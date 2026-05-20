@@ -75,6 +75,40 @@ describe('NativeShellEnv', () => {
   });
 });
 
+describe('NativeShellEnv dev server', () => {
+  let dir: string;
+  beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), 'cezar-dev-')); });
+  afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
+
+  it('boots a server, probes readiness, and stops it on dispose', async () => {
+    const port = 49000 + Math.floor(Math.random() * 10000);
+    const command = `node -e "require('http').createServer((q,s)=>s.end('ok')).listen(${port})"`;
+    const env = new NativeShellEnv(dir, projectEnv({
+      devServer: { enabled: true, command, port, readyPath: '/', readyTimeoutSec: 10 },
+    }));
+
+    const handle = await env.startDevServer();
+    expect(handle).not.toBeNull();
+    expect(handle?.url).toBe(`http://127.0.0.1:${port}`);
+    expect(handle?.ready).toBe(true);
+
+    // a second call returns the same handle (idempotent)
+    const again = await env.startDevServer();
+    expect(again?.url).toBe(handle?.url);
+
+    await env.dispose();
+    // after dispose the port should be free again — a fresh probe fails
+    const { waitForHttp } = await import('../../src/provision/run-env.js');
+    const status = await waitForHttp(`http://127.0.0.1:${port}/`, 1000, 200);
+    expect(status).toBeNull();
+  }, 20000);
+
+  it('returns null when the dev server is disabled', async () => {
+    const env = new NativeShellEnv(dir, projectEnv({ devServer: { enabled: false } }));
+    expect(await env.startDevServer()).toBeNull();
+  });
+});
+
 describe('createRunEnv', () => {
   let dir: string;
   beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), 'cezar-factory-')); });

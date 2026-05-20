@@ -274,6 +274,7 @@ export class WorkflowEngine {
     let headSha: string | undefined;
     let prUrl: string | undefined;
     let prNumber = ctx.prNumber;
+    let devServerUrl: string | undefined;
 
     // Phase B: unified persistent session for autofix.
     // Per docs/REFACTOR-PLAN-persistent-autofix-session.md §5 Phase B.
@@ -393,7 +394,7 @@ export class WorkflowEngine {
       const stepCtx = this.makeStepContext<W>({
         blackboard, iteration, config: ctx.config,
         issue: { number: ctx.issueNumber, title: issueTitle, body: issueBody, comments: issueComments, digest },
-        prNumber, branch, worktreePath,
+        prNumber, branch, worktreePath, devServerUrl,
         tokenBudget: undefined, // set per agent step below
         onAgentEvent: ctx.onAgentEvent, onEvent: ctx.onEvent,
         appendCommentSection: (section) => living.appendSection(step.id, section),
@@ -476,6 +477,10 @@ export class WorkflowEngine {
           }
         } else if (step.kind === 'shell-check') {
           outcome = await this.runShellCheck(step, stepCtx, ctx, living);
+        } else if (step.kind === 'dev-server') {
+          const r = await this.runDevServer(step, stepCtx, ctx, living);
+          if (r.url) devServerUrl = r.url; // exposed to later agent steps
+          outcome = r.outcome;
         } else {
           const exhaustive: never = step;
           throw new Error(`unknown step kind: ${JSON.stringify(exhaustive)}`);
@@ -603,6 +608,44 @@ export class WorkflowEngine {
     };
   }
 
+  /**
+   * Boot the run's dev server. Returns the URL (so the engine can expose it to
+   * later agent steps) plus the step outcome. No env / disabled dev server ⇒ a
+   * silent `continue`. A boot error, or a never-ready server when `gate` is on,
+   * fails the run; otherwise it's recorded and the run continues.
+   */
+  private async runDevServer<W>(
+    step: Extract<WorkflowStep<W>, { kind: 'dev-server' }>,
+    stepCtx: WorkflowStepContext<W>,
+    ctx: WorkflowRunContext,
+    living: LivingComment,
+  ): Promise<{ outcome: StepOutcome<W>; url?: string }> {
+    const env = ctx.runEnv;
+    if (!env) return { outcome: { kind: 'continue' } };
+    const gate = step.gate ? resolveStepValue(step.gate, ctx.config) : false;
+
+    let handle;
+    try {
+      handle = await env.startDevServer((line) => stepCtx.log(`  ${line}`));
+    } catch (err) {
+      const reason = `dev server failed to start: ${(err as Error).message}`;
+      if (step.commentSection) await living.appendSection(step.id, step.commentSection({ url: null, ready: false }, stepCtx));
+      return { outcome: gate ? { kind: 'fail', reason } : { kind: 'continue' } };
+    }
+    if (!handle) return { outcome: { kind: 'continue' } }; // not configured
+
+    if (step.commentSection) await living.appendSection(step.id, step.commentSection({ url: handle.url, ready: handle.ready }, stepCtx));
+    const patch = step.onReady?.({ url: handle.url, ready: handle.ready }, stepCtx) as Partial<W> | undefined;
+
+    if (!handle.ready && gate) {
+      return { outcome: { kind: 'fail', reason: `dev server at ${handle.url} never became ready` }, url: handle.url };
+    }
+    if (!handle.ready) {
+      ctx.onEvent?.(`[#${ctx.issueNumber}] dev server at ${handle.url} not confirmed ready — continuing`);
+    }
+    return { outcome: { kind: 'continue', blackboardPatch: patch }, url: handle.url };
+  }
+
   private async discoverSkillsSafe(ctx: WorkflowRunContext): Promise<Skill[]> {
     const repoRoot = ctx.config.autofix?.repoRoot;
     if (!repoRoot) return [];
@@ -622,6 +665,7 @@ export class WorkflowEngine {
     prNumber?: number;
     branch?: string;
     worktreePath?: string;
+    devServerUrl?: string;
     tokenBudget?: TokenBudget;
     onAgentEvent?: (e: AgentEvent) => void;
     onEvent?: (e: string) => void;
@@ -636,6 +680,7 @@ export class WorkflowEngine {
       prNumber: args.prNumber,
       branch: args.branch,
       worktreePath: args.worktreePath,
+      devServerUrl: args.devServerUrl,
       tokenBudget: args.tokenBudget,
       emit: (e) => args.onAgentEvent?.(e),
       log: (m) => args.onEvent?.(m),
@@ -747,12 +792,23 @@ export class WorkflowEngine {
 
     const runner = runnerFactory(resolved.backend);
     const allowedTools = [...builtinTools, ...resolved.extraTools];
+
+    // When a dev server is up, give this agent step the live URL and let it
+    // probe the running app with `curl` over Bash (backend-agnostic "read-url").
+    let userPrompt = step.buildUserPrompt(ctxWithBudget);
+    let effectiveBashAllowlist = bashAllowlist;
+    if (stepCtx.devServerUrl && allowedTools.includes('Bash')) {
+      userPrompt += `\n\n---\nA dev server for this project is running at ${stepCtx.devServerUrl}. You can probe the live application with curl (e.g. \`curl -sS ${stepCtx.devServerUrl}/\`) to reproduce the issue or verify your change.`;
+      // Only widen an existing allowlist; an undefined allowlist already permits curl.
+      if (bashAllowlist) effectiveBashAllowlist = [...bashAllowlist, 'curl'];
+    }
+
     const spec: AgentRunSpec<unknown> = {
       systemPrompt: resolved.systemPrompt,
-      userPrompt: step.buildUserPrompt(ctxWithBudget),
+      userPrompt,
       cwd: args.worktreePath ?? process.cwd(),
       allowedTools,
-      bashAllowlist,
+      bashAllowlist: effectiveBashAllowlist,
       model: resolved.model,
       maxTurns,
       tokenBudget: budget,

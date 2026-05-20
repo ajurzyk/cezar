@@ -82,6 +82,8 @@ export interface AutofixBlackboard {
   installResult?: ShellResult;
   buildResult?: ShellResult;
   testResult?: ShellResult;
+  /** Dev server URL once booted (set by the dev-server step). */
+  devServerUrl?: string;
   prUrl?: string;
   prNumber?: number;
   headSha?: string;
@@ -223,6 +225,21 @@ const testStep: WorkflowStep<AutofixBlackboard> = {
       ? { testResult: result }
       : { testResult: result, retryNotes: failureRetryNote('test', ctx.blackboard.retryNotes, result) },
   commentSection: (result): CommentSection => shellCommentSection('Tests', result),
+};
+
+// Boot the dev server (if configured) after install, before diagnosis, so
+// root-cause / fix can probe the live app via curl. Torn down with the run env.
+const devServerStep: WorkflowStep<AutofixBlackboard> = {
+  id: 'dev-server',
+  kind: 'dev-server',
+  builtinSkillId: 'dev-server',
+  // Informational: don't fail the run if the server is slow to come up.
+  gate: false,
+  onReady: (info) => ({ devServerUrl: info.url }),
+  commentSection: (info): CommentSection =>
+    info.url
+      ? { heading: info.ready ? '🌐 Dev server ready' : '🌐 Dev server started (not confirmed ready)', body: `Running at \`${info.url}\` — the agent can probe it with \`curl\`.` }
+      : null,
 };
 
 const rootCauseStep: WorkflowStep<AutofixBlackboard> = agentStep<AutofixBlackboard, z.infer<typeof AnalyzerResultSchema>>({
@@ -400,6 +417,7 @@ export const autofixWorkflow: Workflow<AutofixBlackboard> = {
     verifyInRepoStep,
     confirmFixGate,
     installStep,
+    devServerStep,
     rootCauseStep,
     fixStep,
     commitStep,

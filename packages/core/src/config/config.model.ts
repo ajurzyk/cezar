@@ -93,6 +93,21 @@ export const ConfigSchema = z.object({
       gateOnInstall: z.boolean().default(true),
       gateOnBuild: z.boolean().default(false),
       gateOnTest: z.boolean().default(true),
+      // Optional runnable dev server: booted once after install so the agent can
+      // probe the live app (via `curl` over Bash) while diagnosing / fixing.
+      // Disposed with the run env. Native binds `port` on the host; compose
+      // publishes the container `port` to an ephemeral host port.
+      devServer: z.object({
+        enabled: z.boolean().default(false),
+        // Native: the command to launch (e.g. `yarn dev`). Compose: optional —
+        // empty ⇒ `up -d` the service with its own command.
+        command: z.string().default(''),
+        // The app's listen port: container port (compose) or host port (native).
+        port: z.number().default(0),
+        // Probed for readiness after launch (an HTTP response — any status — = up).
+        readyPath: z.string().default('/'),
+        readyTimeoutSec: z.number().default(60),
+      }).default({}),
     }).default({}),
     draftPr: z.boolean().default(true),
     prLabels: z.array(z.string()).default(['cezar-autofix']),

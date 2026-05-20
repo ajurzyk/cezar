@@ -1,5 +1,6 @@
-import { spawn } from 'node:child_process';
-import type { ProjectEnvSpec, RunEnv, ShellResult } from './run-env.js';
+import { spawn, type ChildProcess } from 'node:child_process';
+import type { DevServerHandle, ProjectEnvSpec, RunEnv, ShellResult } from './run-env.js';
+import { waitForHttp } from './run-env.js';
 
 /**
  * Runs project commands directly on the host, inside the worktree. The trust
@@ -8,6 +9,7 @@ import type { ProjectEnvSpec, RunEnv, ShellResult } from './run-env.js';
  */
 export class NativeShellEnv implements RunEnv {
   readonly kind = 'native' as const;
+  private devServer: { child: ChildProcess; handle: DevServerHandle } | null = null;
 
   constructor(
     private readonly worktreePath: string,
@@ -62,7 +64,40 @@ export class NativeShellEnv implements RunEnv {
     });
   }
 
-  dispose(): Promise<void> {
-    return Promise.resolve();
+  async startDevServer(onLine?: (line: string) => void): Promise<DevServerHandle | null> {
+    if (this.devServer) return this.devServer.handle;
+    const ds = this.spec.devServer;
+    if (!ds.enabled || !ds.command.trim()) return null;
+    if (!ds.port) throw new Error('projectEnv.devServer.port is required for the native dev server');
+
+    // detached so we can signal the whole process group on stop (yarn → node → …).
+    const child = spawn(ds.command, {
+      cwd: this.worktreePath,
+      shell: true,
+      detached: true,
+      env: { ...process.env, ...this.spec.envVars },
+    });
+    child.stdout?.on('data', (c: Buffer) => onLine?.(`[dev] ${c.toString().trimEnd()}`));
+    child.stderr?.on('data', (c: Buffer) => onLine?.(`[dev] ${c.toString().trimEnd()}`));
+
+    const url = `http://127.0.0.1:${ds.port}`;
+    const status = await waitForHttp(`${url}${ds.readyPath}`, ds.readyTimeoutSec * 1000);
+
+    const handle: DevServerHandle = {
+      url,
+      ready: status != null,
+      stop: async () => {
+        if (this.devServer?.child.pid && !this.devServer.child.killed) {
+          try { process.kill(-this.devServer.child.pid, 'SIGTERM'); } catch { /* group may be gone */ }
+        }
+        this.devServer = null;
+      },
+    };
+    this.devServer = { child, handle };
+    return handle;
+  }
+
+  async dispose(): Promise<void> {
+    await this.devServer?.handle.stop();
   }
 }

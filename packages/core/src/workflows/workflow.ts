@@ -24,7 +24,7 @@ import type { ShellResult } from '../provision/run-env.js';
 export type WorkflowRunStatus = 'queued' | 'running' | 'paused' | 'succeeded' | 'failed' | 'cancelled';
 export type StepRunStatus = 'running' | 'succeeded' | 'failed' | 'skipped';
 
-export type WorkflowStepKind = 'agent' | 'effect' | 'human-gate' | 'commit' | 'open-pr' | 'push' | 'shell-check';
+export type WorkflowStepKind = 'agent' | 'effect' | 'human-gate' | 'commit' | 'open-pr' | 'push' | 'shell-check' | 'dev-server';
 
 // ─── Comment helpers passed to a step ────────────────────────────────────────
 
@@ -78,6 +78,8 @@ export interface WorkflowStepContext<W> {
   readonly branch?: string;
   /** The git worktree path (autofix/ci-followup); undefined for repo-less workflows (triage). */
   readonly worktreePath?: string;
+  /** Base URL of the run's dev server once a `dev-server` step has booted it (else undefined). */
+  readonly devServerUrl?: string;
   /** Per-attempt token budget (autofix loop iterations get a fresh one). */
   readonly tokenBudget?: TokenBudget;
   /** Stream a normalized agent event (or a lifecycle note) out to the caller. */
@@ -224,6 +226,22 @@ export interface ShellCheckStepDef<W> extends BaseStepDef {
   commentSection?: (result: ShellResult, ctx: WorkflowStepContext<W>) => CommentSection;
 }
 
+/**
+ * Boot the run's dev server (via the `RunEnv`) so subsequent agent steps can
+ * probe the live app with `curl` over Bash (the engine appends the URL to their
+ * prompt + adds `curl` to the bash allowlist). No `RunEnv` / a disabled dev
+ * server ⇒ a no-op `continue`. The server is torn down with the run env.
+ */
+export interface DevServerStepDef<W> extends BaseStepDef {
+  kind: 'dev-server';
+  /** When true, fail the run if the server never became ready — config-derivable. */
+  gate?: StepValue<boolean>;
+  /** Patch the blackboard once the server is up. */
+  onReady?: (info: { url: string; ready: boolean }, ctx: WorkflowStepContext<W>) => Partial<W> | undefined;
+  /** Render this step's living-comment section. */
+  commentSection?: (info: { url: string | null; ready: boolean }, ctx: WorkflowStepContext<W>) => CommentSection;
+}
+
 export type WorkflowStep<W> =
   | AgentStepDef<W, unknown>
   | EffectStepDef<W>
@@ -231,7 +249,8 @@ export type WorkflowStep<W> =
   | CommitStepDef<W>
   | OpenPrStepDef<W>
   | PushStepDef<W>
-  | ShellCheckStepDef<W>;
+  | ShellCheckStepDef<W>
+  | DevServerStepDef<W>;
 
 // Helper so callers can author an AgentStepDef<W, T> with a concrete T and have
 // it widen safely into WorkflowStep<W>. (TS can't infer T through the union.)

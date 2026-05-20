@@ -67,6 +67,13 @@ export async function saveWorkspaceConfig(
         gateOnInstall: bool(formData, 'autofix.projectEnv.gateOnInstall'),
         gateOnBuild: bool(formData, 'autofix.projectEnv.gateOnBuild'),
         gateOnTest: bool(formData, 'autofix.projectEnv.gateOnTest'),
+        devServer: {
+          enabled: bool(formData, 'autofix.projectEnv.devServer.enabled'),
+          command: rawStr(formData, 'autofix.projectEnv.devServer.command'),
+          port: num(formData, 'autofix.projectEnv.devServer.port', 0),
+          readyPath: str(formData, 'autofix.projectEnv.devServer.readyPath', '/'),
+          readyTimeoutSec: num(formData, 'autofix.projectEnv.devServer.readyTimeoutSec', 60),
+        },
       },
     },
   };

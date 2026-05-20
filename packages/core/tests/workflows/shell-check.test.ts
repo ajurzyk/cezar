@@ -76,6 +76,7 @@ function makeFakeRunEnv(testFailures = 0): RunEnv & { ran: string[] } {
     async build() { ran.push('build'); return shell('build', true); },
     async test() { ran.push('test'); testCalls++; return shell('test', testCalls > testFailures); },
     async run(cmd) { return shell(cmd, true); },
+    async startDevServer() { return null; },
     async dispose() {},
   };
 }

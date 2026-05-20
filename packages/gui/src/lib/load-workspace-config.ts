@@ -62,14 +62,18 @@ export async function loadWorkspaceConfig(
     // Deep-merge projectEnv so a partial workspace override keeps the defaults
     // for unset fields (nested `compose` and `envVars` merged too).
     if (projectEnv && Object.keys(projectEnv).length > 0) {
-      const { compose, envVars, ...peRest } = projectEnv as {
+      const { compose, devServer, envVars, ...peRest } = projectEnv as {
         compose?: Record<string, unknown>;
+        devServer?: Record<string, unknown>;
         envVars?: Record<string, string>;
         [k: string]: unknown;
       };
       Object.assign(baseConfig.autofix.projectEnv, peRest);
       if (compose && Object.keys(compose).length > 0) {
         Object.assign(baseConfig.autofix.projectEnv.compose, compose);
+      }
+      if (devServer && Object.keys(devServer).length > 0) {
+        Object.assign(baseConfig.autofix.projectEnv.devServer, devServer);
       }
       if (envVars) {
         baseConfig.autofix.projectEnv.envVars = envVars;

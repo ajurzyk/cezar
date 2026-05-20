@@ -25,6 +25,7 @@ export function SettingsForm({ config, issueAutofixMode, readOnly }: SettingsFor
   const maxTurns = (autofix.maxTurns ?? {}) as Record<string, unknown>;
   const projectEnv = (autofix.projectEnv ?? {}) as Record<string, unknown>;
   const compose = (projectEnv.compose ?? {}) as Record<string, unknown>;
+  const devServer = (projectEnv.devServer ?? {}) as Record<string, unknown>;
   const envVarsText = Object.entries((projectEnv.envVars ?? {}) as Record<string, string>)
     .map(([k, v]) => `${k}=${v}`)
     .join('\n');
@@ -125,6 +126,21 @@ export function SettingsForm({ config, issueAutofixMode, readOnly }: SettingsFor
             readOnly={readOnly}
             placeholder={'DATABASE_URL=postgres://localhost/test\nNODE_ENV=test'}
           />
+        </div>
+
+        <p className="mb-3 mt-6 text-xs leading-relaxed text-on-surface-variant">
+          <strong>Dev server (optional).</strong> Booted once after install so the agent can probe the
+          live app with <code>curl</code> while diagnosing and verifying its fix. Native binds the
+          port on the host; compose publishes the container port to an ephemeral host port. Torn down
+          when the run ends.
+        </p>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Toggle name="autofix.projectEnv.devServer.enabled" label="Enable dev server" checked={!!devServer.enabled} readOnly={readOnly} />
+          <div className="hidden sm:block" />
+          <TextField   name="autofix.projectEnv.devServer.command"        label="Command"        value={str(devServer.command, '')}        readOnly={readOnly} hint="native only — e.g. yarn dev. Compose uses the service's own command." />
+          <NumberField name="autofix.projectEnv.devServer.port"           label="Port"           value={val(devServer.port, 0)}            readOnly={readOnly} hint="container port (compose) / host port (native)" />
+          <TextField   name="autofix.projectEnv.devServer.readyPath"      label="Ready path"     value={str(devServer.readyPath, '/')}     readOnly={readOnly} hint="probed until it responds" />
+          <NumberField name="autofix.projectEnv.devServer.readyTimeoutSec" label="Ready timeout (s)" value={val(devServer.readyTimeoutSec, 60)} readOnly={readOnly} />
         </div>
       </SettingsSubsection>
 

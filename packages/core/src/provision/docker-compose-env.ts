@@ -2,7 +2,8 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { ProjectEnvSpec, RunEnv, ShellResult } from './run-env.js';
+import type { DevServerHandle, ProjectEnvSpec, RunEnv, ShellResult } from './run-env.js';
+import { waitForHttp } from './run-env.js';
 
 /** How to invoke compose on this host: `docker compose …` (v2) or `docker-compose …` (v1). */
 export interface ComposeCommand {
@@ -41,6 +42,7 @@ export class DockerComposeEnv implements RunEnv {
   private overrideDir: string | null = null;
   private overrideFile: string | null = null;
   private setupPromise: Promise<void> | null = null;
+  private devHandle: DevServerHandle | null = null;
 
   constructor(private readonly opts: DockerComposeEnvOpts) {}
 
@@ -66,14 +68,21 @@ export class DockerComposeEnv implements RunEnv {
       this.setupPromise = (async () => {
         this.overrideDir = await mkdtemp(join(tmpdir(), 'cezar-compose-'));
         this.overrideFile = join(this.overrideDir, 'compose.cezar.override.yaml');
-        const yaml = [
+        const ds = this.opts.spec.devServer;
+        const lines = [
           'services:',
           `  ${this.opts.service}:`,
           '    volumes:',
           `      - ${this.opts.worktreePath}:${this.opts.workdir}`,
-          '',
-        ].join('\n');
-        await writeFile(this.overrideFile, yaml, 'utf8');
+        ];
+        // Publish the dev-server container port to an ephemeral host port so
+        // concurrent runs don't collide. Only affects `up` (run --rm ignores it).
+        if (ds.enabled && ds.port) {
+          lines.push('    ports:', `      - "${ds.port}"`);
+          if (ds.command.trim()) lines.push(`    command: ${ds.command}`);
+        }
+        lines.push('');
+        await writeFile(this.overrideFile, lines.join('\n'), 'utf8');
       })();
     }
     return this.setupPromise;
@@ -107,7 +116,46 @@ export class DockerComposeEnv implements RunEnv {
     return spawnCapture(this.opts.compose.bin, args, command, onLine);
   }
 
+  async startDevServer(onLine?: (line: string) => void): Promise<DevServerHandle | null> {
+    if (this.devHandle) return this.devHandle;
+    const ds = this.opts.spec.devServer;
+    if (!ds.enabled) return null;
+    if (!ds.port) throw new Error('projectEnv.devServer.port (the container port) is required for the compose dev server');
+    await this.ensureOverride();
+
+    const up = await spawnCapture(
+      this.opts.compose.bin,
+      [...this.baseArgs(), 'up', '-d', this.opts.service],
+      'compose up -d',
+      onLine,
+    );
+    if (!up.ok) throw new Error(`compose up failed (exit ${up.exitCode}): ${up.stderr.split('\n').slice(-3).join(' ')}`);
+
+    // Ask compose which host port the container port got published to.
+    const portOut = await spawnCapture(
+      this.opts.compose.bin,
+      [...this.baseArgs(), 'port', this.opts.service, String(ds.port)],
+      'compose port',
+    );
+    const hostPort = parseHostPort(portOut.stdout);
+    if (!hostPort) throw new Error(`could not resolve the published host port for ${this.opts.service}:${ds.port}`);
+
+    const url = `http://127.0.0.1:${hostPort}`;
+    const status = await waitForHttp(`${url}${ds.readyPath}`, ds.readyTimeoutSec * 1000);
+
+    this.devHandle = {
+      url,
+      ready: status != null,
+      stop: async () => {
+        await spawnCapture(this.opts.compose.bin, [...this.baseArgs(), 'stop', this.opts.service], 'compose stop').catch(() => {});
+        this.devHandle = null;
+      },
+    };
+    return this.devHandle;
+  }
+
   async dispose(): Promise<void> {
+    this.devHandle = null; // `down -v` below stops everything anyway
     if (this.setupPromise) {
       try {
         await spawnCapture(this.opts.compose.bin, [...this.baseArgs(), 'down', '-v', '--remove-orphans'], 'compose down');
@@ -121,6 +169,15 @@ export class DockerComposeEnv implements RunEnv {
       this.overrideFile = null;
     }
   }
+}
+
+/** Parse `docker compose port` output (e.g. `0.0.0.0:54213` / `[::]:54213`) → the host port. */
+export function parseHostPort(out: string): number | null {
+  for (const line of out.split('\n').map((l) => l.trim()).filter(Boolean)) {
+    const m = line.match(/:(\d+)\s*$/);
+    if (m) return Number(m[1]);
+  }
+  return null;
 }
 
 /** Spawn a process with array args (no shell), capture stdout/stderr, stream lines. */
