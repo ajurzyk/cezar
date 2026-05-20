@@ -96,6 +96,24 @@ export * from './actions/autofix/prompts/fixer.js';
 export * from './actions/autofix/prompts/reviewer.js';
 export * from './actions/autofix/ci-attribution.js';
 
+// Runnable project environment (native shell / docker-compose) for autofix runs.
+export {
+  createRunEnv,
+  resolveComposeCommand,
+  NativeShellEnv,
+  DockerComposeEnv,
+  detectComposeFile,
+  firstComposeService,
+  COMPOSE_FILENAMES,
+  tailLines,
+  type RunEnv,
+  type ShellResult,
+  type ProjectEnvSpec,
+  type CreateRunEnvOpts,
+  type ComposeCommand,
+  type DockerComposeEnvOpts,
+} from './provision/index.js';
+
 // Skills (Phase 1a) — merged built-in + repo `.ai/skills/**/*.md` catalog.
 export {
   discoverSkills,

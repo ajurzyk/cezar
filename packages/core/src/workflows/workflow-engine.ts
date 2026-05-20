@@ -7,6 +7,7 @@ import { createAgentRunner } from '../agents/runner-factory.js';
 import { discoverSkills, type Skill } from '../skills/skill-catalog.js';
 import { resolveStepConfig, type WorkflowBinding, type WorkspaceWorkflowSettings, DEFAULT_WORKSPACE_WORKFLOW_SETTINGS } from './binding.js';
 import { commitAll, getDiffAgainstBase, startWorktreeAutosaver } from '../actions/autofix/worktree.js';
+import type { RunEnv } from '../provision/run-env.js';
 import { PersistentClaudeSession } from '../agents/persistent-claude-session.js';
 import { UNIFIED_AUTOFIX_SYSTEM_PROMPT } from '../actions/autofix/prompts/autofix-unified.js';
 import { TokenBudget } from '../actions/autofix/token-budget.js';
@@ -59,6 +60,12 @@ export interface WorkflowRunContext {
   worktreePath?: string;
   /** Or: a hook the engine calls to set one up (and dispose it at the end). */
   prepareWorktree?: () => Promise<{ path: string; dispose: () => Promise<void> }>;
+  /**
+   * The runnable project environment bound to the worktree (native shell or a
+   * docker-compose project). Drives `shell-check` steps. When absent, those
+   * steps are no-ops, so env-less runs (tests, triage) behave as before.
+   */
+  runEnv?: RunEnv;
   /** Per-attempt token budget; created fresh per loop iteration if omitted. */
   tokenBudgetPerAttempt?: number;
   /** Lifecycle progress strings. */
@@ -467,6 +474,8 @@ export class WorkflowEngine {
             }
             outcome = step.onPushed({ headSha: headSha ?? '' }, stepCtx);
           }
+        } else if (step.kind === 'shell-check') {
+          outcome = await this.runShellCheck(step, stepCtx, ctx, living);
         } else {
           const exhaustive: never = step;
           throw new Error(`unknown step kind: ${JSON.stringify(exhaustive)}`);
@@ -562,6 +571,36 @@ export class WorkflowEngine {
   private requireWorktree(path: string | undefined, stepId: string): string {
     if (!path) throw new Error(`step '${stepId}' requires a worktree but none was provided`);
     return path;
+  }
+
+  /**
+   * Run a `shell-check` step's command in the run's `RunEnv`. No env, or an
+   * unconfigured command, ⇒ a silent `continue` (env-less runs unaffected).
+   * Gated failures inside a loop fail-`retriable` so the engine re-enters it.
+   */
+  private async runShellCheck<W>(
+    step: Extract<WorkflowStep<W>, { kind: 'shell-check' }>,
+    stepCtx: WorkflowStepContext<W>,
+    ctx: WorkflowRunContext,
+    living: LivingComment,
+  ): Promise<StepOutcome<W>> {
+    const env = ctx.runEnv;
+    if (!env) return { kind: 'continue' };
+    const result = await env[step.which]((line) => stepCtx.log(`  [${step.which}] ${line}`));
+    if (!result) return { kind: 'continue' }; // command not configured ⇒ skip the check
+    const gate = resolveStepValue(step.gate, ctx.config);
+    const patch = step.onResult?.(result, stepCtx) as Partial<W> | undefined;
+    if (step.commentSection) await living.appendSection(step.id, step.commentSection(result, stepCtx));
+    if (result.ok || !gate) {
+      if (!result.ok) ctx.onEvent?.(`[#${ctx.issueNumber}] ${step.which} failed (exit ${result.exitCode}) — not gated, continuing`);
+      return { kind: 'continue', blackboardPatch: patch };
+    }
+    return {
+      kind: 'fail',
+      reason: `${step.which} failed (exit ${result.exitCode})`,
+      retriable: step.retriable === true,
+      blackboardPatch: patch,
+    };
   }
 
   private async discoverSkillsSafe(ctx: WorkflowRunContext): Promise<Skill[]> {

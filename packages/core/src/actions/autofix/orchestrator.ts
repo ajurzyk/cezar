@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import type { Config } from '../../config/config.model.js';
 import type { IssueStore } from '../../store/store.js';
@@ -5,6 +6,8 @@ import type { StoredIssue } from '../../store/store.model.js';
 import { GitHubService } from '../../services/github.service.js';
 import { createWorktree, commitAll, getDiffAgainstBase, fetchRemoteBranch } from './worktree.js';
 import { runSetupCommand } from './setup-runner.js';
+import { createRunEnv } from '../../provision/create-run-env.js';
+import type { RunEnv } from '../../provision/run-env.js';
 import { TokenBudget } from './token-budget.js';
 import { runAgentSession, type AgentEvent } from './agent-session.js';
 import type { AgentEvent as NormalizedAgentEvent } from '../../agents/agent-runner.js';
@@ -878,6 +881,23 @@ export class AutofixOrchestrator {
       }
     }
 
+    // Build the runnable project env (native shell or a per-run docker-compose
+    // project) bound to the worktree. Drives the install/build/test shell-check
+    // steps. createRunEnv only throws for an explicit compose config that can't
+    // run here (no compose file / no Docker); auto falls back to native.
+    let runEnv: RunEnv;
+    try {
+      runEnv = await createRunEnv({
+        worktreePath: worktree.path,
+        spec: cfg.projectEnv,
+        runId: `${issueNumber}-${randomUUID().slice(0, 8)}`,
+        onWarn: (m) => opts.onEvent?.(`[#${issueNumber}] ${m}`),
+      });
+    } catch (err) {
+      await worktree.dispose().catch(() => {});
+      return this.recordFailure(issueNumber, `project env setup failed: ${(err as Error).message}`, 0, undefined, branch);
+    }
+
     let result;
     try {
       result = await runWorkflow<AutofixBlackboard>(autofixWorkflow, {
@@ -887,6 +907,7 @@ export class AutofixOrchestrator {
         issueNumber,
         apply: opts.apply,
         worktreePath: worktree.path,
+        runEnv,
         bindings: this.config.workflow?.bindings,
         settings: this.config.workflow?.settings,
         loopMaxIterations: { 'fix-review': cfg.maxAttemptsPerIssue },
@@ -917,10 +938,12 @@ export class AutofixOrchestrator {
           : undefined,
       });
     } catch (err) {
+      await runEnv.dispose().catch(() => {});
       await worktree.dispose().catch(() => {});
       return this.recordFailure(issueNumber, (err as Error).message, 0, undefined, branch);
     }
 
+    await runEnv.dispose().catch(() => {});
     await worktree.dispose().catch(() => {});
 
     const outcome = workflowResultToAutofixOutcome(result);
@@ -987,6 +1010,19 @@ export class AutofixOrchestrator {
     };
     const configWithSeed = { ...this.config, __ciFollowup: seed } as Config;
 
+    let runEnv: RunEnv;
+    try {
+      runEnv = await createRunEnv({
+        worktreePath: worktree.path,
+        spec: cfg.projectEnv,
+        runId: `ci-${input.issueNumber}-${randomUUID().slice(0, 8)}`,
+        onWarn: (m) => opts.onEvent?.(`[#${input.issueNumber}] ${m}`),
+      });
+    } catch (err) {
+      await worktree.dispose().catch(() => {});
+      return { status: 'failed', reason: `project env setup failed: ${(err as Error).message}`, branch: input.branch };
+    }
+
     let result;
     try {
       result = await runWorkflow<CiFollowupBlackboard>(ciFollowupWorkflow, {
@@ -998,6 +1034,7 @@ export class AutofixOrchestrator {
         branch: input.branch,
         apply: true,
         worktreePath: worktree.path,
+        runEnv,
         bindings: this.config.workflow?.bindings,
         settings: this.config.workflow?.settings,
         tokenBudgetPerAttempt: cfg.ciFixTokenBudget ?? cfg.tokenBudgetPerAttempt,
@@ -1008,10 +1045,12 @@ export class AutofixOrchestrator {
         cancelRequested: opts.cancelRequested,
       });
     } catch (err) {
+      await runEnv.dispose().catch(() => {});
       await worktree.dispose().catch(() => {});
       return { status: 'failed', reason: (err as Error).message, branch: input.branch };
     }
 
+    await runEnv.dispose().catch(() => {});
     await worktree.dispose().catch(() => {});
     return workflowResultToCiFollowupOutcome(result);
   }

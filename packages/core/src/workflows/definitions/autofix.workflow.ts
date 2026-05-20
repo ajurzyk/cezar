@@ -25,6 +25,7 @@ import {
 import { buildCommitMessage, buildPrBody } from '../../actions/autofix/messages.js';
 import { AGENT_EXECUTION_GUIDANCE } from '../../actions/autofix/prompts/agent-guidance.js';
 import { agentStep, type Workflow, type WorkflowStep, type CommentSection } from '../workflow.js';
+import { tailLines, type ShellResult } from '../../provision/run-env.js';
 
 /**
  * The `autofix` workflow as data (docs/REFACTOR-PLAN-agent-cockpit.md §3.1):
@@ -75,8 +76,12 @@ export interface AutofixBlackboard {
   commitSha?: string;
   /** Normalized review verdict; `verdict.verdict === 'pass'` is the loop exit. */
   verdict?: Required<ReviewVerdict>;
-  /** Reviewer blocker notes carried into the next fix↔review iteration. */
+  /** Reviewer blocker notes (and/or build/test failure tails) carried into the next fix iteration. */
   retryNotes?: string;
+  /** Latest install / build / test results (set by the shell-check steps). */
+  installResult?: ShellResult;
+  buildResult?: ShellResult;
+  testResult?: ShellResult;
   prUrl?: string;
   prNumber?: number;
   headSha?: string;
@@ -159,6 +164,65 @@ const confirmFixGate: WorkflowStep<AutofixBlackboard> = {
   onDecision: (decision) =>
     decision.choice === 'proceed' ? { kind: 'continue' } : { kind: 'skip-run', reason: 'maintainer declined the automated fix' },
   commentSection: (): CommentSection => ({ heading: '⏸ Maintainer go-ahead', body: 'Proceeding with the automated fix.' }),
+};
+
+// ─── shell-check steps (install / build / test) ─────────────────────────────
+// Run only when the workspace configured a runnable project env (and the run
+// has a `RunEnv`). Otherwise the engine skips them, so behavior is unchanged.
+
+function shellCommentSection(label: string, result: ShellResult): CommentSection {
+  const out = tailLines(`${result.stdout}\n${result.stderr}`, 30);
+  return {
+    heading: result.ok ? `✅ ${label} passed` : `❌ ${label} failed (exit ${result.exitCode})`,
+    body: out ? `\`\`\`\n${out}\n\`\`\`` : '_(no output)_',
+  };
+}
+
+/** Build the fixer retry note from a failing build/test result. */
+function failureRetryNote(label: string, prior: string | undefined, result: ShellResult): string {
+  const tail = tailLines(`${result.stdout}\n${result.stderr}`, 40);
+  const note = `The ${label} step failed (exit ${result.exitCode}). Fix the underlying cause. Output tail:\n${tail}`;
+  return prior ? `${prior}\n\n${note}` : note;
+}
+
+const installStep: WorkflowStep<AutofixBlackboard> = {
+  id: 'install',
+  kind: 'shell-check',
+  builtinSkillId: 'install',
+  which: 'install',
+  gate: (cfg) => autofixCfg(cfg).projectEnv.gateOnInstall,
+  // Install runs once before root-cause; a gated failure is terminal (not in the loop).
+  retriable: false,
+  onResult: (result) => ({ installResult: result }),
+  commentSection: (result): CommentSection => shellCommentSection('Install', result),
+};
+
+const buildStep: WorkflowStep<AutofixBlackboard> = {
+  id: 'build',
+  kind: 'shell-check',
+  builtinSkillId: 'build',
+  which: 'build',
+  gate: (cfg) => autofixCfg(cfg).projectEnv.gateOnBuild,
+  retriable: true,
+  onResult: (result, ctx) =>
+    result.ok
+      ? { buildResult: result }
+      : { buildResult: result, retryNotes: failureRetryNote('build', ctx.blackboard.retryNotes, result) },
+  commentSection: (result): CommentSection => shellCommentSection('Build', result),
+};
+
+const testStep: WorkflowStep<AutofixBlackboard> = {
+  id: 'test',
+  kind: 'shell-check',
+  builtinSkillId: 'test',
+  which: 'test',
+  gate: (cfg) => autofixCfg(cfg).projectEnv.gateOnTest,
+  retriable: true,
+  onResult: (result, ctx) =>
+    result.ok
+      ? { testResult: result }
+      : { testResult: result, retryNotes: failureRetryNote('test', ctx.blackboard.retryNotes, result) },
+  commentSection: (result): CommentSection => shellCommentSection('Tests', result),
 };
 
 const rootCauseStep: WorkflowStep<AutofixBlackboard> = agentStep<AutofixBlackboard, z.infer<typeof AnalyzerResultSchema>>({
@@ -335,18 +399,23 @@ export const autofixWorkflow: Workflow<AutofixBlackboard> = {
   steps: [
     verifyInRepoStep,
     confirmFixGate,
+    installStep,
     rootCauseStep,
     fixStep,
     commitStep,
+    buildStep,
+    testStep,
     reviewStep,
     openPrStep,
   ],
-  // fix↔commit↔review loop until the reviewer passes; maxIterations mirrors
+  // fix↔commit↔build↔test↔review loop until the reviewer passes; a gated build
+  // or test failure short-circuits back to fix (carrying the failure tail as
+  // retry notes) before the reviewer ever sees the diff. maxIterations mirrors
   // today's `cfg.autofix.maxAttemptsPerIssue` (the engine clamps to ≥1).
   loops: [
     {
       id: 'fix-review',
-      stepIds: ['fix', 'commit', 'review'],
+      stepIds: ['fix', 'commit', 'build', 'test', 'review'],
       until: (ctx) => ctx.blackboard.verdict?.verdict === 'pass',
       maxIterations: 2,
     },

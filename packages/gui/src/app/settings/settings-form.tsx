@@ -23,6 +23,11 @@ export function SettingsForm({ config, issueAutofixMode, readOnly }: SettingsFor
   const autofix = (config.autofix ?? {}) as Record<string, unknown>;
   const models = (autofix.models ?? {}) as Record<string, unknown>;
   const maxTurns = (autofix.maxTurns ?? {}) as Record<string, unknown>;
+  const projectEnv = (autofix.projectEnv ?? {}) as Record<string, unknown>;
+  const compose = (projectEnv.compose ?? {}) as Record<string, unknown>;
+  const envVarsText = Object.entries((projectEnv.envVars ?? {}) as Record<string, string>)
+    .map(([k, v]) => `${k}=${v}`)
+    .join('\n');
 
   return (
     <form action={formAction} className="space-y-8">
@@ -75,6 +80,50 @@ export function SettingsForm({ config, issueAutofixMode, readOnly }: SettingsFor
             value={(autofix.setupCommands as string[] | undefined)?.join('\n') ?? ''}
             readOnly={readOnly}
             placeholder={'yarn install\nyarn migrate'}
+          />
+        </div>
+      </SettingsSubsection>
+
+      <SettingsSubsection title="Project environment">
+        <p className="mb-4 text-xs leading-relaxed text-on-surface-variant">
+          How Cezar installs deps, builds, and runs tests on the checked-out worktree so the autofix
+          loop gets real build/test feedback before opening a PR. <strong>Compose</strong> runs each
+          command inside a per-run <code>docker compose</code> project (worktree bind-mounted) and
+          requires a self-hosted runner with Docker. <strong>Auto</strong> uses compose when a
+          compose file is present, else the host shell. Leave commands blank to skip that check.
+        </p>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <SelectField
+            name="autofix.projectEnv.kind"
+            label="Environment"
+            value={str(projectEnv.kind, 'auto')}
+            readOnly={readOnly}
+            options={[
+              { value: 'auto', label: 'Auto — compose if a compose file exists, else native' },
+              { value: 'native', label: 'Native — run commands on the host shell' },
+              { value: 'compose', label: 'Compose — run inside docker compose (runner only)' },
+            ]}
+          />
+          <div className="hidden sm:block" />
+          <TextField name="autofix.projectEnv.install" label="Install command" value={str(projectEnv.install, '')} readOnly={readOnly} hint="e.g. yarn install --immutable" />
+          <TextField name="autofix.projectEnv.build"   label="Build command"   value={str(projectEnv.build, '')}   readOnly={readOnly} hint="e.g. yarn build" />
+          <TextField name="autofix.projectEnv.test"    label="Test command"    value={str(projectEnv.test, '')}    readOnly={readOnly} hint="e.g. yarn test" />
+          <div className="hidden sm:block" />
+          <Toggle name="autofix.projectEnv.gateOnInstall" label="Gate on install" checked={projectEnv.gateOnInstall !== false} readOnly={readOnly} />
+          <Toggle name="autofix.projectEnv.gateOnBuild"   label="Gate on build"   checked={!!projectEnv.gateOnBuild}            readOnly={readOnly} />
+          <Toggle name="autofix.projectEnv.gateOnTest"    label="Gate on test"    checked={projectEnv.gateOnTest !== false}    readOnly={readOnly} />
+          <div className="hidden sm:block" />
+          <TextField name="autofix.projectEnv.compose.file"    label="Compose file"    value={str(compose.file, '')}     readOnly={readOnly} hint="blank = auto-detect" />
+          <TextField name="autofix.projectEnv.compose.service" label="App service"     value={str(compose.service, '')}  readOnly={readOnly} hint="blank = first service" />
+          <TextField name="autofix.projectEnv.compose.workdir" label="Bind-mount path" value={str(compose.workdir, '/app')} readOnly={readOnly} hint="worktree mounted here in the container" />
+          <div className="hidden sm:block" />
+          <TextareaField
+            name="autofix.projectEnv.envVars"
+            label="Environment variables"
+            hint="One KEY=VALUE per line — injected into every command."
+            value={envVarsText}
+            readOnly={readOnly}
+            placeholder={'DATABASE_URL=postgres://localhost/test\nNODE_ENV=test'}
           />
         </div>
       </SettingsSubsection>

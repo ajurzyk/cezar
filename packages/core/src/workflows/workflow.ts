@@ -3,6 +3,7 @@ import type { AgentBackend, AgentEvent } from '../agents/agent-runner.js';
 import type { Config } from '../config/config.model.js';
 import type { TokenBudget } from '../actions/autofix/token-budget.js';
 import type { IssueStore } from '../store/store.js';
+import type { ShellResult } from '../provision/run-env.js';
 
 /**
  * The declarative workflow types (docs/REFACTOR-PLAN-agent-cockpit.md §3.1).
@@ -23,7 +24,7 @@ import type { IssueStore } from '../store/store.js';
 export type WorkflowRunStatus = 'queued' | 'running' | 'paused' | 'succeeded' | 'failed' | 'cancelled';
 export type StepRunStatus = 'running' | 'succeeded' | 'failed' | 'skipped';
 
-export type WorkflowStepKind = 'agent' | 'effect' | 'human-gate' | 'commit' | 'open-pr' | 'push';
+export type WorkflowStepKind = 'agent' | 'effect' | 'human-gate' | 'commit' | 'open-pr' | 'push' | 'shell-check';
 
 // ─── Comment helpers passed to a step ────────────────────────────────────────
 
@@ -199,13 +200,38 @@ export interface PushStepDef<W> extends BaseStepDef {
   onPushed: (info: { headSha: string }, ctx: WorkflowStepContext<W>) => StepOutcome<W>;
 }
 
+/**
+ * Run a project command (`install` / `build` / `test`) inside the run's
+ * `RunEnv` (native host shell or a per-run docker-compose project) and gate the
+ * workflow on its exit code. When `gate` is true and the command fails *inside
+ * a declared loop*, the step fails-`retriable` so the engine re-enters the loop
+ * (carrying the `onResult` patch — e.g. the failure tail as fix retry notes).
+ *
+ * No `RunEnv` on the run, or an unconfigured command, ⇒ the step is a no-op
+ * (`continue`), so existing repo-less / env-less runs are unaffected.
+ */
+export interface ShellCheckStepDef<W> extends BaseStepDef {
+  kind: 'shell-check';
+  /** Which configured command to run. */
+  which: 'install' | 'build' | 'test';
+  /** Whether a non-zero exit fails the step — config-derivable. */
+  gate: StepValue<boolean>;
+  /** When gated+failing inside a loop, mark the failure retriable so the loop re-enters. */
+  retriable?: boolean;
+  /** Patch the blackboard from the result (both success and failure paths). */
+  onResult?: (result: ShellResult, ctx: WorkflowStepContext<W>) => Partial<W> | undefined;
+  /** Render this step's section of the living comment from the result. */
+  commentSection?: (result: ShellResult, ctx: WorkflowStepContext<W>) => CommentSection;
+}
+
 export type WorkflowStep<W> =
   | AgentStepDef<W, unknown>
   | EffectStepDef<W>
   | HumanGateStepDef<W>
   | CommitStepDef<W>
   | OpenPrStepDef<W>
-  | PushStepDef<W>;
+  | PushStepDef<W>
+  | ShellCheckStepDef<W>;
 
 // Helper so callers can author an AgentStepDef<W, T> with a concrete T and have
 // it widen safely into WorkflowStep<W>. (TS can't infer T through the union.)

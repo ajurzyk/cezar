@@ -50,13 +50,30 @@ export async function loadWorkspaceConfig(
   if (Object.keys(wAutofix).length > 0) {
     const models = wAutofix.models as Record<string, unknown> | undefined;
     const maxTurns = wAutofix.maxTurns as Record<string, unknown> | undefined;
-    const { models: _m, maxTurns: _t, ...rest } = wAutofix;
+    const projectEnv = wAutofix.projectEnv as Record<string, unknown> | undefined;
+    const { models: _m, maxTurns: _t, projectEnv: _p, ...rest } = wAutofix;
     Object.assign(baseConfig.autofix, rest);
     if (models && Object.keys(models).length > 0) {
       Object.assign(baseConfig.autofix.models, models);
     }
     if (maxTurns && Object.keys(maxTurns).length > 0) {
       Object.assign(baseConfig.autofix.maxTurns, maxTurns);
+    }
+    // Deep-merge projectEnv so a partial workspace override keeps the defaults
+    // for unset fields (nested `compose` and `envVars` merged too).
+    if (projectEnv && Object.keys(projectEnv).length > 0) {
+      const { compose, envVars, ...peRest } = projectEnv as {
+        compose?: Record<string, unknown>;
+        envVars?: Record<string, string>;
+        [k: string]: unknown;
+      };
+      Object.assign(baseConfig.autofix.projectEnv, peRest);
+      if (compose && Object.keys(compose).length > 0) {
+        Object.assign(baseConfig.autofix.projectEnv.compose, compose);
+      }
+      if (envVars) {
+        baseConfig.autofix.projectEnv.envVars = envVars;
+      }
     }
   }
 
