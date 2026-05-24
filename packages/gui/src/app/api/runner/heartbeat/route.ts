@@ -10,12 +10,21 @@ interface HeartbeatBody {
   currentJobIds?: string[];
 }
 
+interface HeartbeatRpcRow {
+  cancel_job_ids: string[] | null;
+  pause_run_ids: string[] | null;
+}
+
 /**
  * POST /api/runner/heartbeat  { status?, currentJobIds? }
  *
  * Refreshes the runner's `last_heartbeat_at`/`status` and tells it which of its
  * jobs/runs the operator has asked to cancel/pause (the runner has no other
  * channel for that).
+ *
+ * Implemented as a single `runner_heartbeat` RPC (migration 0020) — previously
+ * this was four sequential statements, which caused the bimodal 200ms / 10-16s
+ * tail latency we hit at multi-runner scale.
  */
 export async function POST(req: Request) {
   const auth = await authRunner(req);
@@ -26,34 +35,16 @@ export async function POST(req: Request) {
   try { body = await req.json(); } catch { /* empty body is fine */ }
   const status: RunnerStatus = body.status ?? 'online';
 
-  await admin.from('runners').update({ last_heartbeat_at: new Date().toISOString(), status, updated_at: new Date().toISOString() }).eq('id', runner.id);
+  const { data, error } = await admin.rpc('runner_heartbeat', {
+    p_runner_id: runner.id,
+    p_status: status,
+  });
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-  // Jobs this runner holds that have been cancelled.
-  const { data: cancelledJobs } = await admin
-    .from('jobs')
-    .select('id')
-    .eq('claimed_by_runner', runner.id)
-    .in('status', ['cancelled']);
-  const cancelJobIds = (cancelledJobs ?? []).map((j) => j.id);
-
-  // Workflow runs driven by this runner's jobs with pause_requested set.
-  let pauseRunIds: string[] = [];
-  {
-    const { data: activeJobs } = await admin
-      .from('jobs')
-      .select('id')
-      .eq('claimed_by_runner', runner.id)
-      .in('status', ['claimed', 'running']);
-    const jobIds = (activeJobs ?? []).map((j) => j.id);
-    if (jobIds.length > 0) {
-      const { data: runs } = await admin
-        .from('workflow_runs')
-        .select('id')
-        .in('job_id', jobIds)
-        .eq('pause_requested', true);
-      pauseRunIds = (runs ?? []).map((r) => r.id);
-    }
-  }
+  // PostgREST returns `setof record` functions as an array of rows.
+  const row = (Array.isArray(data) ? data[0] : data) as HeartbeatRpcRow | null | undefined;
+  const cancelJobIds = row?.cancel_job_ids ?? [];
+  const pauseRunIds  = row?.pause_run_ids  ?? [];
 
   return NextResponse.json({ ok: true, cancelJobIds, pauseRunIds });
 }

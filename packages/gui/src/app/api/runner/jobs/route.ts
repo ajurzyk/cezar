@@ -28,11 +28,9 @@ export async function GET(req: Request) {
   if (auth instanceof NextResponse) return auth;
   const { runner, admin } = auth;
 
-  // Heartbeat-on-poll (best-effort).
-  await admin.rpc('touch_runner_heartbeat', { p_runner_id: runner.id, p_status: 'online' }).then(
-    () => {},
-    () => admin.from('runners').update({ last_heartbeat_at: new Date().toISOString(), status: 'online' }).eq('id', runner.id),
-  );
+  // No heartbeat-on-poll: the daemon's dedicated `/api/runner/heartbeat` (now
+  // a single RPC, migration 0020) is the single source of truth. The previous
+  // double-write here was pure overhead per claim tick.
 
   const url = new URL(req.url);
   const requested = (url.searchParams.get('backends') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
