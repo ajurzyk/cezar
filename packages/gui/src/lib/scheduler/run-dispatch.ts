@@ -55,7 +55,7 @@ export async function runDispatch(supabase: SupabaseClient<Database>): Promise<D
       continue;
     }
 
-    const payload = (job.payload ?? {}) as { ciFollowup?: CiFollowupInput };
+    const payload = (job.payload ?? {}) as { ciFollowup?: CiFollowupInput; flowId?: string; flowInput?: string };
     void executeWorkflowJob(supabase, {
       workspaceId: job.workspace_id,
       repo: job.repo,
@@ -64,6 +64,8 @@ export async function runDispatch(supabase: SupabaseClient<Database>): Promise<D
       prNumber: job.pr_number ?? undefined,
       jobId: job.id,
       ciFollowupSeed: payload.ciFollowup,
+      flowId: payload.flowId,
+      flowInput: payload.flowInput,
     }).catch((err) => {
       console.error(`[dispatch] job ${job.id} crashed:`, err);
     });

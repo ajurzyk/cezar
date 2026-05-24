@@ -100,6 +100,8 @@ interface WebhookPayload {
   changes?: { title?: unknown; body?: unknown };
   issue?: WebhookIssue;
   pull_request?: WebhookPullRequest;
+  /** Present on `issues.labeled` — the label that was just added. */
+  label?: { name?: string };
   repository?: { name: string; owner: { login: string } };
   installation?: { id: number };
   check_run?: {
@@ -133,10 +135,13 @@ const TRIAGE_ACTIONS = new Set(['opened', 'reopened']);
 
 async function handleIssues(admin: SupabaseAdmin, payload: WebhookPayload): Promise<NextResponse> {
   const action = payload.action ?? '';
-  const relevant =
+  const isTriageRelevant =
     TRIAGE_ACTIONS.has(action) ||
     (action === 'edited' && !!payload.changes && ('title' in payload.changes || 'body' in payload.changes));
-  if (!relevant) return NextResponse.json({ ok: true, ignored: `issues.${action}` });
+  const isFlowRelevant = action === 'opened' || action === 'labeled';
+  if (!isTriageRelevant && !isFlowRelevant) {
+    return NextResponse.json({ ok: true, ignored: `issues.${action}` });
+  }
 
   const issue = payload.issue;
   const repo = payload.repository;
@@ -146,43 +151,147 @@ async function handleIssues(admin: SupabaseAdmin, payload: WebhookPayload): Prom
   if (workspaces.length === 0) return NextResponse.json({ ok: true, ignored: 'no matching workspace' });
 
   const repoSlug = `${repo.owner.login}/${repo.name}`;
-  let enqueued = 0;
+  // GitHub puts the just-added label on `payload.label` for issues.labeled.
+  const justLabeled =
+    action === 'labeled' && payload.label && typeof payload.label.name === 'string'
+      ? payload.label.name
+      : null;
+
+  let triageEnqueued = 0;
+  let flowsEnqueued = 0;
   for (const ws of workspaces) {
-    if (!ws.auto_triage_enabled) continue;
+    // Upsert the issue once per workspace either way so the issues table stays
+    // current even for flow-only triggers.
     try {
       await upsertIssueFromWebhook(admin, ws.id, issue);
     } catch (err) {
       console.error(`[github-webhook] issue upsert failed for ws ${ws.id}:`, err instanceof Error ? err.message : err);
       continue;
     }
-    // dedupe: skip if a triage job for this issue is already in flight.
+
+    // Triage path (existing behavior).
+    if (isTriageRelevant && ws.auto_triage_enabled) {
+      const { data: open } = await admin
+        .from('jobs')
+        .select('id')
+        .eq('workspace_id', ws.id)
+        .eq('kind', 'triage')
+        .eq('issue_number', issue.number)
+        .in('status', ['queued', 'claimed', 'running'])
+        .limit(1);
+      if (!open || open.length === 0) {
+        const { error } = await admin.from('jobs').insert({
+          workspace_id: ws.id,
+          repo: repoSlug,
+          kind: 'triage',
+          issue_number: issue.number,
+          pr_number: null,
+          priority: 5,
+          status: 'queued',
+          max_attempts: 1,
+          payload: { trigger: 'webhook', action },
+        });
+        if (error) {
+          console.error(`[github-webhook] triage enqueue failed for ws ${ws.id}:`, error.message);
+        } else {
+          triageEnqueued++;
+        }
+      }
+    }
+
+    // Flow auto-trigger path. Match flows whose `triggers` include
+    // `issue.opened` (on opened) or `issue.labeled` with the right label.
+    if (isFlowRelevant) {
+      flowsEnqueued += await enqueueFlowsForIssueEvent(admin, {
+        workspaceId: ws.id,
+        repoSlug,
+        issueNumber: issue.number,
+        action,
+        labelName: justLabeled,
+      });
+    }
+  }
+  return NextResponse.json({
+    ok: true,
+    triageEnqueued,
+    flowsEnqueued,
+    workspaces: workspaces.length,
+  });
+}
+
+/**
+ * For a `issues.opened` / `issues.labeled` event, find flows in `workspaceId`
+ * whose `triggers` match and enqueue one `kind='flow'` job per match. Skips
+ * flows that already have an in-flight job for this issue (dedupe).
+ */
+async function enqueueFlowsForIssueEvent(
+  admin: SupabaseAdmin,
+  args: {
+    workspaceId: string;
+    repoSlug: string;
+    issueNumber: number;
+    action: string;
+    labelName: string | null;
+  },
+): Promise<number> {
+  const { data: flows } = await admin
+    .from('flows')
+    .select('id, name, triggers, paused')
+    .eq('workspace_id', args.workspaceId)
+    .eq('paused', false);
+  if (!flows || flows.length === 0) return 0;
+
+  let enqueued = 0;
+  for (const flow of flows) {
+    const triggers = Array.isArray(flow.triggers) ? (flow.triggers as Array<Record<string, unknown>>) : [];
+    const matches = triggers.some((t) => {
+      if (!t || typeof t !== 'object') return false;
+      if (args.action === 'opened' && t.kind === 'issue.opened') return true;
+      if (args.action === 'labeled' && t.kind === 'issue.labeled') {
+        return typeof t.label === 'string' && t.label === args.labelName;
+      }
+      return false;
+    });
+    if (!matches) continue;
+
+    // Dedupe: don't double-enqueue a flow for the same issue while one's
+    // already in flight (e.g. label added, then issue edited later).
     const { data: open } = await admin
       .from('jobs')
-      .select('id')
-      .eq('workspace_id', ws.id)
-      .eq('kind', 'triage')
-      .eq('issue_number', issue.number)
-      .in('status', ['queued', 'claimed', 'running'])
-      .limit(1);
-    if (open && open.length > 0) continue;
+      .select('id, payload')
+      .eq('workspace_id', args.workspaceId)
+      .eq('kind', 'flow')
+      .eq('issue_number', args.issueNumber)
+      .in('status', ['queued', 'claimed', 'running']);
+    const alreadyForThisFlow = (open ?? []).some((row) => {
+      const p = (row.payload ?? {}) as { flowId?: string };
+      return p.flowId === flow.id;
+    });
+    if (alreadyForThisFlow) continue;
+
     const { error } = await admin.from('jobs').insert({
-      workspace_id: ws.id,
-      repo: repoSlug,
-      kind: 'triage',
-      issue_number: issue.number,
+      workspace_id: args.workspaceId,
+      repo: args.repoSlug,
+      kind: 'flow',
+      issue_number: args.issueNumber,
       pr_number: null,
       priority: 5,
       status: 'queued',
       max_attempts: 1,
-      payload: { trigger: 'webhook', action },
+      payload: {
+        trigger: 'webhook',
+        action: args.action,
+        flowId: flow.id,
+        flowInput: String(args.issueNumber),
+      },
     });
     if (error) {
-      console.error(`[github-webhook] triage enqueue failed for ws ${ws.id}:`, error.message);
+      console.error(`[github-webhook] flow '${flow.name}' enqueue failed:`, error.message);
       continue;
     }
     enqueued++;
   }
-  return NextResponse.json({ ok: true, enqueued, workspaces: workspaces.length });
+  return enqueued;
 }
 
 // ─── check_run ──────────────────────────────────────────────────────────────

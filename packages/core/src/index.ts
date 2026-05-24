@@ -196,3 +196,30 @@ export {
   type CiFollowupBlackboard,
   type CiFollowupSeed,
 } from './workflows/definitions/ci-followup.workflow.js';
+
+// Worktree helpers — exported so the GUI's flow runner can prep a worktree
+// before calling `runWorkflow` (same as the autofix path does internally).
+export {
+  createWorktree,
+  commitAll,
+  getDiffAgainstBase,
+  fetchRemoteBranch,
+  type WorktreeHandle,
+} from './actions/autofix/worktree.js';
+
+// Flow runner — runtime for the simple "flows" feature (workspace-defined
+// chains of skill steps). Used both by the GUI dispatcher (cron-based) and
+// the self-hosted runner daemon.
+export {
+  runFlow,
+  extractPrMarkers,
+  renderTemplate,
+  effectiveStepNotes,
+  composeStepSystemPrompt,
+  FLOW_STEP_SCAFFOLDING,
+  DEFAULT_STEP_NOTES,
+  FLOW_STEP_SYSTEM_PROMPT,
+  type FlowStep,
+  type FlowRow,
+  type RunFlowParams,
+} from './workflows/flow-runner.js';

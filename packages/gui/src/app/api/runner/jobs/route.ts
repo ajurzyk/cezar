@@ -28,11 +28,9 @@ export async function GET(req: Request) {
   if (auth instanceof NextResponse) return auth;
   const { runner, admin } = auth;
 
-  // Heartbeat-on-poll (best-effort).
-  await admin.rpc('touch_runner_heartbeat', { p_runner_id: runner.id, p_status: 'online' }).then(
-    () => {},
-    () => admin.from('runners').update({ last_heartbeat_at: new Date().toISOString(), status: 'online' }).eq('id', runner.id),
-  );
+  // No heartbeat-on-poll: the daemon's dedicated `/api/runner/heartbeat` (now
+  // a single RPC, migration 0020) is the single source of truth. The previous
+  // double-write here was pure overhead per claim tick.
 
   const url = new URL(req.url);
   const requested = (url.searchParams.get('backends') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -85,6 +83,33 @@ export async function GET(req: Request) {
       ? ((job.payload as { ciFollowup?: { issueNumber?: number } })?.ciFollowup?.issueNumber ?? job.issue_number)
       : job.issue_number;
 
+    // ── flow lookup ── For `kind='flow'` jobs the runner needs the flow's
+    //   name + steps so it can build a Workflow and call runFlow. Load the
+    //   row by `payload.flowId` here so the runner doesn't need DB access.
+    //   `workflow_runs.workflow` becomes `flow:<name>` so the cockpit labels
+    //   runner-driven flow runs the same way cron-driven ones look.
+    type FlowPayload = { flowId?: string; flowInput?: string };
+    let flowOut: { name: string; steps: import('@cezar/core').FlowStep[]; input: string } | null = null;
+    let workflowLabel: string = job.kind;
+    if (job.kind === 'flow') {
+      const payload = (job.payload ?? {}) as FlowPayload;
+      if (!payload.flowId) throw new Error('flow job missing payload.flowId');
+      const { data: flowRow, error: fErr } = await admin
+        .from('flows')
+        .select('name, steps, paused')
+        .eq('id', payload.flowId)
+        .eq('workspace_id', job.workspace_id)
+        .single();
+      if (fErr || !flowRow) throw new Error(`flow ${payload.flowId} not found: ${fErr?.message ?? 'no row'}`);
+      const parsedSteps = parseFlowSteps(flowRow.steps);
+      flowOut = {
+        name: flowRow.name,
+        steps: parsedSteps,
+        input: payload.flowInput ?? (runIssueNumber != null ? String(runIssueNumber) : ''),
+      };
+      workflowLabel = `flow:${flowRow.name}`;
+    }
+
     // ── workflow_runs row ──
     const repoSlug = owner && repo ? `${owner}/${repo}` : job.repo;
     const { data: runRow, error: runErr } = await admin
@@ -92,7 +117,7 @@ export async function GET(req: Request) {
       .insert({
         workspace_id: job.workspace_id,
         job_id: job.id,
-        workflow: job.kind,
+        workflow: workflowLabel,
         repo: repoSlug,
         issue_number: runIssueNumber ?? null,
         pr_number: job.pr_number ?? null,
@@ -127,6 +152,7 @@ export async function GET(req: Request) {
       githubToken,
       store: storeSnapshot,
       ciFollowupSeed,
+      flow: flowOut,
     });
   } catch (err) {
     await releaseJob().catch(() => {});
@@ -134,6 +160,28 @@ export async function GET(req: Request) {
     console.error('[runner-api] /jobs failed:', message);
     return NextResponse.json({ error: message }, { status: 500 });
   }
+}
+
+/**
+ * Defensive parser for the `flows.steps` JSONB column — keeps the runner-API
+ * contract clean even if a row was inserted by an older client. Mirrors the
+ * GUI-side `parseSteps` in `app/workflows/actions.ts`.
+ */
+function parseFlowSteps(raw: unknown): import('@cezar/core').FlowStep[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((s) => {
+      if (!s || typeof s !== 'object') return null;
+      const obj = s as Record<string, unknown>;
+      const step: import('@cezar/core').FlowStep = {
+        skill: typeof obj.skill === 'string' ? obj.skill : '',
+        argsTemplate: typeof obj.argsTemplate === 'string' ? obj.argsTemplate : '',
+      };
+      if (typeof obj.stopChainIfContains === 'string' && obj.stopChainIfContains) step.stopChainIfContains = obj.stopChainIfContains;
+      if (typeof obj.systemNotes === 'string' && obj.systemNotes) step.systemNotes = obj.systemNotes;
+      return step;
+    })
+    .filter((x): x is import('@cezar/core').FlowStep => x !== null);
 }
 
 /** Mirrors the per-workspace token lookup in the crons (`execute-workflow-job.ts`). */

@@ -11,6 +11,7 @@ import {
   TerminalIcon,
   ClockIcon,
   SettingsIcon,
+  PlayIcon,
 } from './icons';
 import type { SessionUser } from '@/lib/auth';
 import type { ActiveWorkspace, WorkspaceListItem } from '@/lib/workspace';
@@ -23,6 +24,7 @@ const NAV = [
   { href: '/skills',    label: 'Skills',   icon: <SparkleIcon className="h-5 w-5" /> },
   { href: '/actions',   label: 'Actions',  icon: <BoltIcon className="h-5 w-5" /> },
   { href: '/cockpit',   label: 'Runs',     icon: <TerminalIcon className="h-5 w-5" /> },
+  { href: '/workflows', label: 'Workflows', icon: <PlayIcon className="h-5 w-5" /> },
   { href: '/activity',  label: 'Activity', icon: <ClockIcon className="h-5 w-5" /> },
   { href: '/settings',  label: 'Settings', icon: <SettingsIcon className="h-5 w-5" /> },
 ] as const;

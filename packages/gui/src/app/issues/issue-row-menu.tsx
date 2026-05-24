@@ -6,6 +6,7 @@ import { MoreVerticalIcon } from '@/components/icons';
 import { RowMenuPortal } from '@/components/row-menu-portal';
 import { startAutofix } from './autofix-actions';
 import { RunActionForIssueModal } from './run-action-for-issue-modal';
+import { RunFlowForIssueModal } from './run-flow-for-issue-modal';
 
 export interface IssueRowMenuProps {
   issueNumber: number;
@@ -35,6 +36,7 @@ export function IssueRowMenu({
 }: IssueRowMenuProps) {
   const [open, setOpen] = useState(false);
   const [runActionOpen, setRunActionOpen] = useState(false);
+  const [runFlowOpen, setRunFlowOpen] = useState(false);
   const [pending, startTransition] = useTransition();
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -96,6 +98,13 @@ export function IssueRowMenu({
       id: 'run-action',
       label: 'Run action…',
       onSelect: () => setRunActionOpen(true),
+      disabled: readOnly,
+      group: 1,
+    },
+    {
+      id: 'run-flow',
+      label: 'Run flow…',
+      onSelect: () => setRunFlowOpen(true),
       disabled: readOnly,
       group: 1,
     },
@@ -206,6 +215,13 @@ export function IssueRowMenu({
           issueNumber={issueNumber}
           issueTitle={issueTitle}
           onClose={() => setRunActionOpen(false)}
+        />
+      )}
+      {runFlowOpen && (
+        <RunFlowForIssueModal
+          issueNumber={issueNumber}
+          issueTitle={issueTitle}
+          onClose={() => setRunFlowOpen(false)}
         />
       )}
     </>

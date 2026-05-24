@@ -777,6 +777,10 @@ export class WorkflowEngine {
         if (outcome.kind === 'fail') record.error = outcome.reason;
         if (step.failCommentSection && outcome.kind === 'fail') {
           await args.living.appendSection(step.id, step.failCommentSection(outcome.reason, stepCtx));
+        } else if (step.unparsedCommentSection && outcome.kind !== 'fail') {
+          // Flows runtime path: agent emitted free text and onNoParse said go.
+          // Surface what the agent actually produced in the living comment.
+          await args.living.appendSection(step.id, step.unparsedCommentSection(result.text, stepCtx));
         }
         return { outcome, record };
       }
