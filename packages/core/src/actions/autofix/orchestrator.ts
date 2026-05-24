@@ -211,7 +211,11 @@ export class AutofixOrchestrator {
           baseBranch: cfg.baseBranch,
           remote: cfg.remote,
           fetchRemote: cfg.fetchBeforeAttempt,
-          resetBranch: !isFirst, // retries always start fresh from baseBranch
+          // Always start fresh: local branches with this name are always
+          // stale work from a prior run (cezar only pushes on review-pass).
+          // Inheriting them lets the previous run's autosave commits leak
+          // into verify-in-repo and skip the new run.
+          resetBranch: true,
         });
       } catch (err) {
         // Worktree setup failure is the same next attempt too — hard stop.
@@ -858,7 +862,8 @@ export class AutofixOrchestrator {
         baseBranch: cfg.baseBranch,
         remote: cfg.remote,
         fetchRemote: cfg.fetchBeforeAttempt,
-        resetBranch: attemptsAlready > 0, // retries start fresh from baseBranch
+        // Always start fresh — see the matching call site above.
+        resetBranch: true,
         onWarn: (m) => opts.onEvent?.(`[#${issueNumber}] ${m}`),
       });
     } catch (err) {
