@@ -1,0 +1,99 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Cezar — self-hosted stack for Dokploy / generic Docker hosts.
+#
+#   gui     — the Next.js cockpit (also fires the /api/cron/* routes via the
+#             in-process scheduler; CEZAR_INPROCESS_CRON=true).
+#   runner  — optional @cezar/runner daemon for subscription CLIs
+#             (`claude` / `codex`). Comment out if you only need the
+#             managed-API path.
+#
+# Copy `.env.docker.example` to `.env` (or use Dokploy's env-var UI) before
+# bringing the stack up. See MIGRATION.md for the full env-var matrix.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  gui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cezar-gui:latest
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+
+      # ── Supabase (required) ────────────────────────────────────────────────
+      NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+
+      # ── Anthropic (required for the managed cron path) ─────────────────────
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+
+      # ── Public URL & cron bearer (required) ────────────────────────────────
+      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL}
+      CRON_SECRET: ${CRON_SECRET}
+
+      # ── In-process cron scheduler (required on self-hosted) ────────────────
+      # Boots the scheduler from instrumentation.ts; drives /api/cron/dispatch,
+      # /api/cron/triage-sweep, /api/cron/issue-sync on the cadence from
+      # vercel.json (overridable via CEZAR_*_INTERVAL_MS).
+      CEZAR_INPROCESS_CRON: "true"
+      CEZAR_INPROCESS_CRON_BASE_URL: http://127.0.0.1:3000
+
+      # ── GitHub App (required for webhooks + autofix) ───────────────────────
+      GITHUB_APP_ID: ${GITHUB_APP_ID}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY}
+      GITHUB_APP_WEBHOOK_SECRET: ${GITHUB_APP_WEBHOOK_SECRET}
+
+      # ── Optional tuning ────────────────────────────────────────────────────
+      CEZAR_USE_WORKFLOW_ENGINE: ${CEZAR_USE_WORKFLOW_ENGINE:-true}
+      CEZAR_DISPATCH_BATCH: ${CEZAR_DISPATCH_BATCH:-3}
+      CEZAR_DISPATCH_STALE_MINUTES: ${CEZAR_DISPATCH_STALE_MINUTES:-15}
+      CEZAR_RUNNER_OFFLINE_MINUTES: ${CEZAR_RUNNER_OFFLINE_MINUTES:-3}
+      CEZAR_TRIAGE_SWEEP_BATCH: ${CEZAR_TRIAGE_SWEEP_BATCH:-10}
+    ports:
+      # Host 3333 → container 3000. On Dokploy, Traefik fronts this — keep the
+      # bind on 127.0.0.1 so the port isn't exposed publicly. Remove the
+      # `127.0.0.1:` prefix if you're running compose standalone and exposing
+      # directly. The container still listens on 3000 internally, so the
+      # in-process scheduler and the `runner` → `gui:3000` traffic are
+      # unaffected.
+      - "127.0.0.1:3333:3000"
+    networks:
+      - cezar
+
+  runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.runner
+    image: cezar-runner:latest
+    restart: unless-stopped
+    depends_on:
+      - gui
+    environment:
+      # Token is issued in the GUI: Settings → Runners → Register a runner.
+      # The runner long-polls /api/runner/jobs at this URL.
+      CEZAR_RUNNER_URL: ${CEZAR_RUNNER_URL:-http://gui:3000}
+      CEZAR_RUNNER_TOKEN: ${CEZAR_RUNNER_TOKEN}
+    command:
+      - "start"
+      - "--kind"
+      - "self-hosted"
+      - "--backends"
+      - "claude-cli,codex-cli"
+      - "--concurrency"
+      - "1"
+    volumes:
+      # Persists `~/.claude` and `~/.codex` so the one-time interactive
+      # login survives container restarts and rebuilds.
+      - runner-home:/home/node
+    networks:
+      - cezar
+
+networks:
+  cezar:
+    driver: bridge
+
+volumes:
+  runner-home:
