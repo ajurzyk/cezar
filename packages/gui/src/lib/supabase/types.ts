@@ -18,7 +18,7 @@ export type WorkflowBackend = 'anthropic-api' | 'claude-cli' | 'codex-cli';
 // Note: `@cezar/core` also exports a `WorkflowRunStatus` (the in-process engine
 // state). These are the *DB* string sets — kept local + named distinctly to
 // avoid confusing the two.
-export type JobKind = 'triage' | 'autofix' | 'ci-followup';
+export type JobKind = 'triage' | 'autofix' | 'ci-followup' | 'flow';
 export type JobStatus = 'queued' | 'claimed' | 'running' | 'done' | 'failed' | 'cancelled';
 export type DbWorkflowRunStatus = 'queued' | 'running' | 'paused' | 'succeeded' | 'failed' | 'cancelled';
 export type AgentRunStatus = 'running' | 'succeeded' | 'failed' | 'skipped';
@@ -154,6 +154,29 @@ export interface Database {
           updated_at?: string;
         };
         Update: Partial<Database['public']['Tables']['user_github_tokens']['Insert']>;
+      };
+      flows: {
+        Row: {
+          id: string;
+          workspace_id: string;
+          name: string;
+          /** Array of `{ skill: string; argsTemplate: string; stopChainIfContains?: string }`. */
+          steps: Json;
+          /** Array of trigger objects — `{ kind: 'issue.opened' } | { kind: 'issue.labeled', label: string }`. */
+          triggers: Json;
+          /** Paused flows skip webhook auto-triggers but stay manually runnable. */
+          paused: boolean;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: Omit<Database['public']['Tables']['flows']['Row'], 'id' | 'triggers' | 'paused' | 'created_at' | 'updated_at'> & {
+          id?: string;
+          triggers?: Json;
+          paused?: boolean;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: Partial<Database['public']['Tables']['flows']['Insert']>;
       };
       workflow_bindings: {
         Row: {

@@ -1,4 +1,4 @@
-import type { Config, Store, CiFollowupInput } from '@cezar/core';
+import type { Config, Store, CiFollowupInput, FlowStep } from '@cezar/core';
 
 // ─── wire shapes ────────────────────────────────────────────────────────
 // What `GET /api/runner/jobs` returns when there's work. The SaaS has already
@@ -9,7 +9,7 @@ export interface ClaimedJob {
     id: string;
     workspaceId: string;
     repo: string | null;
-    kind: 'triage' | 'autofix' | 'ci-followup';
+    kind: 'triage' | 'autofix' | 'ci-followup' | 'flow';
     issueNumber: number | null;
     prNumber: number | null;
     requiredBackend: string | null;
@@ -24,6 +24,8 @@ export interface ClaimedJob {
   store: Store;
   /** For `ci-followup` jobs only — lifted off `jobs.payload.ciFollowup`. */
   ciFollowupSeed: CiFollowupInput | null;
+  /** For `flow` jobs only — the `flows` row referenced by `jobs.payload.flowId`. */
+  flow: { name: string; steps: FlowStep[]; input: string } | null;
 }
 
 /** One streamed event the runner POSTs back to `/api/runner/runs/:id/events`. */

@@ -7,7 +7,12 @@ type AgentRunsRow = Database['public']['Tables']['agent_runs']['Row'];
 export interface CreateWorkflowRunOpts {
   workspaceId: string;
   jobId?: string | null;
-  workflow: 'autofix' | 'ci-followup' | 'triage' | 'single-action';
+  /**
+   * The `workflow_runs.workflow` column — plain text. Built-ins are 'autofix',
+   * 'ci-followup', 'triage'; the legacy single-action path uses 'single-action';
+   * custom data-driven workflows carry their descriptor id (e.g. 'autofix-lite').
+   */
+  workflow: string;
   repo: string | null;
   issueNumber: number | null;
   prNumber?: number | null;

@@ -137,6 +137,13 @@ export interface AgentStepDef<W, T> extends BaseStepDef {
   onNoParse?: (rawText: string, ctx: WorkflowStepContext<W>) => StepOutcome<W>;
   /** Render this step's section of the living comment from the parsed output. */
   commentSection?: (parsed: T, ctx: WorkflowStepContext<W>) => CommentSection;
+  /**
+   * Render this step's section when the agent emitted free text (no JSON parse)
+   * and `onNoParse` returned a success outcome (`continue` / `skip-run`). Used
+   * by the flows runtime, whose steps don't enforce a response schema. Built-in
+   * workflow steps that always produce parseable JSON can ignore this.
+   */
+  unparsedCommentSection?: (rawText: string, ctx: WorkflowStepContext<W>) => CommentSection;
   /** Render a section when the step failed (no parse / outcome=fail). */
   failCommentSection?: (reason: string, ctx: WorkflowStepContext<W>) => CommentSection;
   /** True ⇒ the engine refuses to run this step without a `worktreePath`. */
@@ -245,7 +252,13 @@ export interface WorkflowLoop<W> {
 }
 
 export interface Workflow<W> {
-  id: 'triage' | 'autofix' | 'ci-followup';
+  /**
+   * Workflow identifier. The three built-ins are `'triage' | 'autofix' | 'ci-followup'`;
+   * custom workflows compiled from `WorkflowDescriptor` (see `./compiler.ts`) carry
+   * their own string ids. The engine treats this as opaque except for the autofix
+   * unified-session gate, which compares against the literal `'autofix'`.
+   */
+  id: string;
   title: string;
   /** Pre-PR steps edit the issue comment; once a PR exists, post-PR steps edit a PR comment (docs §3.6). */
   commentTargetOrder: CommentTarget[];

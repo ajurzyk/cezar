@@ -25,7 +25,7 @@ export async function executeJobLocally(
   claimed: ClaimedJob,
   controls: ExecuteJobControls,
 ): Promise<void> {
-  const { workflowRunId, job, workspace, githubToken, ciFollowupSeed } = claimed;
+  const { workflowRunId, job, workspace, githubToken, ciFollowupSeed, flow } = claimed;
 
   // ── event buffer ──────────────────────────────────────────────────────
   const buffer: RunnerEvent[] = [];
@@ -149,6 +149,40 @@ export async function executeJobLocally(
           branch: 'branch' in outcome ? outcome.branch ?? null : (ciFollowupSeed.branch ?? null),
           headSha: 'headSha' in outcome ? outcome.headSha ?? null : null,
           prNumber: ciFollowupSeed.prNumber ?? (job.prNumber ?? null),
+          tokensUsed,
+        },
+      };
+    } else if (job.kind === 'flow') {
+      if (!flow) throw new Error('flow job is missing payload.flowId / claim payload');
+      if (job.issueNumber == null) throw new Error('flow job has no issue_number');
+      const flowOutcome = await core.runFlow({
+        flow: { name: flow.name, steps: flow.steps },
+        input: flow.input || String(job.issueNumber),
+        store, config, github,
+        issueNumber: job.issueNumber,
+        onEvent, onAgentEvent, onRunRecord,
+        pauseRequested, cancelRequested,
+      });
+      const status = flowOutcome.status === 'succeeded' ? 'succeeded'
+        : flowOutcome.status === 'paused' ? 'paused'
+        : flowOutcome.status === 'cancelled' ? 'cancelled'
+        : 'failed';
+      // FinalizeRunBody.status is a narrow union — map our workflow status onto
+      // it. The cockpit uses `outcome` for the rich detail anyway.
+      const finalizeStatus = status === 'succeeded' ? 'succeeded'
+        : status === 'paused' ? 'paused'
+        : status === 'cancelled' ? 'cancelled'
+        : 'failed';
+      result = {
+        status,
+        finalize: {
+          status: finalizeStatus,
+          outcome: flowOutcome,
+          reason: flowOutcome.reason ?? null,
+          prUrl: flowOutcome.prUrl ?? null,
+          prNumber: flowOutcome.prNumber ?? (job.prNumber ?? null),
+          branch: flowOutcome.branch ?? null,
+          headSha: flowOutcome.headSha ?? null,
           tokensUsed,
         },
       };

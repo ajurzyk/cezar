@@ -7,7 +7,7 @@ import { ensureRepoClone } from './repo-clone';
 import { runTriagePassJob } from './run-triage-pass-job';
 import type { Database } from './supabase/types';
 
-type WorkflowKind = 'autofix' | 'ci-followup' | 'triage';
+type WorkflowKind = 'autofix' | 'ci-followup' | 'triage' | 'flow';
 
 export interface ExecuteWorkflowJobParams {
   workspaceId: string;
@@ -20,6 +20,10 @@ export interface ExecuteWorkflowJobParams {
   jobId?: string | null;
   /** For `ci-followup` jobs — the seed lifted off `jobs.payload.ciFollowup` (a `CiFollowupInput`). */
   ciFollowupSeed?: CiFollowupInput;
+  /** For `flow` jobs — the `flows.id` (uuid) whose `steps` to walk. */
+  flowId?: string;
+  /** For `flow` jobs — the `{{input}}` value passed to the first step (typically the issue number as a string). */
+  flowInput?: string;
 }
 
 /**
@@ -42,7 +46,7 @@ export async function executeWorkflowJob(
   adminSupabase: SupabaseClient<Database>,
   params: ExecuteWorkflowJobParams,
 ): Promise<void> {
-  const { workspaceId, workflow, issueNumber, prNumber, jobId, ciFollowupSeed } = params;
+  const { workspaceId, workflow, issueNumber, prNumber, jobId, ciFollowupSeed, flowId, flowInput } = params;
   let persister: WorkflowRunPersister | null = null;
 
   const finishJob = async (status: Database['public']['Tables']['jobs']['Row']['status']): Promise<void> => {
@@ -97,11 +101,27 @@ export async function executeWorkflowJob(
     const runIssueNumber = workflow === 'ci-followup' ? ciFollowupSeed?.issueNumber ?? issueNumber : issueNumber;
     if (runIssueNumber == null) throw new Error(`workflow '${workflow}' job has no issue_number`);
 
+    // ── flow workflow: load the flow row up-front so the `workflow_runs.workflow`
+    //    column gets the flow's name (e.g. 'fix-github-issue') instead of the
+    //    opaque 'flow' kind. Surfaces in the cockpit alongside the built-ins.
+    let flowRow: { name: string; steps: Array<{ skill: string; argsTemplate: string }> } | null = null;
+    if (workflow === 'flow') {
+      if (!flowId) throw new Error('flow job missing payload.flowId');
+      const { data, error: fErr } = await adminSupabase
+        .from('flows')
+        .select('name, steps')
+        .eq('id', flowId)
+        .eq('workspace_id', workspaceId)
+        .single();
+      if (fErr || !data) throw new Error(`flow ${flowId} not found: ${fErr?.message ?? 'no row'}`);
+      flowRow = { name: data.name, steps: data.steps as Array<{ skill: string; argsTemplate: string }> };
+    }
+
     // ── workflow_runs row + persistence (the shared persister) ──
     persister = await createWorkflowRunPersister(adminSupabase, {
       workspaceId,
       jobId,
-      workflow,
+      workflow: flowRow ? `flow:${flowRow.name}` : workflow,
       repo: repoSlug,
       issueNumber: runIssueNumber,
       prNumber: prNumber ?? ciFollowupSeed?.prNumber ?? null,
@@ -135,7 +155,33 @@ export async function executeWorkflowJob(
     let tokensUsed = 0;
     let outcomeJson: unknown = null;
 
-    if (workflow === 'autofix') {
+    if (workflow === 'flow') {
+      if (!flowRow) throw new Error('flow not loaded (internal error)');
+      const result = await core.runFlow({
+        flow: flowRow,
+        input: flowInput ?? String(runIssueNumber),
+        store,
+        config,
+        github,
+        issueNumber: runIssueNumber,
+        onEvent,
+        onAgentEvent,
+        onRunRecord,
+        pauseRequested,
+        cancelRequested,
+      });
+      outcomeJson = result;
+      runStatus = result.status === 'succeeded' ? 'succeeded'
+        : result.status === 'paused' ? 'paused'
+        : result.status === 'cancelled' ? 'cancelled'
+        : 'failed';
+      reason = result.reason;
+      prUrl = result.prUrl ?? null;
+      outPrNumber = result.prNumber ?? outPrNumber;
+      branch = result.branch ?? null;
+      headSha = result.headSha ?? null;
+      tokensUsed = result.tokensUsed;
+    } else if (workflow === 'autofix') {
       const orch = new core.AutofixOrchestrator(store, config, github);
       const outcome = await orch.processIssue(runIssueNumber, {
         apply: true,
