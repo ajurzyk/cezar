@@ -1,0 +1,81 @@
+# syntax=docker/dockerfile:1.7
+
+# ─────────────────────────────────────────────────────────────────────────────
+# @cezar/runner — self-hosted runner daemon for subscription-billed agents
+# (Claude Pro/Max via `claude`, ChatGPT via `codex`).
+#
+# After `docker compose up`, run the one-time interactive login(s):
+#   docker compose exec -it runner claude login
+#   docker compose exec -it runner codex login    # if codex-cli is enabled
+#
+# Credentials persist via the `runner-home` volume mounted at /home/node.
+# ─────────────────────────────────────────────────────────────────────────────
+
+ARG NODE_VERSION=20-bookworm-slim
+
+# ── deps: shared workspace install ───────────────────────────────────────────
+FROM node:${NODE_VERSION} AS deps
+WORKDIR /app
+
+RUN corepack enable
+
+COPY package.json yarn.lock .yarnrc.yml ./
+COPY packages/core/package.json packages/core/package.json
+COPY packages/cli/package.json packages/cli/package.json
+COPY packages/gui/package.json packages/gui/package.json
+COPY packages/runner/package.json packages/runner/package.json
+
+RUN --mount=type=cache,target=/root/.yarn/berry/cache \
+    yarn install --immutable
+
+# ── builder: compile @cezar/core then @cezar/runner ──────────────────────────
+FROM node:${NODE_VERSION} AS builder
+WORKDIR /app
+
+RUN corepack enable
+
+# Yarn 4 hoists deps to the root; per-workspace `node_modules/` only exist
+# when hoisting conflicts force them. Copying the deps stage wholesale picks
+# up whatever layout Yarn produced; the .dockerignore strips node_modules
+# from the local context so the second COPY can't clobber them.
+COPY --from=deps /app ./
+COPY . .
+
+RUN yarn workspace @cezar/core build \
+ && yarn workspace @cezar/runner build
+
+# ── runtime: node + git + claude/codex CLIs ──────────────────────────────────
+FROM node:${NODE_VERSION} AS runtime
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+# `git` is a hard dependency — the runner clones the target repo per job.
+# `ca-certificates` keeps HTTPS clones working on minimal slim images.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# Install the subscription CLIs globally. `claude login` / `codex login` are
+# interactive OAuth flows; run them once via `docker compose exec` after boot.
+# If you only want one backend, drop the other from the install line.
+RUN npm install --global @anthropic-ai/claude-code @openai/codex \
+ && claude --version \
+ && codex --version
+
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/packages/core ./packages/core
+COPY --from=builder /app/packages/runner ./packages/runner
+COPY --from=builder /app/package.json ./package.json
+
+# The `node` user (uid 1000) ships with the official Node image. Its home is
+# /home/node — that's where `claude login` / `codex login` write credentials,
+# and what the compose volume mounts.
+RUN mkdir -p /home/node/.claude /home/node/.codex \
+ && chown -R node:node /home/node /app
+USER node
+
+ENV PATH=/app/packages/runner/dist:$PATH
+
+ENTRYPOINT ["node", "/app/packages/runner/dist/cli.js"]
+CMD ["start"]
