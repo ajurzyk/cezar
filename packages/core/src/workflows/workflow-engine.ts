@@ -6,7 +6,7 @@ import type { AgentBackend, AgentEvent, AgentRunner, AgentRunSpec } from '../age
 import { createAgentRunner } from '../agents/runner-factory.js';
 import { discoverSkills, type Skill } from '../skills/skill-catalog.js';
 import { resolveStepConfig, type WorkflowBinding, type WorkspaceWorkflowSettings, DEFAULT_WORKSPACE_WORKFLOW_SETTINGS } from './binding.js';
-import { commitAll, getDiffAgainstBase, startWorktreeAutosaver } from '../actions/autofix/worktree.js';
+import { commitAll, getDiffAgainstBase, squashCommitsToBase, startWorktreeAutosaver } from '../actions/autofix/worktree.js';
 import type { RunEnv } from '../provision/run-env.js';
 import { PersistentClaudeSession } from '../agents/persistent-claude-session.js';
 import { UNIFIED_AUTOFIX_SYSTEM_PROMPT } from '../actions/autofix/prompts/autofix-unified.js';
@@ -96,6 +96,10 @@ export interface WorkflowRunContext {
   gitOps?: {
     commitAll(worktreePath: string, message: string): Promise<string | null>;
     getDiffAgainstBase(worktreePath: string, baseRef: string): Promise<string>;
+    /** Optional. Used to recover from autosaver-already-committed work — see
+     *  `squashCommitsToBase` in worktree.ts. When omitted the engine falls
+     *  back to the no-changes path, matching pre-autosaver behavior. */
+    squashCommitsToBase?(worktreePath: string, baseRef: string, message: string): Promise<string | null>;
   };
 }
 
@@ -299,7 +303,7 @@ export class WorkflowEngine {
       ctx.prNumber,
     );
 
-    const gitOps = ctx.gitOps ?? { commitAll, getDiffAgainstBase };
+    const gitOps = ctx.gitOps ?? { commitAll, getDiffAgainstBase, squashCommitsToBase };
 
     const effectDeps: WorkflowEffectDeps = {
       github: {
@@ -428,8 +432,17 @@ export class WorkflowEngine {
           if (step.commentSection) await living.appendSection(step.id, step.commentSection(stepCtx));
         } else if (step.kind === 'commit') {
           const wt = this.requireWorktree(worktreePath, step.id);
+          const baseRef = ctx.config.autofix?.baseBranch ?? 'main';
           const message = step.buildMessage(stepCtx);
-          const sha = await gitOps.commitAll(wt, message);
+          let sha = await gitOps.commitAll(wt, message);
+          // `commitAll` returns null when the working tree is clean. That can
+          // mean two things: (a) the fixer really did nothing, or (b) the
+          // autosaver already committed everything under `cezar: autosave
+          // (fix)`. Squash autosave commits into one clean commit when (b);
+          // only declare "no changes" when there's truly no diff against base.
+          if (!sha && gitOps.squashCommitsToBase) {
+            sha = await gitOps.squashCommitsToBase(wt, baseRef, message);
+          }
           if (!sha) {
             if (step.failOnNoChanges) {
               outcome = { kind: 'fail', reason: 'fixer made no file changes' };
@@ -437,7 +450,7 @@ export class WorkflowEngine {
               outcome = { kind: 'skip-run', reason: 'fixer made no file changes — CI failure may no longer reproduce' };
             }
           } else {
-            const diff = await gitOps.getDiffAgainstBase(wt, ctx.config.autofix?.baseBranch ?? 'main');
+            const diff = await gitOps.getDiffAgainstBase(wt, baseRef);
             headSha = sha;
             outcome = step.onCommitted({ commitSha: sha, diff }, stepCtx);
             if (step.commentSection) await living.appendSection(step.id, step.commentSection({ commitSha: sha }, stepCtx));
