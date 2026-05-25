@@ -78,14 +78,10 @@ export async function saveWorkspaceConfig(
     },
   };
 
-  const rawMode = (formData.get('issueAutofixMode') as string | null) ?? 'off';
-  const issueAutofixMode =
-    rawMode === 'notify' || rawMode === 'autonomous' ? rawMode : 'off';
-
   const supabase = await createSupabaseServerClient();
   const { error } = await supabase
     .from('workspaces')
-    .update({ config, issue_autofix_mode: issueAutofixMode })
+    .update({ config })
     .eq('id', workspace.id);
 
   if (error) return { error: error.message };
