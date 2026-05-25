@@ -33,11 +33,20 @@ function autofixSteps(): FlowStep[] {
   return [
     {
       skill: 'verify-in-repo',
-      argsTemplate: 'Issue #{{input}} — verify whether this is a real, still-unfixed defect.',
+      argsTemplate:
+        'Issue #{{input}} — verify whether this is a real, still-unfixed defect.\n\n' +
+        '— EXISTING CEZAR PR ON THIS ISSUE (if any) —\n' +
+        '{{existingCezarPr}}',
       stopChainIfContains: 'NO_ACTION_NEEDED',
       systemNotes:
         'This is the VERIFY gate. Read-only: do NOT edit files. Use only Read/Grep/Glob ' +
         'and read-only `git log`/`git diff`/`git show`/`git status`.\n\n' +
+        'Step 0 — pre-check the marker: if the user message says `EXISTING CEZAR PR ON THIS ISSUE` ' +
+        'and the line below it is non-empty and mentions a PR classified as `active`, this issue ' +
+        'already has an open Cezar PR. Write `NO_ACTION_NEEDED` on a line by itself with a one-line ' +
+        'reason like "PR #N already open (state: changes-requested) — operator should resolve there." ' +
+        'Do NOT re-verify or re-fix. Only when the existing-PR line is empty, or its state is ' +
+        '`merged` / `closed`, proceed with the normal verification below.\n\n' +
         'Decide quickly whether the issue describes a real, still-unfixed defect on the current ' +
         'branch — as opposed to expected behavior, something already fixed, or a usage error.\n\n' +
         'If no action is needed (already fixed / not a bug / out of scope), write `NO_ACTION_NEEDED` ' +
@@ -94,7 +103,14 @@ function autofixSteps(): FlowStep[] {
         'This is the REVIEW step. Read the PR diff and post a review comment on the PR. ' +
         'Be specific about blockers vs nits. Read-only: do NOT push further commits.\n\n' +
         'If `{{previousPullRequestNumber}}` is empty, the upstream open-pr step did not open a PR — ' +
-        'end with `Status: blocked` and a one-line reason. Do not invent a PR number.',
+        'end with `Status: blocked` and a one-line reason. Do not invent a PR number.\n\n' +
+        'After posting the review, emit ONE final line so the issue\'s `cezar:pr-link` marker ' +
+        'reflects the PR\'s new state:\n' +
+        '  PR_STATE=review              ← clean review, no blockers\n' +
+        '  PR_STATE=changes-requested   ← blockers found / changes needed\n' +
+        '  PR_STATE=approved            ← LGTM\n' +
+        'The marker is what later flow runs see when deciding "this issue already has a PR" — ' +
+        'a stale `draft` marker would let a re-run hallucinate a fresh fix attempt.',
     },
   ];
 }

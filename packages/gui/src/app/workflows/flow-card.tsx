@@ -46,6 +46,7 @@ const TEMPLATE_VARS = [
   { name: 'previousOutput', label: '{{previousOutput}}', hint: 'previous step\'s text output (truncated to 8KB)' },
   { name: 'previousPullRequestUrl', label: '{{previousPullRequestUrl}}', hint: 'PR url from previous step (if any)' },
   { name: 'previousPullRequestNumber', label: '{{previousPullRequestNumber}}', hint: 'PR number from previous step (if any)' },
+  { name: 'existingCezarPr', label: '{{existingCezarPr}}', hint: 'one-line description of an open Cezar PR on the issue (empty when none)' },
 ] as const;
 
 const PR_CREATING_PATTERN = /(fix|open|create|pr|pull|merge|raise)/i;

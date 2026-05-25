@@ -135,11 +135,15 @@ describe('autofixWorkflow (engine)', () => {
     expect(github.pushed).toHaveLength(1);
     expect(github.prsOpened).toHaveLength(1);
     expect(github.prsOpened[0].title).toMatch(/^fix: Password reset broken/);
-    // living comment: posted on the issue first (id 2000), then a fresh shell
-    // comment on the PR (id 2001) which is then edited with the PR summary.
-    const issueShell = github.added.filter((c) => c.n === 1740);
+    // Issue gets: (1) the living-comment shell (id 2000), (2) the sticky
+    // `cezar:pr-link` marker after open-pr (id 2002). PR gets one shell
+    // comment (id 2001) which is later edited with the summary.
+    const issueComments = github.added.filter((c) => c.n === 1740);
+    const issueShell = issueComments.filter((c) => !c.body.includes('cezar:pr-link'));
+    const issueMarker = issueComments.filter((c) => c.body.includes('cezar:pr-link'));
     const prShell = github.added.filter((c) => c.n === 42);
     expect(issueShell).toHaveLength(1);
+    expect(issueMarker).toHaveLength(1);
     expect(prShell).toHaveLength(1);
     const prCommentId = 2001; // first addComment → 2000 (issue), second → 2001 (PR)
     const prEdits = github.updated.filter((u) => u.id === prCommentId);
