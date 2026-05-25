@@ -17,6 +17,12 @@ import {
   type WorkflowStep,
 } from './workflow.js';
 import { runWorkflow } from './workflow-engine.js';
+import {
+  describeMarkerForPrompt,
+  findMarkerComment,
+  upsertMarkerComment,
+  type PrLinkData,
+} from './pr-link-marker.js';
 
 /**
  * Runtime for the simple "flows" UI (migration 0021). A flow is a named chain
@@ -84,6 +90,15 @@ interface FlowBlackboard extends Record<string, unknown> {
    * Threaded into the next step's user prompt via `{{previousOutput}}`.
    */
   previousOutput: string;
+  /**
+   * One-line description of an existing `cezar:pr-link` marker on the issue,
+   * if any was found at run start (e.g. "PR #2050 (changes-requested,
+   * classified active) at https://…/pull/2050"). Empty string when no marker.
+   * Threaded into step prompts via `{{existingCezarPr}}` so a verify step can
+   * stop with NO_ACTION_NEEDED when a previous run already opened a PR for
+   * the same issue. See pr-link-marker.ts for the marker schema.
+   */
+  existingCezarPr: string;
 }
 
 export async function runFlow(params: RunFlowParams): Promise<WorkflowRunResult<FlowBlackboard>> {
@@ -105,6 +120,44 @@ export async function runFlow(params: RunFlowParams): Promise<WorkflowRunResult<
   // each step's `buildUserPrompt` sees the freshest `previousTaskId` (which
   // the engine doesn't expose through the step context directly).
   let lastAgentRunId = '';
+
+  // ── PR-link marker state ─────────────────────────────────────────────────
+  // `existingMarker` is the marker (if any) we found on the issue *before* the
+  // first step ran — it's what populates `{{existingCezarPr}}` so a verify
+  // step can see "a previous Cezar run already opened PR #N for this issue".
+  //
+  // `pendingMarkerWrites` accumulates fire-and-forget upserts triggered when a
+  // step emits PR markers in its text. We `await Promise.allSettled` on them
+  // before `runFlow` returns so the marker is persisted even if a later step
+  // fails — otherwise a successful open-pr followed by a failing review-pr
+  // would lose the marker write.
+  //
+  // `lastUpsertedPr` dedupes consecutive identical writes (e.g. the same PR
+  // number echoed by review-pr's output).
+  const existingMarker = await findMarkerComment(params.github, params.issueNumber).catch((err: Error) => {
+    params.onEvent(`[flow] could not read pr-link marker: ${err.message}`);
+    return null;
+  });
+  const initialExistingPr = existingMarker ? describeMarkerForPrompt(existingMarker.data) : '';
+  const pendingMarkerWrites = new Set<Promise<unknown>>();
+  let lastUpsertedPr: { number: number; state: string } | null = existingMarker
+    ? { number: existingMarker.data.prNumber, state: existingMarker.data.prState }
+    : null;
+
+  function scheduleMarkerUpsert(data: PrLinkData): void {
+    // Skip when nothing changed — avoids spamming updateComment on every step
+    // that echoes the PR number forward.
+    if (lastUpsertedPr && lastUpsertedPr.number === data.prNumber && lastUpsertedPr.state === data.prState) return;
+    lastUpsertedPr = { number: data.prNumber, state: data.prState };
+    const p = upsertMarkerComment(params.github, params.issueNumber, data)
+      .catch((err: Error) => {
+        params.onEvent(`[flow] pr-link marker upsert failed: ${err.message}`);
+      })
+      .finally(() => {
+        pendingMarkerWrites.delete(p);
+      });
+    pendingMarkerWrites.add(p);
+  }
 
   // Auto-prepended env steps (install, dev-server). Only when both repo-backed
   // AND the workspace configured the corresponding `autofix.projectEnv` field;
@@ -128,6 +181,7 @@ export async function runFlow(params: RunFlowParams): Promise<WorkflowRunResult<
       previousPullRequestUrl: '',
       previousPullRequestNumber: '',
       previousOutput: '',
+      existingCezarPr: initialExistingPr,
     }),
     steps: [...prefixSteps, ...agentSteps],
   };
@@ -203,6 +257,13 @@ export async function runFlow(params: RunFlowParams): Promise<WorkflowRunResult<
       cancelRequested: params.cancelRequested,
     });
   } finally {
+    // Drain marker upserts before releasing the worktree/runEnv. Each upsert
+    // is already wrapped in a `.catch` that logs and swallows, so allSettled
+    // here is belt-and-braces — but it guarantees the marker is on the issue
+    // before the run is reported as done in the cockpit.
+    if (pendingMarkerWrites.size > 0) {
+      await Promise.allSettled(Array.from(pendingMarkerWrites));
+    }
     if (runEnv) await runEnv.dispose().catch(() => {});
     if (disposeWorktree) await disposeWorktree().catch(() => {});
   }
@@ -251,11 +312,45 @@ export async function runFlow(params: RunFlowParams): Promise<WorkflowRunResult<
       onResult: () => ({ kind: 'continue' as const }),
       onNoParse: (rawText, _ctx) => {
         const { url, number } = extractPrMarkers(rawText);
+        // Fall back to the existing marker when the step didn't emit its own
+        // PR_URL/PR_NUMBER lines. Lets review-pr inherit "PR #N" from a marker
+        // an earlier run wrote, even though the open-pr step on this run
+        // skipped (e.g. NO_ACTION_NEEDED for an already-fixed issue).
+        const fallbackNumber = lastUpsertedPr?.number;
+        const fallbackUrl = existingMarker?.data.prUrl;
+        const effectiveNumber = number ?? fallbackNumber ?? null;
+        const effectiveUrl = url ?? (number == null ? fallbackUrl : null) ?? null;
         const patch: Partial<FlowBlackboard> = {
-          previousPullRequestUrl: url ?? '',
-          previousPullRequestNumber: number != null ? String(number) : '',
+          previousPullRequestUrl: effectiveUrl ?? '',
+          previousPullRequestNumber: effectiveNumber != null ? String(effectiveNumber) : '',
           previousOutput: truncateOutput(rawText),
         };
+        // Persist a sticky `cezar:pr-link` comment on the issue whenever the
+        // step's output yields a PR number. Fire-and-forget: awaited at the
+        // end of `runFlow`. State defaults to 'draft' for a fresh open-pr;
+        // downstream steps that change the PR's state should emit their own
+        // marker (e.g. `PR_STATE=changes-requested`) — see extractPrState.
+        if (number != null && url) {
+          const state = extractPrState(rawText) ?? (lastUpsertedPr?.number === number ? lastUpsertedPr.state : 'draft');
+          scheduleMarkerUpsert({
+            prNumber: number,
+            prUrl: url,
+            prState: state,
+            branch: branchName,
+          });
+        } else if (number == null && fallbackNumber != null) {
+          // A later step (e.g. review-pr) may emit only `PR_STATE=...` to
+          // update the existing marker without re-stating PR_URL/PR_NUMBER.
+          const state = extractPrState(rawText);
+          if (state && existingMarker) {
+            scheduleMarkerUpsert({
+              prNumber: existingMarker.data.prNumber,
+              prUrl: existingMarker.data.prUrl,
+              prState: state,
+              branch: existingMarker.data.branch ?? branchName,
+            });
+          }
+        }
         // Stop-chain: cleanly end the workflow when the agent's output
         // contains the configured marker. We rely on `skip-run` rather than
         // a hard fail so the cockpit shows it as `succeeded (with reason)`.
@@ -302,7 +397,6 @@ export async function runFlow(params: RunFlowParams): Promise<WorkflowRunResult<
 // ─── Living-comment rendering helpers ──────────────────────────────────────
 
 const STOP_MARKER_RE = /^NO_ACTION_NEEDED\b/m;
-const MAX_BODY_CHARS = 1500;
 
 /** Cap on `{{previousOutput}}` (chars) so a chain of long outputs doesn't
  *  cascade into runaway prompts. ~8KB ≈ ~2k tokens — enough for a structured
@@ -342,17 +436,16 @@ function flowStepHeading(idx: number, step: FlowStep, rawText: string): string {
 }
 
 /**
- * Render the most useful tail of the agent's output. Most skills end with a
- * structured summary block (Status/Files changed/Summary/…); the last ~1500
- * chars reliably capture that without flooding the GitHub comment with full
- * tool-call transcripts.
+ * Render the agent's full output into the living comment. We don't truncate
+ * here — losing the head of a multi-section response (e.g. NO_ACTION_NEEDED
+ * with a long justification) was more disruptive than the verbose history.
+ * If a step's output ever pushes the combined comment past GitHub's 65536-byte
+ * limit, `updateComment` will surface that error and we'll re-introduce a
+ * higher per-step cap (or split into separate comments per step).
  */
 function flowStepBody(rawText: string): string {
   const trimmed = (rawText ?? '').trim();
-  if (!trimmed) return '_(no output)_';
-  if (trimmed.length <= MAX_BODY_CHARS) return trimmed;
-  const tail = trimmed.slice(-MAX_BODY_CHARS).trimStart();
-  return `_… (truncated; showing last ${MAX_BODY_CHARS} chars)_\n\n${tail}`;
+  return trimmed || '_(no output)_';
 }
 
 // ─── PR marker extraction ──────────────────────────────────────────────────
@@ -381,6 +474,23 @@ export function extractPrMarkers(text: string): { url: string | null; number: nu
     }
   }
   return { url, number };
+}
+
+/**
+ * Optional companion to PR_URL/PR_NUMBER. A skill can emit a single line like
+ *
+ *   PR_STATE=changes-requested
+ *
+ * to update the `pr-link` marker's `pr_state` field without restating the PR
+ * number. Used by review-pr to flip the marker from `draft` → `review` /
+ * `changes-requested` / `approved` as the PR moves through the pipeline.
+ *
+ * Free-form: the marker schema doesn't enforce a fixed set; classifyActivity
+ * in pr-link-marker.ts buckets unknown values as `other`.
+ */
+export function extractPrState(text: string): string | null {
+  const m = text.match(/PR_STATE\s*=\s*([\w-]+)/);
+  return m ? m[1].toLowerCase() : null;
 }
 
 // ─── Template rendering ────────────────────────────────────────────────────
