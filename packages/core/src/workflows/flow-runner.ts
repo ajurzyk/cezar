@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { AgentEvent as RunnerAgentEvent } from '../agents/agent-runner.js';
 import type { Config } from '../config/config.model.js';
@@ -5,14 +6,23 @@ import type { GitHubService } from '../services/github.service.js';
 import type { IssueStore } from '../store/store.js';
 import { discoverSkills } from '../skills/skill-catalog.js';
 import { createWorktree } from '../actions/autofix/worktree.js';
+import { createRunEnv } from '../provision/create-run-env.js';
+import { tailLines, type RunEnv, type ShellResult } from '../provision/run-env.js';
 import {
   agentStep,
   type AgentRunRecord,
+  type CommentSection,
   type Workflow,
   type WorkflowRunResult,
   type WorkflowStep,
 } from './workflow.js';
 import { runWorkflow } from './workflow-engine.js';
+import {
+  describeMarkerForPrompt,
+  findMarkerComment,
+  upsertMarkerComment,
+  type PrLinkData,
+} from './pr-link-marker.js';
 
 /**
  * Runtime for the simple "flows" UI (migration 0021). A flow is a named chain
@@ -73,6 +83,22 @@ interface FlowBlackboard extends Record<string, unknown> {
   previousTaskId: string;
   previousPullRequestUrl: string;
   previousPullRequestNumber: string;
+  /**
+   * The previous step's raw text output, truncated. Without this, a step can
+   * only reference the prior step by `previousTaskId` (an opaque UUID) — which
+   * means the agent has no way to see what the prior agent actually decided.
+   * Threaded into the next step's user prompt via `{{previousOutput}}`.
+   */
+  previousOutput: string;
+  /**
+   * One-line description of an existing `cezar:pr-link` marker on the issue,
+   * if any was found at run start (e.g. "PR #2050 (changes-requested,
+   * classified active) at https://…/pull/2050"). Empty string when no marker.
+   * Threaded into step prompts via `{{existingCezarPr}}` so a verify step can
+   * stop with NO_ACTION_NEEDED when a previous run already opened a PR for
+   * the same issue. See pr-link-marker.ts for the marker schema.
+   */
+  existingCezarPr: string;
 }
 
 export async function runFlow(params: RunFlowParams): Promise<WorkflowRunResult<FlowBlackboard>> {
@@ -95,6 +121,56 @@ export async function runFlow(params: RunFlowParams): Promise<WorkflowRunResult<
   // the engine doesn't expose through the step context directly).
   let lastAgentRunId = '';
 
+  // ── PR-link marker state ─────────────────────────────────────────────────
+  // `existingMarker` is the marker (if any) we found on the issue *before* the
+  // first step ran — it's what populates `{{existingCezarPr}}` so a verify
+  // step can see "a previous Cezar run already opened PR #N for this issue".
+  //
+  // `pendingMarkerWrites` accumulates fire-and-forget upserts triggered when a
+  // step emits PR markers in its text. We `await Promise.allSettled` on them
+  // before `runFlow` returns so the marker is persisted even if a later step
+  // fails — otherwise a successful open-pr followed by a failing review-pr
+  // would lose the marker write.
+  //
+  // `lastUpsertedPr` dedupes consecutive identical writes (e.g. the same PR
+  // number echoed by review-pr's output).
+  const existingMarker = await findMarkerComment(params.github, params.issueNumber).catch((err: Error) => {
+    params.onEvent(`[flow] could not read pr-link marker: ${err.message}`);
+    return null;
+  });
+  const initialExistingPr = existingMarker ? describeMarkerForPrompt(existingMarker.data) : '';
+  const pendingMarkerWrites = new Set<Promise<unknown>>();
+  let lastUpsertedPr: { number: number; state: string } | null = existingMarker
+    ? { number: existingMarker.data.prNumber, state: existingMarker.data.prState }
+    : null;
+
+  function scheduleMarkerUpsert(data: PrLinkData): void {
+    // Skip when nothing changed — avoids spamming updateComment on every step
+    // that echoes the PR number forward.
+    if (lastUpsertedPr && lastUpsertedPr.number === data.prNumber && lastUpsertedPr.state === data.prState) return;
+    lastUpsertedPr = { number: data.prNumber, state: data.prState };
+    const p = upsertMarkerComment(params.github, params.issueNumber, data)
+      .catch((err: Error) => {
+        params.onEvent(`[flow] pr-link marker upsert failed: ${err.message}`);
+      })
+      .finally(() => {
+        pendingMarkerWrites.delete(p);
+      });
+    pendingMarkerWrites.add(p);
+  }
+
+  // Auto-prepended env steps (install, dev-server). Only when both repo-backed
+  // AND the workspace configured the corresponding `autofix.projectEnv` field;
+  // otherwise the run behaves as before (agent steps only).
+  const projectEnv = params.config.autofix?.projectEnv;
+  const wantInstall = !!repoRoot && !!projectEnv?.install?.trim();
+  const wantDevServer = !!repoRoot && !!projectEnv?.devServer?.enabled && (projectEnv.devServer.port ?? 0) > 0;
+  const prefixSteps: WorkflowStep<FlowBlackboard>[] = [];
+  if (wantInstall) prefixSteps.push(makeInstallStep());
+  if (wantDevServer) prefixSteps.push(makeDevServerStep());
+
+  const agentSteps = params.flow.steps.map((step, idx) => makeAgentStepForFlowStep(step, idx, params.config));
+
   const workflow: Workflow<FlowBlackboard> = {
     id: `flow:${params.flow.name}`,
     title: params.flow.name,
@@ -104,52 +180,97 @@ export async function runFlow(params: RunFlowParams): Promise<WorkflowRunResult<
       previousTaskId: '',
       previousPullRequestUrl: '',
       previousPullRequestNumber: '',
+      previousOutput: '',
+      existingCezarPr: initialExistingPr,
     }),
-    steps: params.flow.steps.map((step, idx) => makeAgentStepForFlowStep(step, idx, params.config)),
+    steps: [...prefixSteps, ...agentSteps],
   };
 
-  return runWorkflow(workflow, {
-    store: params.store,
-    config: params.config,
-    github: params.github,
-    issueNumber: params.issueNumber,
-    apply: true,
-    skills,
-    // Bindings: per-step, set the skillName so resolveStepConfig appends the
-    // skill body to the system prompt. The engine reads these from `bindings`.
-    bindings: params.flow.steps.map((step, idx) => ({
-      stepId: stepIdFor(idx),
-      skillName: step.skill,
-      backend: null,
-      model: null,
-      extraTools: [],
-    })),
-    prepareWorktree: repoRoot
-      ? async () => {
-          const wt = await createWorktree({
-            repoRoot,
-            branch: (params.config.autofix?.branchPrefix ?? 'autofix/cezar-issue-') + params.issueNumber,
-            baseBranch: params.config.autofix?.baseBranch ?? 'main',
-            remote: params.config.autofix?.remote ?? 'origin',
-            fetchRemote: params.config.autofix?.fetchBeforeAttempt ?? true,
-            onWarn: (m: string) => params.onEvent(m),
-          });
-          return { path: wt.path, dispose: wt.dispose };
-        }
-      : undefined,
-    onEvent: params.onEvent,
-    onAgentEvent: (e: RunnerAgentEvent) => params.onAgentEvent(e as unknown as { type: string; [k: string]: unknown }),
-    onRunRecord: (r: AgentRunRecord) => {
-      lastAgentRunId = r.id;
-      params.onRunRecord(r);
-    },
-    pauseRequested: params.pauseRequested,
-    cancelRequested: params.cancelRequested,
-  });
+  // Repo-backed setup: prepare a worktree on a unique per-run branch, then a
+  // RunEnv bound to it. The branch carries a random 8-char suffix so concurrent
+  // runs against the same issue don't collide on `git worktree add` or on the
+  // remote (each push lands on its own ref). The RunEnv lets `shell-check` /
+  // `dev-server` steps actually do work (install deps, boot the app) and
+  // injects `projectEnv.envVars` into every command.
+  let worktreePath: string | undefined;
+  let branchName: string | undefined;
+  let disposeWorktree: (() => Promise<void>) | undefined;
+  let runEnv: RunEnv | undefined;
+
+  if (repoRoot) {
+    const branchPrefix = params.config.autofix?.branchPrefix ?? 'autofix/cezar-issue-';
+    const suffix = randomUUID().slice(0, 8);
+    branchName = `${branchPrefix}${params.issueNumber}-${suffix}`;
+    const wt = await createWorktree({
+      repoRoot,
+      branch: branchName,
+      baseBranch: params.config.autofix?.baseBranch ?? 'main',
+      remote: params.config.autofix?.remote ?? 'origin',
+      fetchRemote: params.config.autofix?.fetchBeforeAttempt ?? true,
+      onWarn: (m: string) => params.onEvent(m),
+    });
+    worktreePath = wt.path;
+    disposeWorktree = wt.dispose;
+
+    try {
+      runEnv = await createRunEnv({
+        worktreePath: wt.path,
+        spec: projectEnv!,
+        runId: `flow-${params.issueNumber}-${suffix}`,
+        onWarn: (m) => params.onEvent(`[run-env] ${m}`),
+      });
+    } catch (err) {
+      await disposeWorktree().catch(() => {});
+      throw err;
+    }
+  }
+
+  try {
+    return await runWorkflow(workflow, {
+      store: params.store,
+      config: params.config,
+      github: params.github,
+      issueNumber: params.issueNumber,
+      apply: true,
+      skills,
+      // Bindings: per-step, set the skillName so resolveStepConfig appends the
+      // skill body to the system prompt. The engine reads these from `bindings`.
+      // Only agent steps need bindings; prefix steps (install / dev-server)
+      // resolve everything from their step definition + config.
+      bindings: params.flow.steps.map((step, idx) => ({
+        stepId: agentStepIdFor(idx),
+        skillName: step.skill,
+        backend: null,
+        model: null,
+        extraTools: [],
+      })),
+      worktreePath,
+      branch: branchName,
+      runEnv,
+      onEvent: params.onEvent,
+      onAgentEvent: (e: RunnerAgentEvent) => params.onAgentEvent(e as unknown as { type: string; [k: string]: unknown }),
+      onRunRecord: (r: AgentRunRecord) => {
+        lastAgentRunId = r.id;
+        params.onRunRecord(r);
+      },
+      pauseRequested: params.pauseRequested,
+      cancelRequested: params.cancelRequested,
+    });
+  } finally {
+    // Drain marker upserts before releasing the worktree/runEnv. Each upsert
+    // is already wrapped in a `.catch` that logs and swallows, so allSettled
+    // here is belt-and-braces — but it guarantees the marker is on the issue
+    // before the run is reported as done in the cockpit.
+    if (pendingMarkerWrites.size > 0) {
+      await Promise.allSettled(Array.from(pendingMarkerWrites));
+    }
+    if (runEnv) await runEnv.dispose().catch(() => {});
+    if (disposeWorktree) await disposeWorktree().catch(() => {});
+  }
 
   // ─── Helpers ──────────────────────────────────────────────────────────────
 
-  function stepIdFor(idx: number): string {
+  function agentStepIdFor(idx: number): string {
     return `step-${idx + 1}`;
   }
 
@@ -165,7 +286,7 @@ export async function runFlow(params: RunFlowParams): Promise<WorkflowRunResult<
     const model = autofix?.models?.fixer ?? 'claude-sonnet-4-6';
 
     return agentStep<FlowBlackboard, unknown>({
-      id: stepIdFor(idx),
+      id: agentStepIdFor(idx),
       kind: 'agent',
       builtinSkillId: step.skill,
       builtinSystemPrompt: composeStepSystemPrompt(step),
@@ -191,10 +312,45 @@ export async function runFlow(params: RunFlowParams): Promise<WorkflowRunResult<
       onResult: () => ({ kind: 'continue' as const }),
       onNoParse: (rawText, _ctx) => {
         const { url, number } = extractPrMarkers(rawText);
+        // Fall back to the existing marker when the step didn't emit its own
+        // PR_URL/PR_NUMBER lines. Lets review-pr inherit "PR #N" from a marker
+        // an earlier run wrote, even though the open-pr step on this run
+        // skipped (e.g. NO_ACTION_NEEDED for an already-fixed issue).
+        const fallbackNumber = lastUpsertedPr?.number;
+        const fallbackUrl = existingMarker?.data.prUrl;
+        const effectiveNumber = number ?? fallbackNumber ?? null;
+        const effectiveUrl = url ?? (number == null ? fallbackUrl : null) ?? null;
         const patch: Partial<FlowBlackboard> = {
-          previousPullRequestUrl: url ?? '',
-          previousPullRequestNumber: number != null ? String(number) : '',
+          previousPullRequestUrl: effectiveUrl ?? '',
+          previousPullRequestNumber: effectiveNumber != null ? String(effectiveNumber) : '',
+          previousOutput: truncateOutput(rawText),
         };
+        // Persist a sticky `cezar:pr-link` comment on the issue whenever the
+        // step's output yields a PR number. Fire-and-forget: awaited at the
+        // end of `runFlow`. State defaults to 'draft' for a fresh open-pr;
+        // downstream steps that change the PR's state should emit their own
+        // marker (e.g. `PR_STATE=changes-requested`) — see extractPrState.
+        if (number != null && url) {
+          const state = extractPrState(rawText) ?? (lastUpsertedPr?.number === number ? lastUpsertedPr.state : 'draft');
+          scheduleMarkerUpsert({
+            prNumber: number,
+            prUrl: url,
+            prState: state,
+            branch: branchName,
+          });
+        } else if (number == null && fallbackNumber != null) {
+          // A later step (e.g. review-pr) may emit only `PR_STATE=...` to
+          // update the existing marker without re-stating PR_URL/PR_NUMBER.
+          const state = extractPrState(rawText);
+          if (state && existingMarker) {
+            scheduleMarkerUpsert({
+              prNumber: existingMarker.data.prNumber,
+              prUrl: existingMarker.data.prUrl,
+              prState: state,
+              branch: existingMarker.data.branch ?? branchName,
+            });
+          }
+        }
         // Stop-chain: cleanly end the workflow when the agent's output
         // contains the configured marker. We rely on `skip-run` rather than
         // a hard fail so the cockpit shows it as `succeeded (with reason)`.
@@ -202,6 +358,23 @@ export async function runFlow(params: RunFlowParams): Promise<WorkflowRunResult<
           return {
             kind: 'skip-run',
             reason: `stopped at step ${idx + 1}: output matched "${step.stopChainIfContains}"`,
+          };
+        }
+        // Hard fail when the skill explicitly reports a blocked/failed status.
+        // Convention used by the autofix skill set ('fix', 'open-pr', etc.):
+        // an end-of-output line like `Status: blocked` or `Status: failed`
+        // means "I cannot proceed safely; do not run downstream steps."
+        // Returning `fail` here (vs `continue`) marks the step failed in the
+        // cockpit AND stops the chain — otherwise a no-op fix would cascade
+        // into open-pr opening nothing, then review-pr asking which PR.
+        const statusFailMatch = rawText.match(STATUS_FAIL_RE);
+        if (statusFailMatch) {
+          const status = statusFailMatch[1].toLowerCase();
+          const tailReason = extractStatusReason(rawText, statusFailMatch.index ?? 0);
+          return {
+            kind: 'fail',
+            reason: `step ${idx + 1} (\`${step.skill}\`) reported Status: ${status}${tailReason ? ` — ${tailReason}` : ''}`,
+            blackboardPatch: patch,
           };
         }
         return { kind: 'continue', blackboardPatch: patch };
@@ -224,7 +397,32 @@ export async function runFlow(params: RunFlowParams): Promise<WorkflowRunResult<
 // ─── Living-comment rendering helpers ──────────────────────────────────────
 
 const STOP_MARKER_RE = /^NO_ACTION_NEEDED\b/m;
-const MAX_BODY_CHARS = 1500;
+
+/** Cap on `{{previousOutput}}` (chars) so a chain of long outputs doesn't
+ *  cascade into runaway prompts. ~8KB ≈ ~2k tokens — enough for a structured
+ *  brief, not enough to balloon. */
+const MAX_PREV_OUTPUT_CHARS = 8000;
+
+/** Matches an end-of-output `Status: blocked` / `Status: failed` marker (per the
+ *  autofix skill set's output contract). Case-insensitive, line-anchored. */
+const STATUS_FAIL_RE = /^Status:\s*(blocked|failed)\b/im;
+
+function truncateOutput(rawText: string): string {
+  const trimmed = (rawText ?? '').trim();
+  if (trimmed.length <= MAX_PREV_OUTPUT_CHARS) return trimmed;
+  return `… (truncated; showing last ${MAX_PREV_OUTPUT_CHARS} chars)\n\n${trimmed.slice(-MAX_PREV_OUTPUT_CHARS)}`;
+}
+
+/** Grab a one-line reason that follows a `Status: blocked|failed` marker. */
+function extractStatusReason(rawText: string, matchIndex: number): string {
+  // Take the rest of the matched line + the next non-empty line as the reason.
+  const after = rawText.slice(matchIndex);
+  const lines = after.split(/\r?\n/);
+  const sameLineRest = lines[0].replace(STATUS_FAIL_RE, '').trim();
+  if (sameLineRest) return sameLineRest.slice(0, 200);
+  const nextLine = (lines[1] ?? '').trim();
+  return nextLine.slice(0, 200);
+}
 
 function flowStepHeading(idx: number, step: FlowStep, rawText: string): string {
   const base = `Step ${idx + 1} — \`${step.skill}\``;
@@ -238,17 +436,16 @@ function flowStepHeading(idx: number, step: FlowStep, rawText: string): string {
 }
 
 /**
- * Render the most useful tail of the agent's output. Most skills end with a
- * structured summary block (Status/Files changed/Summary/…); the last ~1500
- * chars reliably capture that without flooding the GitHub comment with full
- * tool-call transcripts.
+ * Render the agent's full output into the living comment. We don't truncate
+ * here — losing the head of a multi-section response (e.g. NO_ACTION_NEEDED
+ * with a long justification) was more disruptive than the verbose history.
+ * If a step's output ever pushes the combined comment past GitHub's 65536-byte
+ * limit, `updateComment` will surface that error and we'll re-introduce a
+ * higher per-step cap (or split into separate comments per step).
  */
 function flowStepBody(rawText: string): string {
   const trimmed = (rawText ?? '').trim();
-  if (!trimmed) return '_(no output)_';
-  if (trimmed.length <= MAX_BODY_CHARS) return trimmed;
-  const tail = trimmed.slice(-MAX_BODY_CHARS).trimStart();
-  return `_… (truncated; showing last ${MAX_BODY_CHARS} chars)_\n\n${tail}`;
+  return trimmed || '_(no output)_';
 }
 
 // ─── PR marker extraction ──────────────────────────────────────────────────
@@ -277,6 +474,23 @@ export function extractPrMarkers(text: string): { url: string | null; number: nu
     }
   }
   return { url, number };
+}
+
+/**
+ * Optional companion to PR_URL/PR_NUMBER. A skill can emit a single line like
+ *
+ *   PR_STATE=changes-requested
+ *
+ * to update the `pr-link` marker's `pr_state` field without restating the PR
+ * number. Used by review-pr to flip the marker from `draft` → `review` /
+ * `changes-requested` / `approved` as the PR moves through the pipeline.
+ *
+ * Free-form: the marker schema doesn't enforce a fixed set; classifyActivity
+ * in pr-link-marker.ts buckets unknown values as `other`.
+ */
+export function extractPrState(text: string): string | null {
+  const m = text.match(/PR_STATE\s*=\s*([\w-]+)/);
+  return m ? m[1].toLowerCase() : null;
 }
 
 // ─── Template rendering ────────────────────────────────────────────────────
@@ -339,4 +553,51 @@ export function effectiveStepNotes(step: FlowStep): string {
 /** The system prompt the engine actually sends (before the skill body is appended). */
 export function composeStepSystemPrompt(step: FlowStep): string {
   return `${FLOW_STEP_SCAFFOLDING}\n\n${effectiveStepNotes(step)}`;
+}
+
+// ─── Auto-prepended env steps (install + dev-server) ──────────────────────
+// Used when `autofix.projectEnv.install` is set / `autofix.projectEnv.devServer.enabled`
+// is true on a repo-backed flow run. The engine no-ops these when the run has
+// no `RunEnv` (i.e. repo-less flows), so adding them unconditionally would also
+// be safe — we gate them in `runFlow` only to keep the cockpit clean.
+
+function shellCommentSection(label: string, result: ShellResult): CommentSection {
+  const out = tailLines(`${result.stdout}\n${result.stderr}`, 30);
+  return {
+    heading: result.ok ? `✅ ${label} passed` : `❌ ${label} failed (exit ${result.exitCode})`,
+    body: out ? `\`\`\`\n${out}\n\`\`\`` : '_(no output)_',
+  };
+}
+
+function makeInstallStep(): WorkflowStep<FlowBlackboard> {
+  return {
+    id: 'install',
+    kind: 'shell-check',
+    builtinSkillId: 'install',
+    which: 'install',
+    // Gate on `projectEnv.gateOnInstall`. Failed install ⇒ failed run (agents
+    // can't do useful work against an unbuilt project anyway).
+    gate: (cfg) => cfg.autofix?.projectEnv?.gateOnInstall ?? true,
+    retriable: false,
+    commentSection: (result) => shellCommentSection('Install', result),
+  };
+}
+
+function makeDevServerStep(): WorkflowStep<FlowBlackboard> {
+  return {
+    id: 'dev-server',
+    kind: 'dev-server',
+    builtinSkillId: 'dev-server',
+    // Informational: don't fail the run if the server is slow to come up. The
+    // engine still exposes `devServerUrl` to subsequent agent steps via the
+    // step context, so agents can `curl` it once it's ready.
+    gate: false,
+    commentSection: (info) =>
+      info.url
+        ? {
+            heading: info.ready ? '🌐 Dev server ready' : '🌐 Dev server started (not confirmed ready)',
+            body: `Running at \`${info.url}\` — agents can probe it with \`curl\`.`,
+          }
+        : null,
+  };
 }

@@ -420,6 +420,35 @@ export class GitHubService {
     }
   }
 
+  /**
+   * Like `getIssueComments` but returns the GitHub-assigned `id` for each
+   * comment. Needed by sticky-marker upserts (find the marker → edit it in
+   * place via `updateComment(id, body)`) — kept separate from the existing
+   * shape to avoid disturbing every call site that already destructures the
+   * narrower tuple.
+   */
+  async listIssueCommentsWithIds(
+    issueNumber: number,
+  ): Promise<Array<{ id: number; author: string; body: string; createdAt: string }>> {
+    try {
+      const comments = await this.octokit.paginate(this.octokit.rest.issues.listComments, {
+        owner: this.owner,
+        repo: this.repo,
+        issue_number: issueNumber,
+        per_page: 100,
+      });
+      return comments.map(c => ({
+        id: c.id,
+        author: c.user?.login ?? 'unknown',
+        body: c.body ?? '',
+        createdAt: c.created_at,
+      }));
+    } catch (error) {
+      this.handleError(error);
+      throw error;
+    }
+  }
+
   async getIssueWithComments(issueNumber: number): Promise<{
     issue: {
       number: number;

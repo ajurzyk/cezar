@@ -9,7 +9,6 @@ import type { WorkspaceRole } from '@/lib/supabase/types';
 
 async function loadWorkspaceConfig(workspaceId: string): Promise<{
   config: Record<string, unknown>;
-  issueAutofixMode: 'off' | 'notify' | 'autonomous';
   autoTriageEnabled: boolean;
   autofixEnabled: boolean;
   separateCommentPerStep: boolean;
@@ -18,12 +17,11 @@ async function loadWorkspaceConfig(workspaceId: string): Promise<{
   const supabase = createSupabaseAdminClient();
   const { data } = await supabase
     .from('workspaces')
-    .select('config, issue_autofix_mode, auto_triage_enabled, autofix_enabled, separate_comment_per_step, action_auto_comment')
+    .select('config, auto_triage_enabled, autofix_enabled, separate_comment_per_step, action_auto_comment')
     .eq('id', workspaceId)
     .single();
   return {
     config: (data?.config as Record<string, unknown>) ?? {},
-    issueAutofixMode: (data?.issue_autofix_mode as 'off' | 'notify' | 'autonomous') ?? 'off',
     autoTriageEnabled: data?.auto_triage_enabled ?? true,
     autofixEnabled: data?.autofix_enabled ?? false,
     separateCommentPerStep: data?.separate_comment_per_step ?? false,
@@ -84,7 +82,7 @@ export default async function SettingsPage() {
     );
   }
 
-  const [{ config, issueAutofixMode, autoTriageEnabled, autofixEnabled, separateCommentPerStep, actionAutoComment }, members] = await Promise.all([
+  const [{ config, autoTriageEnabled, autofixEnabled, separateCommentPerStep, actionAutoComment }, members] = await Promise.all([
     loadWorkspaceConfig(workspace.id),
     loadMembers(workspace.id),
   ]);
@@ -125,7 +123,7 @@ export default async function SettingsPage() {
           title="Configuration"
           description="Low-level autofix knobs — sync cadence, model selection, attempt budgets. Most workspaces leave the defaults alone."
         >
-          <SettingsForm config={config} issueAutofixMode={issueAutofixMode} readOnly={!isAdmin} />
+          <SettingsForm config={config} readOnly={!isAdmin} />
         </SettingsCard>
       }
     />

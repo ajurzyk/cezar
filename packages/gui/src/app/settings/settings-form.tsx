@@ -6,15 +6,12 @@ import { saveWorkspaceConfig, type SaveConfigState } from './actions';
 import { SettingsSubsection } from './settings-tabs';
 import { PROJECT_ENV_PRESETS, type ProjectEnvPreset } from './project-env-presets';
 
-export type IssueAutofixMode = 'off' | 'notify' | 'autonomous';
-
 interface SettingsFormProps {
   config: Record<string, unknown>;
-  issueAutofixMode: IssueAutofixMode;
   readOnly: boolean;
 }
 
-export function SettingsForm({ config, issueAutofixMode, readOnly }: SettingsFormProps) {
+export function SettingsForm({ config, readOnly }: SettingsFormProps) {
   const [state, formAction, pending] = useActionState<SaveConfigState, FormData>(
     saveWorkspaceConfig,
     {},
@@ -29,20 +26,6 @@ export function SettingsForm({ config, issueAutofixMode, readOnly }: SettingsFor
     <form action={formAction} className="space-y-8">
       {state.ok && <Banner tone="ok">Settings saved.</Banner>}
       {state.error && <Banner tone="error">{state.error}</Banner>}
-
-      <SettingsSubsection title="Issue autofix loop">
-        <SelectField
-          name="issueAutofixMode"
-          label="Mode"
-          value={issueAutofixMode}
-          readOnly={readOnly}
-          options={[
-            { value: 'off', label: 'Off — do not sync bug issues' },
-            { value: 'notify', label: 'Notify — surface candidates for one-click fix' },
-            { value: 'autonomous', label: 'Autonomous — auto-dispatch on unmatched bugs' },
-          ]}
-        />
-      </SettingsSubsection>
 
       <SettingsSubsection title="Sync">
         <div className="grid gap-4 sm:grid-cols-2">

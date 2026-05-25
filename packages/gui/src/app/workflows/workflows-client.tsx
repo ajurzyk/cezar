@@ -153,8 +153,10 @@ export function WorkflowsClient({ workspaceName, workspaceRole, initialFlows, av
               Chain named skill steps. Args can use{' '}
               <code>{'{{input}}'}</code>,{' '}
               <code>{'{{previousTaskId}}'}</code>,{' '}
-              <code>{'{{previousPullRequestUrl}}'}</code>, and{' '}
-              <code>{'{{previousPullRequestNumber}}'}</code>.
+              <code>{'{{previousOutput}}'}</code>,{' '}
+              <code>{'{{previousPullRequestUrl}}'}</code>,{' '}
+              <code>{'{{previousPullRequestNumber}}'}</code>, and{' '}
+              <code>{'{{existingCezarPr}}'}</code>.
               <span className="ml-2 text-fg-muted/60">— workspace: <span className="text-fg">{workspaceName}</span></span>
             </p>
           </div>
