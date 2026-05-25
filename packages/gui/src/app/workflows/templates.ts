@@ -47,37 +47,54 @@ function autofixSteps(): FlowStep[] {
     {
       skill: 'root-cause',
       argsTemplate:
-        'Issue #{{input}} — find the root cause and propose the minimal fix.\n' +
-        'Previous verify task: {{previousTaskId}}.',
+        'Issue #{{input}} — find the root cause and propose the minimal fix.\n\n' +
+        '— PREVIOUS STEP (verify-in-repo) said —\n' +
+        '{{previousOutput}}',
       systemNotes:
         'This is the ANALYZE step. Read-only: do NOT edit files.\n\n' +
         'Produce: (1) a one-paragraph summary of the bug, (2) the file(s) that need to change, ' +
-        '(3) the proposed minimal change. Keep it tight — the next step implements it.',
+        '(3) the proposed minimal change. Keep it tight — the next step implements it.\n\n' +
+        'End with `Status: blocked` on its own line if you cannot locate a confident root cause; ' +
+        'the chain will stop and surface the failure instead of cascading into a hallucinated fix.',
     },
     {
       skill: 'fix',
       argsTemplate:
-        'Issue #{{input}} — implement the fix from the analyzer (previous task {{previousTaskId}}).',
+        'Issue #{{input}} — implement the fix per the analyzer brief below.\n\n' +
+        '— PREVIOUS STEP (root-cause) said —\n' +
+        '{{previousOutput}}',
       systemNotes:
-        'This is the FIX step. Implement the minimal change identified by the analyzer. ' +
+        'This is the FIX step. Implement the minimal change EXACTLY as the analyzer described above. ' +
+        'Do NOT invent your own root cause; if the brief is unclear or contradicts the repo, end with ' +
+        '`Status: blocked` and explain what is missing.\n\n' +
         'Use Edit/Write to change files; run tests with Bash if needed to verify the change holds.\n\n' +
         'Do NOT commit, push, or open a PR — the next step handles that.\n\n' +
-        'When done, write a one-paragraph summary of what you changed and which files were touched.',
+        'On the success path, end with `Status: ready` plus a one-paragraph summary of what you changed ' +
+        'and which files were touched. On the blocked path, end with `Status: blocked` and a short reason ' +
+        '— the chain will stop cleanly.',
     },
     {
       skill: 'open-pr',
       argsTemplate:
-        'Issue #{{input}} — commit, push, and open a draft PR for the fix from previous task {{previousTaskId}}.',
+        'Issue #{{input}} — commit, push, and open a draft PR for the fix from the previous step.\n\n' +
+        '— PREVIOUS STEP (fix) said —\n' +
+        '{{previousOutput}}',
       // Default systemNotes (DEFAULT_STEP_NOTES) documents the PR_URL=/PR_NUMBER= marker
       // contract that the review-pr step needs — leave systemNotes unset to inherit it.
+      // The skill itself emits `Status: blocked` when there are no changes to commit;
+      // the flow runner recognises that marker and stops the chain cleanly.
     },
     {
       skill: 'auto-review-pr',
       argsTemplate:
-        'Review PR #{{previousPullRequestNumber}} at {{previousPullRequestUrl}}.',
+        'Review PR #{{previousPullRequestNumber}} at {{previousPullRequestUrl}}.\n\n' +
+        '— PREVIOUS STEP (open-pr) said —\n' +
+        '{{previousOutput}}',
       systemNotes:
         'This is the REVIEW step. Read the PR diff and post a review comment on the PR. ' +
-        'Be specific about blockers vs nits. Read-only: do NOT push further commits.',
+        'Be specific about blockers vs nits. Read-only: do NOT push further commits.\n\n' +
+        'If `{{previousPullRequestNumber}}` is empty, the upstream open-pr step did not open a PR — ' +
+        'end with `Status: blocked` and a one-line reason. Do not invent a PR number.',
     },
   ];
 }

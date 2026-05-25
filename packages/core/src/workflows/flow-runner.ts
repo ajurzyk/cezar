@@ -73,6 +73,13 @@ interface FlowBlackboard extends Record<string, unknown> {
   previousTaskId: string;
   previousPullRequestUrl: string;
   previousPullRequestNumber: string;
+  /**
+   * The previous step's raw text output, truncated. Without this, a step can
+   * only reference the prior step by `previousTaskId` (an opaque UUID) — which
+   * means the agent has no way to see what the prior agent actually decided.
+   * Threaded into the next step's user prompt via `{{previousOutput}}`.
+   */
+  previousOutput: string;
 }
 
 export async function runFlow(params: RunFlowParams): Promise<WorkflowRunResult<FlowBlackboard>> {
@@ -104,6 +111,7 @@ export async function runFlow(params: RunFlowParams): Promise<WorkflowRunResult<
       previousTaskId: '',
       previousPullRequestUrl: '',
       previousPullRequestNumber: '',
+      previousOutput: '',
     }),
     steps: params.flow.steps.map((step, idx) => makeAgentStepForFlowStep(step, idx, params.config)),
   };
@@ -194,6 +202,7 @@ export async function runFlow(params: RunFlowParams): Promise<WorkflowRunResult<
         const patch: Partial<FlowBlackboard> = {
           previousPullRequestUrl: url ?? '',
           previousPullRequestNumber: number != null ? String(number) : '',
+          previousOutput: truncateOutput(rawText),
         };
         // Stop-chain: cleanly end the workflow when the agent's output
         // contains the configured marker. We rely on `skip-run` rather than
@@ -202,6 +211,23 @@ export async function runFlow(params: RunFlowParams): Promise<WorkflowRunResult<
           return {
             kind: 'skip-run',
             reason: `stopped at step ${idx + 1}: output matched "${step.stopChainIfContains}"`,
+          };
+        }
+        // Hard fail when the skill explicitly reports a blocked/failed status.
+        // Convention used by the autofix skill set ('fix', 'open-pr', etc.):
+        // an end-of-output line like `Status: blocked` or `Status: failed`
+        // means "I cannot proceed safely; do not run downstream steps."
+        // Returning `fail` here (vs `continue`) marks the step failed in the
+        // cockpit AND stops the chain — otherwise a no-op fix would cascade
+        // into open-pr opening nothing, then review-pr asking which PR.
+        const statusFailMatch = rawText.match(STATUS_FAIL_RE);
+        if (statusFailMatch) {
+          const status = statusFailMatch[1].toLowerCase();
+          const tailReason = extractStatusReason(rawText, statusFailMatch.index ?? 0);
+          return {
+            kind: 'fail',
+            reason: `step ${idx + 1} (\`${step.skill}\`) reported Status: ${status}${tailReason ? ` — ${tailReason}` : ''}`,
+            blackboardPatch: patch,
           };
         }
         return { kind: 'continue', blackboardPatch: patch };
@@ -225,6 +251,32 @@ export async function runFlow(params: RunFlowParams): Promise<WorkflowRunResult<
 
 const STOP_MARKER_RE = /^NO_ACTION_NEEDED\b/m;
 const MAX_BODY_CHARS = 1500;
+
+/** Cap on `{{previousOutput}}` (chars) so a chain of long outputs doesn't
+ *  cascade into runaway prompts. ~8KB ≈ ~2k tokens — enough for a structured
+ *  brief, not enough to balloon. */
+const MAX_PREV_OUTPUT_CHARS = 8000;
+
+/** Matches an end-of-output `Status: blocked` / `Status: failed` marker (per the
+ *  autofix skill set's output contract). Case-insensitive, line-anchored. */
+const STATUS_FAIL_RE = /^Status:\s*(blocked|failed)\b/im;
+
+function truncateOutput(rawText: string): string {
+  const trimmed = (rawText ?? '').trim();
+  if (trimmed.length <= MAX_PREV_OUTPUT_CHARS) return trimmed;
+  return `… (truncated; showing last ${MAX_PREV_OUTPUT_CHARS} chars)\n\n${trimmed.slice(-MAX_PREV_OUTPUT_CHARS)}`;
+}
+
+/** Grab a one-line reason that follows a `Status: blocked|failed` marker. */
+function extractStatusReason(rawText: string, matchIndex: number): string {
+  // Take the rest of the matched line + the next non-empty line as the reason.
+  const after = rawText.slice(matchIndex);
+  const lines = after.split(/\r?\n/);
+  const sameLineRest = lines[0].replace(STATUS_FAIL_RE, '').trim();
+  if (sameLineRest) return sameLineRest.slice(0, 200);
+  const nextLine = (lines[1] ?? '').trim();
+  return nextLine.slice(0, 200);
+}
 
 function flowStepHeading(idx: number, step: FlowStep, rawText: string): string {
   const base = `Step ${idx + 1} — \`${step.skill}\``;

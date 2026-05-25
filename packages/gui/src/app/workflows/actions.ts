@@ -443,6 +443,8 @@ export async function renderStepPreview(params: {
   samplePrevTaskId: string;
   samplePrevPrUrl: string;
   samplePrevPrNumber: string;
+  /** Optional sample for {{previousOutput}} — defaults to a placeholder. */
+  samplePrevOutput?: string;
 }): Promise<ActionResult<PreviewResult>> {
   const workspace = await getActiveWorkspace();
   if (!workspace) return { ok: false, error: 'no active workspace' };
@@ -465,6 +467,7 @@ export async function renderStepPreview(params: {
     previousTaskId: params.samplePrevTaskId,
     previousPullRequestUrl: params.samplePrevPrUrl,
     previousPullRequestNumber: params.samplePrevPrNumber,
+    previousOutput: params.samplePrevOutput ?? '<previous step output goes here>',
   });
 
   // Try to read the skill body from the workspace's cloned repo. Best-effort —
