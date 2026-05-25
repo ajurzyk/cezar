@@ -6,7 +6,8 @@ import type { AgentBackend, AgentEvent, AgentRunner, AgentRunSpec } from '../age
 import { createAgentRunner } from '../agents/runner-factory.js';
 import { discoverSkills, type Skill } from '../skills/skill-catalog.js';
 import { resolveStepConfig, type WorkflowBinding, type WorkspaceWorkflowSettings, DEFAULT_WORKSPACE_WORKFLOW_SETTINGS } from './binding.js';
-import { commitAll, getDiffAgainstBase, startWorktreeAutosaver } from '../actions/autofix/worktree.js';
+import { commitAll, getDiffAgainstBase, squashCommitsToBase, startWorktreeAutosaver } from '../actions/autofix/worktree.js';
+import type { RunEnv } from '../provision/run-env.js';
 import { PersistentClaudeSession } from '../agents/persistent-claude-session.js';
 import { UNIFIED_AUTOFIX_SYSTEM_PROMPT } from '../actions/autofix/prompts/autofix-unified.js';
 import { TokenBudget } from '../actions/autofix/token-budget.js';
@@ -59,6 +60,12 @@ export interface WorkflowRunContext {
   worktreePath?: string;
   /** Or: a hook the engine calls to set one up (and dispose it at the end). */
   prepareWorktree?: () => Promise<{ path: string; dispose: () => Promise<void> }>;
+  /**
+   * The runnable project environment bound to the worktree (native shell or a
+   * docker-compose project). Drives `shell-check` steps. When absent, those
+   * steps are no-ops, so env-less runs (tests, triage) behave as before.
+   */
+  runEnv?: RunEnv;
   /** Per-attempt token budget; created fresh per loop iteration if omitted. */
   tokenBudgetPerAttempt?: number;
   /** Lifecycle progress strings. */
@@ -89,6 +96,10 @@ export interface WorkflowRunContext {
   gitOps?: {
     commitAll(worktreePath: string, message: string): Promise<string | null>;
     getDiffAgainstBase(worktreePath: string, baseRef: string): Promise<string>;
+    /** Optional. Used to recover from autosaver-already-committed work — see
+     *  `squashCommitsToBase` in worktree.ts. When omitted the engine falls
+     *  back to the no-changes path, matching pre-autosaver behavior. */
+    squashCommitsToBase?(worktreePath: string, baseRef: string, message: string): Promise<string | null>;
   };
 }
 
@@ -267,6 +278,7 @@ export class WorkflowEngine {
     let headSha: string | undefined;
     let prUrl: string | undefined;
     let prNumber = ctx.prNumber;
+    let devServerUrl: string | undefined;
 
     // Phase B: unified persistent session for autofix.
     // Per docs/REFACTOR-PLAN-persistent-autofix-session.md §5 Phase B.
@@ -291,7 +303,7 @@ export class WorkflowEngine {
       ctx.prNumber,
     );
 
-    const gitOps = ctx.gitOps ?? { commitAll, getDiffAgainstBase };
+    const gitOps = ctx.gitOps ?? { commitAll, getDiffAgainstBase, squashCommitsToBase };
 
     const effectDeps: WorkflowEffectDeps = {
       github: {
@@ -386,7 +398,7 @@ export class WorkflowEngine {
       const stepCtx = this.makeStepContext<W>({
         blackboard, iteration, config: ctx.config,
         issue: { number: ctx.issueNumber, title: issueTitle, body: issueBody, comments: issueComments, digest },
-        prNumber, branch, worktreePath,
+        prNumber, branch, worktreePath, devServerUrl,
         tokenBudget: undefined, // set per agent step below
         onAgentEvent: ctx.onAgentEvent, onEvent: ctx.onEvent,
         appendCommentSection: (section) => living.appendSection(step.id, section),
@@ -420,8 +432,17 @@ export class WorkflowEngine {
           if (step.commentSection) await living.appendSection(step.id, step.commentSection(stepCtx));
         } else if (step.kind === 'commit') {
           const wt = this.requireWorktree(worktreePath, step.id);
+          const baseRef = ctx.config.autofix?.baseBranch ?? 'main';
           const message = step.buildMessage(stepCtx);
-          const sha = await gitOps.commitAll(wt, message);
+          let sha = await gitOps.commitAll(wt, message);
+          // `commitAll` returns null when the working tree is clean. That can
+          // mean two things: (a) the fixer really did nothing, or (b) the
+          // autosaver already committed everything under `cezar: autosave
+          // (fix)`. Squash autosave commits into one clean commit when (b);
+          // only declare "no changes" when there's truly no diff against base.
+          if (!sha && gitOps.squashCommitsToBase) {
+            sha = await gitOps.squashCommitsToBase(wt, baseRef, message);
+          }
           if (!sha) {
             if (step.failOnNoChanges) {
               outcome = { kind: 'fail', reason: 'fixer made no file changes' };
@@ -429,7 +450,7 @@ export class WorkflowEngine {
               outcome = { kind: 'skip-run', reason: 'fixer made no file changes — CI failure may no longer reproduce' };
             }
           } else {
-            const diff = await gitOps.getDiffAgainstBase(wt, ctx.config.autofix?.baseBranch ?? 'main');
+            const diff = await gitOps.getDiffAgainstBase(wt, baseRef);
             headSha = sha;
             outcome = step.onCommitted({ commitSha: sha, diff }, stepCtx);
             if (step.commentSection) await living.appendSection(step.id, step.commentSection({ commitSha: sha }, stepCtx));
@@ -467,6 +488,12 @@ export class WorkflowEngine {
             }
             outcome = step.onPushed({ headSha: headSha ?? '' }, stepCtx);
           }
+        } else if (step.kind === 'shell-check') {
+          outcome = await this.runShellCheck(step, stepCtx, ctx, living);
+        } else if (step.kind === 'dev-server') {
+          const r = await this.runDevServer(step, stepCtx, ctx, living);
+          if (r.url) devServerUrl = r.url; // exposed to later agent steps
+          outcome = r.outcome;
         } else {
           const exhaustive: never = step;
           throw new Error(`unknown step kind: ${JSON.stringify(exhaustive)}`);
@@ -564,6 +591,74 @@ export class WorkflowEngine {
     return path;
   }
 
+  /**
+   * Run a `shell-check` step's command in the run's `RunEnv`. No env, or an
+   * unconfigured command, ⇒ a silent `continue` (env-less runs unaffected).
+   * Gated failures inside a loop fail-`retriable` so the engine re-enters it.
+   */
+  private async runShellCheck<W>(
+    step: Extract<WorkflowStep<W>, { kind: 'shell-check' }>,
+    stepCtx: WorkflowStepContext<W>,
+    ctx: WorkflowRunContext,
+    living: LivingComment,
+  ): Promise<StepOutcome<W>> {
+    const env = ctx.runEnv;
+    if (!env) return { kind: 'continue' };
+    const result = await env[step.which]((line) => stepCtx.log(`  [${step.which}] ${line}`));
+    if (!result) return { kind: 'continue' }; // command not configured ⇒ skip the check
+    const gate = resolveStepValue(step.gate, ctx.config);
+    const patch = step.onResult?.(result, stepCtx) as Partial<W> | undefined;
+    if (step.commentSection) await living.appendSection(step.id, step.commentSection(result, stepCtx));
+    if (result.ok || !gate) {
+      if (!result.ok) ctx.onEvent?.(`[#${ctx.issueNumber}] ${step.which} failed (exit ${result.exitCode}) — not gated, continuing`);
+      return { kind: 'continue', blackboardPatch: patch };
+    }
+    return {
+      kind: 'fail',
+      reason: `${step.which} failed (exit ${result.exitCode})`,
+      retriable: step.retriable === true,
+      blackboardPatch: patch,
+    };
+  }
+
+  /**
+   * Boot the run's dev server. Returns the URL (so the engine can expose it to
+   * later agent steps) plus the step outcome. No env / disabled dev server ⇒ a
+   * silent `continue`. A boot error, or a never-ready server when `gate` is on,
+   * fails the run; otherwise it's recorded and the run continues.
+   */
+  private async runDevServer<W>(
+    step: Extract<WorkflowStep<W>, { kind: 'dev-server' }>,
+    stepCtx: WorkflowStepContext<W>,
+    ctx: WorkflowRunContext,
+    living: LivingComment,
+  ): Promise<{ outcome: StepOutcome<W>; url?: string }> {
+    const env = ctx.runEnv;
+    if (!env) return { outcome: { kind: 'continue' } };
+    const gate = step.gate ? resolveStepValue(step.gate, ctx.config) : false;
+
+    let handle;
+    try {
+      handle = await env.startDevServer((line) => stepCtx.log(`  ${line}`));
+    } catch (err) {
+      const reason = `dev server failed to start: ${(err as Error).message}`;
+      if (step.commentSection) await living.appendSection(step.id, step.commentSection({ url: null, ready: false }, stepCtx));
+      return { outcome: gate ? { kind: 'fail', reason } : { kind: 'continue' } };
+    }
+    if (!handle) return { outcome: { kind: 'continue' } }; // not configured
+
+    if (step.commentSection) await living.appendSection(step.id, step.commentSection({ url: handle.url, ready: handle.ready }, stepCtx));
+    const patch = step.onReady?.({ url: handle.url, ready: handle.ready }, stepCtx) as Partial<W> | undefined;
+
+    if (!handle.ready && gate) {
+      return { outcome: { kind: 'fail', reason: `dev server at ${handle.url} never became ready` }, url: handle.url };
+    }
+    if (!handle.ready) {
+      ctx.onEvent?.(`[#${ctx.issueNumber}] dev server at ${handle.url} not confirmed ready — continuing`);
+    }
+    return { outcome: { kind: 'continue', blackboardPatch: patch }, url: handle.url };
+  }
+
   private async discoverSkillsSafe(ctx: WorkflowRunContext): Promise<Skill[]> {
     const repoRoot = ctx.config.autofix?.repoRoot;
     if (!repoRoot) return [];
@@ -583,6 +678,7 @@ export class WorkflowEngine {
     prNumber?: number;
     branch?: string;
     worktreePath?: string;
+    devServerUrl?: string;
     tokenBudget?: TokenBudget;
     onAgentEvent?: (e: AgentEvent) => void;
     onEvent?: (e: string) => void;
@@ -597,6 +693,7 @@ export class WorkflowEngine {
       prNumber: args.prNumber,
       branch: args.branch,
       worktreePath: args.worktreePath,
+      devServerUrl: args.devServerUrl,
       tokenBudget: args.tokenBudget,
       emit: (e) => args.onAgentEvent?.(e),
       log: (m) => args.onEvent?.(m),
@@ -708,12 +805,23 @@ export class WorkflowEngine {
 
     const runner = runnerFactory(resolved.backend);
     const allowedTools = [...builtinTools, ...resolved.extraTools];
+
+    // When a dev server is up, give this agent step the live URL and let it
+    // probe the running app with `curl` over Bash (backend-agnostic "read-url").
+    let userPrompt = step.buildUserPrompt(ctxWithBudget);
+    let effectiveBashAllowlist = bashAllowlist;
+    if (stepCtx.devServerUrl && allowedTools.includes('Bash')) {
+      userPrompt += `\n\n---\nA dev server for this project is running at ${stepCtx.devServerUrl}. You can probe the live application with curl (e.g. \`curl -sS ${stepCtx.devServerUrl}/\`) to reproduce the issue or verify your change.`;
+      // Only widen an existing allowlist; an undefined allowlist already permits curl.
+      if (bashAllowlist) effectiveBashAllowlist = [...bashAllowlist, 'curl'];
+    }
+
     const spec: AgentRunSpec<unknown> = {
       systemPrompt: resolved.systemPrompt,
-      userPrompt: step.buildUserPrompt(ctxWithBudget),
+      userPrompt,
       cwd: args.worktreePath ?? process.cwd(),
       allowedTools,
-      bashAllowlist,
+      bashAllowlist: effectiveBashAllowlist,
       model: resolved.model,
       maxTurns,
       tokenBudget: budget,

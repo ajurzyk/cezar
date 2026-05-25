@@ -256,6 +256,29 @@ export async function getDiffAgainstBase(worktreePath: string, baseRef: string):
   return runGit(worktreePath, ['diff', `${baseRef}...HEAD`]);
 }
 
+/**
+ * Squash every commit between `baseRef` and HEAD into one new commit with
+ * `message`. Used by the engine's commit step when `startWorktreeAutosaver`
+ * has already committed the agent's edits under `cezar: autosave (…)` —
+ * without this, `commitAll` would find a clean working tree and the step
+ * would fail with "fixer made no file changes" even though the work is on
+ * the branch.
+ *
+ * Returns the new HEAD sha, or `null` when there's no diff against `baseRef`
+ * (i.e. the fixer really didn't touch anything).
+ */
+export async function squashCommitsToBase(
+  worktreePath: string,
+  baseRef: string,
+  message: string,
+): Promise<string | null> {
+  const changed = await runGit(worktreePath, ['diff', '--name-only', `${baseRef}...HEAD`]);
+  if (!changed) return null;
+  await runGit(worktreePath, ['reset', '--soft', baseRef]);
+  await runGit(worktreePath, ['commit', '-m', message]);
+  return runGit(worktreePath, ['rev-parse', 'HEAD']);
+}
+
 export async function listChangedFiles(worktreePath: string, baseRef: string): Promise<string[]> {
   const out = await runGit(worktreePath, ['diff', '--name-only', `${baseRef}...HEAD`]);
   return out.split('\n').map(s => s.trim()).filter(Boolean);

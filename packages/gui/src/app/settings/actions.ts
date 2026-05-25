@@ -53,6 +53,28 @@ export async function saveWorkspaceConfig(
         fixer: num(formData, 'autofix.maxTurns.fixer', 30),
         reviewer: num(formData, 'autofix.maxTurns.reviewer', 10),
       },
+      projectEnv: {
+        kind: enumStr(formData, 'autofix.projectEnv.kind', ['auto', 'native', 'compose'], 'auto'),
+        install: rawStr(formData, 'autofix.projectEnv.install'),
+        build: rawStr(formData, 'autofix.projectEnv.build'),
+        test: rawStr(formData, 'autofix.projectEnv.test'),
+        compose: {
+          file: rawStr(formData, 'autofix.projectEnv.compose.file'),
+          service: rawStr(formData, 'autofix.projectEnv.compose.service'),
+          workdir: str(formData, 'autofix.projectEnv.compose.workdir', '/app'),
+        },
+        envVars: parseEnvVars(formData.get('autofix.projectEnv.envVars') as string | null),
+        gateOnInstall: bool(formData, 'autofix.projectEnv.gateOnInstall'),
+        gateOnBuild: bool(formData, 'autofix.projectEnv.gateOnBuild'),
+        gateOnTest: bool(formData, 'autofix.projectEnv.gateOnTest'),
+        devServer: {
+          enabled: bool(formData, 'autofix.projectEnv.devServer.enabled'),
+          command: rawStr(formData, 'autofix.projectEnv.devServer.command'),
+          port: num(formData, 'autofix.projectEnv.devServer.port', 0),
+          readyPath: str(formData, 'autofix.projectEnv.devServer.readyPath', '/'),
+          readyTimeoutSec: num(formData, 'autofix.projectEnv.devServer.readyTimeoutSec', 60),
+        },
+      },
     },
   };
 
@@ -73,6 +95,27 @@ export async function saveWorkspaceConfig(
 
 function str(fd: FormData, key: string, fallback: string): string {
   return (fd.get(key) as string)?.trim() || fallback;
+}
+/** Trimmed string, defaulting to '' (no fallback) — for optional command fields. */
+function rawStr(fd: FormData, key: string): string {
+  return (fd.get(key) as string)?.trim() || '';
+}
+function enumStr<T extends string>(fd: FormData, key: string, allowed: readonly T[], fallback: T): T {
+  const v = (fd.get(key) as string)?.trim();
+  return allowed.includes(v as T) ? (v as T) : fallback;
+}
+/** Parse `KEY=VALUE` lines into a record; blank lines and lines without `=` are ignored. */
+function parseEnvVars(raw: string | null): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!raw) return out;
+  for (const line of raw.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq <= 0) continue;
+    out[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1).trim();
+  }
+  return out;
 }
 function num(fd: FormData, key: string, fallback: number): number {
   const v = Number(fd.get(key));

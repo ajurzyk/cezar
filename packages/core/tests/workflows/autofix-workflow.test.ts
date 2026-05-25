@@ -63,17 +63,30 @@ class SequencedRunner implements AgentRunner {
 }
 
 // fake git ops — no real worktree.
-function makeFakeGit(opts: { changesPerCommit?: boolean[] } = {}) {
+function makeFakeGit(opts: { changesPerCommit?: boolean[]; squashableCommit?: boolean[] } = {}) {
   let commitN = 0;
+  let squashN = 0;
   const commits: string[] = [];
+  const squashed: string[] = [];
   return {
     commits,
+    squashed,
     async commitAll(_wt: string, message: string): Promise<string | null> {
       const hasChanges = opts.changesPerCommit ? (opts.changesPerCommit[commitN] ?? true) : true;
       commitN++;
       if (!hasChanges) return null;
       commits.push(message);
       return `sha${commitN}0000000`;
+    },
+    // Simulates `git reset --soft <base> && git commit -m <msg>` collapsing
+    // autosave commits into one clean commit. `squashableCommit[i] === false`
+    // models "no diff against base" (squash also returns null).
+    async squashCommitsToBase(_wt: string, _base: string, message: string): Promise<string | null> {
+      const hasDiff = opts.squashableCommit ? (opts.squashableCommit[squashN] ?? true) : true;
+      squashN++;
+      if (!hasDiff) return null;
+      squashed.push(message);
+      return `squash${squashN}000000`;
     },
     async getDiffAgainstBase(): Promise<string> { return 'diff --git a/x b/x\n+fix'; },
   };
@@ -200,6 +213,53 @@ describe('autofixWorkflow (engine)', () => {
     expect(result.reason).toMatch(/already fixed/);
     expect(runner.specs).toHaveLength(1);
     expect(git.commits).toHaveLength(0);
+    expect(github.prsOpened).toHaveLength(0);
+  });
+
+  it('commit step recovers when the autosaver already committed the fix (squash path)', async () => {
+    // Regression for the autosaver vs. commit-step race: the fix step's
+    // `startWorktreeAutosaver` commits the agent's edits every 90s under
+    // `cezar: autosave (fix)`. The explicit commit step then sees a clean
+    // working tree (`commitAll` returns null) — pre-fix that hard-failed
+    // with "fixer made no file changes" even though the work was on the
+    // branch. The fix is `squashCommitsToBase`, exercised here.
+    const store = await makeStore();
+    const github = makeFakeGitHub();
+    const runner = new SequencedRunner('anthropic-api', [VERIFY_OK, ROOT_CAUSE, FIX_REPORT, REVIEW_PASS]);
+    const git = makeFakeGit({ changesPerCommit: [false] }); // commitAll → null (autosave already did it)
+    const result = await runWorkflow(autofixWorkflow, {
+      store, config: makeConfig(), github,
+      issueNumber: 1740, apply: true, worktreePath: '/tmp/wt',
+      runnerFactory: () => runner, gitOps: git,
+      loopMaxIterations: { 'fix-review': 2 },
+    });
+
+    expect(result.status).toBe('succeeded');
+    // commitAll never produced a sha (autosave path), but squash did.
+    expect(git.commits).toHaveLength(0);
+    expect(git.squashed).toHaveLength(1);
+    // The squashed commit got the real commit message, not the autosave one.
+    expect(git.squashed[0]).toMatch(/Password reset broken/);
+    expect((result.blackboard as AutofixBlackboard).commitSha).toMatch(/^squash/);
+    expect(github.prsOpened).toHaveLength(1);
+  });
+
+  it('commit step still fails "no file changes" when neither commitAll nor squash finds work', async () => {
+    const store = await makeStore();
+    const github = makeFakeGitHub();
+    const runner = new SequencedRunner('anthropic-api', [VERIFY_OK, ROOT_CAUSE, FIX_REPORT, REVIEW_PASS]);
+    const git = makeFakeGit({ changesPerCommit: [false, false], squashableCommit: [false, false] });
+    const result = await runWorkflow(autofixWorkflow, {
+      store, config: makeConfig(), github,
+      issueNumber: 1740, apply: true, worktreePath: '/tmp/wt',
+      runnerFactory: () => runner, gitOps: git,
+      loopMaxIterations: { 'fix-review': 2 },
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.reason).toMatch(/no file changes/);
+    expect(git.commits).toHaveLength(0);
+    expect(git.squashed).toHaveLength(0);
     expect(github.prsOpened).toHaveLength(0);
   });
 

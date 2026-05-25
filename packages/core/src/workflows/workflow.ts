@@ -3,6 +3,7 @@ import type { AgentBackend, AgentEvent } from '../agents/agent-runner.js';
 import type { Config } from '../config/config.model.js';
 import type { TokenBudget } from '../actions/autofix/token-budget.js';
 import type { IssueStore } from '../store/store.js';
+import type { ShellResult } from '../provision/run-env.js';
 
 /**
  * The declarative workflow types (docs/REFACTOR-PLAN-agent-cockpit.md §3.1).
@@ -23,7 +24,7 @@ import type { IssueStore } from '../store/store.js';
 export type WorkflowRunStatus = 'queued' | 'running' | 'paused' | 'succeeded' | 'failed' | 'cancelled';
 export type StepRunStatus = 'running' | 'succeeded' | 'failed' | 'skipped';
 
-export type WorkflowStepKind = 'agent' | 'effect' | 'human-gate' | 'commit' | 'open-pr' | 'push';
+export type WorkflowStepKind = 'agent' | 'effect' | 'human-gate' | 'commit' | 'open-pr' | 'push' | 'shell-check' | 'dev-server';
 
 // ─── Comment helpers passed to a step ────────────────────────────────────────
 
@@ -77,6 +78,8 @@ export interface WorkflowStepContext<W> {
   readonly branch?: string;
   /** The git worktree path (autofix/ci-followup); undefined for repo-less workflows (triage). */
   readonly worktreePath?: string;
+  /** Base URL of the run's dev server once a `dev-server` step has booted it (else undefined). */
+  readonly devServerUrl?: string;
   /** Per-attempt token budget (autofix loop iterations get a fresh one). */
   readonly tokenBudget?: TokenBudget;
   /** Stream a normalized agent event (or a lifecycle note) out to the caller. */
@@ -199,13 +202,55 @@ export interface PushStepDef<W> extends BaseStepDef {
   onPushed: (info: { headSha: string }, ctx: WorkflowStepContext<W>) => StepOutcome<W>;
 }
 
+/**
+ * Run a project command (`install` / `build` / `test`) inside the run's
+ * `RunEnv` (native host shell or a per-run docker-compose project) and gate the
+ * workflow on its exit code. When `gate` is true and the command fails *inside
+ * a declared loop*, the step fails-`retriable` so the engine re-enters the loop
+ * (carrying the `onResult` patch — e.g. the failure tail as fix retry notes).
+ *
+ * No `RunEnv` on the run, or an unconfigured command, ⇒ the step is a no-op
+ * (`continue`), so existing repo-less / env-less runs are unaffected.
+ */
+export interface ShellCheckStepDef<W> extends BaseStepDef {
+  kind: 'shell-check';
+  /** Which configured command to run. */
+  which: 'install' | 'build' | 'test';
+  /** Whether a non-zero exit fails the step — config-derivable. */
+  gate: StepValue<boolean>;
+  /** When gated+failing inside a loop, mark the failure retriable so the loop re-enters. */
+  retriable?: boolean;
+  /** Patch the blackboard from the result (both success and failure paths). */
+  onResult?: (result: ShellResult, ctx: WorkflowStepContext<W>) => Partial<W> | undefined;
+  /** Render this step's section of the living comment from the result. */
+  commentSection?: (result: ShellResult, ctx: WorkflowStepContext<W>) => CommentSection;
+}
+
+/**
+ * Boot the run's dev server (via the `RunEnv`) so subsequent agent steps can
+ * probe the live app with `curl` over Bash (the engine appends the URL to their
+ * prompt + adds `curl` to the bash allowlist). No `RunEnv` / a disabled dev
+ * server ⇒ a no-op `continue`. The server is torn down with the run env.
+ */
+export interface DevServerStepDef<W> extends BaseStepDef {
+  kind: 'dev-server';
+  /** When true, fail the run if the server never became ready — config-derivable. */
+  gate?: StepValue<boolean>;
+  /** Patch the blackboard once the server is up. */
+  onReady?: (info: { url: string; ready: boolean }, ctx: WorkflowStepContext<W>) => Partial<W> | undefined;
+  /** Render this step's living-comment section. */
+  commentSection?: (info: { url: string | null; ready: boolean }, ctx: WorkflowStepContext<W>) => CommentSection;
+}
+
 export type WorkflowStep<W> =
   | AgentStepDef<W, unknown>
   | EffectStepDef<W>
   | HumanGateStepDef<W>
   | CommitStepDef<W>
   | OpenPrStepDef<W>
-  | PushStepDef<W>;
+  | PushStepDef<W>
+  | ShellCheckStepDef<W>
+  | DevServerStepDef<W>;
 
 // Helper so callers can author an AgentStepDef<W, T> with a concrete T and have
 // it widen safely into WorkflowStep<W>. (TS can't infer T through the union.)

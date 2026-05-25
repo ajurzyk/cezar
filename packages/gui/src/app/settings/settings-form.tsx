@@ -1,9 +1,10 @@
 'use client';
 
-import { useActionState } from 'react';
+import { useActionState, useState } from 'react';
 import { cn } from '@/components/ui/cn';
 import { saveWorkspaceConfig, type SaveConfigState } from './actions';
 import { SettingsSubsection } from './settings-tabs';
+import { PROJECT_ENV_PRESETS, type ProjectEnvPreset } from './project-env-presets';
 
 export type IssueAutofixMode = 'off' | 'notify' | 'autonomous';
 
@@ -79,6 +80,8 @@ export function SettingsForm({ config, issueAutofixMode, readOnly }: SettingsFor
         </div>
       </SettingsSubsection>
 
+      <ProjectEnvSection autofix={autofix} readOnly={readOnly} />
+
       <SettingsSubsection title="Models">
         <div className="grid gap-4 sm:grid-cols-3">
           <TextField name="autofix.models.analyzer" label="Analyzer" value={str(models.analyzer, 'claude-sonnet-4-6')}             readOnly={readOnly} />
@@ -107,6 +110,189 @@ export function SettingsForm({ config, issueAutofixMode, readOnly }: SettingsFor
         </div>
       )}
     </form>
+  );
+}
+
+// ─── Project environment section (preset-aware) ─────────────────────────
+
+interface ProjectEnvFieldValues {
+  kind: string;
+  install: string;
+  build: string;
+  test: string;
+  gateOnInstall: boolean;
+  gateOnBuild: boolean;
+  gateOnTest: boolean;
+  composeFile: string;
+  composeService: string;
+  composeWorkdir: string;
+  envVarsText: string;
+  devEnabled: boolean;
+  devCommand: string;
+  devPort: number;
+  devReadyPath: string;
+  devReadyTimeoutSec: number;
+}
+
+function initialProjectEnvValues(autofix: Record<string, unknown>): ProjectEnvFieldValues {
+  const projectEnv = (autofix.projectEnv ?? {}) as Record<string, unknown>;
+  const compose = (projectEnv.compose ?? {}) as Record<string, unknown>;
+  const devServer = (projectEnv.devServer ?? {}) as Record<string, unknown>;
+  const envVarsText = Object.entries((projectEnv.envVars ?? {}) as Record<string, string>)
+    .map(([k, v]) => `${k}=${v}`)
+    .join('\n');
+  return {
+    kind: str(projectEnv.kind, 'auto'),
+    install: str(projectEnv.install, ''),
+    build: str(projectEnv.build, ''),
+    test: str(projectEnv.test, ''),
+    gateOnInstall: projectEnv.gateOnInstall !== false,
+    gateOnBuild: !!projectEnv.gateOnBuild,
+    gateOnTest: projectEnv.gateOnTest !== false,
+    composeFile: str(compose.file, ''),
+    composeService: str(compose.service, ''),
+    composeWorkdir: str(compose.workdir, '/app'),
+    envVarsText,
+    devEnabled: !!devServer.enabled,
+    devCommand: str(devServer.command, ''),
+    devPort: val(devServer.port, 0),
+    devReadyPath: str(devServer.readyPath, '/'),
+    devReadyTimeoutSec: val(devServer.readyTimeoutSec, 60),
+  };
+}
+
+function presetToFieldValues(preset: ProjectEnvPreset): ProjectEnvFieldValues {
+  const v = preset.values;
+  return {
+    kind: v.kind,
+    install: v.install,
+    build: v.build,
+    test: v.test,
+    gateOnInstall: v.gateOnInstall,
+    gateOnBuild: v.gateOnBuild,
+    gateOnTest: v.gateOnTest,
+    composeFile: v.compose.file,
+    composeService: v.compose.service,
+    composeWorkdir: v.compose.workdir,
+    envVarsText: Object.entries(v.envVars).map(([k, val]) => `${k}=${val}`).join('\n'),
+    devEnabled: v.devServer.enabled,
+    devCommand: v.devServer.command,
+    devPort: v.devServer.port,
+    devReadyPath: v.devServer.readyPath,
+    devReadyTimeoutSec: v.devServer.readyTimeoutSec,
+  };
+}
+
+function ProjectEnvSection({ autofix, readOnly }: { autofix: Record<string, unknown>; readOnly: boolean }) {
+  const [values, setValues] = useState<ProjectEnvFieldValues>(() => initialProjectEnvValues(autofix));
+  // Remount the field tree on preset apply so uncontrolled inputs pick up the new defaultValue.
+  const [resetKey, setResetKey] = useState(0);
+  const [selectedPresetId, setSelectedPresetId] = useState('');
+
+  const selectedPreset = PROJECT_ENV_PRESETS.find((p) => p.id === selectedPresetId) ?? null;
+
+  const applyPreset = () => {
+    if (!selectedPreset) return;
+    setValues(presetToFieldValues(selectedPreset));
+    setResetKey((k) => k + 1);
+  };
+
+  return (
+    <SettingsSubsection title="Project environment">
+      <p className="mb-4 text-xs leading-relaxed text-on-surface-variant">
+        How Cezar installs deps, builds, and runs tests on the checked-out worktree so the autofix
+        loop gets real build/test feedback before opening a PR. <strong>Compose</strong> runs each
+        command inside a per-run <code>docker compose</code> project (worktree bind-mounted) and
+        requires a self-hosted runner with Docker. <strong>Auto</strong> uses compose when a
+        compose file is present, else the host shell. Leave commands blank to skip that check.
+      </p>
+
+      {!readOnly && (
+        <div className="mb-5 rounded-md border border-outline-variant/60 bg-surface-container-lowest p-3">
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="min-w-[18rem] grow">
+              <FieldLabel htmlFor="projectEnvPreset" label="Load preset" hint="prefills the fields below — Save to persist" />
+              <select
+                id="projectEnvPreset"
+                value={selectedPresetId}
+                onChange={(e) => setSelectedPresetId(e.target.value)}
+                className={INPUT_BASE}
+              >
+                <option value="">— none —</option>
+                {PROJECT_ENV_PRESETS.map((p) => (
+                  <option key={p.id} value={p.id}>{p.label}</option>
+                ))}
+              </select>
+            </div>
+            <button
+              type="button"
+              onClick={applyPreset}
+              disabled={!selectedPreset}
+              className="inline-flex h-9 items-center rounded-md border border-outline-variant px-4 text-sm font-medium text-on-surface transition-colors hover:bg-surface-container disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Apply preset
+            </button>
+          </div>
+          {selectedPreset && (
+            <p className="mt-2 text-[11px] leading-relaxed text-on-surface-variant">
+              {selectedPreset.description}
+            </p>
+          )}
+        </div>
+      )}
+
+      <div key={resetKey}>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <SelectField
+            name="autofix.projectEnv.kind"
+            label="Environment"
+            value={values.kind}
+            readOnly={readOnly}
+            options={[
+              { value: 'auto', label: 'Auto — compose if a compose file exists, else native' },
+              { value: 'native', label: 'Native — run commands on the host shell' },
+              { value: 'compose', label: 'Compose — run inside docker compose (runner only)' },
+            ]}
+          />
+          <div className="hidden sm:block" />
+          <TextField name="autofix.projectEnv.install" label="Install command" value={values.install} readOnly={readOnly} hint="e.g. yarn install --immutable" />
+          <TextField name="autofix.projectEnv.build"   label="Build command"   value={values.build}   readOnly={readOnly} hint="e.g. yarn build" />
+          <TextField name="autofix.projectEnv.test"    label="Test command"    value={values.test}    readOnly={readOnly} hint="e.g. yarn test" />
+          <div className="hidden sm:block" />
+          <Toggle name="autofix.projectEnv.gateOnInstall" label="Gate on install" checked={values.gateOnInstall} readOnly={readOnly} />
+          <Toggle name="autofix.projectEnv.gateOnBuild"   label="Gate on build"   checked={values.gateOnBuild}   readOnly={readOnly} />
+          <Toggle name="autofix.projectEnv.gateOnTest"    label="Gate on test"    checked={values.gateOnTest}    readOnly={readOnly} />
+          <div className="hidden sm:block" />
+          <TextField name="autofix.projectEnv.compose.file"    label="Compose file"    value={values.composeFile}    readOnly={readOnly} hint="blank = auto-detect" />
+          <TextField name="autofix.projectEnv.compose.service" label="App service"     value={values.composeService} readOnly={readOnly} hint="blank = first service" />
+          <TextField name="autofix.projectEnv.compose.workdir" label="Bind-mount path" value={values.composeWorkdir} readOnly={readOnly} hint="worktree mounted here in the container" />
+          <div className="hidden sm:block" />
+          <TextareaField
+            name="autofix.projectEnv.envVars"
+            label="Environment variables"
+            hint="One KEY=VALUE per line — injected into every command."
+            value={values.envVarsText}
+            readOnly={readOnly}
+            placeholder={'DATABASE_URL=postgres://localhost/test\nNODE_ENV=test'}
+          />
+        </div>
+
+        <p className="mb-3 mt-6 text-xs leading-relaxed text-on-surface-variant">
+          <strong>Dev server (optional).</strong> Booted once after install so the agent can probe the
+          live app with <code>curl</code> while diagnosing and verifying its fix. Native binds the
+          port on the host; compose publishes the container port to an ephemeral host port. Torn down
+          when the run ends.
+        </p>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Toggle name="autofix.projectEnv.devServer.enabled" label="Enable dev server" checked={values.devEnabled} readOnly={readOnly} />
+          <div className="hidden sm:block" />
+          <TextField   name="autofix.projectEnv.devServer.command"         label="Command"           value={values.devCommand}         readOnly={readOnly} hint="native only — e.g. yarn dev. Compose uses the service's own command." />
+          <NumberField name="autofix.projectEnv.devServer.port"            label="Port"              value={values.devPort}            readOnly={readOnly} hint="container port (compose) / host port (native)" />
+          <TextField   name="autofix.projectEnv.devServer.readyPath"       label="Ready path"        value={values.devReadyPath}       readOnly={readOnly} hint="probed until it responds" />
+          <NumberField name="autofix.projectEnv.devServer.readyTimeoutSec" label="Ready timeout (s)" value={values.devReadyTimeoutSec} readOnly={readOnly} />
+        </div>
+      </div>
+    </SettingsSubsection>
   );
 }
 
