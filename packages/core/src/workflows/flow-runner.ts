@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { AgentEvent as RunnerAgentEvent } from '../agents/agent-runner.js';
 import type { Config } from '../config/config.model.js';
@@ -5,9 +6,12 @@ import type { GitHubService } from '../services/github.service.js';
 import type { IssueStore } from '../store/store.js';
 import { discoverSkills } from '../skills/skill-catalog.js';
 import { createWorktree } from '../actions/autofix/worktree.js';
+import { createRunEnv } from '../provision/create-run-env.js';
+import { tailLines, type RunEnv, type ShellResult } from '../provision/run-env.js';
 import {
   agentStep,
   type AgentRunRecord,
+  type CommentSection,
   type Workflow,
   type WorkflowRunResult,
   type WorkflowStep,
@@ -102,6 +106,18 @@ export async function runFlow(params: RunFlowParams): Promise<WorkflowRunResult<
   // the engine doesn't expose through the step context directly).
   let lastAgentRunId = '';
 
+  // Auto-prepended env steps (install, dev-server). Only when both repo-backed
+  // AND the workspace configured the corresponding `autofix.projectEnv` field;
+  // otherwise the run behaves as before (agent steps only).
+  const projectEnv = params.config.autofix?.projectEnv;
+  const wantInstall = !!repoRoot && !!projectEnv?.install?.trim();
+  const wantDevServer = !!repoRoot && !!projectEnv?.devServer?.enabled && (projectEnv.devServer.port ?? 0) > 0;
+  const prefixSteps: WorkflowStep<FlowBlackboard>[] = [];
+  if (wantInstall) prefixSteps.push(makeInstallStep());
+  if (wantDevServer) prefixSteps.push(makeDevServerStep());
+
+  const agentSteps = params.flow.steps.map((step, idx) => makeAgentStepForFlowStep(step, idx, params.config));
+
   const workflow: Workflow<FlowBlackboard> = {
     id: `flow:${params.flow.name}`,
     title: params.flow.name,
@@ -113,51 +129,87 @@ export async function runFlow(params: RunFlowParams): Promise<WorkflowRunResult<
       previousPullRequestNumber: '',
       previousOutput: '',
     }),
-    steps: params.flow.steps.map((step, idx) => makeAgentStepForFlowStep(step, idx, params.config)),
+    steps: [...prefixSteps, ...agentSteps],
   };
 
-  return runWorkflow(workflow, {
-    store: params.store,
-    config: params.config,
-    github: params.github,
-    issueNumber: params.issueNumber,
-    apply: true,
-    skills,
-    // Bindings: per-step, set the skillName so resolveStepConfig appends the
-    // skill body to the system prompt. The engine reads these from `bindings`.
-    bindings: params.flow.steps.map((step, idx) => ({
-      stepId: stepIdFor(idx),
-      skillName: step.skill,
-      backend: null,
-      model: null,
-      extraTools: [],
-    })),
-    prepareWorktree: repoRoot
-      ? async () => {
-          const wt = await createWorktree({
-            repoRoot,
-            branch: (params.config.autofix?.branchPrefix ?? 'autofix/cezar-issue-') + params.issueNumber,
-            baseBranch: params.config.autofix?.baseBranch ?? 'main',
-            remote: params.config.autofix?.remote ?? 'origin',
-            fetchRemote: params.config.autofix?.fetchBeforeAttempt ?? true,
-            onWarn: (m: string) => params.onEvent(m),
-          });
-          return { path: wt.path, dispose: wt.dispose };
-        }
-      : undefined,
-    onEvent: params.onEvent,
-    onAgentEvent: (e: RunnerAgentEvent) => params.onAgentEvent(e as unknown as { type: string; [k: string]: unknown }),
-    onRunRecord: (r: AgentRunRecord) => {
-      lastAgentRunId = r.id;
-      params.onRunRecord(r);
-    },
-    pauseRequested: params.pauseRequested,
-    cancelRequested: params.cancelRequested,
-  });
+  // Repo-backed setup: prepare a worktree on a unique per-run branch, then a
+  // RunEnv bound to it. The branch carries a random 8-char suffix so concurrent
+  // runs against the same issue don't collide on `git worktree add` or on the
+  // remote (each push lands on its own ref). The RunEnv lets `shell-check` /
+  // `dev-server` steps actually do work (install deps, boot the app) and
+  // injects `projectEnv.envVars` into every command.
+  let worktreePath: string | undefined;
+  let branchName: string | undefined;
+  let disposeWorktree: (() => Promise<void>) | undefined;
+  let runEnv: RunEnv | undefined;
+
+  if (repoRoot) {
+    const branchPrefix = params.config.autofix?.branchPrefix ?? 'autofix/cezar-issue-';
+    const suffix = randomUUID().slice(0, 8);
+    branchName = `${branchPrefix}${params.issueNumber}-${suffix}`;
+    const wt = await createWorktree({
+      repoRoot,
+      branch: branchName,
+      baseBranch: params.config.autofix?.baseBranch ?? 'main',
+      remote: params.config.autofix?.remote ?? 'origin',
+      fetchRemote: params.config.autofix?.fetchBeforeAttempt ?? true,
+      onWarn: (m: string) => params.onEvent(m),
+    });
+    worktreePath = wt.path;
+    disposeWorktree = wt.dispose;
+
+    try {
+      runEnv = await createRunEnv({
+        worktreePath: wt.path,
+        spec: projectEnv!,
+        runId: `flow-${params.issueNumber}-${suffix}`,
+        onWarn: (m) => params.onEvent(`[run-env] ${m}`),
+      });
+    } catch (err) {
+      await disposeWorktree().catch(() => {});
+      throw err;
+    }
+  }
+
+  try {
+    return await runWorkflow(workflow, {
+      store: params.store,
+      config: params.config,
+      github: params.github,
+      issueNumber: params.issueNumber,
+      apply: true,
+      skills,
+      // Bindings: per-step, set the skillName so resolveStepConfig appends the
+      // skill body to the system prompt. The engine reads these from `bindings`.
+      // Only agent steps need bindings; prefix steps (install / dev-server)
+      // resolve everything from their step definition + config.
+      bindings: params.flow.steps.map((step, idx) => ({
+        stepId: agentStepIdFor(idx),
+        skillName: step.skill,
+        backend: null,
+        model: null,
+        extraTools: [],
+      })),
+      worktreePath,
+      branch: branchName,
+      runEnv,
+      onEvent: params.onEvent,
+      onAgentEvent: (e: RunnerAgentEvent) => params.onAgentEvent(e as unknown as { type: string; [k: string]: unknown }),
+      onRunRecord: (r: AgentRunRecord) => {
+        lastAgentRunId = r.id;
+        params.onRunRecord(r);
+      },
+      pauseRequested: params.pauseRequested,
+      cancelRequested: params.cancelRequested,
+    });
+  } finally {
+    if (runEnv) await runEnv.dispose().catch(() => {});
+    if (disposeWorktree) await disposeWorktree().catch(() => {});
+  }
 
   // ─── Helpers ──────────────────────────────────────────────────────────────
 
-  function stepIdFor(idx: number): string {
+  function agentStepIdFor(idx: number): string {
     return `step-${idx + 1}`;
   }
 
@@ -173,7 +225,7 @@ export async function runFlow(params: RunFlowParams): Promise<WorkflowRunResult<
     const model = autofix?.models?.fixer ?? 'claude-sonnet-4-6';
 
     return agentStep<FlowBlackboard, unknown>({
-      id: stepIdFor(idx),
+      id: agentStepIdFor(idx),
       kind: 'agent',
       builtinSkillId: step.skill,
       builtinSystemPrompt: composeStepSystemPrompt(step),
@@ -391,4 +443,51 @@ export function effectiveStepNotes(step: FlowStep): string {
 /** The system prompt the engine actually sends (before the skill body is appended). */
 export function composeStepSystemPrompt(step: FlowStep): string {
   return `${FLOW_STEP_SCAFFOLDING}\n\n${effectiveStepNotes(step)}`;
+}
+
+// ─── Auto-prepended env steps (install + dev-server) ──────────────────────
+// Used when `autofix.projectEnv.install` is set / `autofix.projectEnv.devServer.enabled`
+// is true on a repo-backed flow run. The engine no-ops these when the run has
+// no `RunEnv` (i.e. repo-less flows), so adding them unconditionally would also
+// be safe — we gate them in `runFlow` only to keep the cockpit clean.
+
+function shellCommentSection(label: string, result: ShellResult): CommentSection {
+  const out = tailLines(`${result.stdout}\n${result.stderr}`, 30);
+  return {
+    heading: result.ok ? `✅ ${label} passed` : `❌ ${label} failed (exit ${result.exitCode})`,
+    body: out ? `\`\`\`\n${out}\n\`\`\`` : '_(no output)_',
+  };
+}
+
+function makeInstallStep(): WorkflowStep<FlowBlackboard> {
+  return {
+    id: 'install',
+    kind: 'shell-check',
+    builtinSkillId: 'install',
+    which: 'install',
+    // Gate on `projectEnv.gateOnInstall`. Failed install ⇒ failed run (agents
+    // can't do useful work against an unbuilt project anyway).
+    gate: (cfg) => cfg.autofix?.projectEnv?.gateOnInstall ?? true,
+    retriable: false,
+    commentSection: (result) => shellCommentSection('Install', result),
+  };
+}
+
+function makeDevServerStep(): WorkflowStep<FlowBlackboard> {
+  return {
+    id: 'dev-server',
+    kind: 'dev-server',
+    builtinSkillId: 'dev-server',
+    // Informational: don't fail the run if the server is slow to come up. The
+    // engine still exposes `devServerUrl` to subsequent agent steps via the
+    // step context, so agents can `curl` it once it's ready.
+    gate: false,
+    commentSection: (info) =>
+      info.url
+        ? {
+            heading: info.ready ? '🌐 Dev server ready' : '🌐 Dev server started (not confirmed ready)',
+            body: `Running at \`${info.url}\` — agents can probe it with \`curl\`.`,
+          }
+        : null,
+  };
 }
