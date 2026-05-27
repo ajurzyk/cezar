@@ -19,20 +19,22 @@ export interface SettingsTabsProps {
     role: 'admin' | 'actor' | 'viewer';
   };
   automation: ReactNode;
+  labels: ReactNode;
   team: ReactNode;
   configuration: ReactNode;
 }
 
-type TabId = 'general' | 'automation' | 'team' | 'configuration';
+type TabId = 'general' | 'automation' | 'labels' | 'team' | 'configuration';
 
 const TABS: { id: TabId; label: string }[] = [
   { id: 'general',       label: 'General' },
   { id: 'automation',    label: 'Automation' },
+  { id: 'labels',        label: 'Labels' },
   { id: 'team',          label: 'Team' },
   { id: 'configuration', label: 'Configuration' },
 ];
 
-export function SettingsTabs({ workspace, automation, team, configuration }: SettingsTabsProps) {
+export function SettingsTabs({ workspace, automation, labels, team, configuration }: SettingsTabsProps) {
   const [active, setActive] = useState<TabId>('general');
   const roleLabel = useMemo(() => workspace.role.toUpperCase(), [workspace.role]);
 
@@ -83,6 +85,7 @@ export function SettingsTabs({ workspace, automation, team, configuration }: Set
       <div>
         {active === 'general' && <GeneralTab />}
         {active === 'automation' && automation}
+        {active === 'labels' && labels}
         {active === 'team' && team}
         {active === 'configuration' && configuration}
       </div>

@@ -9,7 +9,7 @@ export interface RunnerDaemonConfig {
   kind: 'cloud' | 'self-hosted';
   /** Max concurrent jobs. Default 1. */
   concurrency?: number;
-  /** Seconds between claim attempts (and the heartbeat is sent every other tick). Default 5. */
+  /** Seconds between claim attempts (and the heartbeat is sent every other tick). Default 1. */
   pollIntervalSec?: number;
 }
 
@@ -43,7 +43,7 @@ export class RunnerDaemon {
   constructor(private readonly cfg: RunnerDaemonConfig) {
     this.client = new RunnerClient(cfg.url, cfg.token);
     this.concurrency = Math.max(1, cfg.concurrency ?? 1);
-    this.pollMs = Math.max(1000, (cfg.pollIntervalSec ?? 5) * 1000);
+    this.pollMs = Math.max(1000, (cfg.pollIntervalSec ?? 1) * 1000);
   }
 
   async start(): Promise<void> {

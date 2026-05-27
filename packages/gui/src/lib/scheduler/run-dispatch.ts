@@ -6,7 +6,10 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { CiFollowupInput } from '@cezar/core';
 import { executeWorkflowJob } from '@/lib/execute-workflow-job';
+import { executeLabelAnalysisJob } from '@/lib/execute-label-analysis-job';
 import type { Database } from '@/lib/supabase/types';
+
+type WorkflowJobKind = 'triage' | 'autofix' | 'ci-followup' | 'flow';
 
 type JobRow = Database['public']['Tables']['jobs']['Row'];
 
@@ -55,11 +58,41 @@ export async function runDispatch(supabase: SupabaseClient<Database>): Promise<D
       continue;
     }
 
-    const payload = (job.payload ?? {}) as { ciFollowup?: CiFollowupInput; flowId?: string; flowInput?: string };
+    const payload = (job.payload ?? {}) as {
+      ciFollowup?: CiFollowupInput;
+      flowId?: string;
+      flowInput?: string;
+      analysisId?: string;
+    };
+
+    // Label analysis is not a workflow_run — it has no per-issue target and
+    // no agent steps, so it routes to its own executor and writes only to
+    // workspace_label_analyses.
+    if (job.kind === 'label-analysis') {
+      const analysisId = payload.analysisId;
+      if (!analysisId) {
+        console.error(`[dispatch] label-analysis job ${job.id} missing payload.analysisId`);
+        await supabase
+          .from('jobs')
+          .update({ status: 'failed', updated_at: new Date().toISOString() })
+          .eq('id', job.id);
+        continue;
+      }
+      void executeLabelAnalysisJob(supabase, {
+        workspaceId: job.workspace_id,
+        jobId: job.id,
+        analysisId,
+      }).catch((err) => {
+        console.error(`[dispatch] job ${job.id} crashed:`, err);
+      });
+      dispatched += 1;
+      continue;
+    }
+
     void executeWorkflowJob(supabase, {
       workspaceId: job.workspace_id,
       repo: job.repo,
-      workflow: job.kind,
+      workflow: job.kind as WorkflowJobKind,
       issueNumber: job.issue_number ?? undefined,
       prNumber: job.pr_number ?? undefined,
       jobId: job.id,

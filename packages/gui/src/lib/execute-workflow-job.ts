@@ -1,7 +1,8 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import type { CiFollowupInput } from '@cezar/core';
+import type { CiFollowupInput, WorkspaceLabel } from '@cezar/core';
 import { SupabaseStoreAdapter } from './adapters/supabase-store';
 import { loadWorkspaceConfig } from './load-workspace-config';
+import { loadWorkspaceLabels } from './load-workspace-labels';
 import { createWorkflowRunPersister, type WorkflowRunPersister } from './persist-workflow-run';
 import { ensureRepoClone } from './repo-clone';
 import { runTriagePassJob } from './run-triage-pass-job';
@@ -86,6 +87,11 @@ export async function executeWorkflowJob(
     // Phase 3c — the dispatcher always runs the declarative engine.
     config.workflow = { ...(config.workflow ?? {}), useEngine: true };
 
+    // Workspace label catalog — appended to every agent step's system prompt
+    // by the engine (see resolveStepConfig in core/workflows/binding.ts).
+    // Loaded once per job to avoid an extra round-trip per step.
+    const labels: WorkspaceLabel[] = await loadWorkspaceLabels(adminSupabase, workspaceId);
+
     if (!config.autofix.repoRoot) {
       const repoRoot = await ensureRepoClone(
         config.github.owner,
@@ -140,6 +146,7 @@ export async function executeWorkflowJob(
       else if (evt.type === 'tool-result') void persister!.recordEvent('tool-result', { toolUseId: evt.toolUseId, result: evt.result, isError: evt.isError });
       else void persister!.recordEvent('note', evt);
     };
+    const onStepStart = (r: import('@cezar/core').AgentRunRecord): void => { void persister!.recordStepStart(r); };
     const onRunRecord = (r: import('@cezar/core').AgentRunRecord): void => { void persister!.recordAgentRun(r); };
     const pauseRequested = () => persister!.isPauseRequested();
     const cancelRequested = () => persister!.isCancelled();
@@ -164,8 +171,10 @@ export async function executeWorkflowJob(
         config,
         github,
         issueNumber: runIssueNumber,
+        labels,
         onEvent,
         onAgentEvent,
+        onStepStart,
         onRunRecord,
         pauseRequested,
         cancelRequested,
@@ -186,8 +195,10 @@ export async function executeWorkflowJob(
       const outcome = await orch.processIssue(runIssueNumber, {
         apply: true,
         confirmBeforeFix: undefined, // dispatcher = autonomous
+        labels,
         onEvent,
         onAgentEvent,
+        onStepStart,
         onRunRecord,
         pauseRequested,
         cancelRequested,
@@ -207,8 +218,10 @@ export async function executeWorkflowJob(
       const orch = new core.AutofixOrchestrator(store, config, github);
       const outcome = await orch.processCiFollowup(ciFollowupSeed, {
         apply: true,
+        labels,
         onEvent,
         onAgentEvent,
+        onStepStart,
         onRunRecord,
         pauseRequested,
         cancelRequested,
@@ -238,6 +251,7 @@ export async function executeWorkflowJob(
         github,
         supabase: adminSupabase,
         persister,
+        labels,
         deferSink: async ({ call, confidence, summary, action, target }) => {
           // Write the deferred effect to pending_decisions for the inbox.
           // See docs/REFACTOR-PLAN-inbox-and-acceptance.md §7.

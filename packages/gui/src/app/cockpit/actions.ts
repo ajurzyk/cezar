@@ -147,6 +147,50 @@ export async function cancelRuns(ids: string[]): Promise<ActionResult> {
 }
 
 /**
+ * Hard-delete a workflow run row. `agent_runs` and `agent_run_events` cascade
+ * via FK; `pending_decisions.workflow_run_id` is `on delete set null`. Only
+ * terminal runs are deletable — cancel an in-flight run first so the engine
+ * can't keep writing to the row we just removed.
+ */
+const TERMINAL_STATUSES = ['succeeded', 'failed', 'cancelled'] as const;
+
+export async function deleteRun(runId: string): Promise<ActionResult> {
+  const ctx = await guard();
+  if ('error' in ctx) return ctx;
+  const run = await loadRun(ctx, runId);
+  if ('error' in run) return run;
+  if (!(TERMINAL_STATUSES as readonly string[]).includes(run.status)) {
+    return { error: `Run is ${run.status}; cancel it first` };
+  }
+
+  const { error } = await ctx.supabase
+    .from('workflow_runs')
+    .delete()
+    .eq('id', runId)
+    .eq('workspace_id', ctx.workspaceId)
+    .in('status', TERMINAL_STATUSES as readonly string[] as string[]);
+  if (error) return { error: error.message };
+  revalidatePath('/cockpit');
+  return { ok: true };
+}
+
+export async function deleteRuns(ids: string[]): Promise<ActionResult> {
+  const ctx = await guard();
+  if ('error' in ctx) return ctx;
+  if (ids.length === 0) return { ok: true };
+
+  const { error } = await ctx.supabase
+    .from('workflow_runs')
+    .delete()
+    .in('id', ids)
+    .eq('workspace_id', ctx.workspaceId)
+    .in('status', TERMINAL_STATUSES as readonly string[] as string[]);
+  if (error) return { error: error.message };
+  revalidatePath('/cockpit');
+  return { ok: true };
+}
+
+/**
  * Re-enqueue a finished run. Actual re-dispatch needs the Phase-3c dispatcher;
  * here we insert a `jobs` row so it runs once a runner is available.
  */

@@ -6,11 +6,12 @@ import type { AgentBackend, AgentEvent, AgentRunner, AgentRunSpec } from '../age
 import { createAgentRunner } from '../agents/runner-factory.js';
 import { discoverSkills, type Skill } from '../skills/skill-catalog.js';
 import { resolveStepConfig, type WorkflowBinding, type WorkspaceWorkflowSettings, DEFAULT_WORKSPACE_WORKFLOW_SETTINGS } from './binding.js';
+import type { WorkspaceLabel } from '../labels/label-catalog.js';
 import { commitAll, getDiffAgainstBase, squashCommitsToBase, startWorktreeAutosaver } from '../actions/autofix/worktree.js';
 import { upsertMarkerComment } from './pr-link-marker.js';
 import type { RunEnv } from '../provision/run-env.js';
 import { PersistentClaudeSession } from '../agents/persistent-claude-session.js';
-import { UNIFIED_AUTOFIX_SYSTEM_PROMPT } from '../actions/autofix/prompts/autofix-unified.js';
+import { UNIFIED_AUTOFIX_SYSTEM_PROMPT, buildUnifiedFlowSystemPrompt } from '../actions/autofix/prompts/autofix-unified.js';
 import { TokenBudget } from '../actions/autofix/token-budget.js';
 import { parseStructured } from '../agents/structured-output.js';
 import {
@@ -73,12 +74,27 @@ export interface WorkflowRunContext {
   onEvent?: (event: string) => void;
   /** Normalized agent stream. */
   onAgentEvent?: (event: AgentEvent) => void;
+  /**
+   * Fired the moment the engine is about to execute a step — before the agent
+   * launches / the shell-check runs / etc. The record carries `status:
+   * 'running'` and (for agent steps) the resolved backend/model. Lets the
+   * cockpit render a step card and emit a `step-start` event as the work
+   * begins instead of bunching them with the step's completion.
+   */
+  onStepStart?: (record: AgentRunRecord) => void;
   /** Phase 3 hook: persist each step's run record. */
   onRunRecord?: (record: AgentRunRecord) => void;
   /** Human-in-the-loop callback for `human-gate` steps; absent ⇒ pause cleanly unless `autoProceed`. */
   requestHumanDecision?: (prompt: HumanGatePrompt) => Promise<HumanGateDecision | null>;
   /** Pre-discovered repo skills; defaults to discovering from `config.autofix.repoRoot`. */
   skills?: Skill[];
+  /**
+   * Workspace label catalog. When present, the engine appends a "Repository
+   * label catalog" section to each agent step's system prompt (filtered by
+   * the step's `labelScope`, or `'both'` by default). Loaded by the GUI
+   * dispatch layer from `workspace_labels`; the CLI leaves it undefined.
+   */
+  labels?: WorkspaceLabel[];
   /**
    * Set to request a graceful pause between steps (docs §3.4). May be a static
    * boolean or a (sync/async) probe — the dispatcher passes a function that
@@ -283,18 +299,30 @@ export class WorkflowEngine {
     let prNumber = ctx.prNumber;
     let devServerUrl: string | undefined;
 
-    // Phase B: unified persistent session for autofix.
-    // Per docs/REFACTOR-PLAN-persistent-autofix-session.md §5 Phase B.
-    // Only applies when ALL of:
-    //   - this is the autofix workflow (the only one with the 4-role shape)
-    //   - config.autofix.runner.mode === 'unified'
-    //   - we have a worktree
-    // Otherwise stays staged (today's behavior; one process per step).
+    // One claude session id for the whole workflow run — reused across every
+    // agent step's `--session-id`. With `transport: 'stream-json'` claude
+    // resumes the same on-disk session between staged spawns, so each step
+    // after the first sees the prior turns as conversation context and
+    // Anthropic's prompt cache reads the cumulative prefix instead of a cold
+    // start. In `mode: 'unified'` the same id pins the single long-lived
+    // child. Used to be `record.id` per step (a fresh UUID), which threw
+    // away every chance at a cache hit.
+    const runSessionId = randomUUID();
+
+    // Unified persistent session: one long-lived `claude` child for the whole
+    // run. Applies to the typed autofix workflow (`UNIFIED_AUTOFIX_SYSTEM_PROMPT`)
+    // and to user-defined flow workflows (per-flow unified prompt built from
+    // each step's resolved skill body); other workflows stay staged.
+    // Requires `runner.mode: 'unified'` and a worktree.
     const unifiedSession = await this.maybeStartUnifiedSession({
-      workflowId: workflow.id,
+      workflow,
       config: ctx.config,
       worktreePath,
       onEvent: ctx.onAgentEvent,
+      sessionId: runSessionId,
+      bindings,
+      skills,
+      labels: ctx.labels,
     });
 
     const living = new LivingComment(
@@ -411,6 +439,16 @@ export class WorkflowEngine {
       let outcome: StepOutcome<W>;
       let record: AgentRunRecord | undefined;
 
+      // Fire onStepStart for non-agent steps right here so the cockpit can
+      // render a card + emit a `step-start` event before the step's body
+      // produces any lifecycle output. Agent steps fire their own onStepStart
+      // from inside runAgentStep — after binding resolution — so the record
+      // carries the real backend/model instead of placeholders.
+      if (step.kind !== 'agent') {
+        record = this.syntheticRecord(workflow.id, step.id, step.kind, iteration, 'running');
+        ctx.onStepStart?.(record);
+      }
+
       try {
         if (step.kind === 'agent') {
           const r = await this.runAgentStep(step as AgentStepDef<W, unknown>, {
@@ -418,7 +456,10 @@ export class WorkflowEngine {
             tokenBudgetPerAttempt: ctx.tokenBudgetPerAttempt ?? ctx.config.autofix?.tokenBudgetPerAttempt,
             workflowId: workflow.id, worktreePath,
             living,
+            labels: ctx.labels,
             unifiedSession,
+            runSessionId,
+            onStepStart: ctx.onStepStart,
           });
           outcome = r.outcome;
           record = r.record;
@@ -540,6 +581,11 @@ export class WorkflowEngine {
       } else if (outcome.kind === 'fail') {
         record.status = 'failed';
         record.error = outcome.reason;
+      } else if (record.status === 'running') {
+        // Non-agent steps start with status='running' (so onStepStart carries
+        // it). Agent steps set their final status inside runAgentStep, so
+        // this only flips the leftover 'running' on a `continue` outcome.
+        record.status = 'succeeded';
       }
       record.finishedAt ??= new Date().toISOString();
       runRecords.push(record);
@@ -548,6 +594,14 @@ export class WorkflowEngine {
       // Apply blackboard patch (continue / goto-loop / fail-retriable can carry one).
       if ('blackboardPatch' in outcome && outcome.blackboardPatch) {
         Object.assign(blackboard as object, outcome.blackboardPatch);
+      }
+
+      // Pick up the PR opened by an agent step so downstream step contexts see
+      // it (the typed open-pr / push path sets these directly; the flow path
+      // surfaces them through `openedPr` on the outcome).
+      if ('openedPr' in outcome && outcome.openedPr) {
+        if (prNumber == null) prNumber = outcome.openedPr.number;
+        if (!prUrl) prUrl = outcome.openedPr.url;
       }
 
       // ── Outcome dispatch ──
@@ -782,12 +836,20 @@ export class WorkflowEngine {
       workflowId: string;
       worktreePath?: string;
       living: LivingComment;
+      labels?: WorkspaceLabel[];
       /** Phase B: when set, the engine routes agent steps through this
        *  long-lived session instead of spawning a fresh `claude` per step. */
       unifiedSession: PersistentClaudeSession | null;
+      /** Workflow-run-level claude session id reused across every agent step
+       *  so claude-cli resumes the same on-disk session (and Anthropic's
+       *  prompt cache hits the prior conversation prefix). */
+      runSessionId: string;
+      /** Fire `onStepStart` from inside the agent step (after binding
+       *  resolution) so the start record carries the resolved backend/model. */
+      onStepStart?: (record: AgentRunRecord) => void;
     },
   ): Promise<{ outcome: StepOutcome<W>; record: AgentRunRecord }> {
-    const { stepCtx, iteration, bindings, skills, runnerFactory, workflowId } = args;
+    const { stepCtx, iteration, bindings, skills, runnerFactory, workflowId, labels } = args;
 
     if (step.cwdRequired && !args.worktreePath) {
       throw new Error(`agent step '${step.id}' requires a worktree but none was provided`);
@@ -805,6 +867,8 @@ export class WorkflowEngine {
       builtinModel,
       binding: bindings.find((b) => b.stepId === step.id),
       skills,
+      labels,
+      labelScope: step.labelScope ?? 'both',
     });
 
     const budget = args.tokenBudgetPerAttempt ? new TokenBudget(args.tokenBudgetPerAttempt) : undefined;
@@ -822,14 +886,40 @@ export class WorkflowEngine {
       startedAt: new Date().toISOString(),
       tokensUsed: 0,
     };
+    args.onStepStart?.(record);
 
     const runner = runnerFactory(resolved.backend);
     const allowedTools = [...builtinTools, ...resolved.extraTools];
 
-    // When a dev server is up, give this agent step the live URL and let it
-    // probe the running app with `curl` over Bash (backend-agnostic "read-url").
     let userPrompt = step.buildUserPrompt(ctxWithBudget);
     let effectiveBashAllowlist = bashAllowlist;
+
+    // For flow workflows running in a prepared worktree, tell the agent
+    // upfront where it is and that the sandbox is offline for git. Without
+    // this hint, a skill that opens with `gh pr checkout` / `git fetch
+    // origin pull/<n>/head` (a common pattern in repo-local review skills)
+    // burns turns on DNS errors before realizing the worktree is already
+    // on the PR's head branch. Typed workflows (autofix, ci-followup)
+    // already encode this in their built-in system prompts.
+    if (args.workflowId.startsWith('flow:') && args.worktreePath) {
+      const baseBranch = config.autofix?.baseBranch ?? 'main';
+      const branch = stepCtx.branch ?? '(branch not exposed to step context)';
+      userPrompt += [
+        '',
+        '',
+        '---',
+        'You are running inside a sandboxed git worktree.',
+        `  CWD:    ${args.worktreePath}`,
+        `  BRANCH: ${branch}   (this is the PR's head branch)`,
+        `  BASE:   ${baseBranch}`,
+        "The PR's changes are already applied on top of BASE in this worktree.",
+        'Do NOT `git clone`, `git fetch`, or `gh pr checkout` — the sandbox has no network for git, and the worktree is already in the correct state.',
+        `Review the diff with \`git diff ${baseBranch}...HEAD\` and read files directly with Read.`,
+      ].join('\n');
+    }
+
+    // When a dev server is up, give this agent step the live URL and let it
+    // probe the running app with `curl` over Bash (backend-agnostic "read-url").
     if (stepCtx.devServerUrl && allowedTools.includes('Bash')) {
       userPrompt += `\n\n---\nA dev server for this project is running at ${stepCtx.devServerUrl}. You can probe the live application with curl (e.g. \`curl -sS ${stepCtx.devServerUrl}/\`) to reproduce the issue or verify your change.`;
       // Only widen an existing allowlist; an undefined allowlist already permits curl.
@@ -846,10 +936,12 @@ export class WorkflowEngine {
       maxTurns,
       tokenBudget: budget,
       responseSchema: step.responseSchema,
-      // Use the agent_runs row id as the claude session id so an operator
-      // can `cd <worktree> && claude --resume <id>` after a failed run.
-      // Only honored by ClaudeCodeCliRunner today — see agent-runner.ts.
-      sessionId: record.id,
+      // Reuse one claude session id for the whole workflow run. Each step
+      // after the first resumes the same on-disk session, so prior turns
+      // become conversation context and Anthropic's prompt cache reads
+      // the cumulative prefix instead of starting cold. An operator can
+      // `cd <worktree> && claude --resume <runSessionId>` to take over.
+      sessionId: args.runSessionId,
     };
 
     // Periodic autosave for steps that can mutate the worktree (fixer-class).
@@ -903,6 +995,16 @@ export class WorkflowEngine {
         const outcome = step.onNoParse(result.text, stepCtx);
         record.status = outcome.kind === 'fail' ? 'failed' : outcome.kind === 'skip-run' ? 'skipped' : 'succeeded';
         if (outcome.kind === 'fail') record.error = outcome.reason;
+        // Flow runtime: an agent step may open a PR via `gh pr create` and
+        // signal it via `openedPr` (extracted from PR_URL/PR_NUMBER markers in
+        // flow-runner's onNoParse). Switch the living comment to the PR
+        // BEFORE appending the unparsed section, so this step's output AND
+        // every subsequent step's output (e.g. the review verdict) lands on
+        // the PR instead of the issue. Without this, the typed `open-pr` step
+        // is the only path that calls `switchToPr`.
+        if ('openedPr' in outcome && outcome.openedPr) {
+          await args.living.switchToPr(outcome.openedPr.number);
+        }
         if (step.failCommentSection && outcome.kind === 'fail') {
           await args.living.appendSection(step.id, step.failCommentSection(outcome.reason, stepCtx));
         } else if (step.unparsedCommentSection && outcome.kind !== 'fail') {
@@ -937,36 +1039,54 @@ export class WorkflowEngine {
   }
 
   /**
-   * Start a unified `PersistentClaudeSession` for the autofix workflow
-   * when the workspace has opted in via `config.autofix.runner.mode`.
-   * Returns `null` otherwise — staged mode keeps today's behavior.
+   * Start a unified `PersistentClaudeSession` — one long-lived `claude`
+   * process for the whole run that the engine drives via `sendPhase(stepId, …)`
+   * — when the workspace opted in via `config.autofix.runner.mode = 'unified'`.
+   * Returns `null` otherwise; staged mode keeps spawning a fresh child per step.
    *
-   * Gates (per docs/REFACTOR-PLAN-persistent-autofix-session.md §5/§7):
-   *   • workflow.id === 'autofix' (only workflow with the 4-role shape)
-   *   • config.autofix.runner.mode === 'unified'
-   *   • a worktree is available (claude needs cwd)
+   * Supported workflow shapes:
+   *   • The typed autofix workflow — uses `UNIFIED_AUTOFIX_SYSTEM_PROMPT`,
+   *     which hard-codes the verify/analyzer/fixer/reviewer roles.
+   *   • Any flow workflow (`workflow.id.startsWith('flow:')`) — the system
+   *     prompt is built from each agent step's resolved body (built-in step
+   *     prompt + bound skill body + label catalog), so the model has every
+   *     phase's instructions upfront and the user-side just sends short
+   *     per-step payloads via `## PHASE: <stepId>` markers.
+   *
+   * Other workflows (ci-followup, triage) stay staged.
    *
    * Backend lock (Q4) is enforced in the runner factory — by the time
    * this method is called the workspace is already in CLI territory.
    */
-  private async maybeStartUnifiedSession(args: {
-    workflowId: string;
+  private async maybeStartUnifiedSession<W>(args: {
+    workflow: Workflow<W>;
     config: Config;
     worktreePath: string | undefined;
     onEvent: ((evt: AgentEvent) => void) | undefined;
+    sessionId: string;
+    bindings: WorkflowBinding[];
+    skills: Skill[];
+    labels?: WorkspaceLabel[];
   }): Promise<PersistentClaudeSession | null> {
-    if (args.workflowId !== 'autofix') return null;
     if (args.config.autofix?.runner?.mode !== 'unified') return null;
     if (!args.worktreePath) return null;
-    const sessionId = randomUUID();
+
+    const systemPrompt = this.buildUnifiedSystemPrompt(args.workflow, {
+      bindings: args.bindings,
+      skills: args.skills,
+      labels: args.labels,
+      config: args.config,
+    });
+    if (!systemPrompt) return null;
+
     const session = new PersistentClaudeSession({
-      systemPrompt: UNIFIED_AUTOFIX_SYSTEM_PROMPT,
-      sessionId,
+      systemPrompt,
+      sessionId: args.sessionId,
       cwd: args.worktreePath,
       model: args.config.autofix?.models?.analyzer,
-      // Unified mode pools the analyzer/fixer/reviewer tool budgets;
-      // the agent decides per phase which tools to invoke from this
-      // union. Read + write are both allowed since fixer needs them.
+      // Unified mode pools every phase's tool budget; the model picks
+      // per-phase which to use from this union. Read + write are both
+      // allowed since fixer/edit-capable phases need them.
       allowedTools: ['Read', 'Grep', 'Glob', 'Edit', 'Write', 'NotebookEdit', 'Bash'],
       bashAllowlist: args.config.autofix?.bashAllowlist,
       onEvent: (e) => {
@@ -977,6 +1097,46 @@ export class WorkflowEngine {
     });
     session.start();
     return session;
+  }
+
+  /**
+   * Resolve the unified system prompt to ship at session start. Returns
+   * `null` for workflows whose shape doesn't support unified mode (today:
+   * everything other than `'autofix'` and `'flow:*'`).
+   */
+  private buildUnifiedSystemPrompt<W>(
+    workflow: Workflow<W>,
+    deps: {
+      bindings: WorkflowBinding[];
+      skills: Skill[];
+      labels?: WorkspaceLabel[];
+      config: Config;
+    },
+  ): string | null {
+    if (workflow.id === 'autofix') return UNIFIED_AUTOFIX_SYSTEM_PROMPT;
+    if (!workflow.id.startsWith('flow:')) return null;
+
+    // Resolve each agent step's body the same way `runAgentStep` does
+    // (so the unified prompt embeds exactly what staged mode would send,
+    // minus the per-step duplication of the scaffolding).
+    const phases: Array<{ id: string; body: string }> = [];
+    for (const step of workflow.steps) {
+      if (step.kind !== 'agent') continue;
+      const agentStep = step as AgentStepDef<W, unknown>;
+      const resolved = resolveStepConfig({
+        stepId: agentStep.id,
+        builtinSystemPrompt: agentStep.builtinSystemPrompt,
+        builtinModel: resolveStepValue(agentStep.builtinModel, deps.config),
+        binding: deps.bindings.find((b) => b.stepId === agentStep.id),
+        skills: deps.skills,
+        labels: deps.labels,
+        labelScope: agentStep.labelScope ?? 'both',
+      });
+      phases.push({ id: agentStep.id, body: resolved.systemPrompt });
+    }
+    if (phases.length === 0) return null;
+
+    return buildUnifiedFlowSystemPrompt({ workflowId: workflow.id, phases });
   }
 }
 

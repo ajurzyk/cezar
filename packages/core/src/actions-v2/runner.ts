@@ -1,10 +1,15 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { ActionDef, ActionRunResult } from './action.js';
 import type { Skill } from '../skills/skill-catalog.js';
+import {
+  formatLabelCatalogPrompt,
+  type WorkspaceLabel,
+} from '../labels/label-catalog.js';
 import { actionAlreadyCommented, buildAutoCommentBody } from './auto-comment.js';
 import {
   ALL_EFFECT_NAMES,
   EFFECT_REGISTRY,
+  effectNameFromWire,
   effectsAsAnthropicTools,
   executeEffect,
   extractConfidence,
@@ -67,6 +72,15 @@ export interface RunActionDeps {
   /** Sink for effects routed to human review by the action's acceptance
    *  config. Omit to let those effects be dropped silently (CLI default). */
   deferSink?: DeferSink;
+  /**
+   * Workspace label catalog. When present, a "Repository label catalog"
+   * section is appended to the system message (filtered to the target kind:
+   * issue actions get issue+both labels, PR actions get pr+both). The
+   * declarative-mode effect vocabulary (`add_label`, `remove_label`, …)
+   * already lets actions apply labels — the catalog teaches the model
+   * *which* names to use and *when*.
+   */
+  labels?: WorkspaceLabel[];
 }
 
 /**
@@ -92,9 +106,11 @@ export async function runAction(
   const client = deps.anthropic ?? new Anthropic({ apiKey });
 
   const skillSection = resolveSkillContext(action.skillRefs, deps.skills);
+  const labelCatalog = formatLabelCatalogPrompt(deps.labels ?? null, target.kind, target.kind);
   const systemMessage = [
     action.systemPrompt.trim(),
     skillSection,
+    labelCatalog,
   ]
     .filter((s) => s && s.length > 0)
     .join('\n\n---\n\n');
@@ -320,12 +336,20 @@ async function runToolUseMode(
     const resultBlocks: ContentBlock[] = [];
     for (const block of toolUses) {
       const tu = block as { id: string; name: string; input: unknown };
+      // `tu.name` came back wire-safe (no dots, see effectsAsAnthropicTools);
+      // map it back to the canonical effect name before dispatching.
+      const effect = effectNameFromWire(tu.name);
+      if (!effect) {
+        resultBlocks.push({
+          type: 'tool_result',
+          tool_use_id: tu.id,
+          content: `unknown tool "${tu.name}"`,
+          is_error: true,
+        });
+        continue;
+      }
       const { args, confidence } = extractConfidence(tu.input ?? {});
-      const call: EffectCall = {
-        effect: tu.name as EffectName,
-        args,
-        confidence,
-      };
+      const call: EffectCall = { effect, args, confidence };
       const outcome = await applyOrDefer(call, action, mode.effectCtx, mode.deferSink);
       effectsApplied.push({ call, summary: outcome.summary });
       resultBlocks.push({

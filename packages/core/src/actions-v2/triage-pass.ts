@@ -1,5 +1,6 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { GitHubService } from '../services/github.service.js';
+import type { WorkspaceLabel } from '../labels/label-catalog.js';
 import { discoverBuiltinSkills, type Skill } from '../skills/skill-catalog.js';
 import type { ActionDef, ActionTrigger } from './action.js';
 import type { EffectCall, EffectContext } from './effects.js';
@@ -31,6 +32,9 @@ export interface TriagePassOptions {
   /** Receives every effect that the runner deferred to human review. Wired
    *  by the GUI dispatch layer to insert into `pending_decisions`. */
   deferSink?: TriagePassDeferSink;
+  /** Workspace label catalog — forwarded into each action's `runAction` call
+   *  so the per-action system message includes the catalog (see runner.ts). */
+  labels?: WorkspaceLabel[];
 }
 
 /** Per-action result from a triage pass. */
@@ -100,6 +104,7 @@ export async function runTriagePass(opts: TriagePassOptions): Promise<TriagePass
         effectCtx,
         autoComment: opts.autoComment,
         deferSink: innerDeferSink,
+        labels: opts.labels,
       });
       results.push({
         actionName: action.name,

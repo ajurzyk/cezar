@@ -4,8 +4,14 @@ import { createSupabaseAdminClient } from '@/lib/supabase/server';
 import { SettingsForm } from './settings-form';
 import { TeamSection } from './team-section';
 import { AutomationSection } from './automation-section';
+import { LabelsSection, type AcceptedLabelRow } from './labels-section';
 import { SettingsTabs, SettingsCard } from './settings-tabs';
-import type { WorkspaceRole } from '@/lib/supabase/types';
+import type {
+  LabelAnalysisInputsSummary,
+  LabelAnalysisResult,
+  LabelAnalysisStatus,
+  WorkspaceRole,
+} from '@/lib/supabase/types';
 
 async function loadWorkspaceConfig(workspaceId: string): Promise<{
   config: Record<string, unknown>;
@@ -82,9 +88,11 @@ export default async function SettingsPage() {
     );
   }
 
-  const [{ config, autoTriageEnabled, autofixEnabled, separateCommentPerStep, actionAutoComment }, members] = await Promise.all([
+  const [{ config, autoTriageEnabled, autofixEnabled, separateCommentPerStep, actionAutoComment }, members, labelsInitial, acceptedLabels] = await Promise.all([
     loadWorkspaceConfig(workspace.id),
     loadMembers(workspace.id),
+    loadLabelsInitial(workspace.id),
+    loadAcceptedLabels(workspace.id),
   ]);
   const isAdmin = workspace.role === 'admin';
 
@@ -126,6 +134,62 @@ export default async function SettingsPage() {
           <SettingsForm config={config} readOnly={!isAdmin} />
         </SettingsCard>
       }
+      labels={
+        <SettingsCard
+          title="Labels"
+          description="Per-repo labeling guide. Cezar analyses your label usage and produces a catalog with descriptions, when to add, and when to remove — for issues and PRs separately."
+        >
+          <LabelsSection
+            initial={labelsInitial}
+            acceptedLabels={acceptedLabels}
+            readOnly={!isAdmin}
+          />
+        </SettingsCard>
+      }
     />
   );
+}
+
+interface LabelsInitialAnalysis {
+  id: string;
+  status: LabelAnalysisStatus;
+  started_at: string | null;
+  finished_at: string | null;
+  result: LabelAnalysisResult | null;
+  error: string | null;
+  inputs_summary: LabelAnalysisInputsSummary | null;
+  created_at: string;
+  updated_at: string;
+}
+
+async function loadLabelsInitial(workspaceId: string): Promise<{
+  analysis: LabelsInitialAnalysis | null;
+  acceptedLabelCount: number;
+}> {
+  const supabase = createSupabaseAdminClient();
+  const { data: analyses } = await supabase
+    .from('workspace_label_analyses')
+    .select('id, status, started_at, finished_at, result, error, inputs_summary, created_at, updated_at')
+    .eq('workspace_id', workspaceId)
+    .order('created_at', { ascending: false })
+    .limit(1);
+  const { count } = await supabase
+    .from('workspace_labels')
+    .select('*', { count: 'exact', head: true })
+    .eq('workspace_id', workspaceId);
+  return {
+    analysis: (analyses?.[0] as LabelsInitialAnalysis | undefined) ?? null,
+    acceptedLabelCount: count ?? 0,
+  };
+}
+
+async function loadAcceptedLabels(workspaceId: string): Promise<AcceptedLabelRow[]> {
+  const supabase = createSupabaseAdminClient();
+  const { data } = await supabase
+    .from('workspace_labels')
+    .select('id, name, scope, color, description, when_to_add, when_to_remove, add_meaning, remove_meaning, exists_on_github, source')
+    .eq('workspace_id', workspaceId)
+    .order('scope', { ascending: true })
+    .order('name', { ascending: true });
+  return (data ?? []) as AcceptedLabelRow[];
 }

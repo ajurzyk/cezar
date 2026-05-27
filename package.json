@@ -11,7 +11,12 @@
     "test": "yarn workspaces foreach -A run test",
     "typecheck": "yarn workspaces foreach -A run typecheck",
     "lint": "yarn workspaces foreach -A run lint",
-    "dev": "yarn workspace cezar dev"
+    "dev": "yarn workspace cezar dev",
+    "db:start": "docker compose -f infra/supabase/docker-compose.yml up -d",
+    "db:stop": "docker compose -f infra/supabase/docker-compose.yml down",
+    "db:reset": "docker compose -f infra/supabase/docker-compose.yml down -v && docker compose -f infra/supabase/docker-compose.yml up -d",
+    "db:logs": "docker compose -f infra/supabase/docker-compose.yml logs -f",
+    "db:psql": "docker compose -f infra/supabase/docker-compose.yml exec db psql -U postgres -d postgres"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

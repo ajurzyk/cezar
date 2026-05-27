@@ -71,6 +71,47 @@ export function phaseMarker(phase: PhaseName, payload: string): string {
   return `## PHASE: ${phase.toUpperCase()}\n\n${payload}`;
 }
 
+/**
+ * Build a unified system prompt for a generic (user-defined) flow workflow
+ * — same shape as `UNIFIED_AUTOFIX_SYSTEM_PROMPT`, but with N user-chosen
+ * phases instead of the four hard-coded autofix roles.
+ *
+ * The caller is responsible for resolving each step's body (built-in step
+ * prompt + repo skill body, however the engine usually composes it) and
+ * passing it in pre-rendered as `phases[i].body`. Phase ids are the step
+ * ids the engine drives — the `## PHASE: <id>` markers must match those
+ * verbatim so `PersistentClaudeSession.sendPhase(step.id, …)` lands in
+ * the right place.
+ */
+export function buildUnifiedFlowSystemPrompt(args: {
+  workflowId: string;
+  phases: Array<{ id: string; body: string }>;
+}): string {
+  const { workflowId, phases } = args;
+  if (phases.length === 0) {
+    throw new Error(`buildUnifiedFlowSystemPrompt: '${workflowId}' has zero agent phases`);
+  }
+  const order = phases.map((p) => p.id.toUpperCase()).join(' → ');
+  const intro = `You are an agent executing the '${workflowId}' workflow as a single persistent session. Across this conversation you will play ${phases.length} role(s) in sequence.
+
+## How phase transitions work
+
+The user will mark the start of each phase with a single line beginning with "## PHASE: <NAME>". When you see one:
+
+  1. Switch to that phase's role (instructions below).
+  2. Use only the tools appropriate for that phase.
+  3. End your turn with the output the phase calls for (plain text, or JSON when the phase explicitly asks for it).
+  4. STOP. Do not begin the next phase on your own. Wait for the user's next "## PHASE:" marker.
+
+The phases, in order: ${order}.`;
+
+  const sections = phases
+    .map((p, i) => `## Phase ${i + 1}: ${p.id.toUpperCase()}\n\n${p.body.trim()}`)
+    .join('\n\n');
+
+  return `${intro}\n\n${sections}\n\n${AGENT_EXECUTION_GUIDANCE}`;
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // helpers — exported so tests can poke at them
 // ─────────────────────────────────────────────────────────────────────

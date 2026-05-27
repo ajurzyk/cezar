@@ -65,6 +65,12 @@ export const ConfigSchema = z.object({
       'git diff',
       'git log',
       'git show',
+      // gh label management — lets agents apply the workspace label catalog
+      // injected into their system prompt (see labels/label-catalog.ts).
+      'gh issue edit',
+      'gh issue view',
+      'gh pr edit',
+      'gh pr view',
     ]),
     setupCommands: z.array(z.string()).default([]),
     // Runnable project environment: how to install deps, build, and run tests
@@ -130,13 +136,22 @@ export const ConfigSchema = z.object({
     // Both default to today's behavior — flipping a flag is the only way
     // to opt a workspace into the new path.
     runner: z.object({
-      // 'print'       — spawn `claude -p <userPrompt>` per step (today).
-      // 'stream-json' — spawn once without -p, write user message to
-      //                 stdin, read until type='result'. Phase A.
-      transport: z.enum(['print', 'stream-json']).default('print'),
-      // 'staged'  — four separate `claude` sessions, one per phase (today).
-      // 'unified' — one long-lived session with phase markers. Phase B.
-      //             Requires `transport: 'stream-json'` and forces backend='claude-cli'.
+      // 'print'       — spawn `claude -p <userPrompt>` per step.
+      // 'stream-json' — spawn `claude --input-format stream-json` per step;
+      //                 the user message is written to stdin and parsed
+      //                 from the NDJSON output. Default since 2026-05 —
+      //                 it's the prerequisite for `mode: 'unified'` and
+      //                 has a faster startup path than `-p` even in
+      //                 staged mode.
+      transport: z.enum(['print', 'stream-json']).default('stream-json'),
+      // 'staged'  — N separate `claude` sessions, one per agent step (one
+      //             cold start + cold prompt cache each).
+      // 'unified' — one long-lived `claude` session for the whole run with
+      //             `## PHASE: <name>` markers driving step transitions;
+      //             pays the cold start ONCE and lets every subsequent
+      //             step ride Anthropic's prompt cache off the cumulative
+      //             conversation prefix. Requires `transport: 'stream-json'`
+      //             and forces backend='claude-cli'.
       mode: z.enum(['staged', 'unified']).default('staged'),
     }).default({}),
   }).default({}),

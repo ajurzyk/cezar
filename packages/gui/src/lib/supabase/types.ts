@@ -18,7 +18,43 @@ export type WorkflowBackend = 'anthropic-api' | 'claude-cli' | 'codex-cli';
 // Note: `@cezar/core` also exports a `WorkflowRunStatus` (the in-process engine
 // state). These are the *DB* string sets — kept local + named distinctly to
 // avoid confusing the two.
-export type JobKind = 'triage' | 'autofix' | 'ci-followup' | 'flow';
+export type JobKind = 'triage' | 'autofix' | 'ci-followup' | 'flow' | 'label-analysis';
+
+export type LabelAnalysisStatus =
+  | 'queued'
+  | 'running'
+  | 'completed'
+  | 'accepted'
+  | 'failed'
+  | 'cancelled';
+
+export type WorkspaceLabelScope = 'issue' | 'pr' | 'both';
+export type WorkspaceLabelSource = 'ai-analyzed' | 'user-edited' | 'manual';
+
+// Shape of `workspace_label_analyses.result` once the executor finishes.
+export interface LabelAnalysisDraft {
+  name: string;
+  color?: string | null;
+  description: string;
+  when_to_add: string;
+  when_to_remove: string;
+  add_meaning: string;
+  remove_meaning: string;
+  exists_on_github: boolean;
+}
+
+export interface LabelAnalysisResult {
+  issue_labels: LabelAnalysisDraft[];
+  pr_labels: LabelAnalysisDraft[];
+  notes?: string;
+}
+
+export interface LabelAnalysisInputsSummary {
+  github_labels: number;
+  issues_scanned: number;
+  prs_scanned: number;
+  codebase_files: string[];
+}
 export type JobStatus = 'queued' | 'claimed' | 'running' | 'done' | 'failed' | 'cancelled';
 export type DbWorkflowRunStatus = 'queued' | 'running' | 'paused' | 'succeeded' | 'failed' | 'cancelled';
 export type AgentRunStatus = 'running' | 'succeeded' | 'failed' | 'skipped';
@@ -518,6 +554,74 @@ export interface Database {
           expires_at?: string | null;
         };
         Update: Partial<Database['public']['Tables']['pending_decisions']['Insert']>;
+      };
+      workspace_label_analyses: {
+        Row: {
+          id: string;
+          workspace_id: string;
+          job_id: string | null;
+          status: LabelAnalysisStatus;
+          started_at: string | null;
+          finished_at: string | null;
+          result: LabelAnalysisResult | null;
+          error: string | null;
+          inputs_summary: LabelAnalysisInputsSummary | null;
+          created_by: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          workspace_id: string;
+          job_id?: string | null;
+          status?: LabelAnalysisStatus;
+          started_at?: string | null;
+          finished_at?: string | null;
+          result?: LabelAnalysisResult | null;
+          error?: string | null;
+          inputs_summary?: LabelAnalysisInputsSummary | null;
+          created_by?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: Partial<Database['public']['Tables']['workspace_label_analyses']['Insert']>;
+      };
+      workspace_labels: {
+        Row: {
+          id: string;
+          workspace_id: string;
+          analysis_id: string | null;
+          name: string;
+          scope: WorkspaceLabelScope;
+          color: string | null;
+          description: string | null;
+          when_to_add: string | null;
+          when_to_remove: string | null;
+          add_meaning: string | null;
+          remove_meaning: string | null;
+          exists_on_github: boolean;
+          source: WorkspaceLabelSource;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          workspace_id: string;
+          analysis_id?: string | null;
+          name: string;
+          scope: WorkspaceLabelScope;
+          color?: string | null;
+          description?: string | null;
+          when_to_add?: string | null;
+          when_to_remove?: string | null;
+          add_meaning?: string | null;
+          remove_meaning?: string | null;
+          exists_on_github?: boolean;
+          source?: WorkspaceLabelSource;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: Partial<Database['public']['Tables']['workspace_labels']['Insert']>;
       };
     };
   };

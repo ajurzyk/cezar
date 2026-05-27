@@ -118,11 +118,25 @@ export interface OrchestratorOptions {
    */
   onRunRecord?: (record: AgentRunRecord) => void;
   /**
+   * Engine-path only. Fires the moment the engine begins a step (before the
+   * agent launches), so the cockpit can render a card + emit `step-start`
+   * up-front instead of bunching everything onto the step's completion.
+   */
+  onStepStart?: (record: AgentRunRecord) => void;
+  /**
    * Phase 3c: graceful pause/cancel probes, checked by the engine between steps
    * (engine path only). The dispatcher passes functions that re-read the DB.
    */
   pauseRequested?: boolean | (() => boolean | Promise<boolean>);
   cancelRequested?: boolean | (() => boolean | Promise<boolean>);
+  /**
+   * Workspace label catalog forwarded to the engine. When present, each agent
+   * step's system prompt gets a "Repository label catalog" section so the
+   * agent can apply labels (issue + both scopes pre-PR, full catalog around
+   * review / open-pr). Engine-only path — ignored by the legacy hand-rolled
+   * orchestrator path.
+   */
+  labels?: import('../../labels/label-catalog.js').WorkspaceLabel[];
 }
 
 export class AutofixOrchestrator {
@@ -915,10 +929,12 @@ export class AutofixOrchestrator {
         runEnv,
         bindings: this.config.workflow?.bindings,
         settings: this.config.workflow?.settings,
+        labels: opts.labels,
         loopMaxIterations: { 'fix-review': cfg.maxAttemptsPerIssue },
         tokenBudgetPerAttempt: cfg.tokenBudgetPerAttempt,
         onEvent: opts.onEvent,
         onAgentEvent: opts.onAgentEvent ? (e) => { const legacy = normalizedToLegacyAgentEvent(e); if (legacy) opts.onAgentEvent!(legacy); } : undefined,
+        onStepStart: opts.onStepStart,
         onRunRecord: opts.onRunRecord,
         pauseRequested: opts.pauseRequested,
         cancelRequested: opts.cancelRequested,
@@ -1042,9 +1058,11 @@ export class AutofixOrchestrator {
         runEnv,
         bindings: this.config.workflow?.bindings,
         settings: this.config.workflow?.settings,
+        labels: opts.labels,
         tokenBudgetPerAttempt: cfg.ciFixTokenBudget ?? cfg.tokenBudgetPerAttempt,
         onEvent: opts.onEvent,
         onAgentEvent: opts.onAgentEvent ? (e) => { const legacy = normalizedToLegacyAgentEvent(e); if (legacy) opts.onAgentEvent!(legacy); } : undefined,
+        onStepStart: opts.onStepStart,
         onRunRecord: opts.onRunRecord,
         pauseRequested: opts.pauseRequested,
         cancelRequested: opts.cancelRequested,

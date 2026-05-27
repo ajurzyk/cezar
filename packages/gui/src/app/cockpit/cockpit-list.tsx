@@ -14,7 +14,7 @@ import {
   githubUrlForRun,
   runRefLabel,
 } from './cockpit-ui';
-import { pauseRun, resumeRun, cancelRun, cancelRuns, retryRun } from './actions';
+import { pauseRun, resumeRun, cancelRun, cancelRuns, retryRun, deleteRun, deleteRuns } from './actions';
 import { EnqueueRunButton } from './enqueue-run-button';
 import type { CockpitCounts } from './page';
 
@@ -151,6 +151,14 @@ export function CockpitList({
       }),
     [selected, runs],
   );
+  const deletableSelected = useMemo(
+    () =>
+      Array.from(selected).filter((id) => {
+        const r = runs.find((x) => x.id === id);
+        return r && ['succeeded', 'failed', 'cancelled'].includes(r.status);
+      }),
+    [selected, runs],
+  );
 
   return (
     <div className="px-8 py-6">
@@ -226,6 +234,18 @@ export function CockpitList({
               className="rounded-md border border-danger/40 px-3 py-1 text-xs text-danger hover:bg-danger/10 disabled:opacity-50"
             >
               Cancel selected ({cancellableSelected.length})
+            </button>
+          )}
+          {canControl && deletableSelected.length > 0 && (
+            <button
+              disabled={pending}
+              onClick={() => {
+                if (!window.confirm(`Delete ${deletableSelected.length} run record(s)? Step history and events go with it.`)) return;
+                run(() => deleteRuns(deletableSelected));
+              }}
+              className="rounded-md border border-danger/40 px-3 py-1 text-xs text-danger hover:bg-danger/10 disabled:opacity-50"
+            >
+              Delete selected ({deletableSelected.length})
             </button>
           )}
         </div>
@@ -337,6 +357,7 @@ function RowActions({
   const showResume = run.status === 'paused';
   const showCancel = ['running', 'paused', 'queued'].includes(run.status);
   const showRetry = run.status === 'failed' || run.status === 'cancelled';
+  const showDelete = terminal;
 
   return (
     <>
@@ -368,7 +389,18 @@ function RowActions({
           disabled={pending}
         />
       )}
-      {terminal && !showRetry && <span className="text-xs text-fg-subtle">—</span>}
+      {showDelete && (
+        <BtnAction
+          label="Delete"
+          danger
+          title="Permanently removes this run and its step history and events."
+          onClick={() => {
+            if (!window.confirm('Delete this run record? Step history and events go with it.')) return;
+            run_(() => deleteRun(run.id));
+          }}
+          disabled={pending}
+        />
+      )}
     </>
   );
 }
