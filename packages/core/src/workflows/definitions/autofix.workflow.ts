@@ -109,10 +109,11 @@ const verifyInRepoStep: WorkflowStep<AutofixBlackboard> = agentStep<AutofixBlack
   builtinSystemPrompt: VERIFY_IN_REPO_SYSTEM_PROMPT,
   builtinModel: (cfg) => autofixCfg(cfg).models.reviewer,
   builtinTools: ['Read', 'Grep', 'Glob', 'Bash'],
-  bashAllowlist: ['git log', 'git diff', 'git show', 'git status'],
+  bashAllowlist: ['git log', 'git diff', 'git show', 'git status', 'gh issue edit', 'gh issue view', 'gh pr edit', 'gh pr view'],
   maxTurns: (cfg) => autofixCfg(cfg).maxTurns.reviewer,
   responseSchema: VerifyInRepoSchema,
   cwdRequired: true,
+  labelScope: 'issue',
   buildUserPrompt: (ctx) => {
     const lines = [`ISSUE #${ctx.issue.number}: ${ctx.issue.title}`, ''];
     if (ctx.issue.digest) {
@@ -196,7 +197,8 @@ const installStep: WorkflowStep<AutofixBlackboard> = {
   // Install runs once before root-cause; a gated failure is terminal (not in the loop).
   retriable: false,
   onResult: (result) => ({ installResult: result }),
-  commentSection: (result): CommentSection => shellCommentSection('Install', result),
+  // Setup-phase step — intentionally no `commentSection` so install output
+  // doesn't clutter the issue/PR. Status/output is still visible in the cockpit.
 };
 
 const buildStep: WorkflowStep<AutofixBlackboard> = {
@@ -236,10 +238,8 @@ const devServerStep: WorkflowStep<AutofixBlackboard> = {
   // Informational: don't fail the run if the server is slow to come up.
   gate: false,
   onReady: (info) => ({ devServerUrl: info.url }),
-  commentSection: (info): CommentSection =>
-    info.url
-      ? { heading: info.ready ? '🌐 Dev server ready' : '🌐 Dev server started (not confirmed ready)', body: `Running at \`${info.url}\` — the agent can probe it with \`curl\`.` }
-      : null,
+  // Setup-phase step — intentionally no `commentSection`. The URL is still
+  // injected into later agent prompts; the cockpit shows boot status.
 };
 
 const rootCauseStep: WorkflowStep<AutofixBlackboard> = agentStep<AutofixBlackboard, z.infer<typeof AnalyzerResultSchema>>({
@@ -249,10 +249,11 @@ const rootCauseStep: WorkflowStep<AutofixBlackboard> = agentStep<AutofixBlackboa
   builtinSystemPrompt: ANALYZER_SYSTEM_PROMPT,
   builtinModel: (cfg) => autofixCfg(cfg).models.analyzer,
   builtinTools: ['Read', 'Grep', 'Glob', 'Bash'],
-  bashAllowlist: ['git log', 'git diff', 'git show', 'git status'],
+  bashAllowlist: ['git log', 'git diff', 'git show', 'git status', 'gh issue edit', 'gh issue view', 'gh pr edit', 'gh pr view'],
   maxTurns: (cfg) => autofixCfg(cfg).maxTurns.analyzer,
   responseSchema: AnalyzerResultSchema,
   cwdRequired: true,
+  labelScope: 'issue',
   buildUserPrompt: (ctx) => buildAnalyzerUserPrompt({
     issueNumber: ctx.issue.number,
     title: ctx.issue.title,

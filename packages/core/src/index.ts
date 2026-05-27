@@ -228,6 +228,14 @@ export {
   type WorktreeHandle,
 } from './actions/autofix/worktree.js';
 
+// Workspace label catalog — shared vocabulary surfaced to every agent step.
+export {
+  formatLabelCatalogPrompt,
+  type WorkspaceLabel,
+  type LabelScope,
+  type LabelPromptScope,
+} from './labels/label-catalog.js';
+
 // Flow runner — runtime for the simple "flows" feature (workspace-defined
 // chains of skill steps). Used both by the GUI dispatcher (cron-based) and
 // the self-hosted runner daemon.

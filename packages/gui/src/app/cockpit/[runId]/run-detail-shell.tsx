@@ -15,7 +15,7 @@ import {
   githubUrlForRun,
   runRefLabel,
 } from '../cockpit-ui';
-import { pauseRun, resumeRun, cancelRun } from '../actions';
+import { pauseRun, resumeRun, cancelRun, deleteRun } from '../actions';
 
 type WorkflowRunRow = Database['public']['Tables']['workflow_runs']['Row'];
 type AgentRunRow = Database['public']['Tables']['agent_runs']['Row'];
@@ -135,6 +135,7 @@ export function RunDetailShell({ run: initialRun, repoOwner, repoName, role, ini
   const showPause = canControl && run.status === 'running' && !run.pause_requested;
   const showResume = canControl && run.status === 'paused';
   const showCancel = canControl && ['running', 'paused', 'queued'].includes(run.status);
+  const showDelete = canControl && terminal;
 
   // Group events by step for the collapsible per-step log; events with no
   // agent_run_id (lifecycle) go into a "run-level" bucket.
@@ -194,6 +195,23 @@ export function RunDetailShell({ run: initialRun, repoOwner, repoName, role, ini
             )}
             {showCancel && (
               <HeaderBtn label="Cancel" danger onClick={() => act(() => cancelRun(run.id))} disabled={pending} />
+            )}
+            {showDelete && (
+              <HeaderBtn
+                label="Delete"
+                danger
+                title="Permanently removes this run and its step history and events."
+                onClick={() => {
+                  if (!window.confirm('Delete this run record? Step history and events go with it.')) return;
+                  setErr(null);
+                  startTransition(async () => {
+                    const res = await deleteRun(run.id);
+                    if (res?.error) setErr(res.error);
+                    else router.push('/cockpit');
+                  });
+                }}
+                disabled={pending}
+              />
             )}
             {run.pause_requested && run.status === 'running' && (
               <span className="text-xs text-amber-400">⏸ pause pending</span>

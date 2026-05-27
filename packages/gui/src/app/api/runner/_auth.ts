@@ -19,7 +19,14 @@ export function hashRunnerToken(raw: string): string {
  * Authenticates a runner request by its `Authorization: Bearer <token>` header.
  * On success returns `{ runner, admin }` (an authorized service-role client).
  * On failure returns a 401 `NextResponse` — callers must check `instanceof`.
+ *
+ * Token-hash → runner row is cached in-process (`RUNNER_AUTH_TTL_MS`). A
+ * runner heartbeats every ~10s and posts events sub-second; without the cache
+ * every request paid for an extra `SELECT runners` round-trip.
  */
+const RUNNER_AUTH_TTL_MS = 30_000;
+const runnerAuthCache = new Map<string, { runner: RunnerRow; expiresAt: number }>();
+
 export async function authRunner(
   req: Request,
 ): Promise<{ runner: RunnerRow; admin: ReturnType<typeof createSupabaseAdminClient> } | NextResponse> {
@@ -29,10 +36,25 @@ export async function authRunner(
   const tokenHash = hashRunnerToken(match[1]);
 
   const admin = createSupabaseAdminClient();
+
+  const cached = runnerAuthCache.get(tokenHash);
+  if (cached && cached.expiresAt > Date.now()) {
+    return { runner: cached.runner, admin };
+  }
+
   const { data: runner, error } = await admin.from('runners').select('*').eq('token_hash', tokenHash).maybeSingle();
   if (error) return NextResponse.json({ error: 'auth lookup failed' }, { status: 500 });
-  if (!runner) return NextResponse.json({ error: 'unknown runner token' }, { status: 401 });
+  if (!runner) {
+    runnerAuthCache.delete(tokenHash);
+    return NextResponse.json({ error: 'unknown runner token' }, { status: 401 });
+  }
+  runnerAuthCache.set(tokenHash, { runner, expiresAt: Date.now() + RUNNER_AUTH_TTL_MS });
   return { runner, admin };
+}
+
+/** Drop a cached runner row (e.g. after revoking its token). */
+export function invalidateRunnerAuth(tokenHash: string): void {
+  runnerAuthCache.delete(tokenHash);
 }
 
 /** True if `runner` may act on rows scoped to `workspaceId` (managed runners — null

@@ -25,7 +25,7 @@ export async function executeJobLocally(
   claimed: ClaimedJob,
   controls: ExecuteJobControls,
 ): Promise<void> {
-  const { workflowRunId, job, workspace, githubToken, ciFollowupSeed, flow } = claimed;
+  const { workflowRunId, job, workspace, githubToken, ciFollowupSeed, flow, labels } = claimed;
 
   // ── event buffer ──────────────────────────────────────────────────────
   const buffer: RunnerEvent[] = [];
@@ -61,7 +61,10 @@ export async function executeJobLocally(
     else if (evt.type === 'tool-result') emit({ type: 'tool-result', payload: { toolUseId: evt.toolUseId, result: evt.result, isError: evt.isError } });
     else emit({ type: 'note', payload: evt });
   };
-  const onRunRecord = (r: AgentRunRecord): void => {
+  // Fired at the moment the engine begins a step (before the agent launches).
+  // Emits a `step-start` event so the cockpit can open the agent_runs row +
+  // render a card right away — instead of waiting for the step to finish.
+  const onStepStart = (r: AgentRunRecord): void => {
     emit({
       type: 'step-start',
       stepId: r.stepId,
@@ -73,6 +76,10 @@ export async function executeJobLocally(
       startedAt: r.startedAt,
       payload: { stepId: r.stepId, iteration: r.iteration },
     });
+  };
+  // Fired when the engine has finished a step. Emits the matching `step-end`
+  // that closes the agent_runs row opened by `onStepStart`.
+  const onRunRecord = (r: AgentRunRecord): void => {
     emit({
       type: 'step-end',
       stepId: r.stepId,
@@ -118,7 +125,7 @@ export async function executeJobLocally(
     if (job.kind === 'autofix') {
       if (job.issueNumber == null) throw new Error('autofix job has no issue_number');
       const outcome = await new core.AutofixOrchestrator(store, config, github).processIssue(job.issueNumber, {
-        apply: true, onEvent, onAgentEvent, onRunRecord, pauseRequested, cancelRequested,
+        apply: true, labels, onEvent, onAgentEvent, onStepStart, onRunRecord, pauseRequested, cancelRequested,
       });
       const ok = outcome.status === 'pr-opened' || outcome.status === 'dry-run' || outcome.status === 'skipped';
       result = {
@@ -137,7 +144,7 @@ export async function executeJobLocally(
     } else if (job.kind === 'ci-followup') {
       if (!ciFollowupSeed) throw new Error('ci-followup job is missing payload.ciFollowup seed');
       const outcome = await new core.AutofixOrchestrator(store, config, github).processCiFollowup(ciFollowupSeed, {
-        apply: true, onEvent, onAgentEvent, onRunRecord, pauseRequested, cancelRequested,
+        apply: true, labels, onEvent, onAgentEvent, onStepStart, onRunRecord, pauseRequested, cancelRequested,
       });
       const ok = outcome.status === 'pushed' || outcome.status === 'skipped';
       result = {
@@ -160,7 +167,8 @@ export async function executeJobLocally(
         input: flow.input || String(job.issueNumber),
         store, config, github,
         issueNumber: job.issueNumber,
-        onEvent, onAgentEvent, onRunRecord,
+        labels,
+        onEvent, onAgentEvent, onStepStart, onRunRecord,
         pauseRequested, cancelRequested,
       });
       const status = flowOutcome.status === 'succeeded' ? 'succeeded'

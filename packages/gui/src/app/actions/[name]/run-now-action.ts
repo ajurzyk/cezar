@@ -15,12 +15,17 @@ export interface RunNowResult {
 }
 
 /**
- * Real, synchronous "run this action against this issue" — the cockpit-bound
- * counterpart to the dry-run simulator. Persists a one-row `workflow_runs`
- * entry plus one `agent_runs` row and per-effect `agent_run_events` so the
- * cockpit page renders the same shape as a cron-dispatched triage pass.
+ * Real, synchronous "run this action against this issue or PR" — the
+ * cockpit-bound counterpart to the dry-run simulator. Persists a one-row
+ * `workflow_runs` entry plus one `agent_runs` row and per-effect
+ * `agent_run_events` so the cockpit page renders the same shape as a
+ * cron-dispatched triage pass.
+ *
+ * The `number` arg is the issue/PR number — which table it resolves against
+ * is determined by `actionRow.target`. PRs live in `pull_requests` (synced by
+ * /api/cron/prs-sync), not `issues`.
  */
-export async function runActionNow(actionId: string, issueNumber: number): Promise<RunNowResult> {
+export async function runActionNow(actionId: string, number: number): Promise<RunNowResult> {
   const user = await getSessionUser();
   if (!user) return { ok: false, error: 'Not authenticated' };
 
@@ -31,7 +36,6 @@ export async function runActionNow(actionId: string, issueNumber: number): Promi
   const supabase = createSupabaseAdminClient();
   const core = await import('@cezar/core');
 
-  // Load the action and the issue side-by-side.
   const { data: actionRow } = await supabase
     .from('actions')
     .select('id, name, kind, description, system_prompt, skill_refs, target, triggers, effects, output_schema, enabled')
@@ -47,13 +51,38 @@ export async function runActionNow(actionId: string, issueNumber: number): Promi
     .single();
   const autoCommentEnabled = workspaceRow?.action_auto_comment ?? true;
 
-  const { data: issue } = await supabase
-    .from('issues')
-    .select('number, title, body, state, labels, html_url, comments')
-    .eq('workspace_id', workspace.id)
-    .eq('number', issueNumber)
-    .maybeSingle();
-  if (!issue) return { ok: false, error: `Issue #${issueNumber} not in the workspace's issue store` };
+  // Branch on target: issues live in `issues` (with cached comments), PRs in
+  // `pull_requests` (no cached comments — fetched on demand if a skill needs
+  // them). Validation error mentions the right noun so the modal makes sense.
+  type TargetRow = {
+    number: number;
+    title: string | null;
+    body: string | null;
+    state: string | null;
+    labels: string[] | null;
+    html_url: string | null;
+    comments?: unknown;
+  };
+  let targetRow: TargetRow | null = null;
+  if (actionRow.target === 'pr') {
+    const { data } = await supabase
+      .from('pull_requests')
+      .select('number, title, body, state, labels, html_url')
+      .eq('workspace_id', workspace.id)
+      .eq('number', number)
+      .maybeSingle();
+    targetRow = data;
+    if (!targetRow) return { ok: false, error: `PR #${number} not in the workspace's PR store — run /api/cron/prs-sync to refresh` };
+  } else {
+    const { data } = await supabase
+      .from('issues')
+      .select('number, title, body, state, labels, html_url, comments')
+      .eq('workspace_id', workspace.id)
+      .eq('number', number)
+      .maybeSingle();
+    targetRow = data;
+    if (!targetRow) return { ok: false, error: `Issue #${number} not in the workspace's issue store` };
+  }
 
   // Resolve a GitHub token: prefer GitHub App install token, fall back to
   // the caller's OAuth token.
@@ -82,25 +111,29 @@ export async function runActionNow(actionId: string, issueNumber: number): Promi
   const github = new core.GitHubService(config);
   const repoSlug = `${workspace.repoOwner}/${workspace.repoName}`;
 
+  const isPr = actionRow.target === 'pr';
+
   // ── persistence ─────────────────────────────────────────────────────────
   const persister = await createWorkflowRunPersister(supabase, {
     workspaceId: workspace.id,
     jobId: null,
     workflow: 'single-action',
     repo: repoSlug,
-    issueNumber,
+    issueNumber: isPr ? null : number,
+    prNumber: isPr ? number : null,
     onPersistError: (label, err) =>
       console.error(`[run-now] persist ${label} failed:`, err instanceof Error ? err.message : err),
   });
   if (!persister.id) return { ok: false, error: 'Could not create workflow_runs row' };
 
   await persister.recordEvent('lifecycle', {
-    message: `run-now: ${actionRow.name} on #${issueNumber} (manual)`,
+    message: `run-now: ${actionRow.name} on ${isPr ? 'PR' : 'issue'} #${number} (manual)`,
   });
 
-  // Build an ActionTarget mirroring run-triage-pass-job.ts.
-  const labels = Array.isArray(issue.labels) ? issue.labels.filter((l): l is string => typeof l === 'string') : [];
-  const commentsArr = Array.isArray(issue.comments) ? issue.comments : [];
+  // Build an ActionTarget mirroring run-triage-pass-job.ts. Issues carry a
+  // cached comments array; PRs don't (pull_requests has no comments column).
+  const labels = Array.isArray(targetRow.labels) ? targetRow.labels.filter((l): l is string => typeof l === 'string') : [];
+  const commentsArr = Array.isArray(targetRow.comments) ? targetRow.comments : [];
   type CommentLike = { author?: unknown; createdAt?: unknown; body?: unknown };
   const commentsText =
     commentsArr.length > 0
@@ -117,12 +150,12 @@ export async function runActionNow(actionId: string, issueNumber: number): Promi
 
   const target: import('@cezar/core').ActionTarget = {
     kind: actionRow.target,
-    number: issue.number,
-    title: issue.title ?? '',
-    body: issue.body ?? '',
-    state: issue.state ?? 'open',
+    number: targetRow.number,
+    title: targetRow.title ?? '',
+    body: targetRow.body ?? '',
+    state: targetRow.state ?? 'open',
     labels,
-    htmlUrl: issue.html_url ?? '',
+    htmlUrl: targetRow.html_url ?? '',
     comments: commentsText,
   };
 
@@ -165,7 +198,7 @@ export async function runActionNow(actionId: string, issueNumber: number): Promi
     const skills = await core.discoverBuiltinSkills();
     const result = await core.runAction(action, target, {
       skills,
-      effectCtx: { github, targetNumber: issueNumber, supabase },
+      effectCtx: { github, targetNumber: number, supabase },
       autoComment: { enabled: autoCommentEnabled, triggeredBy: 'manual · run now' },
     });
     summary = result.text?.slice(0, 500);

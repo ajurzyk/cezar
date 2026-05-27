@@ -1,4 +1,4 @@
-import type { Config, Store, CiFollowupInput, FlowStep } from '@cezar/core';
+import type { Config, Store, CiFollowupInput, FlowStep, WorkspaceLabel } from '@cezar/core';
 
 // ─── wire shapes ────────────────────────────────────────────────────────
 // What `GET /api/runner/jobs` returns when there's work. The SaaS has already
@@ -26,6 +26,14 @@ export interface ClaimedJob {
   ciFollowupSeed: CiFollowupInput | null;
   /** For `flow` jobs only — the `flows` row referenced by `jobs.payload.flowId`. */
   flow: { name: string; steps: FlowStep[]; input: string } | null;
+  /**
+   * Workspace label catalog (the accepted `workspace_labels` rows for this
+   * workspace). The runner forwards these into the engine so each agent step
+   * gets the catalog injected into its system prompt — same behavior as the
+   * cron-based dispatcher. Missing (older SaaS) ⇒ runner falls back to no
+   * catalog, which the engine treats as a no-op.
+   */
+  labels?: WorkspaceLabel[];
 }
 
 /** One streamed event the runner POSTs back to `/api/runner/runs/:id/events`. */

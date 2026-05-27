@@ -38,10 +38,18 @@ export interface WorkflowRunPersister {
   /** The `workflow_runs.id` this persister writes against. Null when the initial insert failed. */
   readonly id: string | null;
   /**
-   * Persist one step's `AgentRunRecord` as an `agent_runs` row, then emit a
-   * matching `step-end` event tagged with that row's id and bump
-   * `workflow_runs.current_step_id` to this step. Best-effort: a failed insert
-   * is reported via `onPersistError` and the call returns.
+   * Open an `agent_runs` row with `status='running'` for a step that's about
+   * to execute, then emit a matching `step-start` event so the cockpit can
+   * render the step card and the ▶ marker as work begins (instead of waiting
+   * for the step to finish). Upserts on `(workflow_run_id, step_id,
+   * iteration)` — re-deliveries don't double-insert. Best-effort.
+   */
+  recordStepStart(record: AgentRunRecord): Promise<void>;
+  /**
+   * Close the `agent_runs` row opened by `recordStepStart` (or insert it
+   * outright when no start was delivered — the previous fallback path),
+   * then emit a matching `step-end` event tagged with that row's id and
+   * bump `workflow_runs.current_step_id` to this step. Best-effort.
    */
   recordAgentRun(record: AgentRunRecord): Promise<void>;
   /** Append one `agent_run_events` row (best-effort). */
@@ -107,26 +115,66 @@ export async function createWorkflowRunPersister(
     });
   };
 
-  const recordAgentRun: WorkflowRunPersister['recordAgentRun'] = async (r) => {
+  const recordStepStart: WorkflowRunPersister['recordStepStart'] = async (r) => {
     if (!workflowRunId) return;
-    await safe('agent_runs insert', async () => {
+    await safe('agent_runs step-start', async () => {
+      // Upsert on the (workflow_run_id, step_id, iteration) unique key from
+      // migration 0020 — a re-delivery is a no-op, and the row stays in
+      // `running` until `recordAgentRun` closes it.
       const { data, error } = await supabase
         .from('agent_runs')
-        .insert({
-          workspace_id: workspaceId,
-          workflow_run_id: workflowRunId!,
-          step_id: r.stepId,
-          iteration: r.iteration,
-          kind: (r.kind ?? null) as AgentRunsRow['kind'],
-          backend: r.backend,
-          model: r.model,
-          status: r.status === 'running' ? 'running' : r.status,
-          started_at: r.startedAt,
-          finished_at: r.finishedAt ?? null,
-          tokens_used: r.tokensUsed,
-          summary: r.summary ?? null,
-          error: r.error ?? null,
-        })
+        .upsert(
+          {
+            workspace_id: workspaceId,
+            workflow_run_id: workflowRunId!,
+            step_id: r.stepId,
+            iteration: r.iteration,
+            kind: (r.kind ?? null) as AgentRunsRow['kind'],
+            backend: r.backend,
+            model: r.model,
+            status: 'running',
+            started_at: r.startedAt,
+            tokens_used: 0,
+          },
+          { onConflict: 'workflow_run_id,step_id,iteration', ignoreDuplicates: false },
+        )
+        .select('id')
+        .single();
+      if (error) throw error;
+      await recordEvent(
+        'step-start',
+        { stepId: r.stepId, iteration: r.iteration },
+        data?.id,
+      );
+      await supabase.from('workflow_runs').update({ current_step_id: r.stepId }).eq('id', workflowRunId!);
+    });
+  };
+
+  const recordAgentRun: WorkflowRunPersister['recordAgentRun'] = async (r) => {
+    if (!workflowRunId) return;
+    await safe('agent_runs step-end', async () => {
+      // Upsert closes the row opened by `recordStepStart` (or inserts it
+      // outright if start wasn't delivered — the previous fallback path).
+      const { data, error } = await supabase
+        .from('agent_runs')
+        .upsert(
+          {
+            workspace_id: workspaceId,
+            workflow_run_id: workflowRunId!,
+            step_id: r.stepId,
+            iteration: r.iteration,
+            kind: (r.kind ?? null) as AgentRunsRow['kind'],
+            backend: r.backend,
+            model: r.model,
+            status: r.status === 'running' ? 'running' : r.status,
+            started_at: r.startedAt,
+            finished_at: r.finishedAt ?? null,
+            tokens_used: r.tokensUsed,
+            summary: r.summary ?? null,
+            error: r.error ?? null,
+          },
+          { onConflict: 'workflow_run_id,step_id,iteration', ignoreDuplicates: false },
+        )
         .select('id')
         .single();
       if (error) throw error;
@@ -173,6 +221,7 @@ export async function createWorkflowRunPersister(
 
   return {
     get id() { return workflowRunId; },
+    recordStepStart,
     recordAgentRun,
     recordEvent,
     finalize,

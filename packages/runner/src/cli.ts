@@ -15,7 +15,7 @@ Usage:
                            --kind cloud; auto-detected for self-hosted)
       --kind <k>           cloud | self-hosted   (default: self-hosted)
       --concurrency <n>    max concurrent jobs   (default: 1)
-      --poll-interval <s>  seconds between claim attempts (default: 5)
+      --poll-interval <s>  seconds between claim attempts (default: 1)
 
   cezar-runner help
       Show this help.

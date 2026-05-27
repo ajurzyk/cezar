@@ -7,11 +7,11 @@ import type { IssueStore } from '../store/store.js';
 import { discoverSkills } from '../skills/skill-catalog.js';
 import { createWorktree } from '../actions/autofix/worktree.js';
 import { createRunEnv } from '../provision/create-run-env.js';
-import { tailLines, type RunEnv, type ShellResult } from '../provision/run-env.js';
+import type { RunEnv } from '../provision/run-env.js';
+import type { WorkspaceLabel } from '../labels/label-catalog.js';
 import {
   agentStep,
   type AgentRunRecord,
-  type CommentSection,
   type Workflow,
   type WorkflowRunResult,
   type WorkflowStep,
@@ -71,8 +71,18 @@ export interface RunFlowParams {
   config: Config;
   github: GitHubService;
   issueNumber: number;
+  /**
+   * Workspace label catalog. When provided, the engine appends a
+   * "Repository label catalog" section to every flow step's system prompt
+   * (`labelScope: 'both'` — flow steps can transition issue→PR mid-run).
+   */
+  labels?: WorkspaceLabel[];
   onEvent: (msg: string) => void;
   onAgentEvent: (e: { type: string; [k: string]: unknown }) => void;
+  /** Step has begun — record carries `status:'running'`. Fired before the
+   *  step's body produces any lifecycle output so the cockpit can render
+   *  a card and emit `step-start` as work begins. */
+  onStepStart?: (r: AgentRunRecord) => void;
   onRunRecord: (r: AgentRunRecord) => void;
   pauseRequested?: () => boolean | Promise<boolean>;
   cancelRequested?: () => boolean | Promise<boolean>;
@@ -233,6 +243,7 @@ export async function runFlow(params: RunFlowParams): Promise<WorkflowRunResult<
       issueNumber: params.issueNumber,
       apply: true,
       skills,
+      labels: params.labels,
       // Bindings: per-step, set the skillName so resolveStepConfig appends the
       // skill body to the system prompt. The engine reads these from `bindings`.
       // Only agent steps need bindings; prefix steps (install / dev-server)
@@ -249,6 +260,7 @@ export async function runFlow(params: RunFlowParams): Promise<WorkflowRunResult<
       runEnv,
       onEvent: params.onEvent,
       onAgentEvent: (e: RunnerAgentEvent) => params.onAgentEvent(e as unknown as { type: string; [k: string]: unknown }),
+      onStepStart: params.onStepStart,
       onRunRecord: (r: AgentRunRecord) => {
         lastAgentRunId = r.id;
         params.onRunRecord(r);
@@ -281,8 +293,17 @@ export async function runFlow(params: RunFlowParams): Promise<WorkflowRunResult<
   ): WorkflowStep<FlowBlackboard> {
     const autofix = cfg.autofix;
     const builtinTools = autofix?.allowedTools ?? ['Read', 'Edit', 'Write', 'Grep', 'Glob', 'Bash'];
-    const bashAllowlist = autofix?.bashAllowlist;
-    const maxTurns = autofix?.maxTurns?.fixer ?? 30;
+    // Always permit gh label commands when there's a workspace label catalog
+    // — the catalog is appended to every flow step's system prompt and the
+    // instructions tell the agent to apply labels. A workspace bashAllowlist
+    // override (saved before label management existed) shouldn't silently
+    // strip these.
+    const baseAllowlist = autofix?.bashAllowlist;
+    const ghCmds = ['gh issue edit', 'gh issue view', 'gh pr edit', 'gh pr view'];
+    const bashAllowlist = baseAllowlist
+      ? Array.from(new Set([...baseAllowlist, ...ghCmds]))
+      : undefined;
+    const maxTurns = autofix?.maxTurns?.fixer ?? 45;
     const model = autofix?.models?.fixer ?? 'claude-sonnet-4-6';
 
     return agentStep<FlowBlackboard, unknown>({
@@ -320,6 +341,12 @@ export async function runFlow(params: RunFlowParams): Promise<WorkflowRunResult<
         const fallbackUrl = existingMarker?.data.prUrl;
         const effectiveNumber = number ?? fallbackNumber ?? null;
         const effectiveUrl = url ?? (number == null ? fallbackUrl : null) ?? null;
+        // Tell the engine to switch the living comment from issue → PR when
+        // this step is the first to surface a PR (typically the open-pr step
+        // that calls `gh pr create`). Without this, the engine only switches
+        // for typed `open-pr` workflow steps — so a flow's review step's
+        // output stays on the issue and is invisible on the PR's thread.
+        const isFirstPrInThisRun = number != null && url != null && lastUpsertedPr == null;
         const patch: Partial<FlowBlackboard> = {
           previousPullRequestUrl: effectiveUrl ?? '',
           previousPullRequestNumber: effectiveNumber != null ? String(effectiveNumber) : '',
@@ -360,6 +387,21 @@ export async function runFlow(params: RunFlowParams): Promise<WorkflowRunResult<
             reason: `stopped at step ${idx + 1}: output matched "${step.stopChainIfContains}"`,
           };
         }
+        // Universal stop-chain marker shipped by the autofix skill set: an
+        // agent that ends with `NO_ACTION_NEEDED` on its own line is saying
+        // "this issue doesn't need any further action" (already fixed, not a
+        // bug, an in-flight human PR already addresses it, etc.). Downstream
+        // steps (fix → open-pr → review) would be inappropriate. Matches the
+        // existing heading display rule in `flowStepHeading` — without this,
+        // the heading claims "stopped" but the chain actually proceeds, and
+        // cumulative output usually blows past GitHub's 65536-byte comment
+        // limit so the issue gets no visible update.
+        if (STOP_MARKER_RE.test(rawText)) {
+          return {
+            kind: 'skip-run',
+            reason: `stopped at step ${idx + 1}: agent emitted NO_ACTION_NEEDED`,
+          };
+        }
         // Hard fail when the skill explicitly reports a blocked/failed status.
         // Convention used by the autofix skill set ('fix', 'open-pr', etc.):
         // an end-of-output line like `Status: blocked` or `Status: failed`
@@ -377,7 +419,11 @@ export async function runFlow(params: RunFlowParams): Promise<WorkflowRunResult<
             blackboardPatch: patch,
           };
         }
-        return { kind: 'continue', blackboardPatch: patch };
+        return {
+          kind: 'continue',
+          blackboardPatch: patch,
+          ...(isFirstPrInThisRun ? { openedPr: { number: number!, url: url! } } : {}),
+        };
       },
       // Render the agent's actual output into the living comment. The flow
       // runtime never enforces a JSON schema, so the engine takes the
@@ -402,6 +448,15 @@ const STOP_MARKER_RE = /^NO_ACTION_NEEDED\b/m;
  *  cascade into runaway prompts. ~8KB ≈ ~2k tokens — enough for a structured
  *  brief, not enough to balloon. */
 const MAX_PREV_OUTPUT_CHARS = 8000;
+
+/** Cap on a single step's section body in the living comment (chars). GitHub
+ *  rejects issue/PR comments over 65536 bytes; one step's raw output (e.g. a
+ *  long investigation ending in NO_ACTION_NEEDED) can easily exceed that by
+ *  itself, and `LivingComment.rerender` swallows the resulting 422 — leaving
+ *  the issue with no visible update. ~20KB tail is the most-informative
+ *  slice (the agent's final conclusion is at the end) and leaves headroom
+ *  for multiple sections plus header overhead. */
+const MAX_STEP_BODY_CHARS = 20000;
 
 /** Matches an end-of-output `Status: blocked` / `Status: failed` marker (per the
  *  autofix skill set's output contract). Case-insensitive, line-anchored. */
@@ -436,16 +491,19 @@ function flowStepHeading(idx: number, step: FlowStep, rawText: string): string {
 }
 
 /**
- * Render the agent's full output into the living comment. We don't truncate
- * here — losing the head of a multi-section response (e.g. NO_ACTION_NEEDED
- * with a long justification) was more disruptive than the verbose history.
- * If a step's output ever pushes the combined comment past GitHub's 65536-byte
- * limit, `updateComment` will surface that error and we'll re-introduce a
- * higher per-step cap (or split into separate comments per step).
+ * Render the agent's full output into the living comment. Caps the body at
+ * `MAX_STEP_BODY_CHARS` (tail-biased) so one very-long step can't push the
+ * combined comment past GitHub's 65536-byte limit — that error surfaces in
+ * `LivingComment.rerender`'s swallowed try/catch and leaves the issue with
+ * no visible update. The final conclusion (e.g. `NO_ACTION_NEEDED` with its
+ * justification, or a verdict summary) is always at the end of the agent's
+ * output, so keeping the tail is the right slice.
  */
 function flowStepBody(rawText: string): string {
   const trimmed = (rawText ?? '').trim();
-  return trimmed || '_(no output)_';
+  if (!trimmed) return '_(no output)_';
+  if (trimmed.length <= MAX_STEP_BODY_CHARS) return trimmed;
+  return `_… (truncated; showing last ${MAX_STEP_BODY_CHARS} of ${trimmed.length} chars — full output is in the cockpit event log)_\n\n${trimmed.slice(-MAX_STEP_BODY_CHARS)}`;
 }
 
 // ─── PR marker extraction ──────────────────────────────────────────────────
@@ -561,14 +619,6 @@ export function composeStepSystemPrompt(step: FlowStep): string {
 // no `RunEnv` (i.e. repo-less flows), so adding them unconditionally would also
 // be safe — we gate them in `runFlow` only to keep the cockpit clean.
 
-function shellCommentSection(label: string, result: ShellResult): CommentSection {
-  const out = tailLines(`${result.stdout}\n${result.stderr}`, 30);
-  return {
-    heading: result.ok ? `✅ ${label} passed` : `❌ ${label} failed (exit ${result.exitCode})`,
-    body: out ? `\`\`\`\n${out}\n\`\`\`` : '_(no output)_',
-  };
-}
-
 function makeInstallStep(): WorkflowStep<FlowBlackboard> {
   return {
     id: 'install',
@@ -579,7 +629,9 @@ function makeInstallStep(): WorkflowStep<FlowBlackboard> {
     // can't do useful work against an unbuilt project anyway).
     gate: (cfg) => cfg.autofix?.projectEnv?.gateOnInstall ?? true,
     retriable: false,
-    commentSection: (result) => shellCommentSection('Install', result),
+    // Setup-phase step — no `commentSection` on purpose: install logs would
+    // bury the actual flow output in the living comment. Status/output still
+    // appears in the cockpit via the agent_run_events stream.
   };
 }
 
@@ -592,12 +644,6 @@ function makeDevServerStep(): WorkflowStep<FlowBlackboard> {
     // engine still exposes `devServerUrl` to subsequent agent steps via the
     // step context, so agents can `curl` it once it's ready.
     gate: false,
-    commentSection: (info) =>
-      info.url
-        ? {
-            heading: info.ready ? '🌐 Dev server ready' : '🌐 Dev server started (not confirmed ready)',
-            body: `Running at \`${info.url}\` — agents can probe it with \`curl\`.`,
-          }
-        : null,
+    // Setup-phase step — no `commentSection` on purpose (see install above).
   };
 }

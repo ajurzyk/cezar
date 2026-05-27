@@ -1,5 +1,10 @@
 import type { AgentBackend } from '../agents/agent-runner.js';
 import type { Skill } from '../skills/skill-catalog.js';
+import {
+  formatLabelCatalogPrompt,
+  type LabelPromptScope,
+  type WorkspaceLabel,
+} from '../labels/label-catalog.js';
 
 /**
  * The built-in autofix step ids that exist *today* via `AutofixOrchestrator`.
@@ -70,8 +75,14 @@ export function resolveStepConfig(args: {
   // copy/paste slip; kept as-spec'd, `runOverride.model` is unused for now.
   runOverride?: { backend?: AgentBackend; model?: AgentBackend };
   skills: Skill[];
+  /** Workspace label catalog. When present, an entry is appended to the
+   *  system prompt under "## Repository label catalog" (see
+   *  {@link formatLabelCatalogPrompt}). */
+  labels?: WorkspaceLabel[];
+  /** Which scope of the catalog to include for this step. Defaults to `'both'`. */
+  labelScope?: LabelPromptScope;
 }): ResolvedStepConfig {
-  const { builtinSystemPrompt, builtinModel, binding, runOverride, skills } = args;
+  const { builtinSystemPrompt, builtinModel, binding, runOverride, skills, labels, labelScope } = args;
 
   const backend: AgentBackend =
     binding?.backend ?? runOverride?.backend ?? args.builtinBackend ?? 'anthropic-api';
@@ -84,6 +95,11 @@ export function resolveStepConfig(args: {
     if (skill) {
       systemPrompt = `${builtinSystemPrompt}\n\n## Repo-specific guidance\n\n${skill.body}`;
     }
+  }
+
+  const catalog = formatLabelCatalogPrompt(labels ?? null, labelScope ?? 'both');
+  if (catalog) {
+    systemPrompt = `${systemPrompt}\n\n${catalog}`;
   }
 
   return { systemPrompt, backend, model, extraTools, skillName: binding?.skillName ?? null };

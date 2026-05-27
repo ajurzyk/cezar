@@ -47,10 +47,10 @@ export type CommentSection = { heading: string; body: string } | null;
  *  - `goto-loop` — explicit jump back to the start of a declared loop.
  */
 export type StepOutcome<W> =
-  | { kind: 'continue'; blackboardPatch?: Partial<W> }
+  | { kind: 'continue'; blackboardPatch?: Partial<W>; openedPr?: { number: number; url: string } }
   | { kind: 'skip-run'; reason: string }
   | { kind: 'fail'; reason: string; retriable?: boolean; blackboardPatch?: Partial<W> }
-  | { kind: 'goto-loop'; loopId: string; blackboardPatch?: Partial<W> };
+  | { kind: 'goto-loop'; loopId: string; blackboardPatch?: Partial<W>; openedPr?: { number: number; url: string } };
 
 // ─── Step execution context ─────────────────────────────────────────────────
 
@@ -151,6 +151,13 @@ export interface AgentStepDef<W, T> extends BaseStepDef {
   failCommentSection?: (reason: string, ctx: WorkflowStepContext<W>) => CommentSection;
   /** True ⇒ the engine refuses to run this step without a `worktreePath`. */
   cwdRequired: boolean;
+  /**
+   * Which slice of the workspace label catalog to append to this step's system
+   * prompt. `'issue'` ⇒ issue-scoped labels (+ `both`); `'pr'` ⇒ pr-scoped (+
+   * `both`); `'both'` ⇒ the entire catalog. Omitted ⇒ defaults to `'both'`.
+   * Has no effect when the run wasn't given a label catalog (`ctx.labels`).
+   */
+  labelScope?: 'issue' | 'pr' | 'both';
 }
 
 /** A side-effecting step (add label, comment, close issue, …) with typed I/O. */

@@ -182,6 +182,27 @@ export async function executeEffect(
 }
 
 /**
+ * Anthropic's tool-name regex is `^[a-zA-Z0-9_-]{1,128}$` — no dots. Our
+ * effect names (`label.add`, `label.remove`, `label.set`) use dots as the
+ * namespace separator, so we translate `.` → `_` on the wire. `wireToolName`
+ * is what goes into the tools array sent to the API; `effectNameFromWire`
+ * maps the name on a `tool_use` block back to the registry key.
+ */
+export function wireToolName(name: EffectName): string {
+  return name.replace(/\./g, '_');
+}
+
+export function effectNameFromWire(wire: string): EffectName | null {
+  // Fast path: name was wire-safe to begin with (`comment`, `close`, `assign`,
+  // `link-duplicate`, `set-priority`).
+  if ((ALL_EFFECT_NAMES as readonly string[]).includes(wire)) return wire as EffectName;
+  // Restore dots — only effect names with `_` correspond to namespaced keys.
+  const dotted = wire.replace(/_/g, '.');
+  if ((ALL_EFFECT_NAMES as readonly string[]).includes(dotted)) return dotted as EffectName;
+  return null;
+}
+
+/**
  * Convert the effect registry into the JSON-Schema shape Anthropic's tool-use
  * API expects. Used by the undeclared-mode runner.
  */
@@ -198,7 +219,7 @@ export function effectsAsAnthropicTools(allowed: readonly EffectName[] = ALL_EFF
       [k: string]: unknown;
     };
     return {
-      name,
+      name: wireToolName(name),
       description:
         def.description +
         ' Include `_confidence` (0-100 integer) reflecting how certain you are this effect should fire; omit if unsure.',

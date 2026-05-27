@@ -6,6 +6,7 @@ import type {
   GitHubService,
   TriagePassActionResult,
   TriagePassDeferSink,
+  WorkspaceLabel,
 } from '@cezar/core';
 import type { WorkflowRunPersister } from './persist-workflow-run';
 import type { Database } from './supabase/types';
@@ -21,6 +22,8 @@ export interface RunTriagePassJobParams {
   /** Optional sink — receives effects deferred to human review. When omitted
    *  the runner drops them (see docs/REFACTOR-PLAN-inbox-and-acceptance.md). */
   deferSink?: TriagePassDeferSink;
+  /** Workspace label catalog appended to each action's system message. */
+  labels?: WorkspaceLabel[];
 }
 
 export interface RunTriagePassJobResult {
@@ -50,7 +53,7 @@ export interface RunTriagePassJobResult {
  */
 export async function runTriagePassJob(params: RunTriagePassJobParams): Promise<RunTriagePassJobResult> {
   const core = await import('@cezar/core');
-  const { issueNumber, github, supabase, persister, workspaceId, trigger, deferSink } = params;
+  const { issueNumber, github, supabase, persister, workspaceId, trigger, deferSink, labels } = params;
 
   const { data: workspaceRow } = await supabase
     .from('workspaces')
@@ -91,6 +94,7 @@ export async function runTriagePassJob(params: RunTriagePassJobParams): Promise<
         triggeredBy: `cron · ${trigger ?? 'on-issue-opened'}`,
       },
       deferSink,
+      labels,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SupabaseStoreAdapter } from '@/lib/adapters/supabase-store';
 import { loadWorkspaceConfig } from '@/lib/load-workspace-config';
+import { loadWorkspaceLabels } from '@/lib/load-workspace-labels';
 import { authRunner } from '../_auth';
 import type { Database } from '@/lib/supabase/types';
 
@@ -73,6 +74,11 @@ export async function GET(req: Request) {
     config.workflow = { ...(config.workflow ?? {}), useEngine: true };
     // The runner clones the repo itself — don't ship the SaaS's (local) repoRoot.
     config.autofix.repoRoot = '';
+
+    // Workspace label catalog — shipped to the runner so the engine on the
+    // self-hosted side gets the same per-step prompt augmentation as the cron
+    // dispatcher (see execute-workflow-job.ts).
+    const labels = await loadWorkspaceLabels(admin, job.workspace_id);
 
     // ── issue-store snapshot ──
     const adapter = new SupabaseStoreAdapter(admin, job.workspace_id);
@@ -153,6 +159,7 @@ export async function GET(req: Request) {
       store: storeSnapshot,
       ciFollowupSeed,
       flow: flowOut,
+      labels,
     });
   } catch (err) {
     await releaseJob().catch(() => {});

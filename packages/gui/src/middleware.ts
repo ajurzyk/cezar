@@ -16,6 +16,13 @@ const PUBLIC_ROUTES = [
 ];
 
 export async function middleware(request: NextRequest) {
+  // Short-circuit before any Supabase client construction or Auth round-trip
+  // for routes that bring their own auth. Webhook + runner + cron endpoints
+  // are hit on a hot loop; paying `auth.getUser()` for an unused session
+  // lookup roughly doubles their latency floor.
+  const isPublic = PUBLIC_ROUTES.some((r) => request.nextUrl.pathname.startsWith(r));
+  if (isPublic) return NextResponse.next({ request });
+
   let supabaseResponse = NextResponse.next({ request });
 
   const supabase = createServerClient(
@@ -39,15 +46,13 @@ export async function middleware(request: NextRequest) {
 
   const { data: { user } } = await supabase.auth.getUser();
 
-  const isPublic = PUBLIC_ROUTES.some((r) => request.nextUrl.pathname.startsWith(r));
-
-  if (!user && !isPublic) {
+  if (!user) {
     const loginUrl = request.nextUrl.clone();
     loginUrl.pathname = '/login';
     return NextResponse.redirect(loginUrl);
   }
 
-  if (user && request.nextUrl.pathname === '/login') {
+  if (request.nextUrl.pathname === '/login') {
     const dashUrl = request.nextUrl.clone();
     dashUrl.pathname = '/dashboard';
     return NextResponse.redirect(dashUrl);
