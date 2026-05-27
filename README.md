@@ -50,7 +50,8 @@ shared model:
   your login.
 - **Live observability.** Every agent run streams events into the cockpit
   (`workflow_runs` → `agent_runs` → `agent_run_events`) with pause / cancel /
-  resume and `human-gate` steps that block on low-confidence decisions.
+  resume / retry / delete controls (single + bulk) and `human-gate` steps that
+  block on low-confidence decisions.
 
 ---
 
@@ -77,6 +78,14 @@ shared model:
 - **Effect-scoped GitHub access.** Actions can only fire effects they declare:
   `label.add` / `label.remove` / `label.set` / `comment` / `close` / `assign` /
   `link-duplicate` / `set-priority`. No surprise mutations.
+- **Workspace label catalog.** A label-analysis job scans the repo's existing
+  labels + the last 100 issues/PRs and writes a per-workspace vocabulary with
+  add/remove guidance per label. The catalog is then appended to every agent
+  step's system prompt so agents apply *your* labels with *your* semantics —
+  no inventing new labels, no inconsistent usage. Editable in the GUI.
+- **Local Supabase via Docker.** A one-command compose stack
+  (`yarn db:start` / `db:stop` / `db:reset`) ships in `infra/supabase/` —
+  develop the GUI against a real Postgres + Realtime without a cloud project.
 - **Solo-use CLI.** The original `cezar` interactive hub still works against a
   local JSON store — no Supabase, no GUI, no agent runs required.
 
@@ -173,12 +182,16 @@ binary globally.
 
 ### Option 2 — Self-hosted SaaS (cockpit + auto-triage)
 
-Run the full Next.js app against your own Supabase project.
+Run the full Next.js app against Supabase (your own cloud project, or the local
+docker stack that ships in `infra/supabase/`).
 
 ```bash
-# 1. provision Supabase + run migrations
-cd packages/gui
-npx supabase db push      # applies supabase/migrations/*.sql
+# 1a. EITHER: start the local Supabase stack (db + kong + Realtime in Docker)
+yarn db:start                       # docker compose up -d, runs migrations
+yarn db:logs                        # follow logs · db:reset, db:psql, db:stop
+
+# 1b. OR: provision your own cloud Supabase project
+cd packages/gui && npx supabase db push   # applies supabase/migrations/*.sql
 
 # 2. set env vars (see MIGRATION.md for the full list)
 cat > .env.local <<EOF
@@ -196,9 +209,9 @@ EOF
 yarn workspace @cezar/gui dev
 ```
 
-Then install the GitHub App on your repo, create a workspace via
-**Settings → Workspaces**, and open `/dashboard`. New issues will start
-triaging automatically.
+Then install the GitHub App on your repo, walk through the **Workspaces → New**
+wizard (project env preset, label-catalog analysis, workflow defaults), and
+open `/dashboard`. New issues will start triaging automatically.
 
 <!-- SCREENSHOT: The /dashboard page after a fresh workspace — stat row (Open
      / Closed / PRs open / Digested / Bugs), the "Recent agent runs" card, and
@@ -300,6 +313,37 @@ When classifying an issue, weight:
 
 Empty `.ai/skills/` is fully supported — every Action uses its built-in default.
 
+### Workspace label catalog
+
+The label catalog is the per-workspace vocabulary of labels Cezar will apply.
+Instead of having every Action's prompt list which labels exist (or worse,
+letting the model invent them), each workspace owns a single `workspace_labels`
+table that the engine appends to every agent step's system prompt under a
+"Repository label catalog" section.
+
+```text
+# Repository label catalog                  (rendered into the system prompt)
+
+- bug          (issue)       a defect: reproducible incorrect behavior
+   add when:   reproduction steps + observed/expected behavior present
+   remove when: triage confirms not-a-bug or it's converted to a question
+- needs-qa     (pr)          a fix that needs manual verification before merge
+   add when:   the change isn't fully covered by automated tests
+- …
+```
+
+A **label-analysis job** (`kind='label-analysis'` on the `jobs` queue) builds
+the catalog: pulls the repo's current labels, scans the codebase for label
+guidance, walks the last 100 issues + 100 PRs for `labeled`/`unlabeled` timeline
+events to learn maintainer conventions, then asks Claude to synthesize a draft.
+You review/edit the draft in **Settings → Labels** and accept it, materializing
+into `workspace_labels`.
+
+Each agent step picks the relevant slice via its `labelScope`: `issue` (issue-
+scoped + `both`), `pr` (pr-scoped + `both`), or `both` (everything). Effect:
+agents reliably apply *your* labels with *your* semantics, and stop inventing
+new ones.
+
 ---
 
 ## Built-in Action catalog
@@ -365,6 +409,22 @@ So an unconfigured workspace behaves exactly like the defaults.
 `runWorkflow` (in [`packages/core/src/workflows/workflow-engine.ts`](packages/core/src/workflows/workflow-engine.ts))
 threads a blackboard, emits one `AgentRunRecord` per step, and writes
 `agent_run_events` rows the cockpit subscribes to.
+
+**User-defined flows** (a named chain of `{ skill, argsTemplate }` steps,
+configurable per workspace) run on the same engine. The flow runtime adds:
+
+- A **run-environment hint** auto-injected into every flow agent step's user
+  prompt — `CWD`, `BRANCH`, `BASE`, plus an explicit *no-network-for-git* note.
+  Stops review-class skills from burning their turn budget on offline
+  `gh pr checkout` / `git fetch origin pull/<n>/head` before realizing the
+  worktree is already on the PR's head branch.
+- `NO_ACTION_NEEDED` on its own line in a step's output **stops the chain**
+  cleanly (run ends `succeeded` with reason). The marker is the universal
+  "this issue doesn't need any further action" signal — shared with the typed
+  autofix workflow's `isNoActionNeeded` exit.
+- **Per-section body cap** (20 KB tail) when rendering a step's output into
+  the run's living comment, so a single long investigation can't push the
+  combined comment past GitHub's 65 536-byte limit.
 
 <!-- SCREENSHOT: Settings → Workflows page showing the autofix pipeline rows
      (verify-in-repo · root-cause · fix · review-loop · open-pr) with the
@@ -519,6 +579,13 @@ yarn workspace @cezar/gui    run dev         # Next.js dev server
 
 # single test file
 cd packages/core && npx vitest run tests/store/store.test.ts
+
+# local Supabase (docker compose stack in infra/supabase/)
+yarn db:start                                # up -d (db + kong + Realtime)
+yarn db:stop                                 # down
+yarn db:reset                                # down -v && up -d (wipes data)
+yarn db:logs                                 # follow logs
+yarn db:psql                                 # psql -U postgres -d postgres
 ```
 
 ### Tech stack
