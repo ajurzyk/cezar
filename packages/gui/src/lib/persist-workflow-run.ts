@@ -135,6 +135,10 @@ export async function createWorkflowRunPersister(
             status: 'running',
             started_at: r.startedAt,
             tokens_used: 0,
+            // Phase 2: stamp the per-run claude session id (migration 0024)
+            // so the cockpit can show "session XYZ" and a re-claim can read
+            // it back to `claude --resume <id>`.
+            session_id: r.sessionId ?? null,
           },
           { onConflict: 'workflow_run_id,step_id,iteration', ignoreDuplicates: false },
         )
@@ -143,10 +147,15 @@ export async function createWorkflowRunPersister(
       if (error) throw error;
       await recordEvent(
         'step-start',
-        { stepId: r.stepId, iteration: r.iteration },
+        { stepId: r.stepId, iteration: r.iteration, sessionId: r.sessionId ?? null },
         data?.id,
       );
-      await supabase.from('workflow_runs').update({ current_step_id: r.stepId }).eq('id', workflowRunId!);
+      const updatePatch: Database['public']['Tables']['workflow_runs']['Update'] = { current_step_id: r.stepId };
+      // First step that mints a session id seeds `workflow_runs.session_id`.
+      // We only set it if it isn't already populated (the column has a
+      // `coalesce`-style "first writer wins" semantic — same as the RPC).
+      if (r.sessionId) updatePatch.session_id = r.sessionId;
+      await supabase.from('workflow_runs').update(updatePatch).eq('id', workflowRunId!);
     });
   };
 
@@ -172,6 +181,7 @@ export async function createWorkflowRunPersister(
             tokens_used: r.tokensUsed,
             summary: r.summary ?? null,
             error: r.error ?? null,
+            session_id: r.sessionId ?? null,
           },
           { onConflict: 'workflow_run_id,step_id,iteration', ignoreDuplicates: false },
         )
@@ -180,10 +190,12 @@ export async function createWorkflowRunPersister(
       if (error) throw error;
       await recordEvent(
         'step-end',
-        { stepId: r.stepId, iteration: r.iteration, status: r.status, summary: r.summary, error: r.error },
+        { stepId: r.stepId, iteration: r.iteration, status: r.status, summary: r.summary, error: r.error, sessionId: r.sessionId ?? null },
         data?.id,
       );
-      await supabase.from('workflow_runs').update({ current_step_id: r.stepId }).eq('id', workflowRunId!);
+      const updatePatch: Database['public']['Tables']['workflow_runs']['Update'] = { current_step_id: r.stepId };
+      if (r.sessionId) updatePatch.session_id = r.sessionId;
+      await supabase.from('workflow_runs').update(updatePatch).eq('id', workflowRunId!);
     });
   };
 

@@ -25,7 +25,7 @@ export async function executeJobLocally(
   claimed: ClaimedJob,
   controls: ExecuteJobControls,
 ): Promise<void> {
-  const { workflowRunId, job, workspace, githubToken, ciFollowupSeed, flow, labels } = claimed;
+  const { workflowRunId, job, workspace, githubToken, ciFollowupSeed, flow, labels, resumeSessionId } = claimed;
 
   // ── event buffer ──────────────────────────────────────────────────────
   const buffer: RunnerEvent[] = [];
@@ -64,7 +64,12 @@ export async function executeJobLocally(
   // Fired at the moment the engine begins a step (before the agent launches).
   // Emits a `step-start` event so the cockpit can open the agent_runs row +
   // render a card right away — instead of waiting for the step to finish.
+  // The first step-end that carries a sessionId stamps the whole run. We
+  // hold onto it so finalizeRun can re-stamp `workflow_runs.session_id`
+  // even if the per-event RPC hasn't landed yet.
+  let runSessionId: string | undefined;
   const onStepStart = (r: AgentRunRecord): void => {
+    if (r.sessionId) runSessionId = r.sessionId;
     emit({
       type: 'step-start',
       stepId: r.stepId,
@@ -74,12 +79,14 @@ export async function executeJobLocally(
       model: r.model,
       status: 'running',
       startedAt: r.startedAt,
-      payload: { stepId: r.stepId, iteration: r.iteration },
+      sessionId: r.sessionId,
+      payload: { stepId: r.stepId, iteration: r.iteration, sessionId: r.sessionId ?? null },
     });
   };
   // Fired when the engine has finished a step. Emits the matching `step-end`
   // that closes the agent_runs row opened by `onStepStart`.
   const onRunRecord = (r: AgentRunRecord): void => {
+    if (r.sessionId) runSessionId = r.sessionId;
     emit({
       type: 'step-end',
       stepId: r.stepId,
@@ -93,7 +100,8 @@ export async function executeJobLocally(
       tokensUsed: r.tokensUsed,
       startedAt: r.startedAt,
       finishedAt: r.finishedAt ?? null,
-      payload: { stepId: r.stepId, iteration: r.iteration, status: r.status, summary: r.summary, error: r.error },
+      sessionId: r.sessionId,
+      payload: { stepId: r.stepId, iteration: r.iteration, status: r.status, summary: r.summary, error: r.error, sessionId: r.sessionId ?? null },
     });
   };
 
@@ -128,6 +136,7 @@ export async function executeJobLocally(
       if (job.issueNumber == null) throw new Error('autofix job has no issue_number');
       const outcome = await new core.AutofixOrchestrator(store, config, github).processIssue(job.issueNumber, {
         apply: true, labels, onEvent, onAgentEvent, onStepStart, onRunRecord, pauseRequested, cancelRequested,
+        resumeSessionId: resumeSessionId ?? undefined,
       });
       const ok = outcome.status === 'pr-opened' || outcome.status === 'dry-run' || outcome.status === 'skipped';
       result = {
@@ -147,6 +156,7 @@ export async function executeJobLocally(
       if (!ciFollowupSeed) throw new Error('ci-followup job is missing payload.ciFollowup seed');
       const outcome = await new core.AutofixOrchestrator(store, config, github).processCiFollowup(ciFollowupSeed, {
         apply: true, labels, onEvent, onAgentEvent, onStepStart, onRunRecord, pauseRequested, cancelRequested,
+        resumeSessionId: resumeSessionId ?? undefined,
       });
       const ok = outcome.status === 'pushed' || outcome.status === 'skipped';
       result = {
@@ -172,6 +182,7 @@ export async function executeJobLocally(
         labels,
         onEvent, onAgentEvent, onStepStart, onRunRecord,
         pauseRequested, cancelRequested,
+        resumeSessionId: resumeSessionId ?? undefined,
       });
       const status = flowOutcome.status === 'succeeded' ? 'succeeded'
         : flowOutcome.status === 'paused' ? 'paused'
@@ -210,7 +221,7 @@ export async function executeJobLocally(
     }
 
     await flush();
-    await client.finalizeRun(workflowRunId, { ...result.finalize, tokensUsed });
+    await client.finalizeRun(workflowRunId, { ...result.finalize, tokensUsed, sessionId: runSessionId ?? null });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[runner] job ${job.id} failed:`, message);

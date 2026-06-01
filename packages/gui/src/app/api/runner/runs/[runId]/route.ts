@@ -31,6 +31,10 @@ interface FinalizeBody {
   headSha?: string | null;
   tokensUsed?: number;
   reason?: string | null;
+  /** Phase 2: claude session id for this run. Stamped on
+   *  `workflow_runs.session_id` if not already set so a future re-claim
+   *  can `claude --resume <id>`. */
+  sessionId?: string | null;
 }
 
 /** PATCH /api/runner/runs/:runId — the runner reports the final state. Updates
@@ -61,6 +65,10 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ runId:
   };
   if (typeof body.tokensUsed === 'number') patch.tokens_used = body.tokensUsed;
   if (terminal || runStatus === 'paused') patch.finished_at = new Date().toISOString();
+  // Last-resort writer for `session_id` (the per-event RPC's coalesce path
+  // is the primary route; this catches the case where no step event ever
+  // landed on the SaaS).
+  if (body.sessionId) patch.session_id = body.sessionId;
   await admin.from('workflow_runs').update(patch).eq('id', runId);
 
   if (run.job_id) {

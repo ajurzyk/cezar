@@ -396,6 +396,10 @@ export interface Database {
           finished_at: string | null;
           created_at: string;
           updated_at: string;
+          /** Canonical Claude CLI session UUID for this run. Set once by the
+           *  first step that mints one, then reused on re-claim (the runner
+           *  passes `claude --resume <session_id>`). */
+          session_id: string | null;
         };
         Insert: Omit<
           Database['public']['Tables']['workflow_runs']['Row'],
@@ -420,6 +424,7 @@ export interface Database {
           finished_at?: string | null;
           created_at?: string;
           updated_at?: string;
+          session_id?: string | null;
         };
         Update: Partial<Database['public']['Tables']['workflow_runs']['Insert']>;
       };
@@ -440,6 +445,10 @@ export interface Database {
           cost_estimate: number | null;
           summary: string | null;
           error: string | null;
+          /** Claude CLI session UUID for this step. The workflow engine reuses
+           *  one id across every step of a workflow run, and on a re-claim the
+           *  runner picks it up via `claude --resume <session_id>`. */
+          session_id: string | null;
         };
         Insert: Omit<
           Database['public']['Tables']['agent_runs']['Row'],
@@ -457,6 +466,7 @@ export interface Database {
           cost_estimate?: number | null;
           summary?: string | null;
           error?: string | null;
+          session_id?: string | null;
         };
         Update: Partial<Database['public']['Tables']['agent_runs']['Insert']>;
       };

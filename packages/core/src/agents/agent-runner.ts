@@ -37,6 +37,15 @@ export interface AgentRunSpec<T = unknown> {
    *  `claude --resume <id>` later. Today only honored by
    *  `ClaudeCodeCliRunner`; the API/SDK backend ignores it. */
   sessionId?: string;
+  /** When true and `sessionId` is set, the claude-cli runner spawns
+   *  `claude --resume <sessionId>` instead of starting a fresh session
+   *  with `--session-id <sessionId>`. Used by the workflow engine when
+   *  a job is re-claimed after a runner crash to pick up where the
+   *  previous host left off. The runner falls back to a fresh start
+   *  with the same id if the on-disk session can't be found (e.g.
+   *  cross-host re-claim — the session blob lives under `~/.claude/`
+   *  on the original host). API/SDK backend ignores. */
+  resume?: boolean;
 }
 
 /**
@@ -76,6 +85,11 @@ export interface AgentRunResult<T = unknown> {
   tokensUsed: number;
   /** True when a configured `tokenBudget` tripped (run was interrupted early). */
   budgetExceeded: boolean;
+  /** The session id this run executed under, when the backend has one.
+   *  For `claude-cli` it's the value passed in via `spec.sessionId` (echoed
+   *  back so the engine doesn't have to remember it); for API/SDK backends
+   *  this stays undefined. */
+  sessionId?: string;
 }
 
 /**

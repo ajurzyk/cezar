@@ -39,7 +39,10 @@ export function createAgentRunner(
     );
   }
 
-  const transport = opts.config?.autofix?.runner?.transport ?? 'print';
+  // No default here — let `ClaudeCodeCliRunner.resolveDefaultTransport()`
+  // pick `'stream-json'` (with the `CEZAR_CLI_TRANSPORT` env escape hatch).
+  // If the workspace config pins one explicitly, that wins.
+  const transport = opts.config?.autofix?.runner?.transport;
 
   switch (backend) {
     case 'anthropic-api':

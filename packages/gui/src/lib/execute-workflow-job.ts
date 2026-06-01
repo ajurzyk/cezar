@@ -162,6 +162,18 @@ export async function executeWorkflowJob(
     let tokensUsed = 0;
     let outcomeJson: unknown = null;
 
+    // Phase 2 — on a re-claim the watchdog reuses the existing workflow_runs
+    // row, so its `session_id` is the one the previous (crashed) attempt was
+    // driving. Pass it back through so the engine can `claude --resume <id>`
+    // on the first agent step. Cross-host re-claims fall back to a fresh
+    // start under the same id; same-host re-claims pick up where we left off.
+    const { data: existingRunRow } = await adminSupabase
+      .from('workflow_runs')
+      .select('session_id')
+      .eq('id', persister.id)
+      .maybeSingle();
+    const resumeSessionId = existingRunRow?.session_id ?? undefined;
+
     if (workflow === 'flow') {
       if (!flowRow) throw new Error('flow not loaded (internal error)');
       const result = await core.runFlow({
@@ -178,6 +190,7 @@ export async function executeWorkflowJob(
         onRunRecord,
         pauseRequested,
         cancelRequested,
+        resumeSessionId,
       });
       outcomeJson = result;
       runStatus = result.status === 'succeeded' ? 'succeeded'
@@ -202,6 +215,7 @@ export async function executeWorkflowJob(
         onRunRecord,
         pauseRequested,
         cancelRequested,
+        resumeSessionId,
       });
       outcomeJson = outcome;
       runStatus =
@@ -225,6 +239,7 @@ export async function executeWorkflowJob(
         onRunRecord,
         pauseRequested,
         cancelRequested,
+        resumeSessionId,
       });
       outcomeJson = outcome;
       runStatus = outcome.status === 'pushed' || outcome.status === 'skipped' ? 'succeeded' : 'failed';
@@ -286,6 +301,11 @@ export async function executeWorkflowJob(
       tokensUsed = (runs ?? []).reduce((s, r) => s + (r.tokens_used ?? 0), 0);
     }
 
+    // Phase 2: surface the final session id onto `workflow_runs.session_id`
+    // as a last-resort writer if no step event landed it yet (e.g. a run
+    // that failed before its first agent step finished).
+    const outcomeWithSession = (outcomeJson ?? null) as { sessionId?: string } | null;
+    const finalSessionId = outcomeWithSession?.sessionId ?? null;
     await persister.finalize({
       status: runStatus,
       outcome: outcomeJson as Database['public']['Tables']['workflow_runs']['Row']['outcome'],
@@ -296,6 +316,7 @@ export async function executeWorkflowJob(
       head_sha: headSha,
       tokens_used: tokensUsed,
       finished_at: new Date().toISOString(),
+      ...(finalSessionId ? { session_id: finalSessionId } : {}),
     });
     await finishJob(
       runStatus === 'succeeded' ? 'done'

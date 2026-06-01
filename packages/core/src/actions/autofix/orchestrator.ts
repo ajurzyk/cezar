@@ -137,6 +137,14 @@ export interface OrchestratorOptions {
    * orchestrator path.
    */
   labels?: import('../../labels/label-catalog.js').WorkspaceLabel[];
+  /**
+   * Phase 2 re-claim resume — when set, the workflow engine reuses this
+   * session id for every agent step and asks the runner to `claude --resume
+   * <id>` on the first step so the new process picks up the prior on-disk
+   * conversation. Cross-host re-claims fall back to a fresh start under the
+   * same id. Engine-only path; ignored by the legacy hand-rolled orchestrator.
+   */
+  resumeSessionId?: string;
 }
 
 export class AutofixOrchestrator {
@@ -930,6 +938,7 @@ export class AutofixOrchestrator {
         bindings: this.config.workflow?.bindings,
         settings: this.config.workflow?.settings,
         labels: opts.labels,
+        resumeSessionId: opts.resumeSessionId,
         loopMaxIterations: { 'fix-review': cfg.maxAttemptsPerIssue },
         tokenBudgetPerAttempt: cfg.tokenBudgetPerAttempt,
         onEvent: opts.onEvent,
@@ -1059,6 +1068,7 @@ export class AutofixOrchestrator {
         bindings: this.config.workflow?.bindings,
         settings: this.config.workflow?.settings,
         labels: opts.labels,
+        resumeSessionId: opts.resumeSessionId,
         tokenBudgetPerAttempt: cfg.ciFixTokenBudget ?? cfg.tokenBudgetPerAttempt,
         onEvent: opts.onEvent,
         onAgentEvent: opts.onAgentEvent ? (e) => { const legacy = normalizedToLegacyAgentEvent(e); if (legacy) opts.onAgentEvent!(legacy); } : undefined,

@@ -339,6 +339,11 @@ export interface AgentRunRecord {
   tokensUsed: number;
   summary?: string;
   error?: string;
+  /** Claude CLI session id this step ran under (when the backend has one).
+   *  The engine threads the same id across every step of a workflow run so
+   *  multi-step workflows reuse one warm session; on re-claim the runner
+   *  resumes via `claude --resume <sessionId>`. */
+  sessionId?: string;
 }
 
 export interface WorkflowRunResult<W> {
@@ -354,4 +359,7 @@ export interface WorkflowRunResult<W> {
   headSha?: string;
   /** Total cost-weighted tokens across all agent steps. */
   tokensUsed: number;
+  /** Claude CLI session id reused across every step of this run. Persisted
+   *  to `workflow_runs.session_id` so a re-claim can `claude --resume <id>`. */
+  sessionId?: string;
 }

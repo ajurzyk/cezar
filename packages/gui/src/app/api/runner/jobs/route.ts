@@ -117,22 +117,45 @@ export async function GET(req: Request) {
     }
 
     // ── workflow_runs row ──
+    // Phase 2: a watchdog-requeued job (claimed_by_runner was cleared after a
+    // lease expiry) already has an in-flight `workflow_runs` row from the
+    // crashed runner — reuse it so the runner can `claude --resume <id>`
+    // off the same session. The previous run's `session_id` flows back
+    // through `resumeSessionId` below.
     const repoSlug = owner && repo ? `${owner}/${repo}` : job.repo;
-    const { data: runRow, error: runErr } = await admin
+    const { data: existingRun } = await admin
       .from('workflow_runs')
-      .insert({
-        workspace_id: job.workspace_id,
-        job_id: job.id,
-        workflow: workflowLabel,
-        repo: repoSlug,
-        issue_number: runIssueNumber ?? null,
-        pr_number: job.pr_number ?? null,
-        status: 'running',
-        started_at: new Date().toISOString(),
-      })
-      .select('id')
-      .single();
-    if (runErr || !runRow) throw new Error(`workflow_runs insert failed: ${runErr?.message}`);
+      .select('id, session_id, status')
+      .eq('job_id', job.id)
+      .order('started_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    let runRowId: string;
+    let resumeSessionId: string | null = null;
+    if (existingRun && (existingRun.status === 'running' || existingRun.status === 'paused' || existingRun.status === 'queued')) {
+      runRowId = existingRun.id;
+      resumeSessionId = existingRun.session_id ?? null;
+      // Mark the row running again so the cockpit reflects the re-claim.
+      await admin.from('workflow_runs').update({ status: 'running' }).eq('id', runRowId);
+    } else {
+      const { data: runRow, error: runErr } = await admin
+        .from('workflow_runs')
+        .insert({
+          workspace_id: job.workspace_id,
+          job_id: job.id,
+          workflow: workflowLabel,
+          repo: repoSlug,
+          issue_number: runIssueNumber ?? null,
+          pr_number: job.pr_number ?? null,
+          status: 'running',
+          started_at: new Date().toISOString(),
+        })
+        .select('id')
+        .single();
+      if (runErr || !runRow) throw new Error(`workflow_runs insert failed: ${runErr?.message}`);
+      runRowId = runRow.id;
+    }
 
     await admin.from('jobs').update({ status: 'running', updated_at: new Date().toISOString() }).eq('id', job.id);
 
@@ -150,7 +173,7 @@ export async function GET(req: Request) {
         prNumber: job.pr_number,
         requiredBackend: job.required_backend,
       },
-      workflowRunId: runRow.id,
+      workflowRunId: runRowId,
       workspace: { id: job.workspace_id, owner, repo },
       // `config.github.token` IS included on purpose — the runner needs it; it's
       // already a short-lived/scoped token. No other secrets travel.
@@ -160,6 +183,11 @@ export async function GET(req: Request) {
       ciFollowupSeed,
       flow: flowOut,
       labels,
+      // Phase 2: re-claim resume. When non-null the runner asks the engine
+      // to spawn `claude --resume <id>` for the first agent step so the
+      // new process picks up the prior on-disk conversation; cross-host
+      // re-claims fall back to a fresh start under the same id.
+      resumeSessionId,
     });
   } catch (err) {
     await releaseJob().catch(() => {});

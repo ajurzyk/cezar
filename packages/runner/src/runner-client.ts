@@ -34,6 +34,14 @@ export interface ClaimedJob {
    * catalog, which the engine treats as a no-op.
    */
   labels?: WorkspaceLabel[];
+  /**
+   * Phase 2 re-claim resume. Set when the SaaS is handing back an existing
+   * `workflow_runs` row (the watchdog re-queued a crashed job). The runner
+   * threads this into the engine which spawns `claude --resume <id>` for
+   * the first agent step. Cross-host re-claims fall back to a fresh start
+   * under the same id (the on-disk session blob isn't local).
+   */
+  resumeSessionId?: string | null;
 }
 
 /** One streamed event the runner POSTs back to `/api/runner/runs/:id/events`. */
@@ -53,6 +61,11 @@ export interface RunnerEvent {
   tokensUsed?: number;
   startedAt?: string;
   finishedAt?: string | null;
+  /** Claude CLI session id this step ran under. Plumbed into the
+   *  `ingest_runner_events` RPC so it can populate `agent_runs.session_id`
+   *  and seed `workflow_runs.session_id` (migration 0024). Lets a re-claim
+   *  after a runner crash resume via `claude --resume <id>`. */
+  sessionId?: string;
 }
 
 export interface FinalizeRunBody {
@@ -64,6 +77,9 @@ export interface FinalizeRunBody {
   headSha?: string | null;
   tokensUsed?: number;
   reason?: string | null;
+  /** Claude CLI session id for the whole run (migration 0024). Stamped on
+   *  `workflow_runs.session_id` so a future re-claim can `claude --resume <id>`. */
+  sessionId?: string | null;
 }
 
 export interface HeartbeatBody {

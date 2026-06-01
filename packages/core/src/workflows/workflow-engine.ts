@@ -10,7 +10,7 @@ import type { WorkspaceLabel } from '../labels/label-catalog.js';
 import { commitAll, getDiffAgainstBase, squashCommitsToBase, startWorktreeAutosaver } from '../actions/autofix/worktree.js';
 import { upsertMarkerComment } from './pr-link-marker.js';
 import type { RunEnv } from '../provision/run-env.js';
-import { PersistentClaudeSession } from '../agents/persistent-claude-session.js';
+import { PersistentClaudeSession, ResumeFailedError } from '../agents/persistent-claude-session.js';
 import { UNIFIED_AUTOFIX_SYSTEM_PROMPT, buildUnifiedFlowSystemPrompt } from '../actions/autofix/prompts/autofix-unified.js';
 import { TokenBudget } from '../actions/autofix/token-budget.js';
 import { parseStructured } from '../agents/structured-output.js';
@@ -60,6 +60,17 @@ export interface WorkflowRunContext {
   apply: boolean;
   /** Pre-prepared worktree path for repo-backed workflows. */
   worktreePath?: string;
+  /**
+   * Pre-existing Claude session id for this workflow run, set on a re-claim
+   * after a runner crash (the SaaS reads `workflow_runs.session_id` from the
+   * previous attempt and threads it back here). The engine reuses it for
+   * every step and asks the runner to `claude --resume <id>` on the first
+   * step so the new process picks up the prior conversation. If the resume
+   * fails (cross-host re-claim — the on-disk session blob lives under
+   * `~/.claude/` on the original host), the runner falls back to a fresh
+   * start under the same id.
+   */
+  resumeSessionId?: string;
   /** Or: a hook the engine calls to set one up (and dispose it at the end). */
   prepareWorktree?: () => Promise<{ path: string; dispose: () => Promise<void> }>;
   /**
@@ -307,7 +318,14 @@ export class WorkflowEngine {
     // start. In `mode: 'unified'` the same id pins the single long-lived
     // child. Used to be `record.id` per step (a fresh UUID), which threw
     // away every chance at a cache hit.
-    const runSessionId = randomUUID();
+    //
+    // On a re-claim after a runner crash the caller passes the existing id
+    // through `ctx.resumeSessionId` so the workflow keeps the same session
+    // (and `resumingFromCrash` flips the first step to `--resume <id>` so
+    // the new process picks up the prior conversation prefix on the same
+    // host; cross-host fallback is the runner's job).
+    const runSessionId = ctx.resumeSessionId ?? randomUUID();
+    let resumingFromCrash = ctx.resumeSessionId != null;
 
     // Unified persistent session: one long-lived `claude` child for the whole
     // run. Applies to the typed autofix workflow (`UNIFIED_AUTOFIX_SYSTEM_PROMPT`)
@@ -323,6 +341,11 @@ export class WorkflowEngine {
       bindings,
       skills,
       labels: ctx.labels,
+      resume: resumingFromCrash,
+      onResumeFallback: () => {
+        ctx.onEvent?.(`[#${ctx.issueNumber}] claude --resume ${runSessionId} failed — falling back to fresh start under same id`);
+        resumingFromCrash = false;
+      },
     });
 
     const living = new LivingComment(
@@ -378,6 +401,9 @@ export class WorkflowEngine {
         branch,
         headSha,
         tokensUsed: totalTokens,
+        // The same id is used for every claude-cli step; report it back so
+        // the caller can persist it onto `workflow_runs.session_id`.
+        sessionId: runSessionId,
       };
     };
 
@@ -459,8 +485,22 @@ export class WorkflowEngine {
             labels: ctx.labels,
             unifiedSession,
             runSessionId,
+            // Cross-restart resume — `resumingFromCrash` is true only for the
+            // first step on a re-claim. After that step's runner has either
+            // resumed the on-disk session or fallen back to a cold start
+            // under the same id, all subsequent steps use the regular
+            // `--session-id` path (claude resumes off the prior step's turn
+            // file regardless).
+            resume: resumingFromCrash,
+            onResumeFallback: () => {
+              ctx.onEvent?.(`[#${ctx.issueNumber}] claude --resume ${runSessionId} failed — fell back to fresh start under same id`);
+            },
             onStepStart: ctx.onStepStart,
           });
+          // After the first step in a re-claimed run finishes (or fell back),
+          // we've reattached the session — subsequent steps treat it as a
+          // normal continuation.
+          resumingFromCrash = false;
           outcome = r.outcome;
           record = r.record;
           totalTokens += r.record.tokensUsed;
@@ -844,6 +884,13 @@ export class WorkflowEngine {
        *  so claude-cli resumes the same on-disk session (and Anthropic's
        *  prompt cache hits the prior conversation prefix). */
       runSessionId: string;
+      /** True on the first step of a re-claim — flips the runner from
+       *  `--session-id` to `--resume <id>` so the new process picks up the
+       *  prior conversation. The runner falls back transparently on a
+       *  cross-host re-claim where the session blob isn't local. */
+      resume: boolean;
+      /** Invoked when a resume fell back to fresh start under the same id. */
+      onResumeFallback?: () => void;
       /** Fire `onStepStart` from inside the agent step (after binding
        *  resolution) so the start record carries the resolved backend/model. */
       onStepStart?: (record: AgentRunRecord) => void;
@@ -885,6 +932,11 @@ export class WorkflowEngine {
       status: 'running',
       startedAt: new Date().toISOString(),
       tokensUsed: 0,
+      // Stamp the run session id on every agent_runs row so the cockpit can
+      // surface "session XYZ" and a future re-claim can read it back. Only
+      // claude-cli honors session ids today; for other backends this is a
+      // best-effort hint (the runner still ignores it).
+      sessionId: resolved.backend === 'claude-cli' ? args.runSessionId : undefined,
     };
     args.onStepStart?.(record);
 
@@ -942,6 +994,12 @@ export class WorkflowEngine {
       // the cumulative prefix instead of starting cold. An operator can
       // `cd <worktree> && claude --resume <runSessionId>` to take over.
       sessionId: args.runSessionId,
+      // On the first step of a re-claimed run, switch the runner to
+      // `claude --resume <runSessionId>` so the new process picks up
+      // the conversation prefix from the host that crashed. The runner
+      // catches a non-zero exit (cross-host re-claim) and transparently
+      // retries with `--session-id` for a cold start under the same id.
+      resume: args.resume,
     };
 
     // Periodic autosave for steps that can mutate the worktree (fixer-class).
@@ -963,14 +1021,32 @@ export class WorkflowEngine {
         // system prompt was set once when the session started; here we
         // send the step's user prompt with a phase marker and let the
         // session return the assistant text + per-phase token delta.
-        const phaseResult = await args.unifiedSession.sendPhase(step.id, spec.userPrompt);
-        result = {
-          text: phaseResult.text,
-          parsed: null,
-          toolCalls: phaseResult.toolCalls,
-          tokensUsed: phaseResult.tokensUsed,
-          budgetExceeded: false,
-        };
+        //
+        // On a re-claim, the unified session was spawned with `--resume`.
+        // If that fails (cross-host — the on-disk blob isn't here), the
+        // child exits early and `sendPhase` rejects with `ResumeFailedError`.
+        // Recover by stopping the dead session and falling back to the
+        // staged runner for THIS step under the same session id (which
+        // re-spawns with `--session-id` for a cold start). Subsequent
+        // steps go back through the per-step `runner.run` path since the
+        // unified session is now defunct.
+        try {
+          const phaseResult = await args.unifiedSession.sendPhase(step.id, spec.userPrompt);
+          result = {
+            text: phaseResult.text,
+            parsed: null,
+            toolCalls: phaseResult.toolCalls,
+            tokensUsed: phaseResult.tokensUsed,
+            budgetExceeded: false,
+            sessionId: args.runSessionId,
+          };
+        } catch (err) {
+          if (!(err instanceof ResumeFailedError)) throw err;
+          args.onResumeFallback?.();
+          await args.unifiedSession.stop().catch(() => {});
+          stepCtx.emit({ type: 'note', message: `falling back to staged runner for step '${step.id}' after resume failure` });
+          result = await runner.run({ ...spec, resume: false }, (e) => stepCtx.emit(e));
+        }
       } else {
         result = await runner.run(spec, (e) => stepCtx.emit(e));
       }
@@ -1067,6 +1143,10 @@ export class WorkflowEngine {
     bindings: WorkflowBinding[];
     skills: Skill[];
     labels?: WorkspaceLabel[];
+    /** True on a re-claim — spawn `claude --resume <sessionId>` first. */
+    resume?: boolean;
+    /** Invoked when resume fails and we cold-start under the same id. */
+    onResumeFallback?: () => void;
   }): Promise<PersistentClaudeSession | null> {
     if (args.config.autofix?.runner?.mode !== 'unified') return null;
     if (!args.worktreePath) return null;
@@ -1079,7 +1159,7 @@ export class WorkflowEngine {
     });
     if (!systemPrompt) return null;
 
-    const session = new PersistentClaudeSession({
+    const sessionOpts = {
       systemPrompt,
       sessionId: args.sessionId,
       cwd: args.worktreePath,
@@ -1089,13 +1169,34 @@ export class WorkflowEngine {
       // allowed since fixer/edit-capable phases need them.
       allowedTools: ['Read', 'Grep', 'Glob', 'Edit', 'Write', 'NotebookEdit', 'Bash'],
       bashAllowlist: args.config.autofix?.bashAllowlist,
-      onEvent: (e) => {
+      onEvent: (e: AgentEvent) => {
         // Forward to the same agent-event sink the staged path uses so
         // the cockpit doesn't need to know which mode produced an event.
         args.onEvent?.(e);
       },
-    });
-    session.start();
+    };
+
+    // First try: respect the caller's `resume` flag. If resume start
+    // throws ResumeFailedError synchronously we'd never see it (the start
+    // is sync; the failure shows up on the child's exit event). The
+    // engine catches it on `sendPhase` (see `runAgentStep`) and rebuilds
+    // a fresh session under the same id. This `try` only covers a synchronous
+    // spawn failure (e.g. `claude` binary missing), which we let bubble.
+    const session = new PersistentClaudeSession({ ...sessionOpts, resume: args.resume === true });
+    try {
+      session.start();
+    } catch (err) {
+      if (err instanceof ResumeFailedError) {
+        // Defensive — start() can't throw ResumeFailedError today (the
+        // child exit fires asynchronously), but if a future version did,
+        // honor the same fallback path.
+        args.onResumeFallback?.();
+        const fresh = new PersistentClaudeSession({ ...sessionOpts, resume: false });
+        fresh.start();
+        return fresh;
+      }
+      throw err;
+    }
     return session;
   }
 

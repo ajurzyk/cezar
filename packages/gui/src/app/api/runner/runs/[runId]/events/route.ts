@@ -20,6 +20,9 @@ interface IncomingEvent {
   tokensUsed?: number;
   startedAt?: string;
   finishedAt?: string | null;
+  /** Phase 2: claude session id for this step. Written by the RPC into
+   *  `agent_runs.session_id` and (first-non-null) `workflow_runs.session_id`. */
+  sessionId?: string;
 }
 
 /**
