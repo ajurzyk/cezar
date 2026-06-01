@@ -1,5 +1,8 @@
 import { RunnerClient, type ClaimedJob } from './runner-client.js';
 import { executeJobLocally } from './execute-job-locally.js';
+import { maintainBareClones } from './repo-clone.js';
+
+const MAINTENANCE_TICKS = 60;
 
 export interface RunnerDaemonConfig {
   url: string;
@@ -39,6 +42,7 @@ export class RunnerDaemon {
   private stopping = false;
   private loopTimer: NodeJS.Timeout | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
+  private idleTicks = 0;
 
   constructor(private readonly cfg: RunnerDaemonConfig) {
     this.client = new RunnerClient(cfg.url, cfg.token);
@@ -56,7 +60,20 @@ export class RunnerDaemon {
     this.heartbeatTimer = setInterval(() => { void this.heartbeat('online'); }, this.pollMs * 2);
     const tick = async (): Promise<void> => {
       if (!this.stopping) {
-        try { await this.claimAndRun(); } catch (err) {
+        try {
+          const claimedAny = await this.claimAndRun();
+          if (!claimedAny && this.inFlight.size === 0) {
+            this.idleTicks++;
+            if (this.idleTicks >= MAINTENANCE_TICKS) {
+              this.idleTicks = 0;
+              void maintainBareClones().catch((err) => {
+                console.error('[runner] bare-clone maintenance failed:', err instanceof Error ? err.message : err);
+              });
+            }
+          } else {
+            this.idleTicks = 0;
+          }
+        } catch (err) {
           console.error('[runner] claim tick failed:', err instanceof Error ? err.message : err);
           if (err instanceof Error && err.message.includes('(401)')) { await this.shutdown('auth-error'); return; }
         }
@@ -71,12 +88,15 @@ export class RunnerDaemon {
 
   private resolveExit: (() => void) | null = null;
 
-  private async claimAndRun(): Promise<void> {
+  private async claimAndRun(): Promise<boolean> {
+    let claimedAny = false;
     while (this.inFlight.size < this.concurrency && !this.stopping) {
       const claimed = await this.client.claimJob(this.cfg.backends);
-      if (!claimed) return;
+      if (!claimed) return claimedAny;
       this.runJob(claimed);
+      claimedAny = true;
     }
+    return claimedAny;
   }
 
   private runJob(claimed: ClaimedJob): void {

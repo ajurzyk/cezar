@@ -1,7 +1,7 @@
 import type { AgentRunRecord, Config } from '@cezar/core';
 import type { ClaimedJob, RunnerEvent } from './runner-client.js';
 import { RunnerClient } from './runner-client.js';
-import { ensureRepoCloneLocal } from './repo-clone.js';
+import { prepareJobWorktree, type JobWorktree } from './repo-clone.js';
 
 export interface ExecuteJobControls {
   /** Polled between steps — true ⇒ finish the current step then pause the run. */
@@ -100,6 +100,7 @@ export async function executeJobLocally(
   const pauseRequested = async (): Promise<boolean> => controls.shouldPause();
   const cancelRequested = async (): Promise<boolean> => controls.shouldCancel();
 
+  let worktree: JobWorktree | null = null;
   try {
     const core = await import('@cezar/core');
 
@@ -108,7 +109,8 @@ export async function executeJobLocally(
     config.github = { ...config.github, owner: workspace.owner, repo: workspace.repo, token: githubToken };
     config.workflow = { ...(config.workflow ?? {}), useEngine: true };
     if (!config.autofix.repoRoot) {
-      config.autofix.repoRoot = await ensureRepoCloneLocal(workspace.owner, workspace.repo, githubToken, config.autofix.baseBranch);
+      worktree = await prepareJobWorktree(workspace.owner, workspace.repo, githubToken, job.id, config.autofix.baseBranch);
+      config.autofix.repoRoot = worktree.worktreePath;
     }
 
     // No Supabase here — reconstruct the store from the snapshot. Store mutations
@@ -219,5 +221,6 @@ export async function executeJobLocally(
   } finally {
     clearInterval(timer);
     await flush().catch(() => {});
+    if (worktree) await worktree.cleanup().catch(() => {});
   }
 }

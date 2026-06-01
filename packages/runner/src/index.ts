@@ -11,5 +11,5 @@ export type {
   HeartbeatReply,
 } from './runner-client.js';
 export { executeJobLocally, type ExecuteJobControls } from './execute-job-locally.js';
-export { ensureRepoCloneLocal } from './repo-clone.js';
+export { prepareJobWorktree, maintainBareClones, type JobWorktree } from './repo-clone.js';
 export { detectBackends, type BackendCheck } from './backend-detect.js';
