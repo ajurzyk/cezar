@@ -68,94 +68,66 @@ in. Cezar is the **cockpit** that pulls those jobs into one delivery flow.
 
 ## Screenshots
 
-A tour of the surface area, grouped by capability.
+The cockpit shot above is the app as it stands today. Below — a tour of the rest of the surface area. Click any card for the full-size view.
 
-### The cockpit — every run, live
-
-![Cockpit list — every agent run across the workspace, with per-row Retry / Delete controls and filter chips for state](docs/images/cezar-runs.png)
-
-<!-- TODO SCREENSHOT: The /dashboard page after a fresh workspace — stat row
-     (Open / Closed / PRs open / Digested / Bugs), the "Recent agent runs"
-     card, and the action grid below. Save as: docs/images/dashboard.png -->
-
-![Dashboard — what's open, what's running, what needs you (placeholder)](docs/images/dashboard.png)
-
-<!-- TODO SCREENSHOT: The /cockpit list with several rows selected via
-     checkbox and the bulk-action bar visible at the top (Pause selected ·
-     Cancel selected · Retry selected · Delete selected). Save as:
-     docs/images/cockpit-bulk-controls.png -->
-
-![Bulk controls — pause, cancel, retry, or delete many runs at once (placeholder)](docs/images/cockpit-bulk-controls.png)
-
-![Run detail — per-step graph on the left, streaming event log on the right (text · tool-call · tool-result)](docs/images/cezar-run-details.png)
-
-![Activity feed — chronological audit trail across the whole workspace, with view-run links and per-step status](docs/images/cezar-activity-log.png)
-
-### Triage on every incoming issue
-
-![Inbox — pending decisions, PRs to review, paused runs and failures, filterable by skill, confidence, and type](docs/images/cezar-inbox.png)
-
-<!-- TODO SCREENSHOT: A GitHub issue page right after Cezar's triage pass —
-     labels applied (bug · priority/high · area/api), the auto-triage comment
-     with a concise summary and the actions Cezar took. Save as:
-     docs/images/github-issue-triaged.png -->
-
-![Issue after triage — labels, priority, and a single summary comment applied automatically (placeholder)](docs/images/github-issue-triaged.png)
-
-<!-- TODO SCREENSHOT: A GitHub issue marked as duplicate by Cezar — the
-     `duplicate` label set, the comment linking to the canonical issue with
-     the confidence score and the matching signals it found. Save as:
-     docs/images/github-duplicate-detected.png -->
-
-![Duplicate detection — linked to the canonical issue with cited matching signals (placeholder)](docs/images/github-duplicate-detected.png)
-
-<!-- TODO SCREENSHOT: A GitHub issue showing Cezar's single "living" comment
-     with the per-step progress (verify-in-repo ✓ · root-cause ✓ · fix ⏳).
-     Save as: docs/images/github-issue-comment.png -->
-
-![Living comment — edited as each step completes, not a wall of bot chatter (placeholder)](docs/images/github-issue-comment.png)
-
-### Humans stay in control
-
-![Acceptance settings — model choice, auto-accept vs human-in-the-loop, confidence cutoff with a live preview of which findings would route to the inbox](docs/images/cezar-action-details-2.png)
-
-<!-- TODO SCREENSHOT: A run-detail page paused on a human-gate step — the
-     step graph shows the gate in yellow/amber, the panel on the right shows
-     the reason ("low confidence: 0.62 on bug-vs-feature"), the agent's
-     reasoning, and Approve / Reject / Skip buttons. Save as:
-     docs/images/human-gate-paused.png -->
-
-![Human-gate paused — agent reasoning surfaced, with Approve / Reject / Skip controls (placeholder)](docs/images/human-gate-paused.png)
-
-<!-- TODO SCREENSHOT: The approval modal triggered from a human-gate — full
-     context panel (issue text, agent's proposed effects, diff preview if
-     applicable), an optional comment field, and the Approve & resume button.
-     Save as: docs/images/human-gate-approve.png -->
-
-![Approval flow — full context plus an optional note before the run resumes (placeholder)](docs/images/human-gate-approve.png)
-
-<!-- TODO SCREENSHOT: A failed run page with the "Retry from step" picker
-     open — listing every step in the workflow and letting the user pick
-     which one to restart from (with a "use a different model" override).
-     Save as: docs/images/cockpit-retry-from-step.png -->
-
-![Retry from any step — pick the failure point and optionally swap the model (placeholder)](docs/images/cockpit-retry-from-step.png)
-
-### The output — a draft PR ready for review
-
-<!-- TODO SCREENSHOT: A draft PR on GitHub opened by Cezar — title prefixed
-     with "[cezar]", the structured PR description (Problem · Root cause ·
-     Fix · Verification · Risks), the cezar:pr-link marker, and the draft
-     badge. Save as: docs/images/github-draft-pr.png -->
-
-![Draft PR — structured description (Problem · Root cause · Fix · Verification · Risks), never auto-merged (placeholder)](docs/images/github-draft-pr.png)
-
-<!-- TODO SCREENSHOT: A GitHub PR showing the CI-followup loop in action —
-     the failed CI check, then Cezar's comment classifying the failure, then
-     a new commit pushed with the patch and a re-running CI check. Save as:
-     docs/images/github-ci-followup.png -->
-
-![CI follow-up — Cezar classifies the failure, patches, pushes, watches CI again (placeholder)](docs/images/github-ci-followup.png)
+<table>
+<tr>
+<td align="center" width="33%" valign="top">
+  <a href="docs/images/cezar-run-details.png"><img src="docs/images/cezar-run-details.png" alt="Run detail" /></a>
+  <br/><sub><b>Run detail</b><br/>step graph + streaming event log</sub>
+</td>
+<td align="center" width="33%" valign="top">
+  <a href="docs/images/cezar-activity-log.png"><img src="docs/images/cezar-activity-log.png" alt="Activity feed" /></a>
+  <br/><sub><b>Activity feed</b><br/>workspace-wide audit trail</sub>
+</td>
+<td align="center" width="33%" valign="top">
+  <a href="docs/images/cezar-inbox.png"><img src="docs/images/cezar-inbox.png" alt="Inbox" /></a>
+  <br/><sub><b>Inbox</b><br/>pending decisions and paused runs</sub>
+</td>
+</tr>
+<tr>
+<td align="center" width="33%" valign="top">
+  <a href="docs/images/cezar-action-details-1.png"><img src="docs/images/cezar-action-details-1.png" alt="Action editor" /></a>
+  <br/><sub><b>Action editor</b><br/>system prompt, skills, effects</sub>
+</td>
+<td align="center" width="33%" valign="top">
+  <a href="docs/images/cezar-action-details-2.png"><img src="docs/images/cezar-action-details-2.png" alt="Acceptance settings" /></a>
+  <br/><sub><b>Acceptance settings</b><br/>model, auto-accept, confidence cutoff</sub>
+</td>
+<td align="center" width="33%" valign="top">
+  <a href="docs/images/cezar-actions.png"><img src="docs/images/cezar-actions.png" alt="Actions catalog" /></a>
+  <br/><sub><b>Actions catalog</b><br/>built-in + user-defined plays</sub>
+</td>
+</tr>
+<tr>
+<td align="center" width="33%" valign="top">
+  <a href="docs/images/cezar-skills.png"><img src="docs/images/cezar-skills.png" alt="Skills" /></a>
+  <br/><sub><b>Skills</b><br/>built-in + repo <code>.ai/skills/</code></sub>
+</td>
+<td align="center" width="33%" valign="top">
+  <a href="docs/images/cezar-skill-details.png"><img src="docs/images/cezar-skill-details.png" alt="Skill details" /></a>
+  <br/><sub><b>Skill details</b><br/>rendered body + prompt preview</sub>
+</td>
+<td align="center" width="33%" valign="top">
+  <a href="docs/images/cezar-workflows.png"><img src="docs/images/cezar-workflows.png" alt="Workflows" /></a>
+  <br/><sub><b>Workflows editor</b><br/>drag-orderable steps + skill bindings</sub>
+</td>
+</tr>
+<tr>
+<td align="center" width="33%" valign="top">
+  <a href="docs/images/cezar-settings.png"><img src="docs/images/cezar-settings.png" alt="Settings" /></a>
+  <br/><sub><b>Settings landing</b><br/>workspace-level switches in one place</sub>
+</td>
+<td align="center" width="33%" valign="top">
+  <a href="docs/images/cezar-setting-runner.png"><img src="docs/images/cezar-setting-runner.png" alt="Runners" /></a>
+  <br/><sub><b>Settings → Runners</b><br/>registered runners with heartbeat</sub>
+</td>
+<td align="center" width="33%" valign="top">
+  <a href="docs/images/cezar-settings-runner-register.png"><img src="docs/images/cezar-settings-runner-register.png" alt="Register runner" /></a>
+  <br/><sub><b>Register a runner</b><br/>name + backend selection</sub>
+</td>
+</tr>
+</table>
 
 ---
 
@@ -193,21 +165,8 @@ Then install the GitHub App on your repo, walk through the **Workspaces → New*
 wizard (project env preset, label-catalog analysis, workflow defaults), and
 open `/dashboard`. New issues will start triaging automatically.
 
-<!-- TODO SCREENSHOT: The /workspaces/new wizard — step 1 (pick a GitHub repo
-     from the installed App), step 2 (project env preset), step 3 (label-
-     catalog analysis kicking off), step 4 (workflow defaults). Save as:
-     docs/images/workspace-wizard.png -->
-
-![Workspace setup wizard — repo · environment · label catalog · workflow defaults (placeholder)](docs/images/workspace-wizard.png)
-
 > Prefer a no-DB, no-SaaS path? The solo-use CLI runs against a local JSON
 > store. See [`docs/INSTALL.md`](docs/INSTALL.md#option-1--solo-use-cli).
-
-<!-- TODO SCREENSHOT: Terminal screenshot of the `cezar` interactive hub —
-     the setup-wizard greeting, then the main menu of analysis actions
-     (bug-detector, duplicates, auto-label, …). Save as: docs/images/cli-hub.png -->
-
-![Solo-use CLI — interactive hub with the full action catalog (placeholder)](docs/images/cli-hub.png)
 
 ---
 
@@ -273,14 +232,6 @@ Four ideas, each one a thin wrapper over the next. Full reference in
   a decision — low-confidence triage, ambiguous fix, sensitive area of the
   codebase. The run sits in `paused` in the cockpit until you approve.
 
-![Action editor — name, target, triggers, skill refs, effects mode (Declared / Agent tools), live system prompt with auto-save](docs/images/cezar-action-details-1.png)
-
-![Skills page — built-in plus repo skills (`.ai/skills/`), filterable by source, mode, trigger, status; per-skill enable toggle](docs/images/cezar-skills.png)
-
-![Skill details — the rendered Markdown body of a skill with the system-prompt preview Cezar will inject](docs/images/cezar-skill-details.png)
-
-![Workflows editor — drag-orderable steps, each binding a skill and an args template; chain multiple agent + effect + human-gate steps](docs/images/cezar-workflows.png)
-
 ### Workspace label catalog
 
 A per-workspace vocabulary of labels Cezar will apply, with add/remove
@@ -290,21 +241,12 @@ to synthesize a draft you edit in **Settings → Labels**. The accepted catalog
 is appended to every agent step's system prompt — so agents apply *your*
 labels with *your* semantics, and stop inventing new ones.
 
-<!-- TODO SCREENSHOT: Settings → Labels — the label catalog editor showing a
-     list of labels (name · scope · add-when · remove-when), the draft
-     proposed by the label-analysis job highlighted with diff markers, and
-     Accept / Edit / Reject controls per row. Save as: docs/images/settings-labels.png -->
-
-![Settings → Labels — the vocabulary Cezar applies, with the label-analysis draft side by side (placeholder)](docs/images/settings-labels.png)
-
 ---
 
 ## Built-in actions
 
 15 Actions ship with `@cezar/core`. Each one is data — you can enable, disable,
 override, or clone any of them in the GUI without touching code.
-
-![Actions catalog — built-in and user-defined plays, with trigger badges, target, effects mode, and enable toggle per row](docs/images/cezar-actions.png)
 
 | Action | Triggers | Effects | What it does |
 |---|---|---|---|
@@ -332,12 +274,6 @@ Cezar runs on a managed cloud path (`ANTHROPIC_API_KEY` + the in-process
 dispatcher) by default. Add the optional `@cezar/runner` daemon if you want
 subscription CLIs (`claude`, `codex`) to run under your own login on your
 own infra. Full setup: [`docs/SELF-HOSTING.md`](docs/SELF-HOSTING.md).
-
-![Settings landing — every workspace-level switch on one page (skills · actions · runners · recent runs · labels · team)](docs/images/cezar-settings.png)
-
-![Settings → Runners — registered runners with backend tags and heartbeat, plus a one-time token + ready-to-paste start command](docs/images/cezar-setting-runner.png)
-
-![Register a runner — name it, pick which backends (`claude-cli` · `codex-cli` · `anthropic-api`) it will serve](docs/images/cezar-settings-runner-register.png)
 
 ---
 
