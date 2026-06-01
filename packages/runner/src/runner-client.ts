@@ -82,6 +82,10 @@ export interface RunnerEvent {
    *  and seed `workflow_runs.session_id` (migration 0024). Lets a re-claim
    *  after a runner crash resume via `claude --resume <id>`. */
   sessionId?: string;
+  /** Phase 5 (migration 0027) — runner UUID stamped on step events so the
+   *  central can populate `agent_runs.runner_id` (first-writer-wins via the
+   *  RPC's coalesce). Omitted (or empty) on cron-dispatched runs. */
+  runnerId?: string;
 }
 
 export interface FinalizeRunBody {
@@ -116,6 +120,29 @@ export interface HeartbeatBody {
    *  install id. The SaaS upserts onto `runners.github_installation_id` so
    *  subsequent claims mint against this install. NULL clears it. */
   githubInstallationId?: number | null;
+  /** Phase 5 (migration 0027) — runner-reported load snapshot. Written
+   *  verbatim onto `runners.utilization` JSONB by the heartbeat route so the
+   *  cockpit `/cockpit/runners` page can show inflight / capacity / load /
+   *  free-mem at a glance. Older SaaS deployments ignore the field. */
+  utilization?: RunnerUtilizationPayload;
+}
+
+/**
+ * Phase 5 — load snapshot shape. Mirrors `RunnerUtilization` in the GUI
+ * `lib/supabase/types.ts` (kept duplicated so the runner doesn't import GUI
+ * code). All sizes in MB; `cpuLoad` is the 1-minute load average; `uptimeSec`
+ * is the runner process's uptime; `capturedAt` is an ISO timestamp recorded
+ * right before the heartbeat POST.
+ */
+export interface RunnerUtilizationPayload {
+  inflight: number;
+  capacity: number;
+  cpuLoad: number;
+  freeMemMb: number;
+  totalMemMb: number;
+  nodeVersion: string;
+  uptimeSec: number;
+  capturedAt: string;
 }
 
 export interface HeartbeatReply {
@@ -130,6 +157,12 @@ export interface HeartbeatReply {
    *  Older SaaS deployments omit this — treat the missing field as "all
    *  renewed" so the runner stays backward-compatible. */
   renewedJobIds?: string[];
+  /** Phase 5 (migration 0027) — the central echoes the runner's own UUID
+   *  back on every heartbeat reply so the daemon can stamp `runnerId` on
+   *  `step-start` events without an extra round-trip. Older SaaS deployments
+   *  omit this and the daemon falls back to not stamping (the column stays
+   *  NULL, which the cockpit handles as "no runner attribution"). */
+  runnerId?: string;
 }
 
 // ─── client ─────────────────────────────────────────────────────────────

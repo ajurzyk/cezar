@@ -21,6 +21,17 @@ type WorkflowRunRow = Database['public']['Tables']['workflow_runs']['Row'];
 type AgentRunRow = Database['public']['Tables']['agent_runs']['Row'];
 type AgentRunEventRow = Database['public']['Tables']['agent_run_events']['Row'];
 
+/** Phase 5 — minimal runner info threaded into the step chip on /cockpit/[runId].
+ *  Keyed by `runners.id`; populated server-side from the distinct `runner_id`s
+ *  seen on this run's steps. Steps with no `runner_id` (cron path) skip the chip. */
+export type RunnerLookup = Record<string, {
+  id: string;
+  name: string;
+  status: string;
+  lastHeartbeatAt: string | null;
+  ghIdentity: string;
+}>;
+
 interface Props {
   run: WorkflowRunRow;
   repoOwner: string;
@@ -28,9 +39,12 @@ interface Props {
   role: WorkspaceRole;
   initialSteps: AgentRunRow[];
   initialEvents: AgentRunEventRow[];
+  /** Phase 5 — runner_id → display info for the per-step chip. Empty for runs
+   *  with no runner attribution (cron-dispatched anthropic-api). */
+  runners?: RunnerLookup;
 }
 
-export function RunDetailShell({ run: initialRun, repoOwner, repoName, role, initialSteps, initialEvents }: Props) {
+export function RunDetailShell({ run: initialRun, repoOwner, repoName, role, initialSteps, initialEvents, runners = {} }: Props) {
   const router = useRouter();
   const [run, setRun] = useState<WorkflowRunRow>(initialRun);
   const [steps, setSteps] = useState<AgentRunRow[]>(initialSteps);
@@ -235,7 +249,12 @@ export function RunDetailShell({ run: initialRun, repoOwner, repoName, role, ini
           ) : (
             <div className="space-y-2">
               {steps.map((s) => (
-                <StepCard key={s.id} step={s} events={eventsByStep.get(s.id) ?? []} />
+                <StepCard
+                  key={s.id}
+                  step={s}
+                  events={eventsByStep.get(s.id) ?? []}
+                  runner={s.runner_id ? runners[s.runner_id] : undefined}
+                />
               ))}
             </div>
           )}
@@ -272,7 +291,15 @@ export function RunDetailShell({ run: initialRun, repoOwner, repoName, role, ini
   );
 }
 
-function StepCard({ step, events }: { step: AgentRunRow; events: AgentRunEventRow[] }) {
+function StepCard({
+  step,
+  events,
+  runner,
+}: {
+  step: AgentRunRow;
+  events: AgentRunEventRow[];
+  runner?: RunnerLookup[string];
+}) {
   const [open, setOpen] = useState(false);
   return (
     <div className="rounded-md border border-border bg-bg p-3">
@@ -293,6 +320,7 @@ function StepCard({ step, events }: { step: AgentRunRow; events: AgentRunEventRo
         )}
         {step.tokens_used > 0 && <span>{humanizeTokens(step.tokens_used)} tok</span>}
         {step.started_at && <span>{timeAgo(step.started_at)}</span>}
+        {step.runner_id && <RunnerChip runnerId={step.runner_id} runner={runner} />}
       </div>
       {step.summary && <div className="mt-2 text-xs text-fg-muted">{step.summary}</div>}
       {step.error && <div className="mt-2 text-xs text-danger">{step.error}</div>}
@@ -386,6 +414,29 @@ function ToolResultLine({ payload }: { payload: Record<string, unknown> | null }
       </button>
       {truncated && <span className="ml-1 text-fg-subtle">[{open ? 'less' : 'more'}]</span>}
     </div>
+  );
+}
+
+/**
+ * Phase 5 — compact runner attribution badge rendered in each step card. When
+ * the lookup miss (runner deleted, central preview doesn't ship the joined
+ * row yet) we fall back to the last 8 chars of the UUID so the operator still
+ * sees *some* attribution. The tooltip exposes status / last heartbeat / GH
+ * identity source from the Phase 4 fields.
+ */
+function RunnerChip({ runnerId, runner }: { runnerId: string; runner?: RunnerLookup[string] }) {
+  const label = runner?.name ?? `runner ${runnerId.slice(-8)}`;
+  const tip = runner
+    ? `${runner.name} · ${runner.status}${runner.lastHeartbeatAt ? ` · heartbeat ${timeAgo(runner.lastHeartbeatAt)}` : ''} · gh: ${runner.ghIdentity}`
+    : `runner ${runnerId}`;
+  return (
+    <span
+      title={tip}
+      className="inline-flex items-center gap-1 rounded border border-border bg-bg-elevated px-1.5 py-0.5 font-mono text-[10px] text-fg-muted"
+    >
+      <span className="inline-block h-1.5 w-1.5 rounded-full bg-accent/60" aria-hidden />
+      {label}
+    </span>
   );
 }
 

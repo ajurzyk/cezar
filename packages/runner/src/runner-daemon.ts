@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { RunnerClient, type ClaimedJob } from './runner-client.js';
+import os from 'node:os';
+import { RunnerClient, type ClaimedJob, type RunnerUtilizationPayload } from './runner-client.js';
 import { executeJobLocally } from './execute-job-locally.js';
 import { maintainBareClones } from './repo-clone.js';
 
@@ -74,6 +75,11 @@ export class RunnerDaemon {
    *  Read from `gh auth token`, falls back to `process.env.GITHUB_TOKEN`.
    *  Refreshed every 30 min. Null on hosts where neither is available. */
   private hostGithubToken: string | null = null;
+  /** Phase 5 (migration 0027) — runner's own UUID, learned from the heartbeat
+   *  reply on first round-trip. Stamped onto `step-start` events so the
+   *  central populates `agent_runs.runner_id`. Null until the central has
+   *  echoed it back at least once. */
+  private runnerId: string | null = null;
 
   constructor(private readonly cfg: RunnerDaemonConfig) {
     this.client = new RunnerClient(cfg.url, cfg.token);
@@ -205,6 +211,12 @@ export class RunnerDaemon {
       // the job (or it's about to), so we abort to avoid double-execution
       // when another runner picks it up.
       shouldCancel: () => entry.cancel || entry.leaseLost,
+    }, {
+      // Phase 5 — stamp this runner's UUID on `step-start` events so the
+      // central populates `agent_runs.runner_id`. Null on the first claim
+      // before the heartbeat reply has echoed our id back; the column then
+      // stays NULL for those rows (no attribution, no error).
+      runnerId: this.runnerId,
     }).catch((err) => {
       console.error(`[runner] job ${claimed.job.id} crashed:`, err instanceof Error ? err.message : err);
     }).finally(() => {
@@ -231,6 +243,22 @@ export class RunnerDaemon {
     }
   }
 
+  /** Phase 5 — snapshot of current load. Cheap (sync `os` calls + a Map size
+   *  read); we sample right before the heartbeat POST so the timestamp on
+   *  the central matches the values in the snapshot. */
+  private buildUtilization(): RunnerUtilizationPayload {
+    return {
+      inflight: this.inFlight.size,
+      capacity: this.concurrency,
+      cpuLoad: os.loadavg()[0],
+      freeMemMb: Math.round(os.freemem() / 1024 / 1024),
+      totalMemMb: Math.round(os.totalmem() / 1024 / 1024),
+      nodeVersion: process.versions.node,
+      uptimeSec: Math.round(process.uptime()),
+      capturedAt: new Date().toISOString(),
+    };
+  }
+
   private async heartbeat(status: 'online' | 'draining' | 'offline'): Promise<void> {
     const inflight = [...this.inFlight.keys()];
     try {
@@ -246,7 +274,16 @@ export class RunnerDaemon {
         githubInstallationId: this.cfg.githubInheritHost
           ? null
           : (this.cfg.githubInstallationId ?? null),
+        // Phase 5 (migration 0027) — load snapshot written verbatim to
+        // `runners.utilization`. Cheap; ~200 bytes on the wire.
+        utilization: this.buildUtilization(),
       });
+      // Phase 5 — cache the runner's own UUID for stamping on step events.
+      // Older SaaS deployments omit `runnerId`; we stay backward-compatible
+      // by leaving `this.runnerId` null (the column then stays NULL too).
+      if (reply.runnerId && reply.runnerId !== this.runnerId) {
+        this.runnerId = reply.runnerId;
+      }
       for (const jobId of reply.cancelJobIds ?? []) {
         const e = this.inFlight.get(jobId);
         if (e && !e.cancel) { e.cancel = true; console.log(`[runner] cancel requested for job ${jobId}`); }

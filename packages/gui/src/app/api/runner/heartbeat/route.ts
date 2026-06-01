@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { authRunner } from '../_auth';
-import type { Database, RunnerStatus } from '@/lib/supabase/types';
+import type { Database, RunnerStatus, RunnerUtilization } from '@/lib/supabase/types';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -21,6 +21,10 @@ interface HeartbeatBody {
    *  `githubInheritHost` is true, `githubInstallationId` is ignored. */
   githubInheritHost?: boolean;
   githubInstallationId?: number | null;
+  /** Phase 5 (migration 0027) — runner-reported load snapshot. Written
+   *  verbatim onto `runners.utilization` JSONB. Older daemons omit this
+   *  entirely; the column stays NULL until the runner upgrades. */
+  utilization?: RunnerUtilization;
 }
 
 interface HeartbeatRpcRow {
@@ -62,10 +66,16 @@ export async function POST(req: Request) {
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
   // Phase 4 (migration 0026) — runner self-describes its GitHub identity.
+  // Phase 5 (migration 0027) — runner reports its utilization snapshot.
   // Only update fields the runner actually sent, so older daemons (and
   // admin-GUI-configured runners) aren't clobbered. The route never echoes
   // the identity back; the claim route reads `runners.*` fresh per claim.
-  if (body.githubInheritHost !== undefined || body.githubInstallationId !== undefined) {
+  // Utilization is a snapshot (overwritten in place — no time-series).
+  if (
+    body.githubInheritHost !== undefined ||
+    body.githubInstallationId !== undefined ||
+    body.utilization !== undefined
+  ) {
     const patch: Database['public']['Tables']['runners']['Update'] = {};
     if (body.githubInheritHost !== undefined) {
       patch.github_inherit_host = body.githubInheritHost;
@@ -75,13 +85,21 @@ export async function POST(req: Request) {
       // route enforces precedence (inherit_host wins).
       patch.github_installation_id = body.githubInstallationId;
     }
-    const changed =
+    if (body.utilization !== undefined) {
+      // Snapshot overwrite — no merging. The runner samples right before the
+      // POST so the value here is the freshest one. Older daemons don't send
+      // this; their column stays NULL (the cockpit handles NULL as "no data").
+      patch.utilization = body.utilization;
+    }
+    const identityChanged =
       patch.github_inherit_host !== runner.github_inherit_host ||
       patch.github_installation_id !== runner.github_installation_id;
-    if (changed) {
+    // Always write if utilization is present (the snapshot is fresh each
+    // heartbeat); otherwise only if the identity actually changed.
+    if (identityChanged || body.utilization !== undefined) {
       const { error: upErr } = await admin.from('runners').update(patch).eq('id', runner.id);
       if (upErr) {
-        console.error('[runner-api] runner identity upsert failed:', upErr.message);
+        console.error('[runner-api] runner upsert failed:', upErr.message);
       }
     }
   }
@@ -108,5 +126,8 @@ export async function POST(req: Request) {
     }
   }
 
-  return NextResponse.json({ ok: true, cancelJobIds, pauseRunIds, renewedJobIds });
+  // Phase 5 — echo the runner's own UUID so the daemon can stamp `runnerId`
+  // on `step-start` events without an extra round-trip. Older daemons ignore
+  // unrecognized fields, so this is backward-compatible.
+  return NextResponse.json({ ok: true, cancelJobIds, pauseRunIds, renewedJobIds, runnerId: runner.id });
 }

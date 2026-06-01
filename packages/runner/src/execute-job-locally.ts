@@ -1,7 +1,11 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import type { AgentRunRecord, Config } from '@cezar/core';
 import type { ClaimedJob, RunnerEvent } from './runner-client.js';
 import { RunnerClient } from './runner-client.js';
 import { prepareJobWorktree, type JobWorktree } from './repo-clone.js';
+
+const execFileAsync = promisify(execFile);
 
 export interface ExecuteJobControls {
   /** Polled between steps — true ⇒ finish the current step then pause the run. */
@@ -10,8 +14,24 @@ export interface ExecuteJobControls {
   shouldCancel: () => boolean;
 }
 
+export interface ExecuteJobOptions {
+  /** Phase 5 — runner UUID stamped onto every `step-start` so the central
+   *  populates `agent_runs.runner_id` (migration 0027). NULL when the runner
+   *  daemon hasn't learned its own id yet (e.g. very first heartbeat hasn't
+   *  landed) — the central will just leave runner_id NULL on those rows. */
+  runnerId?: string | null;
+}
+
 const FLUSH_INTERVAL_MS = 1000;
 const FLUSH_BATCH = 25;
+// Phase 5 — autosave the per-job worktree every 90s so a runner crash mid-step
+// leaves recoverable WIP on the branch (the watchdog's re-claim then sees the
+// partial work). `--allow-empty` so we get a heartbeat even with no file
+// changes; `-c commit.gpgsign=false` so a host with signing on by default
+// doesn't prompt for a key. Hardcoded author so commits are obvious in
+// `git log` and we don't reuse the operator's identity.
+const AUTOSAVE_INTERVAL_MS = 90_000;
+const AUTOSAVE_AUTHOR = 'Cezar Autosave <autosave@cezar.local>';
 
 /**
  * Runs a claimed workflow job on this runner and reports state back over HTTP.
@@ -24,6 +44,7 @@ export async function executeJobLocally(
   client: RunnerClient,
   claimed: ClaimedJob,
   controls: ExecuteJobControls,
+  opts: ExecuteJobOptions = {},
 ): Promise<void> {
   const { workflowRunId, job, workspace, githubToken, ciFollowupSeed, flow, labels, resumeSessionId } = claimed;
   // The runner-daemon substitutes the host token before calling us when
@@ -92,7 +113,16 @@ export async function executeJobLocally(
       status: 'running',
       startedAt: r.startedAt,
       sessionId: r.sessionId,
-      payload: { stepId: r.stepId, iteration: r.iteration, sessionId: r.sessionId ?? null },
+      // Phase 5 — stamp the runner so the central can populate
+      // `agent_runs.runner_id` (migration 0027). Coalesces server-side, so
+      // re-deliveries don't overwrite with NULL.
+      runnerId: opts.runnerId ?? undefined,
+      payload: {
+        stepId: r.stepId,
+        iteration: r.iteration,
+        sessionId: r.sessionId ?? null,
+        runnerId: opts.runnerId ?? null,
+      },
     });
   };
   // Fired when the engine has finished a step. Emits the matching `step-end`
@@ -113,7 +143,18 @@ export async function executeJobLocally(
       startedAt: r.startedAt,
       finishedAt: r.finishedAt ?? null,
       sessionId: r.sessionId,
-      payload: { stepId: r.stepId, iteration: r.iteration, status: r.status, summary: r.summary, error: r.error, sessionId: r.sessionId ?? null },
+      // Phase 5 — re-stamp the runner on close too. The RPC `coalesce`s, so
+      // this is only a backstop when the step-start event was lost.
+      runnerId: opts.runnerId ?? undefined,
+      payload: {
+        stepId: r.stepId,
+        iteration: r.iteration,
+        status: r.status,
+        summary: r.summary,
+        error: r.error,
+        sessionId: r.sessionId ?? null,
+        runnerId: opts.runnerId ?? null,
+      },
     });
   };
 
@@ -121,6 +162,7 @@ export async function executeJobLocally(
   const cancelRequested = async (): Promise<boolean> => controls.shouldCancel();
 
   let worktree: JobWorktree | null = null;
+  let autosaveTimer: NodeJS.Timeout | null = null;
   try {
     const core = await import('@cezar/core');
 
@@ -131,6 +173,15 @@ export async function executeJobLocally(
     if (!config.autofix.repoRoot) {
       worktree = await prepareJobWorktree(workspace.owner, workspace.repo, githubToken, job.id, config.autofix.baseBranch);
       config.autofix.repoRoot = worktree.worktreePath;
+      // Phase 5 — autosave WIP on the worktree branch every 90s. If the runner
+      // crashes mid-step the branch carries recoverable changes; a re-claim
+      // (Phase 3 lease-based) sees them. Final commit/push at the workflow's
+      // open-pr step is unaffected — autosave commits just trail the branch
+      // history. Failures here are logged only — autosave MUST NOT abort the
+      // job (a stuck index, an fsck blip, etc. shouldn't take down a run).
+      autosaveTimer = setInterval(() => {
+        void autosaveWorktree(worktree!.worktreePath);
+      }, AUTOSAVE_INTERVAL_MS);
     }
 
     // No Supabase here — reconstruct the store from the snapshot. Store mutations
@@ -243,7 +294,46 @@ export async function executeJobLocally(
     });
   } finally {
     clearInterval(timer);
+    if (autosaveTimer) clearInterval(autosaveTimer);
     await flush().catch(() => {});
     if (worktree) await worktree.cleanup().catch(() => {});
+  }
+}
+
+/**
+ * Phase 5 autosave. Stages every change and commits with `--allow-empty` so
+ * even a "nothing changed since last tick" iteration still leaves a heartbeat
+ * commit. `commit.gpgsign=false` is set inline so a host with signing on by
+ * default doesn't prompt; the author is hardcoded so we never depend on the
+ * operator's git identity (and so the commits stand out in `git log`).
+ *
+ * A `running` guard skips overlapping ticks — git is generally fast enough
+ * that 90s gives plenty of slack, but a slow disk shouldn't queue stale
+ * commits behind a still-running `git add`.
+ */
+let autosaveRunning = false;
+async function autosaveWorktree(cwd: string): Promise<void> {
+  if (autosaveRunning) return;
+  autosaveRunning = true;
+  try {
+    await execFileAsync('git', ['add', '-A'], { cwd });
+    await execFileAsync(
+      'git',
+      [
+        '-c', 'commit.gpgsign=false',
+        'commit',
+        '--allow-empty',
+        '-m', 'wip: cezar autosave [skip ci]',
+        '--author', AUTOSAVE_AUTHOR,
+      ],
+      { cwd, env: { ...process.env, GIT_COMMITTER_NAME: 'Cezar Autosave', GIT_COMMITTER_EMAIL: 'autosave@cezar.local' } },
+    );
+  } catch (err) {
+    // Autosave failures are best-effort — never abort the job. Common causes
+    // are an unborn HEAD (worktree just created, no initial commit on this
+    // branch) or a transient git lock; the next tick will retry.
+    console.warn('[runner] autosave failed:', err instanceof Error ? err.message : err);
+  } finally {
+    autosaveRunning = false;
   }
 }

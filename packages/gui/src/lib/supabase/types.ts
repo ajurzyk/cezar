@@ -70,6 +70,23 @@ export type AgentRunEventType =
 export type RunnerKind = 'cloud' | 'self-hosted';
 export type RunnerStatus = 'online' | 'offline' | 'draining';
 
+/**
+ * Phase 5 (migration 0027) — shape of `runners.utilization`. Reported on each
+ * runner heartbeat and overwritten in place (snapshot semantics, no
+ * time-series). Captured-at is a runner-local timestamp; the cockpit pairs
+ * it with `last_heartbeat_at` for the freshness display.
+ */
+export interface RunnerUtilization {
+  inflight: number;
+  capacity: number;
+  cpuLoad: number;
+  freeMemMb: number;
+  totalMemMb: number;
+  nodeVersion: string;
+  uptimeSec: number;
+  capturedAt: string;
+}
+
 export type CiAttributionVerdict = 'ours' | 'unrelated' | 'flaky' | 'unsure';
 export type CiAttributionMethod = 'base-branch-control' | 'llm' | 'degraded';
 
@@ -462,6 +479,10 @@ export interface Database {
            *  one id across every step of a workflow run, and on a re-claim the
            *  runner picks it up via `claude --resume <session_id>`. */
           session_id: string | null;
+          /** Phase 5 (migration 0027) — runner that served this step. NULL for
+           *  cron-dispatched steps (the anthropic-api path). First-writer-wins
+           *  via the `ingest_runner_events` RPC. */
+          runner_id: string | null;
         };
         Insert: Omit<
           Database['public']['Tables']['agent_runs']['Row'],
@@ -480,6 +501,7 @@ export interface Database {
           summary?: string | null;
           error?: string | null;
           session_id?: string | null;
+          runner_id?: string | null;
         };
         Update: Partial<Database['public']['Tables']['agent_runs']['Insert']>;
       };
@@ -525,10 +547,15 @@ export interface Database {
            *  runs. Precedence: if both this AND `github_installation_id`
            *  are set, this wins. */
           github_inherit_host: boolean;
+          /** Phase 5 (migration 0027) — latest utilization snapshot reported
+           *  by the runner on heartbeat. Overwritten on every heartbeat — no
+           *  time-series here. Shape: `RunnerUtilization`. NULL on older
+           *  daemons that don't report. */
+          utilization: RunnerUtilization | null;
         };
         Insert: Omit<
           Database['public']['Tables']['runners']['Row'],
-          'id' | 'backends' | 'models' | 'status' | 'created_at' | 'updated_at' | 'github_installation_id' | 'github_inherit_host'
+          'id' | 'backends' | 'models' | 'status' | 'created_at' | 'updated_at' | 'github_installation_id' | 'github_inherit_host' | 'utilization'
         > & {
           id?: string;
           workspace_id?: string | null;
@@ -541,6 +568,7 @@ export interface Database {
           updated_at?: string;
           github_installation_id?: number | null;
           github_inherit_host?: boolean;
+          utilization?: RunnerUtilization | null;
         };
         Update: Partial<Database['public']['Tables']['runners']['Insert']>;
       };
