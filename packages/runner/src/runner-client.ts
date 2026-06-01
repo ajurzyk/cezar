@@ -84,7 +84,12 @@ export interface FinalizeRunBody {
 
 export interface HeartbeatBody {
   status?: 'online' | 'draining' | 'offline';
+  /** Legacy alias for `inflightJobIds` — kept for older SaaS deployments. */
   currentJobIds?: string[];
+  /** Phase 3: ids of jobs the runner currently has in flight. The SaaS uses
+   *  this to renew leases (migration 0025) and reports back which ids were
+   *  actually renewed via {@link HeartbeatReply.renewedJobIds}. */
+  inflightJobIds?: string[];
 }
 
 export interface HeartbeatReply {
@@ -93,6 +98,12 @@ export interface HeartbeatReply {
   cancelJobIds: string[];
   /** Workflow runs this runner is driving whose `pause_requested` is set. */
   pauseRunIds: string[];
+  /** Phase 3: subset of `inflightJobIds` whose leases the SaaS actually
+   *  renewed. Anything sent that isn't here means the runner has lost the
+   *  claim (watchdog reclaim, cancel, etc.) and should abort that job.
+   *  Older SaaS deployments omit this — treat the missing field as "all
+   *  renewed" so the runner stays backward-compatible. */
+  renewedJobIds?: string[];
 }
 
 // ─── client ─────────────────────────────────────────────────────────────
@@ -106,11 +117,27 @@ export class RunnerClient {
     this.baseUrl = baseUrl.replace(/\/+$/, '');
   }
 
-  async claimJob(backends: string[]): Promise<ClaimedJob | null> {
-    const qs = backends.length ? `?backends=${encodeURIComponent(backends.join(','))}` : '';
-    const body = await this.request<{ job: null } | ClaimedJob>('GET', `/api/runner/jobs${qs}`);
-    if (!body || (body as { job: null }).job === null) return null;
-    return body as ClaimedJob;
+  async claimJob(backends: string[], opts: { wait?: number } = {}): Promise<ClaimedJob | null> {
+    const params = new URLSearchParams();
+    if (backends.length) params.set('backends', backends.join(','));
+    // `wait` is clamped server-side; we pass it as-is. 0 (default) preserves
+    // the legacy short-poll behavior so the CLI's one-shot caller is unaffected.
+    if (opts.wait && opts.wait > 0) params.set('wait', String(opts.wait));
+    const qs = params.toString();
+    // Allow the long-poll response to outlive the wait window by a few seconds
+    // so a hit on the last beat of the window still lands. Short-poll callers
+    // get the default `request` timeout.
+    const timeoutMs = opts.wait && opts.wait > 0 ? (opts.wait + 5) * 1000 : undefined;
+    try {
+      const body = await this.request<{ job: null } | ClaimedJob>('GET', `/api/runner/jobs${qs ? `?${qs}` : ''}`, undefined, { timeoutMs });
+      if (!body || (body as { job: null }).job === null) return null;
+      return body as ClaimedJob;
+    } catch (err) {
+      // AbortError from the long-poll timeout slack expiring is benign — same
+      // outcome as "no claim, try again". The caller (daemon) will pump again.
+      if (err instanceof Error && (err.name === 'AbortError' || err.message.includes('aborted'))) return null;
+      throw err;
+    }
   }
 
   async postEvents(workflowRunId: string, events: RunnerEvent[]): Promise<void> {
@@ -126,10 +153,22 @@ export class RunnerClient {
     return this.request<HeartbeatReply>('POST', '/api/runner/heartbeat', body);
   }
 
-  private async request<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
+  private async request<T = unknown>(
+    method: string,
+    path: string,
+    body?: unknown,
+    opts: { timeoutMs?: number } = {},
+  ): Promise<T> {
     const url = `${this.baseUrl}${path}`;
     let lastErr: unknown;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      // Per-call abort so a long-poll fetch doesn't hang forever if the
+      // socket goes silent. The route's wait cap is 25s; we add 5s of
+      // slack so a hit on the last beat still lands.
+      const controller = opts.timeoutMs ? new AbortController() : null;
+      const abortTimer = controller && opts.timeoutMs
+        ? setTimeout(() => controller.abort(), opts.timeoutMs)
+        : null;
       try {
         const res = await fetch(url, {
           method,
@@ -138,6 +177,7 @@ export class RunnerClient {
             ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
           },
           body: body !== undefined ? JSON.stringify(body) : undefined,
+          signal: controller?.signal,
         });
         if (res.status === 401) throw new Error(`runner token rejected (401) for ${method} ${path}`);
         if (res.status >= 500) throw new RetryableError(`${method} ${path} → ${res.status}`);
@@ -151,6 +191,8 @@ export class RunnerClient {
         if (!(err instanceof RetryableError) && !isNetworkError(err)) throw err;
         if (attempt === MAX_RETRIES) break;
         await sleep(250 * 2 ** attempt);
+      } finally {
+        if (abortTimer) clearTimeout(abortTimer);
       }
     }
     throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));

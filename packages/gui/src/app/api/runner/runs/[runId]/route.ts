@@ -77,7 +77,13 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ runId:
       : runStatus === 'cancelled' ? 'cancelled'
       : runStatus === 'failed' ? 'failed'
       : 'done';
-    await admin.from('jobs').update({ status: jobStatus, claimed_by_runner: null, updated_at: new Date().toISOString() }).eq('id', run.job_id);
+    await admin.from('jobs').update({
+      status: jobStatus,
+      claimed_by_runner: null,
+      // Drop the lease — the job is no longer in-flight on this runner.
+      claim_expires_at: null,
+      updated_at: new Date().toISOString(),
+    }).eq('id', run.job_id);
   }
 
   // Phase 5 — a runner-driven `triage` run finalizes here; if it concluded

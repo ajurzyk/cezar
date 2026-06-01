@@ -7,7 +7,14 @@ export const runtime = 'nodejs';
 
 interface HeartbeatBody {
   status?: RunnerStatus;
+  /** Legacy field — kept for older runners; the daemon now also sends
+   *  `inflightJobIds`. Either is acceptable. */
   currentJobIds?: string[];
+  /** Phase 3: ids of jobs the runner currently has in flight. The route
+   *  bulk-renews their leases via `renew_claim_leases` and returns the ids
+   *  it was actually able to renew — anything missing means the runner has
+   *  lost the claim and should abort that job. */
+  inflightJobIds?: string[];
 }
 
 interface HeartbeatRpcRow {
@@ -15,16 +22,22 @@ interface HeartbeatRpcRow {
   pause_run_ids: string[] | null;
 }
 
+interface RenewRow {
+  renewed_id: string;
+}
+
 /**
- * POST /api/runner/heartbeat  { status?, currentJobIds? }
+ * POST /api/runner/heartbeat  { status?, inflightJobIds? }
  *
- * Refreshes the runner's `last_heartbeat_at`/`status` and tells it which of its
- * jobs/runs the operator has asked to cancel/pause (the runner has no other
- * channel for that).
+ * Refreshes the runner's `last_heartbeat_at`/`status`, renews leases for the
+ * in-flight job ids the runner reports, and tells it which of its jobs/runs
+ * the operator has asked to cancel/pause (the runner has no other channel
+ * for that). The lease renewal replaces the old 3-minute runner-offline
+ * blind window — see migration 0025.
  *
- * Implemented as a single `runner_heartbeat` RPC (migration 0020) — previously
- * this was four sequential statements, which caused the bimodal 200ms / 10-16s
- * tail latency we hit at multi-runner scale.
+ * Implemented as two RPCs: `runner_heartbeat` (one round-trip; cancel/pause
+ * signals) + `renew_claim_leases` (one round-trip; bulk lease bump). Both
+ * use the service-role admin client.
  */
 export async function POST(req: Request) {
   const auth = await authRunner(req);
@@ -34,6 +47,7 @@ export async function POST(req: Request) {
   let body: HeartbeatBody = {};
   try { body = await req.json(); } catch { /* empty body is fine */ }
   const status: RunnerStatus = body.status ?? 'online';
+  const inflight = body.inflightJobIds ?? body.currentJobIds ?? [];
 
   const { data, error } = await admin.rpc('runner_heartbeat', {
     p_runner_id: runner.id,
@@ -46,5 +60,22 @@ export async function POST(req: Request) {
   const cancelJobIds = row?.cancel_job_ids ?? [];
   const pauseRunIds  = row?.pause_run_ids  ?? [];
 
-  return NextResponse.json({ ok: true, cancelJobIds, pauseRunIds });
+  // Bulk-renew leases. Only renews rows still claimed_by_runner = this runner
+  // AND status ∈ ('claimed','running') — so a watchdog-reclaimed job won't be
+  // re-leased back. The runner uses the diff (sent vs. renewed) to detect
+  // lost claims and abort those jobs.
+  let renewedJobIds: string[] = [];
+  if (inflight.length > 0) {
+    const { data: rows, error: renewErr } = await admin.rpc('renew_claim_leases', {
+      p_runner_id: runner.id,
+      p_job_ids: inflight,
+    });
+    if (renewErr) {
+      console.error('[runner-api] renew_claim_leases failed:', renewErr.message);
+    } else {
+      renewedJobIds = ((rows ?? []) as RenewRow[]).map((r) => r.renewed_id);
+    }
+  }
+
+  return NextResponse.json({ ok: true, cancelJobIds, pauseRunIds, renewedJobIds });
 }

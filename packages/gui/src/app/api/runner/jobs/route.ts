@@ -3,6 +3,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { SupabaseStoreAdapter } from '@/lib/adapters/supabase-store';
 import { loadWorkspaceConfig } from '@/lib/load-workspace-config';
 import { loadWorkspaceLabels } from '@/lib/load-workspace-labels';
+import { canAcquireListener, waitForJobsQueuedNotify } from '@/lib/pg-listen';
 import { authRunner } from '../_auth';
 import type { Database } from '@/lib/supabase/types';
 
@@ -11,18 +12,25 @@ export const runtime = 'nodejs';
 
 type JobRow = Database['public']['Tables']['jobs']['Row'];
 
+// `wait` query param is clamped to [0, MAX_WAIT_SEC]. 25s matches the
+// ingress-timeout headroom on most Vercel/edge proxies; the runner sets a
+// matching client-side fetch timeout (= wait + 5s) in runner-client.ts.
+const MAX_WAIT_SEC = 25;
+
 /**
- * GET /api/runner/jobs?backends=anthropic-api,claude-cli
+ * GET /api/runner/jobs?backends=anthropic-api,claude-cli&wait=25
  *
  * A runner long-polls this to claim work. We:
- *   1. refresh the runner's heartbeat,
- *   2. `claim_next_job_for_runner` (FOR UPDATE SKIP LOCKED) restricted to the
- *      requested backends,
+ *   1. try `claim_next_job_for_runner` (FOR UPDATE SKIP LOCKED) restricted to
+ *      the requested backends — fast path when there's queued work.
+ *   2. when there isn't, optionally LISTEN on `jobs_queued` and re-try once on
+ *      wake. NOTIFY is fired by the 0025 trigger on insert/requeue.
  *   3. on a hit: build the merged workspace config (incl. a freshly-minted
- *      GitHub token), snapshot the issue store, create the `workflow_runs` row,
- *      mark the job `running`, and return everything the runner needs.
+ *      GitHub token), snapshot the issue store, create the `workflow_runs`
+ *      row, mark the job `running`, and return everything the runner needs.
  *
- * Returns `{ job: null }` when there's nothing to do.
+ * Returns `{ job: null }` (or HTTP 204 implicitly via `{ job: null }`) when
+ * nothing was found within the wait window.
  */
 export async function GET(req: Request) {
   const auth = await authRunner(req);
@@ -38,19 +46,49 @@ export async function GET(req: Request) {
   const backends = requested.length ? requested : runner.backends;
   if (backends.length === 0) return NextResponse.json({ job: null });
 
-  const { data: claimed, error: claimErr } = await admin.rpc('claim_next_job_for_runner', {
-    p_runner_id: runner.id,
-    p_backends: backends,
-    p_limit: 1,
-  });
-  if (claimErr) return NextResponse.json({ error: claimErr.message }, { status: 500 });
-  const job = ((claimed ?? []) as JobRow[])[0];
+  const waitParam = Number(url.searchParams.get('wait') ?? '0');
+  const waitSec = Number.isFinite(waitParam) ? Math.max(0, Math.min(MAX_WAIT_SEC, waitParam)) : 0;
+
+  const claimOnce = async (): Promise<JobRow | null> => {
+    const { data, error } = await admin.rpc('claim_next_job_for_runner', {
+      p_runner_id: runner.id,
+      p_backends: backends,
+      p_limit: 1,
+    });
+    if (error) throw new Error(error.message);
+    return ((data ?? []) as JobRow[])[0] ?? null;
+  };
+
+  let job: JobRow | null;
+  try {
+    job = await claimOnce();
+  } catch (err) {
+    return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 });
+  }
+
+  // Long-poll path: nothing claimable right now — wait for a NOTIFY (or
+  // timeout / client disconnect) and try once more. We only enter this if the
+  // caller asked for it AND the in-process listener pool has room — otherwise
+  // we behave like the old short-poll (single attempt, return null).
+  if (!job && waitSec > 0 && canAcquireListener()) {
+    const woke = await waitForJobsQueuedNotify(waitSec * 1000, req.signal);
+    if (woke && !req.signal.aborted) {
+      try { job = await claimOnce(); }
+      catch (err) { return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 }); }
+    }
+  }
+
   if (!job) return NextResponse.json({ job: null });
 
   // From here on, any failure should release the job back to the queue so it
   // isn't stuck `claimed` until the watchdog.
   const releaseJob = async () => {
-    await admin.from('jobs').update({ status: 'queued', claimed_by_runner: null, updated_at: new Date().toISOString() }).eq('id', job.id);
+    await admin.from('jobs').update({
+      status: 'queued',
+      claimed_by_runner: null,
+      claim_expires_at: null,
+      updated_at: new Date().toISOString(),
+    }).eq('id', job.id);
   };
 
   try {

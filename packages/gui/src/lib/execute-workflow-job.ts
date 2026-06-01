@@ -52,7 +52,13 @@ export async function executeWorkflowJob(
 
   const finishJob = async (status: Database['public']['Tables']['jobs']['Row']['status']): Promise<void> => {
     if (!jobId) return;
-    await adminSupabase.from('jobs').update({ status, updated_at: new Date().toISOString() }).eq('id', jobId);
+    // Drop the lease (migration 0025) so the watchdog doesn't see a stale
+    // claim_expires_at on a row that's already done/failed.
+    await adminSupabase.from('jobs').update({
+      status,
+      claim_expires_at: null,
+      updated_at: new Date().toISOString(),
+    }).eq('id', jobId);
   };
 
   try {

@@ -345,6 +345,9 @@ export interface Database {
           status: JobStatus;
           required_backend: WorkflowBackend | null;
           claimed_by_runner: string | null;
+          /** Renewable lease deadline (migration 0025). Watchdog reclaims any
+           *  job whose lease has lapsed. NULL when the job isn't currently held. */
+          claim_expires_at: string | null;
           attempts: number;
           max_attempts: number;
           scheduled_at: string;
@@ -354,7 +357,7 @@ export interface Database {
         };
         Insert: Omit<
           Database['public']['Tables']['jobs']['Row'],
-          'id' | 'priority' | 'status' | 'attempts' | 'max_attempts' | 'scheduled_at' | 'payload' | 'created_at' | 'updated_at'
+          'id' | 'priority' | 'status' | 'attempts' | 'max_attempts' | 'scheduled_at' | 'payload' | 'created_at' | 'updated_at' | 'claim_expires_at'
         > & {
           id?: string;
           repo?: string | null;
@@ -364,6 +367,7 @@ export interface Database {
           status?: JobStatus;
           required_backend?: WorkflowBackend | null;
           claimed_by_runner?: string | null;
+          claim_expires_at?: string | null;
           attempts?: number;
           max_attempts?: number;
           scheduled_at?: string;
