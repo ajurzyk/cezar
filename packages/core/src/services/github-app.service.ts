@@ -24,6 +24,43 @@ export class GitHubAppService {
   private static tokenCache = new Map<string, { token: string; expiresAt: number }>();
 
   /**
+   * Returns an installation access token for a specific GitHub App install id.
+   * Used by the runner-API claim route when a runner has its own
+   * `runners.github_installation_id` set — we skip the owner→install lookup
+   * and mint directly. Throws if no App is configured.
+   *
+   * Cache key is `install:<id>` so it doesn't collide with the owner-keyed
+   * tokens produced by {@link getInstallationToken}.
+   */
+  async getInstallationTokenById(installationId: number): Promise<string> {
+    if (!GitHubAppService.isConfigured()) {
+      throw new Error(
+        'GitHub App not configured — set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY, or use a user OAuth token',
+      );
+    }
+
+    const cacheKey = `install:${installationId}`;
+    const cached = GitHubAppService.tokenCache.get(cacheKey);
+    if (cached && cached.expiresAt - Date.now() > 60_000) {
+      return cached.token;
+    }
+
+    const appId = process.env.GITHUB_APP_ID!;
+    const privateKey = normalizePrivateKey(process.env.GITHUB_APP_PRIVATE_KEY!);
+    const jwt = buildAppJwt(appId, privateKey);
+    const appOctokit = new Octokit({ auth: jwt });
+
+    const tokenRes = await appOctokit.request('POST /app/installations/{installation_id}/access_tokens', {
+      installation_id: installationId,
+    });
+    const token = tokenRes.data.token;
+    const expiresAt = tokenRes.data.expires_at ? Date.parse(tokenRes.data.expires_at) : Date.now() + 9 * 60_000;
+
+    GitHubAppService.tokenCache.set(cacheKey, { token, expiresAt });
+    return token;
+  }
+
+  /**
    * Returns an installation access token scoped to the installation that has
    * access to `owner` (the org/user that owns the target repo). Throws if no
    * GitHub App is configured, or if no installation matches `owner`.

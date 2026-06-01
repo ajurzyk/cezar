@@ -19,7 +19,23 @@ export interface ClaimedJob {
   /** Merged workspace config (cosmiconfig defaults + workspace overrides), minus
    * secrets EXCEPT `github.token`, which the runner needs to clone/comment. */
   config: Config;
-  githubToken: string;
+  /** Short-lived GitHub token minted by the SaaS for this claim. Null for
+   *  inherit-host runners (`ghIdentitySource === 'host'`) — the daemon
+   *  substitutes its own host-minted token before executing the job. */
+  githubToken: string | null;
+  /**
+   * Phase 4 (migration 0026) — which identity served this claim:
+   *   - `'host'`                       → runner mints from `gh auth token` /
+   *                                      GITHUB_TOKEN locally.
+   *   - `'runner-install:<id>'`        → central minted against the runner's
+   *                                      per-runner App install.
+   *   - `'workspace:<workspaceId>'`    → central minted via workspace install
+   *                                      / admin token (today's default).
+   * Older SaaS deployments omit this — treat undefined as workspace-default
+   * for logging purposes; behavior is unchanged because the runner only
+   * substitutes when the value is exactly `'host'`.
+   */
+  ghIdentitySource?: string;
   /** Full issue-store snapshot (`IssueStore.getAllData()`) for the workspace. */
   store: Store;
   /** For `ci-followup` jobs only — lifted off `jobs.payload.ciFollowup`. */
@@ -90,6 +106,16 @@ export interface HeartbeatBody {
    *  this to renew leases (migration 0025) and reports back which ids were
    *  actually renewed via {@link HeartbeatReply.renewedJobIds}. */
   inflightJobIds?: string[];
+  /** Phase 4 (migration 0026) — runner advertises that it mints its own
+   *  GitHub token locally from `gh auth token` / GITHUB_TOKEN. The SaaS
+   *  upserts this onto `runners.github_inherit_host` so admins can see the
+   *  mode in the cockpit without manual config. Precedence: when true,
+   *  `githubInstallationId` is ignored server-side. */
+  githubInheritHost?: boolean;
+  /** Phase 4 (migration 0026) — runner advertises its per-runner GitHub App
+   *  install id. The SaaS upserts onto `runners.github_installation_id` so
+   *  subsequent claims mint against this install. NULL clears it. */
+  githubInstallationId?: number | null;
 }
 
 export interface HeartbeatReply {

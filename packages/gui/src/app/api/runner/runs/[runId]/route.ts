@@ -132,6 +132,11 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ runId:
         issueNumber: run.issue_number,
         outcome: triageOutcome,
         workspaceConfig: config,
+        // Phase 4 soft affinity — the runner finalizing this triage is the
+        // same one whose bare clone + on-disk Claude session are warm. Pass
+        // it as the follow-up's preferred runner so the autofix lands here
+        // first (within the 30s soft window).
+        parentRunnerId: runner.id,
       });
     } catch (err) {
       console.error('[runner-finalize] triage→autofix enqueue failed:', err instanceof Error ? err.message : err);

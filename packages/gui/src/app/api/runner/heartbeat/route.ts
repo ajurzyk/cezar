@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { authRunner } from '../_auth';
-import type { RunnerStatus } from '@/lib/supabase/types';
+import type { Database, RunnerStatus } from '@/lib/supabase/types';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -15,6 +15,12 @@ interface HeartbeatBody {
    *  it was actually able to renew — anything missing means the runner has
    *  lost the claim and should abort that job. */
   inflightJobIds?: string[];
+  /** Phase 4 (migration 0026) — runner self-describes its GitHub identity
+   *  mode. The route upserts these onto the `runners` row so the next claim
+   *  picks the right minter without admin-GUI setup. Precedence: when
+   *  `githubInheritHost` is true, `githubInstallationId` is ignored. */
+  githubInheritHost?: boolean;
+  githubInstallationId?: number | null;
 }
 
 interface HeartbeatRpcRow {
@@ -54,6 +60,31 @@ export async function POST(req: Request) {
     p_status: status,
   });
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  // Phase 4 (migration 0026) — runner self-describes its GitHub identity.
+  // Only update fields the runner actually sent, so older daemons (and
+  // admin-GUI-configured runners) aren't clobbered. The route never echoes
+  // the identity back; the claim route reads `runners.*` fresh per claim.
+  if (body.githubInheritHost !== undefined || body.githubInstallationId !== undefined) {
+    const patch: Database['public']['Tables']['runners']['Update'] = {};
+    if (body.githubInheritHost !== undefined) {
+      patch.github_inherit_host = body.githubInheritHost;
+    }
+    if (body.githubInstallationId !== undefined) {
+      // null clears the per-runner install; a number sets it. The claim
+      // route enforces precedence (inherit_host wins).
+      patch.github_installation_id = body.githubInstallationId;
+    }
+    const changed =
+      patch.github_inherit_host !== runner.github_inherit_host ||
+      patch.github_installation_id !== runner.github_installation_id;
+    if (changed) {
+      const { error: upErr } = await admin.from('runners').update(patch).eq('id', runner.id);
+      if (upErr) {
+        console.error('[runner-api] runner identity upsert failed:', upErr.message);
+      }
+    }
+  }
 
   // PostgREST returns `setof record` functions as an array of rows.
   const row = (Array.isArray(data) ? data[0] : data) as HeartbeatRpcRow | null | undefined;

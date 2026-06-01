@@ -26,6 +26,18 @@ export async function executeJobLocally(
   controls: ExecuteJobControls,
 ): Promise<void> {
   const { workflowRunId, job, workspace, githubToken, ciFollowupSeed, flow, labels, resumeSessionId } = claimed;
+  // The runner-daemon substitutes the host token before calling us when
+  // `ghIdentitySource === 'host'`. Any path that reaches here without a
+  // token is a misconfiguration — surface it as a failed run instead of
+  // letting GitHub-service ops fail with confusing 401s.
+  if (!githubToken) {
+    await client.finalizeRun(workflowRunId, {
+      status: 'failed',
+      reason: `no GitHub token available for this job (ghIdentitySource=${claimed.ghIdentitySource ?? 'unknown'})`,
+      tokensUsed: 0,
+    }).catch(() => {});
+    return;
+  }
 
   // ── event buffer ──────────────────────────────────────────────────────
   const buffer: RunnerEvent[] = [];

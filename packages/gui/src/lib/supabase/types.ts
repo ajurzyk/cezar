@@ -348,6 +348,13 @@ export interface Database {
           /** Renewable lease deadline (migration 0025). Watchdog reclaims any
            *  job whose lease has lapsed. NULL when the job isn't currently held. */
           claim_expires_at: string | null;
+          /** Phase 4 (migration 0026) soft affinity — preferred runner for this
+           *  job (typically inherited from the parent workflow run). NULL = no
+           *  preference; any matching runner may claim. */
+          preferred_runner_id: string | null;
+          /** Phase 4 (migration 0026) soft-affinity window. After this instant
+           *  the preference is ignored and any matching runner may claim. */
+          preferred_until: string | null;
           attempts: number;
           max_attempts: number;
           scheduled_at: string;
@@ -357,7 +364,7 @@ export interface Database {
         };
         Insert: Omit<
           Database['public']['Tables']['jobs']['Row'],
-          'id' | 'priority' | 'status' | 'attempts' | 'max_attempts' | 'scheduled_at' | 'payload' | 'created_at' | 'updated_at' | 'claim_expires_at'
+          'id' | 'priority' | 'status' | 'attempts' | 'max_attempts' | 'scheduled_at' | 'payload' | 'created_at' | 'updated_at' | 'claim_expires_at' | 'preferred_runner_id' | 'preferred_until'
         > & {
           id?: string;
           repo?: string | null;
@@ -368,6 +375,8 @@ export interface Database {
           required_backend?: WorkflowBackend | null;
           claimed_by_runner?: string | null;
           claim_expires_at?: string | null;
+          preferred_runner_id?: string | null;
+          preferred_until?: string | null;
           attempts?: number;
           max_attempts?: number;
           scheduled_at?: string;
@@ -505,10 +514,21 @@ export interface Database {
           last_heartbeat_at: string | null;
           created_at: string;
           updated_at: string;
+          /** Phase 4 (migration 0026) per-runner GitHub App install. When set
+           *  the claim route mints an installation token against this id
+           *  instead of the workspace-level install. `bigint` since GitHub
+           *  install ids can exceed 2^31. */
+          github_installation_id: number | null;
+          /** Phase 4 (migration 0026) "inherit host" identity mode. When true
+           *  the runner mints its own GitHub token locally from `gh auth
+           *  token` / GITHUB_TOKEN; the central does NOT mint for these
+           *  runs. Precedence: if both this AND `github_installation_id`
+           *  are set, this wins. */
+          github_inherit_host: boolean;
         };
         Insert: Omit<
           Database['public']['Tables']['runners']['Row'],
-          'id' | 'backends' | 'models' | 'status' | 'created_at' | 'updated_at'
+          'id' | 'backends' | 'models' | 'status' | 'created_at' | 'updated_at' | 'github_installation_id' | 'github_inherit_host'
         > & {
           id?: string;
           workspace_id?: string | null;
@@ -519,6 +539,8 @@ export interface Database {
           last_heartbeat_at?: string | null;
           created_at?: string;
           updated_at?: string;
+          github_installation_id?: number | null;
+          github_inherit_host?: boolean;
         };
         Update: Partial<Database['public']['Tables']['runners']['Insert']>;
       };

@@ -1,8 +1,16 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { RunnerClient, type ClaimedJob } from './runner-client.js';
 import { executeJobLocally } from './execute-job-locally.js';
 import { maintainBareClones } from './repo-clone.js';
 
+const execFileAsync = promisify(execFile);
+
 const MAINTENANCE_TICKS = 60;
+// Refresh the cached host GH token every 30 minutes. `gh auth token` is a
+// short-lived OAuth token in practice (gh refreshes it on its own); we just
+// re-read so we don't carry an expired value into a fresh job.
+const HOST_TOKEN_REFRESH_MS = 30 * 60_000;
 // How long the long-poll request blocks server-side. Must match the route's
 // MAX_WAIT_SEC cap (see /api/runner/jobs/route.ts). The HTTP client adds
 // 5s of slack on top.
@@ -21,6 +29,14 @@ export interface RunnerDaemonConfig {
   concurrency?: number;
   /** Seconds between claim attempts (and the heartbeat is sent every other tick). Default 1. */
   pollIntervalSec?: number;
+  /** Phase 4 (migration 0026) — mint GitHub tokens locally from `gh auth
+   *  token` / GITHUB_TOKEN instead of asking the SaaS to mint them. The
+   *  daemon advertises this on heartbeat so the central updates
+   *  `runners.github_inherit_host`. */
+  githubInheritHost?: boolean;
+  /** Phase 4 (migration 0026) — advertise a per-runner GitHub App install id.
+   *  Mutually exclusive with `githubInheritHost` (the latter wins server-side). */
+  githubInstallationId?: number | null;
 }
 
 interface InFlight {
@@ -52,7 +68,12 @@ export class RunnerDaemon {
   private readonly inFlight = new Map<string, InFlight>();
   private stopping = false;
   private heartbeatTimer: NodeJS.Timeout | null = null;
+  private hostTokenTimer: NodeJS.Timeout | null = null;
   private idleTicks = 0;
+  /** Phase 4 (migration 0026) — cached host GH token for inherit-host mode.
+   *  Read from `gh auth token`, falls back to `process.env.GITHUB_TOKEN`.
+   *  Refreshed every 30 min. Null on hosts where neither is available. */
+  private hostGithubToken: string | null = null;
 
   constructor(private readonly cfg: RunnerDaemonConfig) {
     this.client = new RunnerClient(cfg.url, cfg.token);
@@ -65,6 +86,24 @@ export class RunnerDaemon {
     process.on('SIGTERM', () => { void this.shutdown('SIGTERM'); });
 
     console.log(`[runner] starting — kind=${this.cfg.kind} backends=${this.cfg.backends.join(',')} concurrency=${this.concurrency}`);
+
+    // Phase 4 — prime the host GH token cache before the first heartbeat so
+    // a claim landing seconds after startup already has a token to substitute.
+    // We hard-fail if inherit-host is requested but no token is reachable —
+    // a misconfigured runner that claims jobs it can't actually authenticate
+    // for would just thrash the queue.
+    if (this.cfg.githubInheritHost) {
+      this.hostGithubToken = await readHostGithubToken();
+      if (!this.hostGithubToken) {
+        console.error(
+          '[runner] --inherit-host-github set but no token found: install `gh` and run `gh auth login`, or set GITHUB_TOKEN. Refusing to start.',
+        );
+        process.exit(1);
+      }
+      console.log('[runner] inherit-host-github: cached host GitHub token');
+      this.hostTokenTimer = setInterval(() => { void this.refreshHostGithubToken(); }, HOST_TOKEN_REFRESH_MS);
+    }
+
     await this.heartbeat('online');
 
     // Heartbeat cadence stays at 2x pollMs (default 2s). With a 60s lease the
@@ -140,7 +179,26 @@ export class RunnerDaemon {
       done: Promise.resolve(),
     };
     this.inFlight.set(claimed.job.id, entry);
-    console.log(`[runner] running job ${claimed.job.id} (${claimed.job.kind} #${claimed.job.issueNumber ?? '?'})`);
+
+    // Phase 4 (migration 0026) — inherit-host substitution. The central
+    // returns no token for inherit-host runs (`ghIdentitySource === 'host'`);
+    // swap in our cached host token before handing the claim downstream.
+    // For any other identity source we pass through whatever the central minted.
+    const idSource = claimed.ghIdentitySource ?? 'workspace';
+    if (idSource === 'host') {
+      if (!this.hostGithubToken) {
+        // Should not happen — we hard-fail at startup if inherit-host is on
+        // and no token is reachable. Belt-and-braces: refuse the claim
+        // cleanly so the watchdog re-queues it for another runner.
+        console.error(`[runner] job ${claimed.job.id} requires host GH token but none cached; aborting`);
+        entry.cancel = true;
+      } else {
+        claimed.githubToken = this.hostGithubToken;
+      }
+    }
+    console.log(
+      `[runner] running job ${claimed.job.id} (${claimed.job.kind} #${claimed.job.issueNumber ?? '?'}) — identity=${idSource}`,
+    );
     entry.done = executeJobLocally(this.client, claimed, {
       shouldPause: () => entry.pause, // shutdown does NOT pause — in-flight jobs run to completion
       // A lost lease is treated like a cancel: the SaaS has already re-queued
@@ -155,6 +213,24 @@ export class RunnerDaemon {
     });
   }
 
+  /**
+   * Phase 4 — re-read the host GH token. Called every 30 min by the
+   * `hostTokenTimer` so an expired/rotated token doesn't strand a job.
+   * Never overwrites the cached token with null — if the refresh fails we
+   * keep the previous value (the existing token may still be valid).
+   */
+  private async refreshHostGithubToken(): Promise<void> {
+    try {
+      const next = await readHostGithubToken();
+      if (next && next !== this.hostGithubToken) {
+        this.hostGithubToken = next;
+        console.log('[runner] inherit-host-github: refreshed host GitHub token');
+      }
+    } catch (err) {
+      console.error('[runner] host GitHub token refresh failed:', err instanceof Error ? err.message : err);
+    }
+  }
+
   private async heartbeat(status: 'online' | 'draining' | 'offline'): Promise<void> {
     const inflight = [...this.inFlight.keys()];
     try {
@@ -164,6 +240,12 @@ export class RunnerDaemon {
         // Keep `currentJobIds` populated for SaaS deployments that haven't
         // taken the 0025 heartbeat update yet.
         currentJobIds: inflight,
+        // Phase 4 (migration 0026) — self-describe GitHub identity. Older
+        // SaaS deployments ignore these fields entirely.
+        githubInheritHost: this.cfg.githubInheritHost ?? false,
+        githubInstallationId: this.cfg.githubInheritHost
+          ? null
+          : (this.cfg.githubInstallationId ?? null),
       });
       for (const jobId of reply.cancelJobIds ?? []) {
         const e = this.inFlight.get(jobId);
@@ -202,6 +284,7 @@ export class RunnerDaemon {
     // The pump loop drains via its `while (!this.stopping)` guard — no
     // dedicated timer to cancel anymore.
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    if (this.hostTokenTimer) clearInterval(this.hostTokenTimer);
     await this.heartbeat('draining').catch(() => {});
 
     // Grace period for in-flight jobs.
@@ -224,3 +307,24 @@ export class RunnerDaemon {
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
+
+/**
+ * Reads a GitHub token from the host (inherit-host mode). Preference order:
+ *   1. `gh auth token` if the `gh` CLI is on PATH and logged in
+ *   2. `process.env.GITHUB_TOKEN` as a fallback
+ * Returns null if neither yields a non-empty token. Tolerant: a missing `gh`
+ * binary, a logged-out gh, or a non-zero exit all silently fall through.
+ */
+async function readHostGithubToken(): Promise<string | null> {
+  // Try `gh auth token` first. ENOENT (no gh on PATH) → fall back.
+  try {
+    const { stdout } = await execFileAsync('gh', ['auth', 'token'], { timeout: 5000 });
+    const token = stdout.trim();
+    if (token) return token;
+  } catch {
+    // gh missing / logged out / non-zero exit — fall through.
+  }
+  const env = (process.env.GITHUB_TOKEN ?? '').trim();
+  return env.length > 0 ? env : null;
+}
+

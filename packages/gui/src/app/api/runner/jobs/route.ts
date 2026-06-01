@@ -100,15 +100,65 @@ export async function GET(req: Request) {
     const owner = ws.repo_owner;
     const repo = ws.repo_name;
 
+    // ── per-runner GitHub identity (migration 0026) ──
+    // Three modes, with precedence (inherit_host wins if both are set):
+    //   1. inherit host: runner mints its own token from `gh auth token` /
+    //      GITHUB_TOKEN — central returns no token; `ghIdentitySource` is
+    //      `'host'` so the runner knows to swap in its cached value before
+    //      calling executeJobLocally.
+    //   2. per-runner App install: mint directly against the runner's
+    //      configured installation id.
+    //   3. workspace (default — today's behavior): try the workspace-level
+    //      App install, fall back to the workspace admin token.
     let githubToken: string | null = null;
-    if (owner && core.GitHubAppService.isConfigured()) {
-      try { githubToken = await new core.GitHubAppService().getInstallationToken(owner); }
-      catch (err) { console.error(`[runner-api] installation token failed for ${owner}:`, err instanceof Error ? err.message : err); }
+    let ghIdentitySource: string;
+    if (runner.github_inherit_host) {
+      ghIdentitySource = 'host';
+      // No central minting — the runner side substitutes its cached host
+      // token before passing to executeJobLocally.
+    } else if (runner.github_installation_id != null) {
+      const installId = Number(runner.github_installation_id);
+      ghIdentitySource = `runner-install:${installId}`;
+      try {
+        if (!core.GitHubAppService.isConfigured()) {
+          throw new Error('GitHub App not configured on central');
+        }
+        githubToken = await new core.GitHubAppService().getInstallationTokenById(installId);
+      } catch (err) {
+        // Per-runner install configured but unusable (no access to repo, app
+        // not configured, etc.) — warn and fall back to workspace path so a
+        // misconfiguration doesn't strand the job.
+        console.warn(
+          `[runner-api] per-runner install ${installId} failed, falling back to workspace token:`,
+          err instanceof Error ? err.message : err,
+        );
+        ghIdentitySource = `workspace:${job.workspace_id} (runner-install:${installId} failed)`;
+        if (owner && core.GitHubAppService.isConfigured()) {
+          try { githubToken = await new core.GitHubAppService().getInstallationToken(owner); }
+          catch (e) { console.error(`[runner-api] workspace install token also failed for ${owner}:`, e instanceof Error ? e.message : e); }
+        }
+        if (!githubToken) githubToken = await resolveWorkspaceToken(job.workspace_id, admin);
+      }
+    } else {
+      ghIdentitySource = `workspace:${job.workspace_id}`;
+      if (owner && core.GitHubAppService.isConfigured()) {
+        try { githubToken = await new core.GitHubAppService().getInstallationToken(owner); }
+        catch (err) { console.error(`[runner-api] installation token failed for ${owner}:`, err instanceof Error ? err.message : err); }
+      }
+      if (!githubToken) githubToken = await resolveWorkspaceToken(job.workspace_id, admin);
     }
-    if (!githubToken) githubToken = await resolveWorkspaceToken(job.workspace_id, admin);
-    if (!githubToken) throw new Error('no github token available for workspace');
+    // For host-inherit runs we deliberately leave githubToken null — the
+    // runner will substitute. For every other mode we must have one.
+    if (!runner.github_inherit_host && !githubToken) {
+      throw new Error('no github token available for workspace');
+    }
 
-    const config = await loadWorkspaceConfig(job.workspace_id, admin, { githubToken });
+    // For inherit-host mode we pass undefined so the config's github.token
+    // stays at its empty default; the runner substitutes its host-minted
+    // token before invoking the engine.
+    const config = await loadWorkspaceConfig(job.workspace_id, admin, {
+      githubToken: githubToken ?? undefined,
+    });
     config.workflow = { ...(config.workflow ?? {}), useEngine: true };
     // The runner clones the repo itself — don't ship the SaaS's (local) repoRoot.
     config.autofix.repoRoot = '';
@@ -214,9 +264,15 @@ export async function GET(req: Request) {
       workflowRunId: runRowId,
       workspace: { id: job.workspace_id, owner, repo },
       // `config.github.token` IS included on purpose — the runner needs it; it's
-      // already a short-lived/scoped token. No other secrets travel.
+      // already a short-lived/scoped token. No other secrets travel. Null for
+      // host-inherit runners; they substitute their own.
       config,
       githubToken,
+      /** Phase 4 (migration 0026) — informational label for which identity
+       *  served this claim. The runner logs it on job start so the operator
+       *  can see "workspace:abc-…" vs "runner-install:12345" vs "host" at a
+       *  glance. Drives the host-side token substitution when === 'host'. */
+      ghIdentitySource,
       store: storeSnapshot,
       ciFollowupSeed,
       flow: flowOut,
