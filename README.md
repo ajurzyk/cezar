@@ -139,21 +139,19 @@ yarn install
 # 1. start the local Supabase stack (db + kong + Realtime in Docker)
 yarn db:start
 
-# 2. set env vars (see docs/SELF-HOSTING.md for the full list)
-cat > .env.local <<EOF
-NEXT_PUBLIC_SUPABASE_URL=...
-SUPABASE_SERVICE_ROLE_KEY=...
-ANTHROPIC_API_KEY=sk-ant-...
-GITHUB_APP_ID=...
-GITHUB_APP_PRIVATE_KEY="-----BEGIN..."
-GITHUB_APP_WEBHOOK_SECRET=...
-CRON_SECRET=...
-NEXT_PUBLIC_APP_URL=https://app.example.com
-EOF
+# 2. seed env from the local-dev example; everything but ANTHROPIC_API_KEY
+#    is pre-filled for the local Supabase stack
+cp packages/gui/.env.local.example packages/gui/.env.local
+# then edit packages/gui/.env.local and replace `sk-ant-REPLACE-ME` with
+# your Anthropic key. GitHub App vars are optional for local-only use.
 
 # 3. run
 yarn workspace @cezar/gui dev
 ```
+
+For self-hosted (non-local) deployments, see
+[`docs/SELF-HOSTING.md`](docs/SELF-HOSTING.md) for the full env-var list
+including hosted Supabase, the in-process scheduler, and tuning knobs.
 
 Then install the GitHub App on your repo, walk through the **Workspaces → New**
 wizard (project env preset, label-catalog analysis, workflow defaults), and
