@@ -369,4 +369,77 @@ describe('WorkflowEngine.runWorkflow', () => {
     expect(result.status).toBe('paused');
     expect(runner.specs).toHaveLength(1);
   });
+
+  // ─── Phase 2: session_id threading + cross-restart resume ─────────────
+  // Bindings that pin every agent step's backend to claude-cli so the
+  // engine stamps the run-wide session id onto each agent_runs record.
+  const cliBindings: WorkflowBinding[] = [
+    { stepId: 'step-a', skillName: null, backend: 'claude-cli', model: null, extraTools: [] },
+    { stepId: 'step-b', skillName: null, backend: 'claude-cli', model: null, extraTools: [] },
+  ];
+
+  it('threads one claude session id across every step of a run', async () => {
+    const store = await makeStore();
+    const runner = new FakeRunner('claude-cli', [{ ok: true, note: 'a' }, { pass: true, note: 'b' }]);
+    const records: AgentRunRecord[] = [];
+    const result = await runWorkflow(tinyWorkflow(), {
+      ...baseCtx(),
+      store,
+      github: makeFakeGitHub(),
+      runnerFactory: () => runner,
+      bindings: cliBindings,
+      onRunRecord: (r) => records.push(r),
+    });
+    expect(result.status).toBe('succeeded');
+    expect(result.sessionId).toBeTypeOf('string');
+    // Both steps' specs carry the SAME session id (the one in the result).
+    expect(runner.specs[0].sessionId).toBe(result.sessionId);
+    expect(runner.specs[1].sessionId).toBe(result.sessionId);
+    // The agent_runs records (claude-cli backend) stamp it too.
+    const agentRecords = records.filter((r) => r.kind === 'agent');
+    for (const r of agentRecords) expect(r.sessionId).toBe(result.sessionId);
+    // First step does NOT request resume (fresh run).
+    expect(runner.specs[0].resume).toBeFalsy();
+  });
+
+  it('on resumeSessionId, first agent step asks the runner to resume; later steps do not', async () => {
+    const store = await makeStore();
+    const runner = new FakeRunner('claude-cli', [{ ok: true, note: 'a' }, { pass: true, note: 'b' }]);
+    const result = await runWorkflow(tinyWorkflow(), {
+      ...baseCtx(),
+      store,
+      github: makeFakeGitHub(),
+      runnerFactory: () => runner,
+      bindings: cliBindings,
+      resumeSessionId: 'previous-host-uuid',
+    });
+    expect(result.status).toBe('succeeded');
+    // The whole run is pinned to the inherited id.
+    expect(result.sessionId).toBe('previous-host-uuid');
+    expect(runner.specs[0].sessionId).toBe('previous-host-uuid');
+    expect(runner.specs[1].sessionId).toBe('previous-host-uuid');
+    // Only the first step flips resume:true.
+    expect(runner.specs[0].resume).toBe(true);
+    expect(runner.specs[1].resume).toBe(false);
+  });
+
+  it('non-claude-cli backends do not stamp sessionId onto agent_runs records', async () => {
+    const store = await makeStore();
+    const runner = new FakeRunner('anthropic-api', [{ ok: true, note: 'a' }, { pass: true, note: 'b' }]);
+    const records: AgentRunRecord[] = [];
+    const result = await runWorkflow(tinyWorkflow(), {
+      ...baseCtx(),
+      store,
+      github: makeFakeGitHub(),
+      runnerFactory: () => runner,
+      onRunRecord: (r) => records.push(r),
+    });
+    expect(result.status).toBe('succeeded');
+    // result.sessionId is still set (the engine generated one for the run),
+    // but per-step records under the api backend leave it unset since the
+    // backend doesn't honor sessions.
+    expect(result.sessionId).toBeTypeOf('string');
+    const agentRecords = records.filter((r) => r.kind === 'agent');
+    for (const r of agentRecords) expect(r.sessionId).toBeUndefined();
+  });
 });

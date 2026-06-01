@@ -40,16 +40,31 @@ export interface ClaudeCodeCliRunnerOptions {
   usdPerMillionTokens?: number;
   /**
    * How the runner invokes `claude`:
-   *  - `'print'` (default, today's behavior) — `claude -p <userPrompt>`,
-   *    one turn-cycle, exit.
-   *  - `'stream-json'` — `claude --input-format stream-json
-   *    --output-format stream-json` (no `-p`); the user prompt is sent
-   *    over stdin as one `{type:user}` NDJSON line. Still one process
-   *    per `.run()` call — Phase A plumbing for the persistent-session
-   *    refactor; Phase B will reuse this transport but keep the child
-   *    alive across multiple `.run()` calls.
+   *  - `'stream-json'` (default since Phase 2 of the horizontal-scaling
+   *    rollout) — `claude --input-format stream-json --output-format
+   *    stream-json` (no `-p`); the user prompt is sent over stdin as
+   *    one `{type:user}` NDJSON line. Each `.run()` call still spawns
+   *    its own child today, but pairing this transport with the same
+   *    `spec.sessionId` across steps lets `claude` resume the prior
+   *    on-disk conversation so prompt cache hits the cumulative prefix.
+   *  - `'print'` — `claude -p <userPrompt>`, one turn-cycle, exit.
+   *    Kept as an escape hatch (env override `CEZAR_CLI_TRANSPORT=print`
+   *    or `spec.transport = 'print'` upstream).
    */
   transport?: 'print' | 'stream-json';
+}
+
+/**
+ * Resolve the default transport: explicit `opts.transport` wins, then the
+ * `CEZAR_CLI_TRANSPORT` env override, then `'stream-json'` (the post-Phase-2
+ * default). Print mode stays reachable for callers that need the legacy
+ * argv-style argv invocation (e.g. older claude builds, debugging).
+ */
+function resolveDefaultTransport(explicit: 'print' | 'stream-json' | undefined): 'print' | 'stream-json' {
+  if (explicit) return explicit;
+  const env = process.env.CEZAR_CLI_TRANSPORT;
+  if (env === 'print' || env === 'stream-json') return env;
+  return 'stream-json';
 }
 
 /**
@@ -83,10 +98,34 @@ export class ClaudeCodeCliRunner implements AgentRunner {
     this.spawnFn = opts.spawnFn ?? (nodeSpawn as unknown as SpawnFn);
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS;
     this.usdPerMillionTokens = opts.usdPerMillionTokens ?? DEFAULT_USD_PER_MILLION_TOKENS;
-    this.transport = opts.transport ?? 'print';
+    this.transport = resolveDefaultTransport(opts.transport);
   }
 
   async run<T = unknown>(
+    spec: AgentRunSpec<T>,
+    onEvent?: (event: AgentEvent) => void,
+  ): Promise<AgentRunResult<T>> {
+    try {
+      return await this.runOnce(spec, onEvent);
+    } catch (err) {
+      // Cross-restart resume fallback (docs: Phase 2E). When `spec.resume`
+      // is set but the on-disk session isn't on this host (cross-host
+      // re-claim), `claude --resume <id>` exits non-zero. Retry transparently
+      // with `--session-id <id>` so the engine still threads the same id
+      // through the workflow, just without conversation history. Log a
+      // `note` so the cockpit shows the degraded path.
+      if (spec.resume && spec.sessionId && isResumeFailure(err)) {
+        onEvent?.({
+          type: 'note',
+          message: `claude --resume ${spec.sessionId} failed (likely cross-host re-claim) — retrying with fresh session under the same id`,
+        });
+        return this.runOnce({ ...spec, resume: false }, onEvent);
+      }
+      throw err;
+    }
+  }
+
+  private async runOnce<T = unknown>(
     spec: AgentRunSpec<T>,
     onEvent?: (event: AgentEvent) => void,
   ): Promise<AgentRunResult<T>> {
@@ -212,7 +251,7 @@ export class ClaudeCodeCliRunner implements AgentRunner {
       onEvent?.({ type: 'note', message: `timed out after ${mins}m — killed` });
       onEvent?.({ type: 'error', message: `claude CLI timed out after ${mins}m and was killed` });
       onEvent?.({ type: 'done' });
-      return { text, parsed, toolCalls, tokensUsed, budgetExceeded: false };
+      return { text, parsed, toolCalls, tokensUsed, budgetExceeded: false, sessionId: spec.sessionId };
     }
 
     if (!budgetExceeded && exitCode !== 0 && exitCode !== null) {
@@ -229,7 +268,7 @@ export class ClaudeCodeCliRunner implements AgentRunner {
     }
 
     onEvent?.({ type: 'done' });
-    return { text, parsed, toolCalls, tokensUsed, budgetExceeded };
+    return { text, parsed, toolCalls, tokensUsed, budgetExceeded, sessionId: spec.sessionId };
   }
 
   async interrupt(): Promise<void> {
@@ -270,8 +309,21 @@ function buildClaudeArgs<T>(
   // the agent_run.id as the session id (already a UUID) so the cockpit
   // can show it verbatim. Pre-2025 claude builds may reject `--session-id`;
   // the runner silently drops it via the surrounding try/catch on spawn.
+  //
+  // `spec.resume` (set by the engine on a re-claimed job) flips to
+  // `claude --resume <sessionId>` so the new process picks up the prior
+  // on-disk conversation. If the session blob isn't on this host (cross-
+  // host re-claim), `claude --resume` exits non-zero — the engine catches
+  // that and retries the step without `resume` so the runner re-spawns
+  // with the same `--session-id`, which falls back to a cold start under
+  // the same id. The error path logs a `note` so the operator sees the
+  // degraded path.
   if (spec.sessionId) {
-    args.push('--session-id', spec.sessionId);
+    if (spec.resume) {
+      args.push('--resume', spec.sessionId);
+    } else {
+      args.push('--session-id', spec.sessionId);
+    }
   }
   const allowed = buildAllowedTools(spec.allowedTools, spec.bashAllowlist);
   if (allowed.length > 0) {
@@ -482,4 +534,18 @@ function wrapSpawnError(err: unknown, bin: string): Error {
     );
   }
   return err instanceof Error ? err : new Error(String(err));
+}
+
+/**
+ * `claude --resume <id>` errors that mean "no on-disk session here" — caller
+ * (the engine via the runner) retries without the resume flag. We can't see
+ * the exact stderr from the catch site (it's already wrapped into the thrown
+ * `Error`'s message), so we sniff the message: a non-zero exit code paired
+ * with `claude CLI exited with code` is the cue. ENOENT (binary missing) is
+ * NOT a resume-failure — that's already wrapped into a clear "install Claude
+ * Code" message and shouldn't be retried.
+ */
+function isResumeFailure(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  return /claude CLI exited with code \d+/.test(err.message);
 }

@@ -338,13 +338,27 @@ async function handleCheckRun(admin: SupabaseAdmin, payload: WebhookPayload): Pr
     // Find the autofix workflow_run that owns one of the linked PRs.
     const { data: ownRuns } = await admin
       .from('workflow_runs')
-      .select('id, issue_number, pr_number, branch')
+      .select('id, issue_number, pr_number, branch, job_id')
       .eq('workspace_id', ws.id)
       .eq('workflow', 'autofix')
       .in('pr_number', linkedPrNumbers)
       .limit(1);
     const ownRun = ownRuns?.[0];
     if (!ownRun || ownRun.issue_number == null || ownRun.pr_number == null) continue;
+
+    // Phase 4 soft affinity (migration 0026) — look up which runner handled
+    // the parent autofix. Null when the parent ran on the cron path
+    // (claimed_by_runner stays NULL there) — we deliberately skip affinity
+    // in that case since it's pointless.
+    let parentRunnerId: string | null = null;
+    if (ownRun.job_id) {
+      const { data: parentJob } = await admin
+        .from('jobs')
+        .select('claimed_by_runner')
+        .eq('id', ownRun.job_id)
+        .maybeSingle();
+      parentRunnerId = parentJob?.claimed_by_runner ?? null;
+    }
 
     // Count prior ci-followup attempts for this PR so the agent honours the
     // attempt cap. (`workflow_runs.pr_number` is the source of truth.)
@@ -384,6 +398,14 @@ async function handleCheckRun(admin: SupabaseAdmin, payload: WebhookPayload): Pr
       logTails: cr.html_url ? [{ checkName: cr.name, lines: [`(see ${cr.html_url})`] }] : undefined,
     };
 
+    // Phase 4 soft affinity — 30s window in which the parent runner is
+    // preferred; after that any matching runner can claim.
+    const preferred = parentRunnerId
+      ? {
+          preferred_runner_id: parentRunnerId,
+          preferred_until: new Date(Date.now() + 30_000).toISOString(),
+        }
+      : {};
     const { error } = await admin.from('jobs').insert({
       workspace_id: ws.id,
       repo: repoSlug,
@@ -394,6 +416,7 @@ async function handleCheckRun(admin: SupabaseAdmin, payload: WebhookPayload): Pr
       status: 'queued',
       max_attempts: 1,
       payload: { trigger: 'webhook', ciFollowup: ciFollowupSeed },
+      ...preferred,
     });
     if (error) {
       console.error(`[github-webhook] ci-followup enqueue failed for ws ${ws.id}:`, error.message);

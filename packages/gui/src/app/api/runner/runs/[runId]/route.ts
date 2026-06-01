@@ -31,6 +31,10 @@ interface FinalizeBody {
   headSha?: string | null;
   tokensUsed?: number;
   reason?: string | null;
+  /** Phase 2: claude session id for this run. Stamped on
+   *  `workflow_runs.session_id` if not already set so a future re-claim
+   *  can `claude --resume <id>`. */
+  sessionId?: string | null;
 }
 
 /** PATCH /api/runner/runs/:runId — the runner reports the final state. Updates
@@ -61,6 +65,10 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ runId:
   };
   if (typeof body.tokensUsed === 'number') patch.tokens_used = body.tokensUsed;
   if (terminal || runStatus === 'paused') patch.finished_at = new Date().toISOString();
+  // Last-resort writer for `session_id` (the per-event RPC's coalesce path
+  // is the primary route; this catches the case where no step event ever
+  // landed on the SaaS).
+  if (body.sessionId) patch.session_id = body.sessionId;
   await admin.from('workflow_runs').update(patch).eq('id', runId);
 
   if (run.job_id) {
@@ -69,7 +77,13 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ runId:
       : runStatus === 'cancelled' ? 'cancelled'
       : runStatus === 'failed' ? 'failed'
       : 'done';
-    await admin.from('jobs').update({ status: jobStatus, claimed_by_runner: null, updated_at: new Date().toISOString() }).eq('id', run.job_id);
+    await admin.from('jobs').update({
+      status: jobStatus,
+      claimed_by_runner: null,
+      // Drop the lease — the job is no longer in-flight on this runner.
+      claim_expires_at: null,
+      updated_at: new Date().toISOString(),
+    }).eq('id', run.job_id);
   }
 
   // Phase 5 — a runner-driven `triage` run finalizes here; if it concluded
@@ -118,6 +132,11 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ runId:
         issueNumber: run.issue_number,
         outcome: triageOutcome,
         workspaceConfig: config,
+        // Phase 4 soft affinity — the runner finalizing this triage is the
+        // same one whose bare clone + on-disk Claude session are warm. Pass
+        // it as the follow-up's preferred runner so the autofix lands here
+        // first (within the 30s soft window).
+        parentRunnerId: runner.id,
       });
     } catch (err) {
       console.error('[runner-finalize] triage→autofix enqueue failed:', err instanceof Error ? err.message : err);

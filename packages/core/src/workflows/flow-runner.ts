@@ -86,6 +86,12 @@ export interface RunFlowParams {
   onRunRecord: (r: AgentRunRecord) => void;
   pauseRequested?: () => boolean | Promise<boolean>;
   cancelRequested?: () => boolean | Promise<boolean>;
+  /**
+   * Phase 2 re-claim resume. Threaded into the engine so the runner can
+   * `claude --resume <id>` on the first step of a re-claimed run. Cross-host
+   * re-claims fall back to a fresh start under the same id.
+   */
+  resumeSessionId?: string;
 }
 
 interface FlowBlackboard extends Record<string, unknown> {
@@ -244,6 +250,7 @@ export async function runFlow(params: RunFlowParams): Promise<WorkflowRunResult<
       apply: true,
       skills,
       labels: params.labels,
+      resumeSessionId: params.resumeSessionId,
       // Bindings: per-step, set the skillName so resolveStepConfig appends the
       // skill body to the system prompt. The engine reads these from `bindings`.
       // Only agent steps need bindings; prefix steps (install / dev-server)

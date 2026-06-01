@@ -20,6 +20,14 @@ interface IncomingEvent {
   tokensUsed?: number;
   startedAt?: string;
   finishedAt?: string | null;
+  /** Phase 2: claude session id for this step. Written by the RPC into
+   *  `agent_runs.session_id` and (first-non-null) `workflow_runs.session_id`. */
+  sessionId?: string;
+  /** Phase 5 (migration 0027): runner UUID stamped on `step-start`/`step-end`.
+   *  The RPC `coalesce`s onto `agent_runs.runner_id` so the first event that
+   *  carries it wins; re-deliveries with an empty/missing field don't clobber
+   *  an existing value. */
+  runnerId?: string;
 }
 
 /**

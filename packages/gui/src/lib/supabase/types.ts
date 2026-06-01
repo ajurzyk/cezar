@@ -70,6 +70,23 @@ export type AgentRunEventType =
 export type RunnerKind = 'cloud' | 'self-hosted';
 export type RunnerStatus = 'online' | 'offline' | 'draining';
 
+/**
+ * Phase 5 (migration 0027) — shape of `runners.utilization`. Reported on each
+ * runner heartbeat and overwritten in place (snapshot semantics, no
+ * time-series). Captured-at is a runner-local timestamp; the cockpit pairs
+ * it with `last_heartbeat_at` for the freshness display.
+ */
+export interface RunnerUtilization {
+  inflight: number;
+  capacity: number;
+  cpuLoad: number;
+  freeMemMb: number;
+  totalMemMb: number;
+  nodeVersion: string;
+  uptimeSec: number;
+  capturedAt: string;
+}
+
 export type CiAttributionVerdict = 'ours' | 'unrelated' | 'flaky' | 'unsure';
 export type CiAttributionMethod = 'base-branch-control' | 'llm' | 'degraded';
 
@@ -345,6 +362,16 @@ export interface Database {
           status: JobStatus;
           required_backend: WorkflowBackend | null;
           claimed_by_runner: string | null;
+          /** Renewable lease deadline (migration 0025). Watchdog reclaims any
+           *  job whose lease has lapsed. NULL when the job isn't currently held. */
+          claim_expires_at: string | null;
+          /** Phase 4 (migration 0026) soft affinity — preferred runner for this
+           *  job (typically inherited from the parent workflow run). NULL = no
+           *  preference; any matching runner may claim. */
+          preferred_runner_id: string | null;
+          /** Phase 4 (migration 0026) soft-affinity window. After this instant
+           *  the preference is ignored and any matching runner may claim. */
+          preferred_until: string | null;
           attempts: number;
           max_attempts: number;
           scheduled_at: string;
@@ -354,7 +381,7 @@ export interface Database {
         };
         Insert: Omit<
           Database['public']['Tables']['jobs']['Row'],
-          'id' | 'priority' | 'status' | 'attempts' | 'max_attempts' | 'scheduled_at' | 'payload' | 'created_at' | 'updated_at'
+          'id' | 'priority' | 'status' | 'attempts' | 'max_attempts' | 'scheduled_at' | 'payload' | 'created_at' | 'updated_at' | 'claim_expires_at' | 'preferred_runner_id' | 'preferred_until'
         > & {
           id?: string;
           repo?: string | null;
@@ -364,6 +391,9 @@ export interface Database {
           status?: JobStatus;
           required_backend?: WorkflowBackend | null;
           claimed_by_runner?: string | null;
+          claim_expires_at?: string | null;
+          preferred_runner_id?: string | null;
+          preferred_until?: string | null;
           attempts?: number;
           max_attempts?: number;
           scheduled_at?: string;
@@ -396,6 +426,10 @@ export interface Database {
           finished_at: string | null;
           created_at: string;
           updated_at: string;
+          /** Canonical Claude CLI session UUID for this run. Set once by the
+           *  first step that mints one, then reused on re-claim (the runner
+           *  passes `claude --resume <session_id>`). */
+          session_id: string | null;
         };
         Insert: Omit<
           Database['public']['Tables']['workflow_runs']['Row'],
@@ -420,6 +454,7 @@ export interface Database {
           finished_at?: string | null;
           created_at?: string;
           updated_at?: string;
+          session_id?: string | null;
         };
         Update: Partial<Database['public']['Tables']['workflow_runs']['Insert']>;
       };
@@ -440,6 +475,14 @@ export interface Database {
           cost_estimate: number | null;
           summary: string | null;
           error: string | null;
+          /** Claude CLI session UUID for this step. The workflow engine reuses
+           *  one id across every step of a workflow run, and on a re-claim the
+           *  runner picks it up via `claude --resume <session_id>`. */
+          session_id: string | null;
+          /** Phase 5 (migration 0027) — runner that served this step. NULL for
+           *  cron-dispatched steps (the anthropic-api path). First-writer-wins
+           *  via the `ingest_runner_events` RPC. */
+          runner_id: string | null;
         };
         Insert: Omit<
           Database['public']['Tables']['agent_runs']['Row'],
@@ -457,6 +500,8 @@ export interface Database {
           cost_estimate?: number | null;
           summary?: string | null;
           error?: string | null;
+          session_id?: string | null;
+          runner_id?: string | null;
         };
         Update: Partial<Database['public']['Tables']['agent_runs']['Insert']>;
       };
@@ -491,10 +536,26 @@ export interface Database {
           last_heartbeat_at: string | null;
           created_at: string;
           updated_at: string;
+          /** Phase 4 (migration 0026) per-runner GitHub App install. When set
+           *  the claim route mints an installation token against this id
+           *  instead of the workspace-level install. `bigint` since GitHub
+           *  install ids can exceed 2^31. */
+          github_installation_id: number | null;
+          /** Phase 4 (migration 0026) "inherit host" identity mode. When true
+           *  the runner mints its own GitHub token locally from `gh auth
+           *  token` / GITHUB_TOKEN; the central does NOT mint for these
+           *  runs. Precedence: if both this AND `github_installation_id`
+           *  are set, this wins. */
+          github_inherit_host: boolean;
+          /** Phase 5 (migration 0027) — latest utilization snapshot reported
+           *  by the runner on heartbeat. Overwritten on every heartbeat — no
+           *  time-series here. Shape: `RunnerUtilization`. NULL on older
+           *  daemons that don't report. */
+          utilization: RunnerUtilization | null;
         };
         Insert: Omit<
           Database['public']['Tables']['runners']['Row'],
-          'id' | 'backends' | 'models' | 'status' | 'created_at' | 'updated_at'
+          'id' | 'backends' | 'models' | 'status' | 'created_at' | 'updated_at' | 'github_installation_id' | 'github_inherit_host' | 'utilization'
         > & {
           id?: string;
           workspace_id?: string | null;
@@ -505,6 +566,9 @@ export interface Database {
           last_heartbeat_at?: string | null;
           created_at?: string;
           updated_at?: string;
+          github_installation_id?: number | null;
+          github_inherit_host?: boolean;
+          utilization?: RunnerUtilization | null;
         };
         Update: Partial<Database['public']['Tables']['runners']['Insert']>;
       };

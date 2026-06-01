@@ -100,7 +100,12 @@ export async function executeLabelAnalysisJob(
   const { workspaceId, jobId, analysisId } = params;
 
   const finishJob = async (status: Database['public']['Tables']['jobs']['Row']['status']): Promise<void> => {
-    await adminSupabase.from('jobs').update({ status, updated_at: new Date().toISOString() }).eq('id', jobId);
+    // Drop the lease (migration 0025) on completion.
+    await adminSupabase.from('jobs').update({
+      status,
+      claim_expires_at: null,
+      updated_at: new Date().toISOString(),
+    }).eq('id', jobId);
   };
 
   const failAnalysis = async (message: string): Promise<void> => {

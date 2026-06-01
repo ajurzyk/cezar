@@ -42,9 +42,12 @@ const AnalyzerSchema = z.object({
 });
 
 describe('ClaudeCodeCliRunner', () => {
-  it('parses the stream-json transcript into events, tool calls, and structured output', async () => {
+  it('parses the stream-json transcript into events, tool calls, and structured output (default transport)', async () => {
     const { spawnFn, calls } = makeFakeSpawn({ stdoutLines: TRANSCRIPT, exitCode: 0 });
-    const runner = new ClaudeCodeCliRunner({ spawnFn });
+    // Phase 2 of the horizontal-scaling rollout flipped the default to
+    // stream-json. Pin it here explicitly so the test still asserts the
+    // happy path regardless of any future env-driven default shifts.
+    const runner = new ClaudeCodeCliRunner({ spawnFn, transport: 'stream-json' });
     const events: { type: string }[] = [];
     const res = await runner.run(
       {
@@ -68,14 +71,16 @@ describe('ClaudeCodeCliRunner', () => {
     expect(events.some((e) => e.type === 'text')).toBe(true);
     expect(events.at(-1)).toEqual({ type: 'done' });
 
-    // argv sanity: headless print mode + the sandbox flags + cwd.
+    // argv sanity: stream-json transport reads the prompt over stdin (not
+    // argv), keeps the per-call sandbox flags, and pins the cwd.
     const argv = calls[0].args;
     expect(calls[0].command).toBe('claude');
     expect(calls[0].cwd).toBe('/work/wt');
-    expect(argv).toContain('-p');
-    expect(argv).toContain('Find the root cause of #42.');
-    expect(argv).toContain('--output-format');
+    expect(argv).toContain('--input-format');
     expect(argv).toContain('stream-json');
+    expect(argv).not.toContain('-p');
+    expect(argv).not.toContain('Find the root cause of #42.');
+    expect(argv).toContain('--output-format');
     expect(argv).toContain('--append-system-prompt');
     expect(argv).toContain('You are the analyzer.');
     expect(argv).toContain('--allowedTools');
@@ -84,6 +89,79 @@ describe('ClaudeCodeCliRunner', () => {
     expect(argv).toContain('acceptEdits');
     expect(argv).toContain('--model');
     expect(argv).toContain('claude-sonnet-4-6');
+  });
+
+  it('defaults to stream-json transport when no override is provided', async () => {
+    const { spawnFn, calls } = makeFakeSpawn({
+      stdoutLines: [JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'ok', usage: { input_tokens: 1 } })],
+      exitCode: 0,
+    });
+    const runner = new ClaudeCodeCliRunner({ spawnFn });
+    await runner.run({ systemPrompt: 's', userPrompt: 'u', cwd: '/tmp', allowedTools: ['Read'] });
+    const argv = calls[0].args;
+    expect(argv).toContain('--input-format');
+    expect(argv).toContain('stream-json');
+    expect(argv).not.toContain('-p');
+  });
+
+  it('passes --session-id when the spec carries a sessionId without resume', async () => {
+    const { spawnFn, calls } = makeFakeSpawn({
+      stdoutLines: [JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'ok', usage: { input_tokens: 1 } })],
+      exitCode: 0,
+    });
+    const runner = new ClaudeCodeCliRunner({ spawnFn });
+    const res = await runner.run({
+      systemPrompt: 's',
+      userPrompt: 'u',
+      cwd: '/tmp',
+      allowedTools: ['Read'],
+      sessionId: 'abc-123',
+    });
+    expect(res.sessionId).toBe('abc-123');
+    const argv = calls[0].args;
+    expect(argv).toContain('--session-id');
+    expect(argv).toContain('abc-123');
+    expect(argv).not.toContain('--resume');
+  });
+
+  it('switches to --resume when spec.resume is set, and falls back to fresh start on resume failure', async () => {
+    let attempt = 0;
+    const capturedAttempts: Array<{ args: readonly string[] }> = [];
+    const failingSpawn = makeFakeSpawn({ stdoutLines: [], stderr: 'session not found', exitCode: 1 });
+    const successSpawn = makeFakeSpawn({
+      stdoutLines: [JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'ok', usage: { input_tokens: 1 } })],
+      exitCode: 0,
+    });
+    const spawnFn: import('../../src/agents/claude-cli-runner.js').SpawnFn = (cmd, args, opts) => {
+      attempt += 1;
+      capturedAttempts.push({ args });
+      return (attempt === 1 ? failingSpawn.spawnFn : successSpawn.spawnFn)(cmd, args, opts);
+    };
+
+    const runner = new ClaudeCodeCliRunner({ spawnFn });
+    const events: { type: string; message?: string }[] = [];
+    const res = await runner.run(
+      {
+        systemPrompt: 's',
+        userPrompt: 'u',
+        cwd: '/tmp',
+        allowedTools: ['Read'],
+        sessionId: 'sess-xyz',
+        resume: true,
+      },
+      (e) => events.push(e as { type: string; message?: string }),
+    );
+
+    expect(res.sessionId).toBe('sess-xyz');
+    // Two spawn attempts — first with --resume, second cold start with --session-id.
+    expect(capturedAttempts.length).toBe(2);
+    expect(capturedAttempts[0].args).toContain('--resume');
+    expect(capturedAttempts[0].args).toContain('sess-xyz');
+    expect(capturedAttempts[1].args).toContain('--session-id');
+    expect(capturedAttempts[1].args).toContain('sess-xyz');
+    expect(capturedAttempts[1].args).not.toContain('--resume');
+    // Fallback emits a `note` so the cockpit shows the degraded path.
+    expect(events.some((e) => e.type === 'note' && (e.message ?? '').includes('cross-host re-claim'))).toBe(true);
   });
 
   it('throws a clear error when the claude binary is missing', async () => {

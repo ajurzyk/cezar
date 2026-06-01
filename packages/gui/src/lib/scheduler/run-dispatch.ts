@@ -38,7 +38,14 @@ export async function runDispatch(supabase: SupabaseClient<Database>): Promise<D
   }
 
   // ── claim ──
-  const { data: claimed, error: claimErr } = await supabase.rpc('claim_next_job', { p_limit: DISPATCH_BATCH });
+  // 5-minute lease (migration 0025): cron handlers are fire-and-forget and
+  // individual workflow jobs can run a few minutes. The longer lease avoids
+  // needing an in-handler renewal tick (the runner-side 60s lease has a
+  // heartbeat tick to renew it; the cron path doesn't).
+  const { data: claimed, error: claimErr } = await supabase.rpc('claim_next_job', {
+    p_limit: DISPATCH_BATCH,
+    p_lease_seconds: 300,
+  });
   if (claimErr) {
     console.error('[dispatch] claim_next_job failed:', claimErr.message);
     return { claimed: 0, requeued, error: claimErr.message };
@@ -74,7 +81,7 @@ export async function runDispatch(supabase: SupabaseClient<Database>): Promise<D
         console.error(`[dispatch] label-analysis job ${job.id} missing payload.analysisId`);
         await supabase
           .from('jobs')
-          .update({ status: 'failed', updated_at: new Date().toISOString() })
+          .update({ status: 'failed', claim_expires_at: null, updated_at: new Date().toISOString() })
           .eq('id', job.id);
         continue;
       }

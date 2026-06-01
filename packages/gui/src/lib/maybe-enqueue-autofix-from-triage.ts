@@ -24,7 +24,21 @@ export interface MaybeEnqueueAutofixParams {
   outcome: TriageOutcomeLike | null | undefined;
   /** Resolved workspace `Config` — for `autofix.minBugConfidence`. Optional: defaults are used if absent. */
   workspaceConfig?: Pick<Config, 'autofix'> | null;
+  /**
+   * Phase 4 (migration 0026) soft affinity — the runner that handled the
+   * parent triage job. When set, the follow-up autofix job gets it as
+   * `preferred_runner_id` with a 30s `preferred_until` so the same runner
+   * reuses its warm bare clone / on-disk Claude session. Null/undefined
+   * (cron path, or parent ran on the cron path) → no affinity, behaves as
+   * before. Triage entry-point jobs (no parent) should never set this.
+   */
+  parentRunnerId?: string | null;
 }
+
+/** Phase 4 — soft affinity window. Long enough for a heartbeat to land and a
+ *  fresh claim to fire, short enough that a wedged/slow runner can't strand a
+ *  follow-up for more than a few seconds. */
+const SOFT_AFFINITY_WINDOW_MS = 30_000;
 
 const DEFAULT_MIN_BUG_CONFIDENCE = 0.7;
 
@@ -50,7 +64,7 @@ export async function maybeEnqueueAutofixFromTriage(
   adminSupabase: SupabaseClient<Database>,
   params: MaybeEnqueueAutofixParams,
 ): Promise<{ enqueued: boolean; reason?: string }> {
-  const { workspaceId, repo, issueNumber, outcome, workspaceConfig } = params;
+  const { workspaceId, repo, issueNumber, outcome, workspaceConfig, parentRunnerId } = params;
   try {
     if (!outcome || outcome.route !== 'autofix') return { enqueued: false, reason: 'route is not autofix' };
 
@@ -101,6 +115,15 @@ export async function maybeEnqueueAutofixFromTriage(
       if (analysis.autofixStatus === 'pr-opened') return { enqueued: false, reason: 'issue already has an autofix PR open' };
     }
 
+    // Phase 4 soft affinity — prefer the runner that handled the parent
+    // triage when one is known (cron-path parents leave it null, which
+    // means "no preference; any matching runner may claim").
+    const preferred = parentRunnerId
+      ? {
+          preferred_runner_id: parentRunnerId,
+          preferred_until: new Date(Date.now() + SOFT_AFFINITY_WINDOW_MS).toISOString(),
+        }
+      : {};
     const { error: insErr } = await adminSupabase.from('jobs').insert({
       workspace_id: workspaceId,
       repo,
@@ -111,6 +134,7 @@ export async function maybeEnqueueAutofixFromTriage(
       status: 'queued',
       max_attempts: 1,
       payload: { trigger: 'triage' },
+      ...preferred,
     });
     if (insErr) return { enqueued: false, reason: `enqueue failed: ${insErr.message}` };
     return { enqueued: true };

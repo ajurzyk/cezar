@@ -3,6 +3,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { SupabaseStoreAdapter } from '@/lib/adapters/supabase-store';
 import { loadWorkspaceConfig } from '@/lib/load-workspace-config';
 import { loadWorkspaceLabels } from '@/lib/load-workspace-labels';
+import { canAcquireListener, waitForJobsQueuedNotify } from '@/lib/pg-listen';
 import { authRunner } from '../_auth';
 import type { Database } from '@/lib/supabase/types';
 
@@ -11,18 +12,25 @@ export const runtime = 'nodejs';
 
 type JobRow = Database['public']['Tables']['jobs']['Row'];
 
+// `wait` query param is clamped to [0, MAX_WAIT_SEC]. 25s matches the
+// ingress-timeout headroom on most Vercel/edge proxies; the runner sets a
+// matching client-side fetch timeout (= wait + 5s) in runner-client.ts.
+const MAX_WAIT_SEC = 25;
+
 /**
- * GET /api/runner/jobs?backends=anthropic-api,claude-cli
+ * GET /api/runner/jobs?backends=anthropic-api,claude-cli&wait=25
  *
  * A runner long-polls this to claim work. We:
- *   1. refresh the runner's heartbeat,
- *   2. `claim_next_job_for_runner` (FOR UPDATE SKIP LOCKED) restricted to the
- *      requested backends,
+ *   1. try `claim_next_job_for_runner` (FOR UPDATE SKIP LOCKED) restricted to
+ *      the requested backends — fast path when there's queued work.
+ *   2. when there isn't, optionally LISTEN on `jobs_queued` and re-try once on
+ *      wake. NOTIFY is fired by the 0025 trigger on insert/requeue.
  *   3. on a hit: build the merged workspace config (incl. a freshly-minted
- *      GitHub token), snapshot the issue store, create the `workflow_runs` row,
- *      mark the job `running`, and return everything the runner needs.
+ *      GitHub token), snapshot the issue store, create the `workflow_runs`
+ *      row, mark the job `running`, and return everything the runner needs.
  *
- * Returns `{ job: null }` when there's nothing to do.
+ * Returns `{ job: null }` (or HTTP 204 implicitly via `{ job: null }`) when
+ * nothing was found within the wait window.
  */
 export async function GET(req: Request) {
   const auth = await authRunner(req);
@@ -38,19 +46,49 @@ export async function GET(req: Request) {
   const backends = requested.length ? requested : runner.backends;
   if (backends.length === 0) return NextResponse.json({ job: null });
 
-  const { data: claimed, error: claimErr } = await admin.rpc('claim_next_job_for_runner', {
-    p_runner_id: runner.id,
-    p_backends: backends,
-    p_limit: 1,
-  });
-  if (claimErr) return NextResponse.json({ error: claimErr.message }, { status: 500 });
-  const job = ((claimed ?? []) as JobRow[])[0];
+  const waitParam = Number(url.searchParams.get('wait') ?? '0');
+  const waitSec = Number.isFinite(waitParam) ? Math.max(0, Math.min(MAX_WAIT_SEC, waitParam)) : 0;
+
+  const claimOnce = async (): Promise<JobRow | null> => {
+    const { data, error } = await admin.rpc('claim_next_job_for_runner', {
+      p_runner_id: runner.id,
+      p_backends: backends,
+      p_limit: 1,
+    });
+    if (error) throw new Error(error.message);
+    return ((data ?? []) as JobRow[])[0] ?? null;
+  };
+
+  let job: JobRow | null;
+  try {
+    job = await claimOnce();
+  } catch (err) {
+    return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 });
+  }
+
+  // Long-poll path: nothing claimable right now — wait for a NOTIFY (or
+  // timeout / client disconnect) and try once more. We only enter this if the
+  // caller asked for it AND the in-process listener pool has room — otherwise
+  // we behave like the old short-poll (single attempt, return null).
+  if (!job && waitSec > 0 && canAcquireListener()) {
+    const woke = await waitForJobsQueuedNotify(waitSec * 1000, req.signal);
+    if (woke && !req.signal.aborted) {
+      try { job = await claimOnce(); }
+      catch (err) { return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 }); }
+    }
+  }
+
   if (!job) return NextResponse.json({ job: null });
 
   // From here on, any failure should release the job back to the queue so it
   // isn't stuck `claimed` until the watchdog.
   const releaseJob = async () => {
-    await admin.from('jobs').update({ status: 'queued', claimed_by_runner: null, updated_at: new Date().toISOString() }).eq('id', job.id);
+    await admin.from('jobs').update({
+      status: 'queued',
+      claimed_by_runner: null,
+      claim_expires_at: null,
+      updated_at: new Date().toISOString(),
+    }).eq('id', job.id);
   };
 
   try {
@@ -62,15 +100,65 @@ export async function GET(req: Request) {
     const owner = ws.repo_owner;
     const repo = ws.repo_name;
 
+    // ── per-runner GitHub identity (migration 0026) ──
+    // Three modes, with precedence (inherit_host wins if both are set):
+    //   1. inherit host: runner mints its own token from `gh auth token` /
+    //      GITHUB_TOKEN — central returns no token; `ghIdentitySource` is
+    //      `'host'` so the runner knows to swap in its cached value before
+    //      calling executeJobLocally.
+    //   2. per-runner App install: mint directly against the runner's
+    //      configured installation id.
+    //   3. workspace (default — today's behavior): try the workspace-level
+    //      App install, fall back to the workspace admin token.
     let githubToken: string | null = null;
-    if (owner && core.GitHubAppService.isConfigured()) {
-      try { githubToken = await new core.GitHubAppService().getInstallationToken(owner); }
-      catch (err) { console.error(`[runner-api] installation token failed for ${owner}:`, err instanceof Error ? err.message : err); }
+    let ghIdentitySource: string;
+    if (runner.github_inherit_host) {
+      ghIdentitySource = 'host';
+      // No central minting — the runner side substitutes its cached host
+      // token before passing to executeJobLocally.
+    } else if (runner.github_installation_id != null) {
+      const installId = Number(runner.github_installation_id);
+      ghIdentitySource = `runner-install:${installId}`;
+      try {
+        if (!core.GitHubAppService.isConfigured()) {
+          throw new Error('GitHub App not configured on central');
+        }
+        githubToken = await new core.GitHubAppService().getInstallationTokenById(installId);
+      } catch (err) {
+        // Per-runner install configured but unusable (no access to repo, app
+        // not configured, etc.) — warn and fall back to workspace path so a
+        // misconfiguration doesn't strand the job.
+        console.warn(
+          `[runner-api] per-runner install ${installId} failed, falling back to workspace token:`,
+          err instanceof Error ? err.message : err,
+        );
+        ghIdentitySource = `workspace:${job.workspace_id} (runner-install:${installId} failed)`;
+        if (owner && core.GitHubAppService.isConfigured()) {
+          try { githubToken = await new core.GitHubAppService().getInstallationToken(owner); }
+          catch (e) { console.error(`[runner-api] workspace install token also failed for ${owner}:`, e instanceof Error ? e.message : e); }
+        }
+        if (!githubToken) githubToken = await resolveWorkspaceToken(job.workspace_id, admin);
+      }
+    } else {
+      ghIdentitySource = `workspace:${job.workspace_id}`;
+      if (owner && core.GitHubAppService.isConfigured()) {
+        try { githubToken = await new core.GitHubAppService().getInstallationToken(owner); }
+        catch (err) { console.error(`[runner-api] installation token failed for ${owner}:`, err instanceof Error ? err.message : err); }
+      }
+      if (!githubToken) githubToken = await resolveWorkspaceToken(job.workspace_id, admin);
     }
-    if (!githubToken) githubToken = await resolveWorkspaceToken(job.workspace_id, admin);
-    if (!githubToken) throw new Error('no github token available for workspace');
+    // For host-inherit runs we deliberately leave githubToken null — the
+    // runner will substitute. For every other mode we must have one.
+    if (!runner.github_inherit_host && !githubToken) {
+      throw new Error('no github token available for workspace');
+    }
 
-    const config = await loadWorkspaceConfig(job.workspace_id, admin, { githubToken });
+    // For inherit-host mode we pass undefined so the config's github.token
+    // stays at its empty default; the runner substitutes its host-minted
+    // token before invoking the engine.
+    const config = await loadWorkspaceConfig(job.workspace_id, admin, {
+      githubToken: githubToken ?? undefined,
+    });
     config.workflow = { ...(config.workflow ?? {}), useEngine: true };
     // The runner clones the repo itself — don't ship the SaaS's (local) repoRoot.
     config.autofix.repoRoot = '';
@@ -117,22 +205,45 @@ export async function GET(req: Request) {
     }
 
     // ── workflow_runs row ──
+    // Phase 2: a watchdog-requeued job (claimed_by_runner was cleared after a
+    // lease expiry) already has an in-flight `workflow_runs` row from the
+    // crashed runner — reuse it so the runner can `claude --resume <id>`
+    // off the same session. The previous run's `session_id` flows back
+    // through `resumeSessionId` below.
     const repoSlug = owner && repo ? `${owner}/${repo}` : job.repo;
-    const { data: runRow, error: runErr } = await admin
+    const { data: existingRun } = await admin
       .from('workflow_runs')
-      .insert({
-        workspace_id: job.workspace_id,
-        job_id: job.id,
-        workflow: workflowLabel,
-        repo: repoSlug,
-        issue_number: runIssueNumber ?? null,
-        pr_number: job.pr_number ?? null,
-        status: 'running',
-        started_at: new Date().toISOString(),
-      })
-      .select('id')
-      .single();
-    if (runErr || !runRow) throw new Error(`workflow_runs insert failed: ${runErr?.message}`);
+      .select('id, session_id, status')
+      .eq('job_id', job.id)
+      .order('started_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    let runRowId: string;
+    let resumeSessionId: string | null = null;
+    if (existingRun && (existingRun.status === 'running' || existingRun.status === 'paused' || existingRun.status === 'queued')) {
+      runRowId = existingRun.id;
+      resumeSessionId = existingRun.session_id ?? null;
+      // Mark the row running again so the cockpit reflects the re-claim.
+      await admin.from('workflow_runs').update({ status: 'running' }).eq('id', runRowId);
+    } else {
+      const { data: runRow, error: runErr } = await admin
+        .from('workflow_runs')
+        .insert({
+          workspace_id: job.workspace_id,
+          job_id: job.id,
+          workflow: workflowLabel,
+          repo: repoSlug,
+          issue_number: runIssueNumber ?? null,
+          pr_number: job.pr_number ?? null,
+          status: 'running',
+          started_at: new Date().toISOString(),
+        })
+        .select('id')
+        .single();
+      if (runErr || !runRow) throw new Error(`workflow_runs insert failed: ${runErr?.message}`);
+      runRowId = runRow.id;
+    }
 
     await admin.from('jobs').update({ status: 'running', updated_at: new Date().toISOString() }).eq('id', job.id);
 
@@ -150,16 +261,27 @@ export async function GET(req: Request) {
         prNumber: job.pr_number,
         requiredBackend: job.required_backend,
       },
-      workflowRunId: runRow.id,
+      workflowRunId: runRowId,
       workspace: { id: job.workspace_id, owner, repo },
       // `config.github.token` IS included on purpose — the runner needs it; it's
-      // already a short-lived/scoped token. No other secrets travel.
+      // already a short-lived/scoped token. No other secrets travel. Null for
+      // host-inherit runners; they substitute their own.
       config,
       githubToken,
+      /** Phase 4 (migration 0026) — informational label for which identity
+       *  served this claim. The runner logs it on job start so the operator
+       *  can see "workspace:abc-…" vs "runner-install:12345" vs "host" at a
+       *  glance. Drives the host-side token substitution when === 'host'. */
+      ghIdentitySource,
       store: storeSnapshot,
       ciFollowupSeed,
       flow: flowOut,
       labels,
+      // Phase 2: re-claim resume. When non-null the runner asks the engine
+      // to spawn `claude --resume <id>` for the first agent step so the
+      // new process picks up the prior on-disk conversation; cross-host
+      // re-claims fall back to a fresh start under the same id.
+      resumeSessionId,
     });
   } catch (err) {
     await releaseJob().catch(() => {});

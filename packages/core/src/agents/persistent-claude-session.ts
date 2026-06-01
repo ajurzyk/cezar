@@ -52,7 +52,28 @@ export interface PersistentClaudeSessionOptions {
   spawnFn?: SpawnFn;
   /** Subscribed to every assistant text / tool-call / token-usage event. */
   onEvent?: (event: AgentEvent) => void;
+  /**
+   * When true, spawn `claude --resume <sessionId>` instead of
+   * `--session-id <sessionId>` so the new child picks up the on-disk
+   * conversation. Used by the workflow engine when a job is re-claimed
+   * after a runner crash. If the resume fails (cross-host re-claim —
+   * the session blob lives under `~/.claude/` on the original host),
+   * the engine catches the failure and starts a fresh session under
+   * the same id; see `claude-cli-runner.ts > isResumeFailure`.
+   */
+  resume?: boolean;
+  /**
+   * Idle timeout — if no `sendPhase` lands within this many ms, the
+   * session closes itself cleanly. The next step that needs the session
+   * re-opens with `--resume <sessionId>` (cheap on the same host;
+   * gracefully falls back to a fresh start otherwise). Default 5 min;
+   * set 0 to disable.
+   */
+  idleMs?: number;
 }
+
+/** Default idle session timeout (5 min). */
+export const DEFAULT_IDLE_MS = 5 * 60_000;
 
 export interface PhaseResult {
   /** Concatenated assistant text emitted during this phase. */
@@ -72,6 +93,7 @@ export class PersistentClaudeSession {
   private readonly spawnFn: SpawnFn;
   private readonly bin: string;
   private readonly timeoutMs: number;
+  private readonly idleMs: number;
 
   // Cumulative session totals.
   private cumulativeTokens = 0;
@@ -84,6 +106,13 @@ export class PersistentClaudeSession {
   private phaseToolCalls: AgentToolCallRecord[] = [];
   private sawTerminal = false;
   private timedOut = false;
+  /** Resumed vs cold start — set at `start()` time, used to fall back
+   *  to a fresh `--session-id` start if `--resume` errored out. */
+  private resumed = false;
+  /** Idle timer; reset on every `sendPhase`. Fires `closeIfIdle()`. */
+  private idleTimer: NodeJS.Timeout | null = null;
+  /** True once `closeIfIdle()` has closed the child due to inactivity. */
+  private closedIdle = false;
 
   constructor(private readonly opts: PersistentClaudeSessionOptions) {
     this.sessionId = opts.sessionId;
@@ -92,16 +121,28 @@ export class PersistentClaudeSession {
     this.bin = opts.bin ?? defaultBin;
     this.spawnFn = opts.spawnFn ?? (nodeSpawn as unknown as SpawnFn);
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS;
+    this.idleMs = opts.idleMs ?? DEFAULT_IDLE_MS;
   }
 
-  /** Spawn the long-lived child. Idempotent. */
+  /**
+   * Spawn the long-lived child. Idempotent — calling twice is a no-op as long
+   * as the child is alive (callers can use this to lazily re-open after
+   * `closeIfIdle` without tracking lifecycle state). On spawn failure no
+   * partial state is retained, so the caller can retry or fall back.
+   */
   start(): void {
     if (this.child) return;
+    this.closedIdle = false;
+    this.resumed = this.opts.resume === true;
     const args = this.buildArgs();
     let child: ChildProcessWithoutNullStreams;
     try {
       child = this.spawnFn(this.bin, args, { cwd: this.opts.cwd, env: process.env });
     } catch (err) {
+      // Ensure no partial state leaks (no zombie child, no dangling timer):
+      // start() is meant to be retryable.
+      this.child = null;
+      this.resumed = false;
       throw wrapSpawnError(err, this.bin);
     }
     this.child = child;
@@ -114,6 +155,18 @@ export class PersistentClaudeSession {
     });
     child.on('error', (err: Error) => {
       this.resultRejecter?.(wrapSpawnError(err, this.bin));
+    });
+    // If `--resume` was rejected (e.g. cross-host re-claim — the on-disk
+    // session blob lives under `~/.claude/` on the host that started it)
+    // the child exits early with a non-zero code. Surface that as a
+    // resume-failure so the caller can retry with a fresh `--session-id`
+    // start under the same id.
+    child.once('exit', (code) => {
+      if (code != null && code !== 0 && this.resumed && !this.closedIdle) {
+        this.resultRejecter?.(new ResumeFailedError(
+          `claude --resume ${this.sessionId} exited with code ${code} — likely cross-host re-claim`,
+        ));
+      }
     });
 
     // Wall-clock kill switch covers the whole session, not per phase.
@@ -135,17 +188,35 @@ export class PersistentClaudeSession {
    *
    * If a sendPhase is in flight, subsequent calls reject. Phases must
    * be awaited serially.
+   *
+   * If the session was closed by `closeIfIdle()` (because the gap
+   * between steps exceeded `idleMs`), this method re-opens it lazily
+   * with `--resume <sessionId>` so the cumulative conversation prefix
+   * stays intact. A cross-host re-open (or any other resume failure)
+   * surfaces as a `ResumeFailedError` so the workflow engine can
+   * retry without `resume`.
    */
   async sendPhase(phase: string, payload: string): Promise<PhaseResult> {
-    if (!this.child) throw new Error('PersistentClaudeSession.start() not called');
-    if (this.resultResolver) throw new Error('phase in flight — await the prior sendPhase first');
     if (this.timedOut) throw new Error('session timed out');
+    if (this.resultResolver) throw new Error('phase in flight — await the prior sendPhase first');
+
+    // Lazy re-open after `closeIfIdle` — same id, with resume so the
+    // prior conversation prefix survives.
+    if (!this.child && this.closedIdle) {
+      this.opts.onEvent?.({ type: 'note', message: `claude session ${this.sessionId} reopening after idle close` });
+      this.resumed = true;
+      this.closedIdle = false;
+      this.start();
+    }
+
+    if (!this.child) throw new Error('PersistentClaudeSession.start() not called');
 
     // Reset per-phase accumulators.
     this.phaseStartTokens = this.cumulativeTokens;
     this.phaseText = '';
     this.phaseToolCalls = [];
     this.sawTerminal = false;
+    this.resetIdleTimer();
 
     const userMsg = {
       type: 'user',
@@ -166,8 +237,31 @@ export class PersistentClaudeSession {
     });
   }
 
+  /**
+   * Close the child if no `sendPhase` has been issued for `idleMs`.
+   * Idempotent. The next `sendPhase` re-opens with `--resume` so
+   * the conversation prefix is preserved.
+   */
+  closeIfIdle(): void {
+    if (!this.child || this.resultResolver) return;
+    this.closedIdle = true;
+    const child = this.child;
+    this.child = null;
+    try { child.stdin.end(); } catch { /* ignore */ }
+    // Give the child a short grace period to exit on its own; SIGTERM
+    // anything still hanging around.
+    const grace = setTimeout(() => {
+      if (child.exitCode == null && !child.killed) child.kill('SIGTERM');
+    }, 1_000);
+    if (typeof grace.unref === 'function') grace.unref();
+  }
+
   /** Close stdin and wait for the child to exit cleanly. */
   async stop(): Promise<void> {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
     const child = this.child;
     if (!child) return;
     this.child = null;
@@ -206,13 +300,20 @@ export class PersistentClaudeSession {
 
   // ─── internals ─────────────────────────────────────────────────────
   private buildArgs(): string[] {
+    // Cross-restart resume (docs: Phase 2E). When `opts.resume` is set the
+    // engine is asking us to pick up the on-disk conversation from the
+    // previous host's run. Otherwise we mint a fresh session pinned to the
+    // canonical id so a future re-claim can resume it.
+    const sessionArg: string[] = this.resumed
+      ? ['--resume', this.sessionId]
+      : ['--session-id', this.sessionId];
     const args: string[] = [
       '--input-format', 'stream-json',
       '--output-format', 'stream-json',
       '--verbose',
       '--append-system-prompt', this.opts.systemPrompt,
       '--permission-mode', 'acceptEdits',
-      '--session-id', this.sessionId,
+      ...sessionArg,
     ];
     if (this.opts.model) args.push('--model', this.opts.model);
     if (this.opts.allowedTools.length > 0) {
@@ -226,6 +327,24 @@ export class PersistentClaudeSession {
     // session-wide cap is just a safety net.
     args.push('--max-budget-usd', String((DEFAULT_USD_PER_MILLION_TOKENS / 10).toFixed(2)));
     return args;
+  }
+
+  /**
+   * Reset the idle-close timer. Called on every `sendPhase`. When the
+   * timer fires we close the child (next `sendPhase` re-opens with
+   * `--resume`). `idleMs=0` disables the timer entirely.
+   */
+  private resetIdleTimer(): void {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+    if (this.idleMs <= 0) return;
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = null;
+      this.closeIfIdle();
+    }, this.idleMs);
+    if (typeof this.idleTimer.unref === 'function') this.idleTimer.unref();
   }
 
   private buildAllowedTools(): string[] {
@@ -307,6 +426,9 @@ export class PersistentClaudeSession {
       const resolve = this.resultResolver;
       this.resultResolver = null;
       this.resultRejecter = null;
+      // Restart the idle timer here so it counts the gap *until the next*
+      // sendPhase, not the in-flight phase duration.
+      this.resetIdleTimer();
       if (resolve) {
         resolve({
           text: this.phaseText,
@@ -364,6 +486,20 @@ function wrapSpawnError(err: unknown, bin: string): Error {
     return new Error(`${bin} CLI not found on PATH — install claude or fall back to staged mode`);
   }
   return err instanceof Error ? err : new Error(String(err));
+}
+
+/**
+ * Thrown by `PersistentClaudeSession` when `claude --resume <id>` exits
+ * non-zero (e.g. cross-host re-claim — the on-disk session blob lives under
+ * `~/.claude/` on the host that originally created it). Caller catches it
+ * and retries `start()` with `resume:false` so the runner spawns a fresh
+ * session under the same id.
+ */
+export class ResumeFailedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ResumeFailedError';
+  }
 }
 
 function mockClaudePath(): string {
