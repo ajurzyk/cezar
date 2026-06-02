@@ -7,10 +7,15 @@ import type { Database } from './types';
 /**
  * Per-request client scoped to the signed-in user's session. RLS policies
  * apply to every query — this is the right client for most reads.
+ *
+ * Pass `{ usePublicUrl: true }` for code paths that produce a URL the *browser*
+ * will follow (OAuth redirects, magic links). The default uses the internal
+ * Docker hostname (SUPABASE_INTERNAL_URL), which the browser can't resolve.
  */
-export async function createSupabaseServerClient() {
+export async function createSupabaseServerClient(opts?: { usePublicUrl?: boolean }) {
   const cookieStore = await cookies();
-  return createServerClient<Database>(supabaseEnv.internalUrl(), supabaseEnv.anonKey(), {
+  const baseUrl = opts?.usePublicUrl ? supabaseEnv.url() : supabaseEnv.internalUrl();
+  return createServerClient<Database>(baseUrl, supabaseEnv.anonKey(), {
     cookies: {
       getAll: () => cookieStore.getAll(),
       setAll: (entries) => {
