@@ -3,20 +3,23 @@ _format_version: "2.1"
 # Kong gateway routing for the local Supabase stack. Same path scheme as the
 # hosted product so `@supabase/supabase-js` (which builds URLs as
 # `{baseUrl}/rest/v1/...`, `{baseUrl}/auth/v1/...`, `{baseUrl}/realtime/v1/...`)
-# works against http://127.0.0.1:54321 without any client-side change.
+# works against the Kong endpoint without any client-side change.
+#
+# This file is a *template* — `kong-entrypoint.sh` substitutes the two `${...}`
+# placeholders below at container start, then exec's kong on the rendered file.
+# Rotate the JWT secret + regenerate both JWTs in env vars; no rebuild needed.
 #
 # `key-auth` matches the hosted behavior of demanding an `apikey` header on
-# every call. The two consumers below ship the well-known dev anon / service
-# role JWTs; clients pass them as the `apikey` header AND (for writes) as the
-# Authorization bearer so PostgREST picks up the role claim.
+# every call. Clients pass the JWT as the `apikey` header AND (for writes) as
+# the Authorization bearer so PostgREST picks up the role claim.
 
 consumers:
   - username: anon
     keyauth_credentials:
-      - key: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0
+      - key: ${SUPABASE_ANON_KEY}
   - username: service_role
     keyauth_credentials:
-      - key: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU
+      - key: ${SUPABASE_SERVICE_ROLE_KEY}
 
 acls:
   - consumer: anon
