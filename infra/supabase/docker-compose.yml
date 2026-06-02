@@ -84,10 +84,10 @@ services:
       GOTRUE_JWT_ADMIN_ROLES: service_role
       GOTRUE_JWT_AUD: authenticated
       GOTRUE_JWT_ISSUER: http://127.0.0.1:54321/auth/v1
-      # GitHub OAuth: enable iff client id/secret are set in infra/supabase/.env.
-      # Compose substitutes ${VAR:-} to empty string if unset, which GoTrue
-      # treats as "not configured" and rejects the provider.
-      GOTRUE_EXTERNAL_GITHUB_ENABLED: "${LOCAL_GITHUB_CLIENT_ID:+true}"
+      # GitHub OAuth: opt-in via LOCAL_GITHUB_ENABLED=true in infra/supabase/.env.
+      # GoTrue rejects an empty string for the bool, so the default is "false"
+      # — set LOCAL_GITHUB_ENABLED=true alongside the client id/secret.
+      GOTRUE_EXTERNAL_GITHUB_ENABLED: "${LOCAL_GITHUB_ENABLED:-false}"
       GOTRUE_EXTERNAL_GITHUB_CLIENT_ID: "${LOCAL_GITHUB_CLIENT_ID:-}"
       GOTRUE_EXTERNAL_GITHUB_SECRET: "${LOCAL_GITHUB_CLIENT_SECRET:-}"
       GOTRUE_EXTERNAL_GITHUB_REDIRECT_URI: "http://127.0.0.1:54321/auth/v1/callback"
