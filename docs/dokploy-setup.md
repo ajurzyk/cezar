@@ -5,11 +5,11 @@ using the Docker Compose stack defined at the repo root (`Dockerfile`,
 `Dockerfile.runner`, `compose.yaml`). The Supabase database lives in Supabase's
 cloud — Cezar just needs the project URL and keys.
 
-> **Companion docs:** [MIGRATION.md](../MIGRATION.md) (full env-var matrix +
-> Vercel-vs-self-hosted notes), [github-app-setup.md](github-app-setup.md)
+> **Companion docs:** [`.env.docker.example`](../.env.docker.example) (full
+> env-var template), [SELF-HOSTING.md](SELF-HOSTING.md) (env-var reference +
+> self-hosted runner config), [github-app-setup.md](github-app-setup.md)
 > (GitHub App + webhooks), [runner-setup.md](runner-setup.md) (self-hosted
-> runner deep-dive), [packages/gui/SETUP.md](../packages/gui/SETUP.md)
-> (Supabase + OAuth one-time setup).
+> runner deep-dive).
 
 ---
 
@@ -148,7 +148,7 @@ CEZAR_RUNNER_TOKEN=placeholder
 
 The full reference (optional tuning vars: `CEZAR_DISPATCH_BATCH`,
 `CEZAR_*_INTERVAL_MS`, `CEZAR_INPROCESS_CRON_DISABLED`, …) lives in
-`.env.docker.example` and [MIGRATION.md](../MIGRATION.md#step-3--environment-variables).
+`.env.docker.example` and [SELF-HOSTING.md](SELF-HOSTING.md#environment-variables).
 
 > **`GITHUB_APP_PRIVATE_KEY` format:** single-line with literal `\n` between
 > the PEM lines is easiest in env-var UIs. Cezar normalizes `\n` → newlines
@@ -326,6 +326,6 @@ If you scale and want only one replica to drive `issue-sync`, set
 | `compose.yaml` | `gui` + `runner` services + `cezar` bridge net + `runner-home` volume |
 | `.env.docker.example` | Full env-var template (copy values into Dokploy's UI) |
 | `packages/gui/next.config.mjs` | `output: 'standalone'` for the slim runtime image |
-| `MIGRATION.md` | Full env-var matrix + cron-source explanation |
+| `docs/SELF-HOSTING.md` | Env-var reference + cron-source explanation |
 | `docs/github-app-setup.md` | GitHub App creation (permissions, events, install) |
 | `docs/runner-setup.md` | Runner registration + backend specifics |

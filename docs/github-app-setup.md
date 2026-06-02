@@ -1,10 +1,8 @@
 # GitHub App setup (optional)
 
-The agent-cockpit refactor (Phase 1, §3.9 of `REFACTOR-PLAN-agent-cockpit.md`)
-introduces an **optional** GitHub App that Cezar uses to mint short-lived
-**installation tokens** for repo operations — currently skill discovery on
-private repos, with more (bot-identity comments, labels, PRs, checks, webhooks)
-arriving in later phases.
+Cezar uses an **optional** GitHub App to mint short-lived **installation
+tokens** for repo operations — skill discovery on private repos, bot-identity
+comments/labels/PRs/checks, and webhook deliveries that drive the cockpit.
 
 **This is additive.** Without a configured App, Cezar still works exactly as
 before via per-user OAuth tokens. The App becomes a hard requirement only for

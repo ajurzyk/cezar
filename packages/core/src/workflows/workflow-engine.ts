@@ -838,13 +838,12 @@ export class WorkflowEngine {
     if (step.autoProceed?.(ctx)) {
       return { kind: 'resolved', outcome: { kind: 'continue' } };
     }
-    // Phase C (TODO — see docs/REFACTOR-PLAN-persistent-autofix-session.md §5
-    // "Phase C"): in unified mode, a paused gate should keep the
-    // PersistentClaudeSession's child alive so resume can pick up
-    // mid-conversation with the cache prefix intact. Today we still
-    // return `paused`; the workflow_runs row is paused, the runner
-    // process exits, and a resume re-spawns a fresh session (same as
-    // staged). Wiring up the alive-child path requires:
+    // TODO (unified-mode alive-gate): in unified mode, a paused gate should
+    // keep the PersistentClaudeSession's child alive so resume can pick up
+    // mid-conversation with the cache prefix intact. Today we still return
+    // `paused`; the workflow_runs row is paused, the runner process exits,
+    // and a resume re-spawns a fresh session (same as staged). Wiring up
+    // the alive-child path requires:
     //   1. A Supabase channel subscription here that resolves on
     //      'resume' or 'cancel' broadcasts for this workflow_run.id.
     //   2. Keeping the parent runner process alive for the whole pause

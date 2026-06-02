@@ -20,7 +20,7 @@ export interface RunTriagePassJobParams {
   /** Free-form label describing what initiated the pass (e.g. `'on-issue-opened'`). */
   trigger?: string;
   /** Optional sink — receives effects deferred to human review. When omitted
-   *  the runner drops them (see docs/REFACTOR-PLAN-inbox-and-acceptance.md). */
+   *  the runner drops them. */
   deferSink?: TriagePassDeferSink;
   /** Workspace label catalog appended to each action's system message. */
   labels?: WorkspaceLabel[];

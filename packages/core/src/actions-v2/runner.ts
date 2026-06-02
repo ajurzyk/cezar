@@ -383,7 +383,7 @@ async function runToolUseMode(
  *
  * When no confidence is provided on the call, treats it as 100 (fully
  * confident) so existing actions that don't emit confidence keep applying
- * everything. See docs/REFACTOR-PLAN-inbox-and-acceptance.md §7.
+ * everything.
  */
 async function applyOrDefer(
   call: EffectCall,

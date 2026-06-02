@@ -4,20 +4,17 @@ import { REVIEWER_SYSTEM_PROMPT, ReviewVerdictSchema } from './reviewer.js';
 import { AGENT_EXECUTION_GUIDANCE } from './agent-guidance.js';
 
 /**
- * Phase B unified autofix system prompt — one system message playing
- * the four classical roles in sequence inside a single persistent
- * `claude` session.
- *
- * See docs/REFACTOR-PLAN-persistent-autofix-session.md §3-§4.
+ * Unified autofix system prompt — one system message playing the four
+ * classical roles in sequence inside a single persistent `claude`
+ * session.
  *
  * The user drives phase transitions by sending `## PHASE: <NAME>` user
  * messages over stream-json stdin. The model is told to wait for those
  * markers — it must not advance to the next role on its own.
  *
- * Q5 (token telemetry) snapshots usage at each phase boundary; Q6
- * (schema mismatch policy) makes per-phase JSON validation warn-only.
- * Both are implemented by the runner, not the model — this prompt just
- * tells it what the expected shapes are.
+ * Token telemetry snapshots usage at each phase boundary; per-phase JSON
+ * validation is warn-only. Both are implemented by the runner, not the
+ * model — this prompt just tells it what the expected shapes are.
  */
 export const UNIFIED_AUTOFIX_SYSTEM_PROMPT = `You are the Cezar AUTOFIX agent. Across this conversation you will play four roles in sequence.
 

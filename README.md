@@ -275,10 +275,9 @@ own infra. Full setup: [`docs/SELF-HOSTING.md`](docs/SELF-HOSTING.md).
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — Action model, workflow engine, packages, data flow, runner abstraction.
 - [`docs/SELF-HOSTING.md`](docs/SELF-HOSTING.md) — self-hosted runner, configuration, env vars.
 - [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) — local dev, tech stack, adding new Actions and effects.
+- [`docs/dokploy-setup.md`](docs/dokploy-setup.md) — deploying the Docker Compose stack on a Hetzner VPS via Dokploy.
 - [`CLAUDE.md`](CLAUDE.md) — operating manual for AI assistants editing this repo.
-- [`MIGRATION.md`](MIGRATION.md) — activation runbook for the agent-cockpit refactor.
 - [`DESIGN.md`](DESIGN.md) — design system spec for the GUI.
-- [`docs/REFACTOR-PLAN-agent-cockpit.md`](docs/REFACTOR-PLAN-agent-cockpit.md) — design of record for the cockpit + workflow engine.
 - [`cezar-ROADMAP.md`](cezar-ROADMAP.md) — what's next.
 
 ---

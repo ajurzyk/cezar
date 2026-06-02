@@ -6,17 +6,14 @@ import type { IssueStore } from '../store/store.js';
 import type { ShellResult } from '../provision/run-env.js';
 
 /**
- * The declarative workflow types (docs/REFACTOR-PLAN-agent-cockpit.md §3.1).
- * A `Workflow<W>` is a sequence of typed steps that mutate a per-workflow
- * "blackboard" `W` (the structured outputs accumulated so far). `WorkflowEngine`
- * (./workflow-engine.ts) executes them. Phase 2 lands this engine *alongside*
- * the legacy `AutofixOrchestrator`; the cutover (orchestrator → thin adapter)
- * is Phase 3.
+ * The declarative workflow types. A `Workflow<W>` is a sequence of typed steps
+ * that mutate a per-workflow "blackboard" `W` (the structured outputs
+ * accumulated so far). `WorkflowEngine` (./workflow-engine.ts) executes them.
  *
- * Naming note (Phase 0 §6): this module consumes the *normalized* runner
- * `AgentEvent` (from `../agents/agent-runner.js`) — the one re-exported from
- * `@cezar/core` as `RunnerAgentEvent`. The legacy `event.port.ts` `AgentEvent`
- * is untouched (the CLI/GUI still depend on it).
+ * Naming note: this module consumes the *normalized* runner `AgentEvent` (from
+ * `../agents/agent-runner.js`) — the one re-exported from `@cezar/core` as
+ * `RunnerAgentEvent`. The legacy `event.port.ts` `AgentEvent` is untouched
+ * (the CLI/GUI still depend on it).
  */
 
 // ─── Run / step states (docs §3.4 — Phase 2 just *models* the states) ────────

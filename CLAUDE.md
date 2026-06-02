@@ -22,9 +22,9 @@ declarative workflow engine drives every autofix run, the `workflow_runs` /
 `/flows` UI are retired (migration `0011_retire_legacy_path.sql`). `issue-sync`
 is kept as the GitHub → `issues`-table reconcile cron (auto-triage backlog +
 missed-webhook safety net); `dispatch` and `triage-sweep` are the new path.
-The design of record is `docs/REFACTOR-PLAN-agent-cockpit.md`; the activation
-runbook is `MIGRATION.md`. The solo-use CLI (interactive hub + `init` / `sync`
-/ `run` / `status` / `runs`) still works against a local file store.
+The design reference is `docs/ARCHITECTURE.md`. The solo-use CLI (interactive
+hub + `init` / `sync` / `run` / `status` / `runs`) still works against a local
+file store.
 
 ## Commands
 
@@ -163,4 +163,4 @@ confirmation; `--dry-run` previews.
 - `CEZAR_USE_WORKFLOW_ENGINE` — local CLI only: `true` opts the legacy `AutofixOrchestrator` path into delegating to `runWorkflow` (or set `workflow.useEngine: true` in `.issuemanagerrc.json`). The SaaS dispatch path always uses the engine.
 - `CRON_SECRET` — bearer check shared by `/api/cron/dispatch`, `/api/cron/triage-sweep`, `/api/cron/issue-sync`
 - `CEZAR_RUNNER_URL` / `CEZAR_RUNNER_TOKEN` — the self-hosted runner
-- Supabase vars + `NEXT_PUBLIC_APP_URL` (GUI) — see `MIGRATION.md` for the full list and the `CEZAR_DISPATCH_*` / `CEZAR_TRIAGE_SWEEP_*` tuning vars
+- Supabase vars + `NEXT_PUBLIC_APP_URL` (GUI) — see `docs/SELF-HOSTING.md` and `.env.docker.example` for the full list and the `CEZAR_DISPATCH_*` / `CEZAR_TRIAGE_SWEEP_*` tuning vars

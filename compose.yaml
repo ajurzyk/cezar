@@ -30,8 +30,8 @@
 #   1. Copy `.env.docker.example` → `.env` (or paste into Dokploy's env UI).
 #   2. ROTATE THE JWT KEYS. The defaults below are the well-known Supabase
 #      dev keys — anyone on the internet can mint a service_role token
-#      against them. See `infra/supabase/README.md` (or MIGRATION.md) for
-#      the rotation recipe.
+#      against them. Generate a fresh JWT secret + anon/service_role tokens
+#      (see Supabase's self-hosting docs) before exposing this stack.
 #   3. Apply Dokploy domains to `gui` and `kong` per above.
 #   4. Deploy. The migrator runs once on first boot.
 #

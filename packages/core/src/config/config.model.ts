@@ -78,7 +78,7 @@ export const ConfigSchema = z.object({
     // feedback before opening a PR. `kind: 'auto'` picks `compose` when a
     // compose file is present in the repo, else `native` (host shell).
     // Compose requires a Docker daemon ⇒ self-hosted-runner only; the managed
-    // cloud path can't run it. See docs/REFACTOR-PLAN-agent-cockpit.md §3.8.
+    // cloud path can't run it.
     projectEnv: z.object({
       kind: z.enum(['auto', 'native', 'compose']).default('auto'),
       // Commands run inside the env. Empty ⇒ that check is skipped.
@@ -131,10 +131,8 @@ export const ConfigSchema = z.object({
       fixer: z.number().default(30),
       reviewer: z.number().default(10),
     }).default({}),
-    // Persistent-session refactor controls.
-    // See docs/REFACTOR-PLAN-persistent-autofix-session.md.
-    // Both default to today's behavior — flipping a flag is the only way
-    // to opt a workspace into the new path.
+    // Persistent-session controls — both default to staged/print behavior;
+    // flipping a flag opts a workspace into the unified session path.
     runner: z.object({
       // 'print'       — spawn `claude -p <userPrompt>` per step.
       // 'stream-json' — spawn `claude --input-format stream-json` per step;
@@ -156,9 +154,7 @@ export const ConfigSchema = z.object({
     }).default({}),
   }).default({}),
   // Optional GUI-equivalent binding block the CLI can supply from
-  // `.issuemanagerrc.json`. Empty ⇒ built-in defaults ⇒ behavior identical to
-  // today (see docs/REFACTOR-PLAN-agent-cockpit.md §3.5). The full workflow
-  // engine lands in Phase 2; today only the autofix orchestrator reads these.
+  // `.issuemanagerrc.json`. Empty ⇒ built-in defaults.
   workflow: z.object({
     // Phase 3a: when true, `AutofixOrchestrator` delegates to the declarative
     // workflow engine (`runWorkflow`) instead of its hand-rolled path. Defaults

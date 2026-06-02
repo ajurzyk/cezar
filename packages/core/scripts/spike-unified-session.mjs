@@ -11,7 +11,7 @@
  *   4. Captures per-phase `usage` / `cache_read_input_tokens` deltas.
  *   5. Writes a report to docs/spikes/spike-unified-<timestamp>.md.
  *
- * What it validates (per docs/REFACTOR-PLAN-persistent-autofix-session.md §7):
+ * What it validates:
  *   Q1 — does each `## PHASE:` marker yield valid JSON per its schema
  *        (≥80% across phases) ?
  *   Q2 — what is cache_read_input_tokens / total_input by phase 4 ?

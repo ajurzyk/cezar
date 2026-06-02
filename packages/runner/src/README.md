@@ -9,7 +9,9 @@ streams events back. Two modes via `--kind`:
 - `self-hosted` — runs on a team's own infra so the subscription CLIs run under
   the team's login and code/tokens never leave the team's machine.
 
-See `docs/REFACTOR-PLAN-agent-cockpit.md` §3.8 / Phase 4.
+See [`docs/runner-setup.md`](../../../docs/runner-setup.md) for deployment and
+[`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) for how the runner fits
+into the job queue + cockpit.
 
 ## Install & run
 

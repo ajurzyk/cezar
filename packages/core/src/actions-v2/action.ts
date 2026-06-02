@@ -31,8 +31,8 @@ export interface ActionDef {
   enabled: boolean;
   /** LLM model the runner uses. Falls back to runner default when null. */
   model?: string | null;
-  /** Acceptance routing — see docs/REFACTOR-PLAN-inbox-and-acceptance.md.
-   *  Defaults to 'auto' (apply every effect regardless of confidence). */
+  /** Acceptance routing. Defaults to 'auto' (apply every effect regardless of
+   *  confidence). 'human-in-the-loop' routes low-confidence proposals to inbox. */
   acceptanceMode?: AcceptanceMode;
   /** Thresholds the runner uses to route per-effect confidence. */
   confidenceConfig?: ConfidenceConfig;
