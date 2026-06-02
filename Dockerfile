@@ -38,16 +38,7 @@ RUN corepack enable
 COPY --from=deps /app ./
 COPY . .
 
-# NEXT_PUBLIC_* values must be present during `next build` — Next inlines them
-# into the client JS bundle. Compose passes them via `build.args`; we re-export
-# them as ENV so `next build` (which reads process.env) picks them up.
-ARG NEXT_PUBLIC_SUPABASE_URL
-ARG NEXT_PUBLIC_SUPABASE_ANON_KEY
-ARG NEXT_PUBLIC_APP_URL
-ENV NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL} \
-    NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY} \
-    NEXT_PUBLIC_APP_URL=${NEXT_PUBLIC_APP_URL} \
-    NEXT_TELEMETRY_DISABLED=1
+ENV NEXT_TELEMETRY_DISABLED=1
 
 # @cezar/core must be built before `next build`, since the GUI imports its
 # compiled `dist/` (it's listed in `serverExternalPackages`).
