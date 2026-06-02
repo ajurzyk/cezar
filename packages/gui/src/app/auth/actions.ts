@@ -5,7 +5,9 @@ import { redirect } from 'next/navigation';
 import { headers } from 'next/headers';
 
 export async function signInWithGitHub() {
-  const supabase = await createSupabaseServerClient();
+  // signInWithOAuth returns a URL the browser will follow — must be built
+  // against the public Supabase URL, not the internal kong:8000 hostname.
+  const supabase = await createSupabaseServerClient({ usePublicUrl: true });
   const headerStore = await headers();
   const origin = headerStore.get('origin') ?? 'http://localhost:3000';
 
