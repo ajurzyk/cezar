@@ -71,8 +71,7 @@ export async function waitForJobsQueuedNotify(
 
   // Supabase's pooled connection string (pgbouncer) does NOT carry LISTEN
   // sessions. Allow callers to point at the direct (5432) connection string;
-  // the helper just trusts whatever it gets. The README/MIGRATION.md doc
-  // notes the requirement.
+  // the helper just trusts whatever it gets.
   const client = new Client({ connectionString: conn });
   activeListeners += 1;
 

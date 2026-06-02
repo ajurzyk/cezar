@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-06
 **Scope:** Full codebase audit of `packages/cli`, `packages/core`, `packages/gui`, and the issue-driven autofix loop.
-**Method:** Three parallel exploration passes (CLI surface, GUI/autofix, skill extensibility) plus direct reads of `CEZAR-ARCHITECTURE-FOR-GUI.md` and `cezar-ROADMAP.md`.
+**Method:** Three parallel exploration passes (CLI surface, GUI/autofix, skill extensibility) plus direct reads of the then-current architecture notes (since superseded by `docs/ARCHITECTURE.md`) and `cezar-ROADMAP.md`.
 
 ---
 

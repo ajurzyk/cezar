@@ -71,8 +71,8 @@ The SaaS path stores per-workspace config in Supabase; the same shape applies.
 
 ## Environment variables
 
-The full list with which step needs each is in [`../MIGRATION.md`](../MIGRATION.md).
-The key ones:
+The full template with every supported variable is in
+[`../.env.docker.example`](../.env.docker.example). The key ones:
 
 | Var | Used by |
 |---|---|

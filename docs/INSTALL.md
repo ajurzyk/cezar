@@ -55,7 +55,7 @@ yarn db:logs                        # follow logs · db:reset, db:psql, db:stop
 # 1b. OR: provision your own cloud Supabase project
 cd packages/gui && npx supabase db push   # applies supabase/migrations/*.sql
 
-# 2. set env vars (see MIGRATION.md for the full list)
+# 2. set env vars (see .env.docker.example for the full template)
 cat > .env.local <<EOF
 NEXT_PUBLIC_SUPABASE_URL=...
 SUPABASE_SERVICE_ROLE_KEY=...
@@ -76,7 +76,8 @@ wizard (project env preset, label-catalog analysis, workflow defaults), and
 open `/dashboard`. New issues will start triaging automatically.
 
 See [`github-app-setup.md`](github-app-setup.md) for GitHub App provisioning,
-and [`../MIGRATION.md`](../MIGRATION.md) for the full env-var reference.
+and [`../.env.docker.example`](../.env.docker.example) for the full env-var
+template.
 
 ---
 

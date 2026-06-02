@@ -275,7 +275,6 @@ export async function executeWorkflowJob(
         labels,
         deferSink: async ({ call, confidence, summary, action, target }) => {
           // Write the deferred effect to pending_decisions for the inbox.
-          // See docs/REFACTOR-PLAN-inbox-and-acceptance.md §7.
           const { error } = await adminSupabase.from('pending_decisions').insert({
             workspace_id: workspaceId,
             action_id: action.id,

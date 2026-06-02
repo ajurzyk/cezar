@@ -7,11 +7,9 @@ import type { SpawnFn } from './claude-cli-runner.js';
 import { DEFAULT_RUN_TIMEOUT_MS, KILL_GRACE_MS, DEFAULT_USD_PER_MILLION_TOKENS } from './claude-cli-runner.js';
 
 /**
- * Phase B — one long-lived `claude --input-format stream-json` child
- * that the workflow engine drives by sending phase-marker user
- * messages on stdin and reading per-phase `result` envelopes on
- * stdout. See docs/REFACTOR-PLAN-persistent-autofix-session.md §5
- * "Phase B".
+ * One long-lived `claude --input-format stream-json` child that the
+ * workflow engine drives by sending phase-marker user messages on stdin
+ * and reading per-phase `result` envelopes on stdout.
  *
  * Lifecycle:
  *   const session = new PersistentClaudeSession({...});

@@ -28,12 +28,9 @@ import { agentStep, type Workflow, type WorkflowStep, type CommentSection } from
 import { tailLines, type ShellResult } from '../../provision/run-env.js';
 
 /**
- * The `autofix` workflow as data (docs/REFACTOR-PLAN-agent-cockpit.md §3.1):
+ * The `autofix` workflow as data:
  *   verify-in-repo → [confirm-fix gate] → root-cause → fix → commit → review
  *   → loop(fix,commit,review until verdict pass, maxIterations) → open-pr
- *
- * Re-expresses today's `AutofixOrchestrator.runOneAttempt` flow; the legacy
- * orchestrator stays untouched in Phase 2 (cutover is Phase 3).
  */
 
 // ─── verify-in-repo (NEW lightweight gate) ──────────────────────────────────

@@ -27,10 +27,10 @@ export function createAgentRunner(
   backend: AgentBackend = DEFAULT_AGENT_BACKEND,
   opts: CreateAgentRunnerOptions = {},
 ): AgentRunner {
-  // Unified-mode backend lock — per docs/REFACTOR-PLAN-persistent-autofix-session.md
-  // §7 Q4, unified single-session runs are CLI-only because the Claude
-  // Agent SDK doesn't expose stream-json stdin semantics. Reject early
-  // with an actionable message rather than failing further down.
+  // Unified-mode backend lock: unified single-session runs are CLI-only
+  // because the Claude Agent SDK doesn't expose stream-json stdin
+  // semantics. Reject early with an actionable message rather than failing
+  // further down.
   const mode = opts.config?.autofix?.runner?.mode;
   if (mode === 'unified' && backend !== 'claude-cli') {
     throw new Error(
