@@ -10,7 +10,7 @@ import type { Database } from './types';
  */
 export async function createSupabaseServerClient() {
   const cookieStore = await cookies();
-  return createServerClient<Database>(supabaseEnv.url(), supabaseEnv.anonKey(), {
+  return createServerClient<Database>(supabaseEnv.internalUrl(), supabaseEnv.anonKey(), {
     cookies: {
       getAll: () => cookieStore.getAll(),
       setAll: (entries) => {
@@ -32,7 +32,7 @@ export async function createSupabaseServerClient() {
  * maintenance). Never expose to components rendered client-side.
  */
 export function createSupabaseAdminClient() {
-  return createClient<Database>(supabaseEnv.url(), supabaseEnv.serviceRoleKey(), {
+  return createClient<Database>(supabaseEnv.internalUrl(), supabaseEnv.serviceRoleKey(), {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 }
