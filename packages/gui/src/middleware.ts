@@ -26,11 +26,10 @@ export async function middleware(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });
 
   const supabase = createServerClient(
-    // SUPABASE_INTERNAL_URL keeps the per-request auth.getUser() call on the
-    // Docker network in self-hosted setups; falls back to the public URL.
-    // Inlined here (not via lib/supabase/env) because middleware can run in
-    // the edge runtime where the env helper may not resolve runtime vars.
-    process.env.SUPABASE_INTERNAL_URL || process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    // Must match the public URL used by the browser + server clients —
+    // @supabase/ssr derives the session cookie name from the URL host, so
+    // mixing internal/public URLs causes cookie lookups to silently miss.
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
       cookies: {

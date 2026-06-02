@@ -2,14 +2,13 @@
 
 import { createSupabaseServerClient } from '@/lib/supabase/server';
 import { redirect } from 'next/navigation';
-import { headers } from 'next/headers';
 
 export async function signInWithGitHub() {
-  // signInWithOAuth returns a URL the browser will follow — must be built
-  // against the public Supabase URL, not the internal kong:8000 hostname.
-  const supabase = await createSupabaseServerClient({ usePublicUrl: true });
-  const headerStore = await headers();
-  const origin = headerStore.get('origin') ?? 'http://localhost:3000';
+  const supabase = await createSupabaseServerClient();
+  // Prefer the configured public app URL — `headers().get('origin')` returns
+  // the container bind address (`http://0.0.0.0:3000`) when Next runs behind
+  // Traefik without trusted-forwarded-host plumbing.
+  const origin = process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000';
 
   const { data, error } = await supabase.auth.signInWithOAuth({
     provider: 'github',
