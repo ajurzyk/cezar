@@ -3,15 +3,19 @@ import { cookies } from 'next/headers';
 import { NextResponse, type NextRequest } from 'next/server';
 
 export async function GET(request: NextRequest) {
-  const { searchParams, origin } = request.nextUrl;
+  const { searchParams } = request.nextUrl;
   const code = searchParams.get('code');
   const next = searchParams.get('next') ?? '/dashboard';
+  // Use the configured public app URL — `request.nextUrl.origin` is
+  // `http://0.0.0.0:3000` inside the standalone container behind Traefik.
+  const origin = process.env.NEXT_PUBLIC_APP_URL ?? request.nextUrl.origin;
 
   if (code) {
     const cookieStore = await cookies();
     const supabase = createServerClient(
-      // Server-side: prefer the internal Docker URL when set.
-      process.env.SUPABASE_INTERNAL_URL || process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      // Public URL — @supabase/ssr derives the PKCE-verifier cookie name from
+      // the URL host. Must match what signInWithGitHub used to set it.
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
       {
         cookies: {
