@@ -196,7 +196,11 @@ services:
       GOTRUE_JWT_AUD: authenticated
       GOTRUE_JWT_ISSUER: ${NEXT_PUBLIC_SUPABASE_URL}/auth/v1
       # GitHub OAuth — used by the GUI's "Sign in with GitHub" button.
-      GOTRUE_EXTERNAL_GITHUB_ENABLED: "${GOTRUE_GITHUB_CLIENT_ID:+true}"
+      # Opt-in: set GOTRUE_GITHUB_ENABLED=true AND fill the client id/secret.
+      # GoTrue rejects an empty string for the bool, so we default to "false"
+      # rather than the older `${GOTRUE_GITHUB_CLIENT_ID:+true}` trick (which
+      # evaluated to "" when the client id was blank).
+      GOTRUE_EXTERNAL_GITHUB_ENABLED: "${GOTRUE_GITHUB_ENABLED:-false}"
       GOTRUE_EXTERNAL_GITHUB_CLIENT_ID: "${GOTRUE_GITHUB_CLIENT_ID:-}"
       GOTRUE_EXTERNAL_GITHUB_SECRET: "${GOTRUE_GITHUB_CLIENT_SECRET:-}"
       GOTRUE_EXTERNAL_GITHUB_REDIRECT_URI: "${NEXT_PUBLIC_SUPABASE_URL}/auth/v1/callback"
