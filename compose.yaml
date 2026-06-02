@@ -1,14 +1,43 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Cezar — self-hosted stack for Dokploy / generic Docker hosts.
+# Cezar — full self-hosted stack for Dokploy / generic Docker hosts.
 #
-#   gui     — the Next.js cockpit (also fires the /api/cron/* routes via the
-#             in-process scheduler; CEZAR_INPROCESS_CRON=true).
-#   runner  — optional @cezar/runner daemon for subscription CLIs
-#             (`claude` / `codex`). Comment out if you only need the
-#             managed-API path.
+# Bundles the Cezar GUI + runner with a local Supabase stack so the whole app
+# runs on a single host with no external SaaS dependency. Two domains needed
+# in Dokploy (both fronted by Traefik):
 #
-# Copy `.env.docker.example` to `.env` (or use Dokploy's env-var UI) before
-# bringing the stack up. See MIGRATION.md for the full env-var matrix.
+#   cezar.<yourdomain>     → service `gui`,  port 3000
+#   supabase.<yourdomain>  → service `kong`, port 8000
+#
+# The browser-side Supabase client (cockpit Realtime, inbox subscriptions,
+# label editor, etc.) hits the supabase.* URL directly from the user's browser,
+# so it must be publicly resolvable — it can't be `http://kong:8000`.
+#
+# Services:
+#   gui       — Next.js cockpit (also fires /api/cron/* via the in-process
+#               scheduler when CEZAR_INPROCESS_CRON=true).
+#   runner    — optional @cezar/runner daemon for subscription CLIs
+#               (`claude` / `codex`). Comment out if you only need the
+#               managed-API path.
+#   db        — Postgres 15 + wal2json (for Realtime's logical decoding).
+#   auth      — GoTrue: GitHub OAuth + session JWTs.
+#   migrator  — one-shot: applies packages/gui/supabase/migrations/*.sql,
+#               tracked in public._cezar_migrations.
+#   rest      — PostgREST: the auto-generated REST API the GUI calls.
+#   realtime  — supabase/realtime: WAL → websocket fanout.
+#   kong      — gateway routing /auth/v1, /rest/v1, /realtime/v1 to the above.
+#
+# Setup:
+#   1. Copy `.env.docker.example` → `.env` (or paste into Dokploy's env UI).
+#   2. ROTATE THE JWT KEYS. The defaults below are the well-known Supabase
+#      dev keys — anyone on the internet can mint a service_role token
+#      against them. See `infra/supabase/README.md` (or MIGRATION.md) for
+#      the rotation recipe.
+#   3. Apply Dokploy domains to `gui` and `kong` per above.
+#   4. Deploy. The migrator runs once on first boot.
+#
+# If you want to use Supabase Cloud instead of the bundled stack, comment out
+# db/auth/migrator/rest/realtime/kong and set the three NEXT_PUBLIC_SUPABASE_*
+# + SUPABASE_SERVICE_ROLE_KEY vars to your hosted project's values.
 # ─────────────────────────────────────────────────────────────────────────────
 
 services:
@@ -16,14 +45,32 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # NEXT_PUBLIC_* vars are baked into the browser bundle at build time.
+      # Setting them as `environment:` only would make SSR work but break the
+      # client-side Supabase client (browser tries to call `undefined/...`).
+      args:
+        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+        NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL}
     image: cezar-gui:latest
     restart: unless-stopped
+    depends_on:
+      kong:
+        condition: service_started
+      migrator:
+        condition: service_completed_successfully
     environment:
       NODE_ENV: production
       PORT: "3000"
 
       # ── Supabase (required) ────────────────────────────────────────────────
+      # NEXT_PUBLIC_SUPABASE_URL is the public URL baked into the browser
+      # bundle. SUPABASE_INTERNAL_URL shortcuts server-side calls to Kong over
+      # the Docker network so SSR doesn't bounce through Traefik. The server
+      # client (lib/supabase/server.ts) prefers SUPABASE_INTERNAL_URL when set;
+      # the browser client always uses NEXT_PUBLIC_SUPABASE_URL.
       NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
+      SUPABASE_INTERNAL_URL: ${SUPABASE_INTERNAL_URL:-http://kong:8000}
       NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
       SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
 
@@ -35,9 +82,6 @@ services:
       CRON_SECRET: ${CRON_SECRET}
 
       # ── In-process cron scheduler (required on self-hosted) ────────────────
-      # Boots the scheduler from instrumentation.ts; drives /api/cron/dispatch,
-      # /api/cron/triage-sweep, /api/cron/issue-sync on the cadence from
-      # vercel.json (overridable via CEZAR_*_INTERVAL_MS).
       CEZAR_INPROCESS_CRON: "true"
       CEZAR_INPROCESS_CRON_BASE_URL: http://127.0.0.1:3000
 
@@ -53,12 +97,9 @@ services:
       CEZAR_RUNNER_OFFLINE_MINUTES: ${CEZAR_RUNNER_OFFLINE_MINUTES:-3}
       CEZAR_TRIAGE_SWEEP_BATCH: ${CEZAR_TRIAGE_SWEEP_BATCH:-10}
     ports:
-      # Host 3333 → container 3000. On Dokploy, Traefik fronts this — keep the
-      # bind on 127.0.0.1 so the port isn't exposed publicly. Remove the
-      # `127.0.0.1:` prefix if you're running compose standalone and exposing
-      # directly. The container still listens on 3000 internally, so the
-      # in-process scheduler and the `runner` → `gui:3000` traffic are
-      # unaffected.
+      # Host 3333 → container 3000. Dokploy/Traefik routes to the container
+      # over the Docker network, so this bind is purely for debug
+      # (`curl 127.0.0.1:3333/api/health` on the host).
       - "127.0.0.1:3333:3000"
     networks:
       - cezar
@@ -72,8 +113,6 @@ services:
     depends_on:
       - gui
     environment:
-      # Token is issued in the GUI: Settings → Runners → Register a runner.
-      # The runner long-polls /api/runner/jobs at this URL.
       CEZAR_RUNNER_URL: ${CEZAR_RUNNER_URL:-http://gui:3000}
       CEZAR_RUNNER_TOKEN: ${CEZAR_RUNNER_TOKEN}
     command:
@@ -91,9 +130,181 @@ services:
     networks:
       - cezar
 
+  # ── Supabase stack ────────────────────────────────────────────────────────
+  # If you switch to Supabase Cloud, comment out everything from `db:` through
+  # `kong:` (inclusive) and the `db-data` volume.
+
+  db:
+    build:
+      context: ./infra/supabase/db
+    image: cezar-supabase-db:local
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: postgres
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - effective_cache_size=512MB
+      # supabase/realtime tails the WAL via logical replication.
+      - -c
+      - wal_level=logical
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ./infra/supabase/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      # Debug-only: direct psql access from the host loopback.
+      - "127.0.0.1:54322:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    networks:
+      - cezar
+
+  auth:
+    image: supabase/gotrue:v2.158.1
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: "9999"
+      # Public-facing URLs — GoTrue puts these in OAuth redirects + magic links.
+      API_EXTERNAL_URL: ${NEXT_PUBLIC_SUPABASE_URL}
+      GOTRUE_SITE_URL: ${NEXT_PUBLIC_APP_URL}
+      GOTRUE_URI_ALLOW_LIST: "${NEXT_PUBLIC_APP_URL}"
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${POSTGRES_PASSWORD:-postgres}@db:5432/postgres?search_path=auth
+      DB_NAMESPACE: auth
+      GOTRUE_DISABLE_SIGNUP: "${GOTRUE_DISABLE_SIGNUP:-false}"
+      GOTRUE_JWT_SECRET: ${SUPABASE_JWT_SECRET}
+      GOTRUE_JWT_EXP: "3600"
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_ISSUER: ${NEXT_PUBLIC_SUPABASE_URL}/auth/v1
+      # GitHub OAuth — used by the GUI's "Sign in with GitHub" button.
+      GOTRUE_EXTERNAL_GITHUB_ENABLED: "${GOTRUE_GITHUB_CLIENT_ID:+true}"
+      GOTRUE_EXTERNAL_GITHUB_CLIENT_ID: "${GOTRUE_GITHUB_CLIENT_ID:-}"
+      GOTRUE_EXTERNAL_GITHUB_SECRET: "${GOTRUE_GITHUB_CLIENT_SECRET:-}"
+      GOTRUE_EXTERNAL_GITHUB_REDIRECT_URI: "${NEXT_PUBLIC_SUPABASE_URL}/auth/v1/callback"
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
+      GOTRUE_MAILER_AUTOCONFIRM: "true"
+      GOTRUE_SMTP_ADMIN_EMAIL: ${GOTRUE_SMTP_ADMIN_EMAIL:-admin@local.dev}
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:9999/health"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+    networks:
+      - cezar
+
+  migrator:
+    image: postgres:15-alpine
+    depends_on:
+      auth:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - ./packages/gui/supabase/migrations:/migrations:ro
+      - ./infra/supabase/migrate.sh:/migrate.sh:ro
+    entrypoint: ["/bin/sh", "/migrate.sh"]
+    restart: "no"
+    networks:
+      - cezar
+
+  rest:
+    image: postgrest/postgrest:v12.2.0
+    restart: unless-stopped
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD:-postgres}@db:5432/postgres
+      PGRST_DB_SCHEMAS: public,storage
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${SUPABASE_JWT_SECRET}
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+    networks:
+      - cezar
+
+  realtime:
+    image: supabase/realtime:v2.30.34
+    restart: unless-stopped
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+    environment:
+      PORT: "4000"
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_USER: supabase_admin
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      DB_NAME: postgres
+      DB_AFTER_CONNECT_QUERY: 'SET search_path TO _realtime'
+      DB_ENC_KEY: ${SUPABASE_REALTIME_ENC_KEY:-supabaserealtime}
+      API_JWT_SECRET: ${SUPABASE_JWT_SECRET}
+      FLY_ALLOC_ID: fly123
+      FLY_APP_NAME: realtime
+      SECRET_KEY_BASE: ${SUPABASE_REALTIME_SECRET_KEY_BASE}
+      ERL_AFLAGS: -proto_dist inet_tcp
+      ENABLE_TAILSCALE: "false"
+      DNS_NODES: "''"
+      RLIMIT_NOFILE: "10000"
+      APP_NAME: realtime
+      SEED_SELF_HOST: "true"
+      RUN_JANITOR: "true"
+    networks:
+      - cezar
+
+  kong:
+    image: kong:2.8.1
+    restart: unless-stopped
+    depends_on:
+      - auth
+      - rest
+      - realtime
+    # kong-entrypoint.sh substitutes JWT keys from env into the template, then
+    # exec's kong via its stock /docker-entrypoint.sh. KONG_DECLARATIVE_CONFIG
+    # points at the rendered file (/tmp/kong.yml), not the template.
+    entrypoint: ["/bin/sh", "/docker-entrypoint-cezar.sh"]
+    command: ["kong", "docker-start"]
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /tmp/kong.yml
+      KONG_DNS_ORDER: LAST,A,CNAME
+      KONG_PLUGINS: request-transformer,cors,key-auth,acl
+      KONG_NGINX_PROXY_PROXY_BUFFER_SIZE: 160k
+      KONG_NGINX_PROXY_PROXY_BUFFERS: 64 160k
+      SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+    volumes:
+      - ./infra/supabase/kong.yml.template:/home/kong/kong.yml.template:ro
+      - ./infra/supabase/kong-entrypoint.sh:/docker-entrypoint-cezar.sh:ro
+    ports:
+      # Debug-only host bind. Dokploy/Traefik routes to port 8000 over the
+      # Docker network for the supabase.<yourdomain> domain.
+      - "127.0.0.1:54321:8000"
+    networks:
+      - cezar
+
 networks:
   cezar:
     driver: bridge
 
 volumes:
+  db-data:
   runner-home:
