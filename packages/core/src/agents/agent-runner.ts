@@ -119,7 +119,7 @@ export function isBashCommandAllowed(cmd: string, allowlist: string[]): boolean 
   const normalized = cmd.replace(/\s+/g, ' ').trim();
   return allowlist.some((allowed) => {
     const a = allowed.trim();
-    return normalized === a || normalized.startsWith(`${a} `) || normalized.startsWith(`${a}`);
+    return normalized === a || normalized.startsWith(`${a} `);
   });
 }
 
