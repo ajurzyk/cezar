@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import 'dotenv/config';
-import { Command } from 'commander';
+import { Command, InvalidArgumentError } from 'commander';
 import chalk from 'chalk';
 import { loadConfig, IssueStore } from '@cezar/core';
 import { initCommand } from './commands/init.js';
@@ -55,7 +55,13 @@ program.command('run <action>')
   .description('Run a data-driven Action against issues in the local store')
   .option('--all', 'Run against every issue in the store')
   .option('--unanalyzed', 'Run only against issues without prior analysis for this action (default)')
-  .option('--issue <n>', 'Target a single issue number', v => parseInt(v, 10))
+  .option('--issue <n>', 'Target a single issue number', v => {
+    const n = Number.parseInt(v, 10);
+    if (!Number.isInteger(n) || n <= 0 || String(n) !== v.trim()) {
+      throw new InvalidArgumentError(`--issue must be a positive integer, got "${v}".`);
+    }
+    return n;
+  })
   .option('--apply', 'Apply effects to GitHub (default is dry-run)')
   .option('--dry-run', 'Force dry-run; never write to GitHub')
   .action(async (actionName, opts) => {
