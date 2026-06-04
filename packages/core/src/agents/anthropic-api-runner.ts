@@ -12,6 +12,43 @@ import {
 import { costWeightedTokens, parseStructured, type RawUsage } from './structured-output.js';
 
 /**
+ * Stray `ERR_STREAM_WRITE_AFTER_END` errors are emitted as Node
+ * `uncaughtException`s on the SDK subprocess's stdin socket (e.g. after the
+ * agent terminated and we — or the SDK — write once more). They are benign and
+ * would otherwise crash the whole process before an in-flight `run()` can
+ * return gracefully. We install a single, refcounted, process-level handler
+ * that swallows *only* this specific error and lets every other uncaught
+ * exception fall through to Node's default crash path (so the job-claim layer
+ * can re-queue the job).
+ *
+ * The handler is a module-level singleton with an install refcount so that
+ * concurrent `run()` calls in one process (cron dispatch / runner daemon)
+ * install it exactly once. Previously each `run()` installed its own
+ * process-global handler, so a single fatal error fired (and rethrew from)
+ * every installed copy, and a `run()` that threw before its cleanup leaked a
+ * handler — the refcount fixes both.
+ */
+let streamWriteGuardRefcount = 0;
+function streamWriteAfterEndGuard(err: Error): void {
+  if (err && (err as NodeJS.ErrnoException).code === 'ERR_STREAM_WRITE_AFTER_END') return;
+  // Not the benign transport error. Re-throwing inside an `uncaughtException`
+  // handler escalates to Node's default fatal-crash path — which is what we
+  // want: a genuinely uncaught fatal error should terminate the worker so the
+  // job-claim layer re-queues the job, rather than being silently swallowed.
+  throw err;
+}
+function armStreamWriteGuard(): void {
+  if (streamWriteGuardRefcount++ === 0) {
+    process.on('uncaughtException', streamWriteAfterEndGuard);
+  }
+}
+function disarmStreamWriteGuard(): void {
+  if (streamWriteGuardRefcount > 0 && --streamWriteGuardRefcount === 0) {
+    process.removeListener('uncaughtException', streamWriteAfterEndGuard);
+  }
+}
+
+/**
  * `AgentRunner` over `@anthropic-ai/claude-agent-sdk`. This is the verbatim
  * extraction of the old `actions/autofix/agent-session.ts` loop — same tool +
  * bash allowlist enforcement, same cache-weighted token-budget accounting,
@@ -76,14 +113,11 @@ export class AnthropicApiRunner implements AgentRunner {
 
     // Guard against stray transport errors from the SDK's subprocess (e.g.
     // ERR_STREAM_WRITE_AFTER_END after the agent terminated) — those are
-    // emitted as Node 'error' events on the underlying socket and would
+    // emitted as Node 'uncaughtException's on the underlying socket and would
     // otherwise crash the whole process before we could return gracefully.
+    // Refcounted so concurrent run()s in one process install it exactly once.
     let sawTerminalMessage = false;
-    const stashedExceptionHandler = (err: Error): void => {
-      if (err && (err as NodeJS.ErrnoException).code === 'ERR_STREAM_WRITE_AFTER_END') return;
-      throw err;
-    };
-    process.on('uncaughtException', stashedExceptionHandler);
+    armStreamWriteGuard();
 
     try {
       for await (const msg of iter) {
@@ -126,12 +160,11 @@ export class AnthropicApiRunner implements AgentRunner {
         budgetExceeded = true;
       } else {
         onEvent?.({ type: 'error', message: err instanceof Error ? err.message : String(err) });
-        process.off('uncaughtException', stashedExceptionHandler);
-        this.activeIter = null;
+        // `finally` below disarms the guard and clears activeIter.
         throw err;
       }
     } finally {
-      process.off('uncaughtException', stashedExceptionHandler);
+      disarmStreamWriteGuard();
       this.activeIter = null;
     }
 
