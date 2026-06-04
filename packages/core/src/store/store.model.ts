@@ -147,6 +147,11 @@ export const StoreMetaSchema = z.object({
   owner: z.string(),
   repo: z.string(),
   lastSyncedAt: z.string().nullable().default(null),
+  /** Set once a *complete* (all-states, including closed) sync has succeeded.
+   *  Until then, sync does a full fetch rather than an incremental `since`
+   *  fetch — this backfills closed issues for stores first synced by an older
+   *  open-only sync, and bootstraps freshly-connected workspaces. */
+  fullSyncedAt: z.string().nullable().default(null),
   totalFetched: z.number().default(0),
   version: z.literal(1).default(1),
   orgMembers: z.array(z.string()).default([]),

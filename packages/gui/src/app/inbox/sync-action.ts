@@ -105,6 +105,7 @@ export async function syncAndDigest(): Promise<SyncResult> {
             owner: workspace.repoOwner,
             repo: workspace.repoName,
             lastSyncedAt: null,
+            fullSyncedAt: null,
             totalFetched: 0,
             version: 1 as const,
             orgMembers: [],
@@ -175,12 +176,17 @@ interface RunSyncArgs {
 async function runSync({ supabase, workspaceId, store, github, config, llm: LLMService }: RunSyncArgs): Promise<void> {
   const counts: SyncCounts = {};
 
-  // ── 1. Fetch issues (incremental when possible) ──
+  // ── 1. Fetch issues ──
+  // Do a full (all-states, incl. closed) fetch until a complete sync has
+  // succeeded, then switch to incremental `since` fetches. The full fetch
+  // backfills closed issues — and corrects issues closed upstream — for stores
+  // first synced by the older open-only path, and bootstraps new workspaces.
   try {
     const meta = store.getMeta();
-    const issues = meta.lastSyncedAt
-      ? await github.fetchIssuesSince(meta.lastSyncedAt, false)
-      : await github.fetchAllIssues(false);
+    const fullSync = !meta.fullSyncedAt || !meta.lastSyncedAt;
+    const issues = fullSync
+      ? await github.fetchAllIssues(true)
+      : await github.fetchIssuesSince(meta.lastSyncedAt as string, true);
     counts.issuesFetched = issues.length;
     counts.issuesCreated = 0;
     counts.issuesUpdated = 0;
@@ -189,9 +195,13 @@ async function runSync({ supabase, workspaceId, store, github, config, llm: LLMS
       if (r.action === 'created') counts.issuesCreated += 1;
       if (r.action === 'updated') counts.issuesUpdated += 1;
     }
+    const nowIso = new Date().toISOString();
     store.updateMeta({
-      lastSyncedAt: new Date().toISOString(),
+      lastSyncedAt: nowIso,
       totalFetched: issues.length,
+      // Mark the store complete once the first all-states fetch lands, so
+      // later syncs go incremental.
+      ...(fullSync ? { fullSyncedAt: nowIso } : {}),
     });
     await store.save();
   } catch (err) {
@@ -205,9 +215,11 @@ async function runSync({ supabase, workspaceId, store, github, config, llm: LLMS
     return;
   }
 
-  // ── 2. Generate digests for issues that don't have one yet ──
+  // ── 2. Generate digests for OPEN issues that don't have one yet ──
+  // Scoped to open issues: a full backfill can pull in hundreds of historical
+  // closed issues, and digesting those would be a large, low-value LLM spend.
   try {
-    const needDigest = store.getIssues({ hasDigest: false });
+    const needDigest = store.getIssues({ state: 'open', hasDigest: false });
     if (needDigest.length > 0) {
       await writeStatus(supabase, workspaceId, {
         status: 'syncing',

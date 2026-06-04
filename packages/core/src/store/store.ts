@@ -52,6 +52,7 @@ export class IssueStore {
         owner: meta.owner,
         repo: meta.repo,
         lastSyncedAt: null,
+        fullSyncedAt: null,
         totalFetched: 0,
         version: 1,
         orgMembers: [],
