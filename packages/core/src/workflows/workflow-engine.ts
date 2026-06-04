@@ -605,6 +605,7 @@ export class WorkflowEngine {
           record.status = 'failed';
           record.error = msg;
           record.finishedAt = new Date().toISOString();
+          runRecords.push(record);
           ctx.onRunRecord?.(record);
         }
         return finishRun('failed', `step '${step.id}' threw: ${msg}`);
