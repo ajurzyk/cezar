@@ -180,11 +180,14 @@ export async function listEnabledActions(
   filter?: { target?: 'issue' | 'pr'; trigger?: ActionTrigger },
 ): Promise<ActionDef[]> {
   const sb = supabase as LooseSupabase;
+  // We deliberately do NOT filter `enabled = true` in SQL: a user row may
+  // override a built-in with `enabled = false` to disable it. Such a row must
+  // survive into `pickPreferred` so it wins over (and suppresses) the built-in;
+  // we then drop the resolved row if the winner is disabled.
   const { data, error } = await sb
     .from('actions')
     .select(ACTION_COLUMNS)
     .eq('workspace_id', workspaceId)
-    .eq('enabled', true)
     .order('name', { ascending: true });
   if (error) throw new Error(`listEnabledActions failed: ${error.message}`);
   const grouped = new Map<string, ActionRow[]>();
@@ -196,7 +199,7 @@ export async function listEnabledActions(
   let rows: ActionDef[] = [];
   for (const list of grouped.values()) {
     const picked = pickPreferred(list);
-    if (picked) rows.push(picked);
+    if (picked && picked.enabled) rows.push(picked);
   }
   rows.sort((a, b) => a.name.localeCompare(b.name));
   if (filter?.target) rows = rows.filter((a) => a.target === filter.target);
