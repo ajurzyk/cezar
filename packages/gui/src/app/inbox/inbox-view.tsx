@@ -8,7 +8,6 @@ import {
   ChevronDownIcon,
   MoreVerticalIcon,
   PlayIcon,
-  RefreshIcon,
   RotateLeftIcon,
   SparkleSmallIcon,
   StatusDotIcon,
@@ -32,7 +31,7 @@ import {
   dismissDecisions,
   snoozeDecision,
 } from './decision-actions';
-import { syncAndDigest } from './sync-action';
+import { SyncButton, type SyncStatusRow } from '@/app/issues/sync-button';
 
 // ─────────────────────────────────────────────────────────────────────
 // Skill palette — each skill gets its own accent so confidence pills
@@ -115,6 +114,7 @@ interface InboxViewProps {
   syncedAt: number;
   healthAlerts: { id: string; text: string; severity: 'warn' | 'error' }[];
   actionNames: ActionFilterOption[];
+  initialSyncStatus: SyncStatusRow | null;
 }
 
 export function InboxView({
@@ -123,6 +123,7 @@ export function InboxView({
   syncedAt: initialSyncedAt,
   healthAlerts,
   actionNames,
+  initialSyncStatus,
 }: InboxViewProps) {
   const router = useRouter();
   const [, startTransition] = useTransition();
@@ -188,9 +189,14 @@ export function InboxView({
     }
   }, [skillFilters, skillFilter]);
   const [typeFilter, setTypeFilter] = useState<(typeof TYPE_FILTERS)[number]>(TYPE_FILTERS[0]);
-  const [syncing, setSyncing] = useState(false);
   const [syncedAt, setSyncedAt] = useState<number>(initialSyncedAt);
   const [toast, setToast] = useState<string | null>(null);
+
+  // The sync now runs in the background (see SyncButton); when it finishes it
+  // triggers a server refresh, which re-supplies a fresh `syncedAt` prop.
+  useEffect(() => {
+    setSyncedAt(initialSyncedAt);
+  }, [initialSyncedAt]);
 
   // ── derived counts / filters ──
   const counts = useMemo(() => {
@@ -362,28 +368,6 @@ export function InboxView({
     });
   }, [selectedFindings, router]);
 
-  const handleSync = useCallback(async () => {
-    setSyncing(true);
-    const result = await syncAndDigest();
-    setSyncing(false);
-    if (!result.ok) {
-      setToast(`Sync failed: ${result.error ?? 'unknown'}`);
-      return;
-    }
-    setSyncedAt(Date.now());
-    const bits: string[] = [];
-    if (result.issuesFetched) {
-      const created = result.issuesCreated ?? 0;
-      const updated = result.issuesUpdated ?? 0;
-      bits.push(`${result.issuesFetched} issue${result.issuesFetched === 1 ? '' : 's'} (${created} new · ${updated} updated)`);
-    }
-    if (result.digestsCreated) bits.push(`${result.digestsCreated} digested`);
-    if (result.commentsFetched) bits.push(`${result.commentsFetched} commented`);
-    if (result.prsUpdated) bits.push(`${result.prsUpdated} PR${result.prsUpdated === 1 ? '' : 's'}`);
-    setToast(bits.length > 0 ? `Synced: ${bits.join(' · ')}` : 'Already up to date');
-    router.refresh();
-  }, [router]);
-
   // ── keyboard: Cmd+A / Ctrl+A selects all visible findings ──
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -432,20 +416,7 @@ export function InboxView({
               </span>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={handleSync}
-            disabled={syncing}
-            className={cn(
-              'inline-flex items-center gap-2 rounded-md border px-4 py-2 text-sm font-medium transition-colors',
-              syncing
-                ? 'cursor-wait border-outline-variant bg-surface-container text-on-surface-variant'
-                : 'border-primary/40 bg-primary/10 text-primary hover:border-primary/60 hover:bg-primary/15',
-            )}
-          >
-            <RefreshIcon className={cn('h-4 w-4', syncing && 'animate-spin')} />
-            {syncing ? 'Syncing…' : 'Sync & Digest'}
-          </button>
+          <SyncButton workspaceId={workspaceId} readOnly={false} initialStatus={initialSyncStatus} />
         </div>
       </header>
 

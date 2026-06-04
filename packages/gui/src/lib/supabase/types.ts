@@ -31,6 +31,18 @@ export type LabelAnalysisStatus =
 export type WorkspaceLabelScope = 'issue' | 'pr' | 'both';
 export type WorkspaceLabelSource = 'ai-analyzed' | 'user-edited' | 'manual';
 
+// ─── Sync status (0029) ──────────────────────────────────────────────────
+export type SyncStatusState = 'idle' | 'syncing' | 'done' | 'error';
+export type SyncPhase = 'issues' | 'digests' | 'comments' | 'prs';
+export interface SyncCounts {
+  issuesFetched?: number;
+  issuesCreated?: number;
+  issuesUpdated?: number;
+  digestsCreated?: number;
+  commentsFetched?: number;
+  prsUpdated?: number;
+}
+
 // Shape of `workspace_label_analyses.result` once the executor finishes.
 export interface LabelAnalysisDraft {
   name: string;
@@ -195,6 +207,32 @@ export interface Database {
           updated_at?: string;
         };
         Update: Partial<Database['public']['Tables']['pull_requests']['Insert']>;
+      };
+      sync_status: {
+        Row: {
+          workspace_id: string;
+          status: SyncStatusState;
+          phase: SyncPhase | null;
+          message: string | null;
+          /** { issuesFetched, issuesCreated, issuesUpdated, digestsCreated, commentsFetched, prsUpdated } */
+          counts: SyncCounts;
+          error: string | null;
+          started_at: string | null;
+          finished_at: string | null;
+          updated_at: string;
+        };
+        Insert: {
+          workspace_id: string;
+          status?: SyncStatusState;
+          phase?: SyncPhase | null;
+          message?: string | null;
+          counts?: SyncCounts;
+          error?: string | null;
+          started_at?: string | null;
+          finished_at?: string | null;
+          updated_at?: string;
+        };
+        Update: Partial<Database['public']['Tables']['sync_status']['Insert']>;
       };
       user_github_tokens: {
         Row: {
