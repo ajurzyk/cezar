@@ -49,16 +49,27 @@ export async function middleware(request: NextRequest) {
 
   const { data: { user } } = await supabase.auth.getUser();
 
+  // Any response we return INSTEAD of `supabaseResponse` (e.g. a redirect) must
+  // carry over the Set-Cookie headers `getAll()` may have refreshed onto
+  // `supabaseResponse`. Dropping them re-presents the rotated-out refresh token
+  // on the next request → Supabase 400 → silent logout.
+  const withSessionCookies = (response: NextResponse) => {
+    supabaseResponse.cookies.getAll().forEach((cookie) => {
+      response.cookies.set(cookie.name, cookie.value, cookie);
+    });
+    return response;
+  };
+
   if (!user) {
     const loginUrl = request.nextUrl.clone();
     loginUrl.pathname = '/login';
-    return NextResponse.redirect(loginUrl);
+    return withSessionCookies(NextResponse.redirect(loginUrl));
   }
 
   if (request.nextUrl.pathname === '/login') {
     const dashUrl = request.nextUrl.clone();
     dashUrl.pathname = '/dashboard';
-    return NextResponse.redirect(dashUrl);
+    return withSessionCookies(NextResponse.redirect(dashUrl));
   }
 
   return supabaseResponse;
