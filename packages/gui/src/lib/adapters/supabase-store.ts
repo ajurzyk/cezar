@@ -45,6 +45,7 @@ export class SupabaseStoreAdapter implements StorePort {
       .update({
         meta: {
           lastSyncedAt: store.meta.lastSyncedAt,
+          fullSyncedAt: store.meta.fullSyncedAt,
           totalFetched: store.meta.totalFetched,
           version: store.meta.version,
           orgMembers: store.meta.orgMembers,
@@ -70,6 +71,7 @@ function metaFromWorkspace(ws: WorkspaceRow): Store['meta'] {
     owner: ws.repo_owner,
     repo: ws.repo_name,
     lastSyncedAt: raw.lastSyncedAt ?? null,
+    fullSyncedAt: raw.fullSyncedAt ?? null,
     totalFetched: raw.totalFetched ?? 0,
     version: 1,
     orgMembers: raw.orgMembers ?? [],
