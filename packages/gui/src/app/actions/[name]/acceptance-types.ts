@@ -64,11 +64,13 @@ export function coerceConfidenceConfig(
       autoAcceptAbove: clamp(obj.autoAcceptAbove, DEFAULT_AUTO_CONFIG.autoAcceptAbove),
     };
   }
-  const high = clamp(obj.autoAcceptAbove, DEFAULT_HITL_CONFIG.autoAcceptAbove);
+  // Floor `high` at 1 so the `low < high` invariant can hold even when the
+  // stored row came from `mode: 'auto'` with autoAcceptAbove: 0.
+  const high = Math.max(1, clamp(obj.autoAcceptAbove, DEFAULT_HITL_CONFIG.autoAcceptAbove));
   const low = clamp(obj.autoDenyBelow, DEFAULT_HITL_CONFIG.autoDenyBelow);
-  // Enforce invariant: low < high.
+  // Enforce invariant: 0 <= low < high.
   return {
-    autoDenyBelow: Math.min(low, high - 1),
+    autoDenyBelow: Math.max(0, Math.min(low, high - 1)),
     autoAcceptAbove: high,
   };
 }
