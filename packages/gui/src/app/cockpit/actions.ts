@@ -260,6 +260,23 @@ export async function enqueueWorkflowRun(params: {
     workspace.repoOwner && workspace.repoName ? `${workspace.repoOwner}/${workspace.repoName}` : null;
 
   const supabase = createSupabaseAdminClient();
+
+  // Dedupe: a double-click, network burst, or stale tab must not queue two
+  // jobs for the same workflow+issue. If one's already in flight, return it.
+  if (params.issueNumber != null) {
+    const { data: existing } = await supabase
+      .from('jobs')
+      .select('id')
+      .eq('workspace_id', workspace.id)
+      .eq('kind', params.workflow)
+      .eq('issue_number', params.issueNumber)
+      .in('status', ['queued', 'claimed', 'running'])
+      .limit(1);
+    if (existing && existing.length > 0) {
+      return { ok: true, jobId: existing[0].id };
+    }
+  }
+
   const { data, error } = await supabase
     .from('jobs')
     .insert({

@@ -362,6 +362,22 @@ export async function runFlowOnIssue(params: {
     ? `${workspace.repoOwner}/${workspace.repoName}`
     : null;
 
+  // Dedupe: a double-click, network burst, or stale tab must not queue two
+  // jobs for the same flow+issue. Key on payload->>flowId so different flows
+  // on the same issue don't collide. If one's already in flight, return it.
+  const { data: open } = await supabase
+    .from('jobs')
+    .select('id, payload')
+    .eq('workspace_id', workspace.id)
+    .eq('kind', 'flow')
+    .eq('issue_number', params.issueNumber)
+    .in('status', ['queued', 'claimed', 'running']);
+  const existing = (open ?? []).find((row) => {
+    const p = (row.payload ?? {}) as { flowId?: string };
+    return p.flowId === params.flowId;
+  });
+  if (existing) return { ok: true, jobId: existing.id };
+
   const { data: job, error } = await supabase
     .from('jobs')
     .insert({
