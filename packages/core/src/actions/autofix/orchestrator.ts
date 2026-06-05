@@ -31,6 +31,7 @@ import {
   buildCommitMessage,
   buildPrBody,
 } from './messages.js';
+import { normalizeTitle } from './prompts/untrusted.js';
 
 /**
  * Raised when a single agent session exceeds `autofix.attemptTimeoutMs`.
@@ -665,7 +666,7 @@ export class AutofixOrchestrator {
     args.onEvent?.(`[#${issueNumber}] PR — opening draft pull request`);
     const prBody = buildPrBody(issueNumber, rootCause, fixReport, verdict);
     const pr = await this.github.createPullRequest({
-      title: `fix: ${issueData.issue.title} (#${issueNumber})`,
+      title: `fix: ${normalizeTitle(issueData.issue.title)} (#${issueNumber})`,
       body: prBody,
       head: cfg.branchPrefix + issueNumber,
       base: cfg.baseBranch,
