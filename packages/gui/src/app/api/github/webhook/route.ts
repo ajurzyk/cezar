@@ -89,11 +89,11 @@ export async function POST(req: Request): Promise<NextResponse> {
       case 'ping':
         return NextResponse.json({ ok: true });
       case 'issues':
-        return await handleIssues(admin, payload);
+        return await handleIssues(admin, payload, event);
       case 'check_run':
-        return await handleCheckRun(admin, payload);
+        return await handleCheckRun(admin, payload, event);
       case 'pull_request':
-        return await handlePullRequest(admin, payload);
+        return await handlePullRequest(admin, payload, event);
       case 'installation':
       case 'installation_repositories':
         return await handleInstallation(admin, payload);
@@ -180,7 +180,7 @@ interface WebhookPullRequest {
 
 const TRIAGE_ACTIONS = new Set(['opened', 'reopened']);
 
-async function handleIssues(admin: SupabaseAdmin, payload: WebhookPayload): Promise<NextResponse> {
+async function handleIssues(admin: SupabaseAdmin, payload: WebhookPayload, event: string): Promise<NextResponse> {
   const action = payload.action ?? '';
   const isTriageRelevant =
     TRIAGE_ACTIONS.has(action) ||
@@ -194,7 +194,7 @@ async function handleIssues(admin: SupabaseAdmin, payload: WebhookPayload): Prom
   const repo = payload.repository;
   if (!issue || !repo) return NextResponse.json({ ok: true, ignored: 'issues event missing issue/repository' });
 
-  const workspaces = await resolveWorkspaces(admin, payload, repo);
+  const workspaces = await resolveWorkspaces(admin, payload, repo, event);
   if (workspaces.length === 0) return NextResponse.json({ ok: true, ignored: 'no matching workspace' });
 
   const repoSlug = `${repo.owner.login}/${repo.name}`;
@@ -371,7 +371,7 @@ async function enqueueFlowsForIssueEvent(
  */
 const CHECK_RUN_FAIL_CONCLUSIONS = new Set(['failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure']);
 
-async function handleCheckRun(admin: SupabaseAdmin, payload: WebhookPayload): Promise<NextResponse> {
+async function handleCheckRun(admin: SupabaseAdmin, payload: WebhookPayload, event: string): Promise<NextResponse> {
   if (payload.action !== 'completed') return NextResponse.json({ ok: true, ignored: `check_run.${payload.action}` });
   const cr = payload.check_run;
   const repo = payload.repository;
@@ -384,7 +384,7 @@ async function handleCheckRun(admin: SupabaseAdmin, payload: WebhookPayload): Pr
     return NextResponse.json({ ok: true, ignored: 'check_run not linked to any PR' });
   }
 
-  const workspaces = await resolveWorkspaces(admin, payload, repo);
+  const workspaces = await resolveWorkspaces(admin, payload, repo, event);
   if (workspaces.length === 0) return NextResponse.json({ ok: true, ignored: 'no matching workspace' });
 
   const repoSlug = `${repo.owner.login}/${repo.name}`;
@@ -504,7 +504,7 @@ const PR_UPSERT_ACTIONS = new Set([
 ]);
 const PR_CLOSE_ACTIONS = new Set(['closed']);
 
-async function handlePullRequest(admin: SupabaseAdmin, payload: WebhookPayload): Promise<NextResponse> {
+async function handlePullRequest(admin: SupabaseAdmin, payload: WebhookPayload, event: string): Promise<NextResponse> {
   const action = payload.action ?? '';
   const pr = payload.pull_request;
   const repo = payload.repository;
@@ -514,7 +514,7 @@ async function handlePullRequest(admin: SupabaseAdmin, payload: WebhookPayload):
     return NextResponse.json({ ok: true, ignored: `pull_request.${action}` });
   }
 
-  const workspaces = await resolveWorkspaces(admin, payload, repo);
+  const workspaces = await resolveWorkspaces(admin, payload, repo, event);
   if (workspaces.length === 0) return NextResponse.json({ ok: true, ignored: 'no matching workspace' });
 
   const labels = Array.isArray(pr.labels)
@@ -585,24 +585,53 @@ async function handleInstallation(admin: SupabaseAdmin, payload: WebhookPayload)
 type SupabaseAdmin = ReturnType<typeof createSupabaseAdminClient>;
 type WorkspaceMatch = Pick<Database['public']['Tables']['workspaces']['Row'], 'id' | 'auto_triage_enabled'>;
 
-/** Match by `installation_id` first (preferred), else by `repo_owner`/`repo_name`. */
+/**
+ * Match by `installation_id` first (preferred), else by `repo_owner`/`repo_name`.
+ *
+ * This is the single chokepoint every real (non-ping) per-workspace delivery
+ * flows through, so it's also where we stamp the per-workspace "last webhook
+ * delivery" signal (`last_webhook_received_at` / `last_webhook_event`,
+ * migration 0039) that powers the indicator's Live-vs-Polling state. The stamp
+ * is best-effort: a failure logs and continues — it must never affect dispatch
+ * or the 200/503 response.
+ */
 async function resolveWorkspaces(
   admin: SupabaseAdmin,
   payload: WebhookPayload,
   repo: { name: string; owner: { login: string } },
+  event: string,
 ): Promise<WorkspaceMatch[]> {
+  let matched: WorkspaceMatch[] = [];
   const installationId = payload.installation?.id;
   if (installationId != null) {
     const { data } = await admin
       .from('workspaces')
       .select('id, auto_triage_enabled')
       .eq('installation_id', installationId);
-    if (data && data.length > 0) return data;
+    if (data && data.length > 0) matched = data;
   }
-  const { data } = await admin
-    .from('workspaces')
-    .select('id, auto_triage_enabled')
-    .eq('repo_owner', repo.owner.login)
-    .eq('repo_name', repo.name);
-  return data ?? [];
+  if (matched.length === 0) {
+    const { data } = await admin
+      .from('workspaces')
+      .select('id, auto_triage_enabled')
+      .eq('repo_owner', repo.owner.login)
+      .eq('repo_name', repo.name);
+    matched = data ?? [];
+  }
+
+  if (matched.length > 0) {
+    try {
+      await admin
+        .from('workspaces')
+        .update({ last_webhook_received_at: new Date().toISOString(), last_webhook_event: event })
+        .in(
+          'id',
+          matched.map((ws) => ws.id),
+        );
+    } catch (err) {
+      console.error('[github-webhook] webhook signal stamp failed:', err instanceof Error ? err.message : err);
+    }
+  }
+
+  return matched;
 }

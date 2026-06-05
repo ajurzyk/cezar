@@ -13,9 +13,12 @@ interface TopBarProps {
   readOnly: boolean;
   initialSyncStatus: SyncStatusRow | null;
   syncMode: 'auto' | 'manual';
+  syncIntervalMinutes: number;
+  webhookHealth: 'live' | 'polling';
+  lastWebhookAt: string | null;
 }
 
-export function TopBar({ user, workspaceId, readOnly, initialSyncStatus, syncMode }: TopBarProps) {
+export function TopBar({ user, workspaceId, readOnly, initialSyncStatus, syncMode, syncIntervalMinutes, webhookHealth, lastWebhookAt }: TopBarProps) {
   const initials = useMemo(
     () =>
       (user.name || user.email || '?')
@@ -37,6 +40,9 @@ export function TopBar({ user, workspaceId, readOnly, initialSyncStatus, syncMod
             readOnly={readOnly}
             initialStatus={initialSyncStatus}
             syncMode={syncMode}
+            syncIntervalMinutes={syncIntervalMinutes}
+            webhookHealth={webhookHealth}
+            lastWebhookAt={lastWebhookAt}
           />
         )}
 

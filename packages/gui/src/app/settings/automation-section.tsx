@@ -1,10 +1,13 @@
 'use client';
 
-import { useActionState, useState } from 'react';
+import { useActionState, useState, useTransition } from 'react';
 import { cn } from '@/components/ui/cn';
 import { saveAutomationToggles, type SaveAutomationState } from './automation-actions';
+import { generateDigestsNow } from '@/app/inbox/sync-action';
+import type { DigestMode } from '@/lib/supabase/types';
 
 const SYNC_INTERVAL_OPTIONS = [5, 15, 30, 60, 120, 360] as const;
+const DIGEST_INTERVAL_OPTIONS = [15, 30, 60, 120, 360] as const;
 
 function formatInterval(min: number): string {
   if (min < 60) return `Every ${min} minutes`;
@@ -19,6 +22,8 @@ interface AutomationSectionProps {
   actionAutoComment: boolean;
   syncMode: 'auto' | 'manual';
   syncIntervalMinutes: number;
+  digestMode: DigestMode;
+  digestIntervalMinutes: number;
   readOnly: boolean;
 }
 
@@ -29,11 +34,28 @@ export function AutomationSection({
   actionAutoComment,
   syncMode,
   syncIntervalMinutes,
+  digestMode,
+  digestIntervalMinutes,
   readOnly,
 }: AutomationSectionProps) {
   const [state, formAction, pending] = useActionState<SaveAutomationState, FormData>(saveAutomationToggles, {});
   const [autofix, setAutofix] = useState(autofixEnabled);
   const [syncAuto, setSyncAuto] = useState(syncMode === 'auto');
+  const [digest, setDigest] = useState<DigestMode>(digestMode);
+  const [genPending, startGen] = useTransition();
+  const [genMsg, setGenMsg] = useState<{ tone: 'ok' | 'error'; text: string } | null>(null);
+
+  function onGenerateDigests() {
+    setGenMsg(null);
+    startGen(async () => {
+      const res = await generateDigestsNow();
+      setGenMsg(
+        res.ok
+          ? { tone: 'ok', text: 'Generating digests… watch the sync indicator for progress.' }
+          : { tone: 'error', text: res.error ?? 'Failed to start' },
+      );
+    });
+  }
 
   return (
     <form action={formAction} className="space-y-4">
@@ -120,6 +142,80 @@ export function AutomationSection({
           </select>
         </label>
       )}
+
+      {/* ── AI digests (spec §5): a separate cadence from metadata sync, since
+          digests are the only LLM spend. Metadata stays on the sync schedule. ── */}
+      <div className="space-y-4 rounded-md border border-outline-variant bg-surface-container/40 p-4">
+        <div className="space-y-1">
+          <span className="block text-sm font-medium text-on-surface">AI digests</span>
+          <span className="block text-xs leading-relaxed text-on-surface-variant">
+            Digests are AI-generated issue summaries (uses your Anthropic key). They&rsquo;re the only
+            LLM spend in a sync, so they have their own cadence — metadata sync (issues, PRs, comments)
+            stays on your sync schedule regardless. <span className="font-medium">Auto</span> digests on
+            their own slower schedule, <span className="font-medium">On-demand</span> only when you click
+            below, <span className="font-medium">Off</span> never (the inbox shows raw issue titles).
+          </span>
+        </div>
+
+        <label className="flex items-center justify-between gap-3">
+          <span className="text-sm text-on-surface">Mode</span>
+          <select
+            name="digestMode"
+            value={digest}
+            onChange={(e) => setDigest(e.target.value as DigestMode)}
+            disabled={readOnly}
+            className="h-9 shrink-0 rounded-md border border-outline-variant bg-surface px-2 text-sm text-on-surface focus:border-primary focus:outline-none disabled:opacity-70"
+          >
+            <option value="auto">Auto</option>
+            <option value="manual">On-demand</option>
+            <option value="off">Off</option>
+          </select>
+        </label>
+
+        {digest === 'auto' && (
+          <label className="flex items-center justify-between gap-3">
+            <span className="min-w-0 flex-1 space-y-1">
+              <span className="block text-sm text-on-surface">Digest frequency</span>
+              <span className="block text-xs leading-relaxed text-on-surface-variant">
+                How often Cezar generates digests during a sync. Metadata still syncs on every sync;
+                digests only run once this much time has passed.
+              </span>
+            </span>
+            <select
+              name="digestIntervalMinutes"
+              defaultValue={String(digestIntervalMinutes)}
+              disabled={readOnly}
+              className="h-9 shrink-0 rounded-md border border-outline-variant bg-surface px-2 text-sm text-on-surface focus:border-primary focus:outline-none disabled:opacity-70"
+            >
+              {(DIGEST_INTERVAL_OPTIONS.includes(digestIntervalMinutes as (typeof DIGEST_INTERVAL_OPTIONS)[number])
+                ? DIGEST_INTERVAL_OPTIONS
+                : [digestIntervalMinutes, ...DIGEST_INTERVAL_OPTIONS]
+              ).map((min) => (
+                <option key={min} value={min}>
+                  {formatInterval(min)}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+
+        {!readOnly && (
+          <div className="space-y-2 border-t border-outline-variant pt-3">
+            {genMsg && <Banner tone={genMsg.tone}>{genMsg.text}</Banner>}
+            <button
+              type="button"
+              onClick={onGenerateDigests}
+              disabled={genPending}
+              className="inline-flex h-9 items-center rounded-md border border-outline-variant bg-surface px-4 text-sm font-medium text-on-surface transition-colors hover:border-outline disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {genPending ? 'Starting…' : 'Generate digests now'}
+            </button>
+            <span className="block text-xs text-on-surface-variant">
+              Runs a digest pass immediately, regardless of mode. Useful for On-demand / Off workspaces.
+            </span>
+          </div>
+        )}
+      </div>
 
       {!readOnly && (
         <div className="flex justify-end pt-2">

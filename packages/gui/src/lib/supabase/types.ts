@@ -31,16 +31,47 @@ export type LabelAnalysisStatus =
 export type WorkspaceLabelScope = 'issue' | 'pr' | 'both';
 export type WorkspaceLabelSource = 'ai-analyzed' | 'user-edited' | 'manual';
 
+/** Per-workspace AI-digest cadence (migration 0042 / spec §5). `auto` runs
+ *  digests on their own `digest_interval_minutes` cadence; `manual` only on the
+ *  initial import or the admin "Generate digests now" action; `off` never. */
+export type DigestMode = 'auto' | 'manual' | 'off';
+
 // ─── Sync status (0029) ──────────────────────────────────────────────────
 export type SyncStatusState = 'idle' | 'syncing' | 'done' | 'error';
 export type SyncPhase = 'issues' | 'digests' | 'comments' | 'prs';
+/** Classification of a sync failure (migration 0041) — drives the indicator's
+ *  actionable error copy + recovery CTA. `auth` ⇒ expired/revoked token or an
+ *  uninstalled App (→ Reconnect); `rate_limit` is transient; `not_found` is a
+ *  repo-access problem; `unknown` falls back to the raw message. */
+export type SyncErrorKind = 'auth' | 'rate_limit' | 'not_found' | 'unknown';
 export interface SyncCounts {
   issuesFetched?: number;
   issuesCreated?: number;
   issuesUpdated?: number;
   digestsCreated?: number;
+  /** Total issues slated for digesting this run (open + un-digested), captured
+   *  before the LLM call so the first-import bar has a denominator. */
+  digestsTotal?: number;
   commentsFetched?: number;
   prsUpdated?: number;
+  // ── Per-run PR deltas (spec §4) — computed from a pre-upsert state diff,
+  // so the "what changed" toast reflects *this* sync rather than cumulative
+  // totals. Skipped on the initial import (everything would be "new"). ──
+  /** PRs not previously present in the store. */
+  prsCreated?: number;
+  /** PRs that went open → closed this run. Merges fold in here when no merge
+   *  signal is available (`RawPullRequest` carries none today). */
+  prsClosed?: number;
+  /** PRs closed *as merged* this run. Unset while the fetch lacks a merge
+   *  signal — merges are counted under `prsClosed` instead. */
+  prsMerged?: number;
+  /** PRs that went closed → open this run. */
+  prsReopened?: number;
+  // ── Finer issue deltas (spec §4), split out of `issuesUpdated`. ──
+  /** Issues that went open → closed this run. */
+  issuesClosed?: number;
+  /** Issues that went closed → open this run. */
+  issuesReopened?: number;
 }
 
 // Shape of `workspace_label_analyses.result` once the executor finishes.
@@ -132,16 +163,28 @@ export interface Database {
           action_auto_comment: boolean;
           sync_mode: 'auto' | 'manual';
           sync_interval_minutes: number;
+          last_webhook_received_at: string | null;
+          last_webhook_event: string | null;
+          // §5 (migration 0042) — AI-digest cadence, decoupled from the
+          // metadata-sync cadence so "sync often" doesn't mean "spend often".
+          digest_mode: DigestMode;
+          digest_interval_minutes: number;
+          last_digested_at: string | null;
           auto_triage_action_id: string | null;
           created_at: string;
           updated_at: string;
         };
-        Insert: Omit<Database['public']['Tables']['workspaces']['Row'], 'id' | 'created_at' | 'updated_at' | 'auto_triage_action_id' | 'action_auto_comment' | 'sync_mode' | 'sync_interval_minutes'> & {
+        Insert: Omit<Database['public']['Tables']['workspaces']['Row'], 'id' | 'created_at' | 'updated_at' | 'auto_triage_action_id' | 'action_auto_comment' | 'sync_mode' | 'sync_interval_minutes' | 'last_webhook_received_at' | 'last_webhook_event' | 'digest_mode' | 'digest_interval_minutes' | 'last_digested_at'> & {
           id?: string;
           auto_triage_action_id?: string | null;
           action_auto_comment?: boolean;
           sync_mode?: 'auto' | 'manual';
           sync_interval_minutes?: number;
+          last_webhook_received_at?: string | null;
+          last_webhook_event?: string | null;
+          digest_mode?: DigestMode;
+          digest_interval_minutes?: number;
+          last_digested_at?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -218,9 +261,15 @@ export interface Database {
           status: SyncStatusState;
           phase: SyncPhase | null;
           message: string | null;
-          /** { issuesFetched, issuesCreated, issuesUpdated, digestsCreated, commentsFetched, prsUpdated } */
+          /** { issuesFetched, issuesCreated, issuesUpdated, digestsCreated, digestsTotal, commentsFetched, prsUpdated } */
           counts: SyncCounts;
           error: string | null;
+          /** Classification of the last failure (migration 0041), set with
+           *  status='error' so the indicator can show a recovery CTA. */
+          error_kind: SyncErrorKind | null;
+          /** True during the workspace's first full import (migration 0040) —
+           *  flips the indicator to a determinate "Importing" bar. */
+          initial: boolean;
           started_at: string | null;
           finished_at: string | null;
           updated_at: string;
@@ -232,6 +281,8 @@ export interface Database {
           message?: string | null;
           counts?: SyncCounts;
           error?: string | null;
+          error_kind?: SyncErrorKind | null;
+          initial?: boolean;
           started_at?: string | null;
           finished_at?: string | null;
           updated_at?: string;

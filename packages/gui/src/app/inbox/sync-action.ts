@@ -94,7 +94,10 @@ export async function syncAndDigest(): Promise<SyncResult> {
   });
 
   // ── Run the four phases in the background; do NOT await. ──
-  void runSyncPhases({ supabase, workspaceId: workspace.id, store: ctx.store, github: ctx.github, config: ctx.config }).catch(
+  // "Sync now" is a metadata refresh: digests follow the workspace's digest
+  // policy (auto cadence / manual / off), not forced. The dedicated
+  // `generateDigestsNow` action is the explicit "spend now" path.
+  void runSyncPhases({ supabase, workspaceId: workspace.id, store: ctx.store, github: ctx.github, config: ctx.config, digestPolicy: ctx.digestPolicy }).catch(
     async (err) => {
       console.error('[syncAndDigest] background sync crashed:', err);
       await writeSyncStatus(supabase, workspace.id, {
@@ -105,6 +108,95 @@ export async function syncAndDigest(): Promise<SyncResult> {
       });
     },
   );
+
+  return { ok: true };
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Generate digests now — the on-demand "spend now" action (spec §5).
+//
+// For `manual`/`off` digest workspaces, this is how an admin produces AI
+// summaries on demand. It runs the SAME background sync pipeline as
+// `syncAndDigest` but with `forceDigests: true`, so phase 2 runs regardless of
+// the workspace's digest mode/cadence. Metadata phases run too (cheap), keeping
+// everything fresh. Admin-only; writes `sync_status` exactly like the normal
+// path, so the existing indicator reflects progress.
+// ─────────────────────────────────────────────────────────────────────
+export async function generateDigestsNow(): Promise<SyncResult> {
+  const user = await getSessionUser();
+  if (!user) return { ok: false, error: 'Not authenticated' };
+  const workspace = await getActiveWorkspace();
+  if (!workspace) return { ok: false, error: 'No workspace selected' };
+  if (workspace.role !== 'admin') return { ok: false, error: 'Only admins can generate digests' };
+
+  const supabase = createSupabaseAdminClient();
+
+  // Same concurrency guard as syncAndDigest — refuse to start while a sync is
+  // live (a fresh `syncing` row), since both write the same `sync_status`.
+  const { data: existing } = await supabase
+    .from('sync_status')
+    .select('status, updated_at')
+    .eq('workspace_id', workspace.id)
+    .maybeSingle<Pick<SyncStatusRow, 'status' | 'updated_at'>>();
+  if (existing?.status === 'syncing') {
+    const age = Date.now() - new Date(existing.updated_at).getTime();
+    if (age < STALE_SYNC_MS) {
+      return { ok: false, error: 'Sync already in progress' };
+    }
+  }
+
+  const core = await import('@cezar/core');
+  let token = user.githubToken || process.env.GITHUB_TOKEN || '';
+  if (core.GitHubAppService.isConfigured()) {
+    try {
+      token = await new core.GitHubAppService().getInstallationToken(workspace.repoOwner);
+    } catch (err) {
+      console.warn('[generateDigestsNow] GitHub App token failed, falling back to OAuth:', err);
+    }
+  }
+  if (!token) return { ok: false, error: 'No GitHub token — sign out and back in to sync' };
+
+  let ctx: Awaited<ReturnType<typeof buildSyncContext>>;
+  try {
+    ctx = await buildSyncContext({
+      supabase,
+      workspaceId: workspace.id,
+      repoOwner: workspace.repoOwner,
+      repoName: workspace.repoName,
+      token,
+    });
+  } catch (err) {
+    return { ok: false, error: `Config load failed: ${err instanceof Error ? err.message : String(err)}` };
+  }
+
+  await writeSyncStatus(supabase, workspace.id, {
+    status: 'syncing',
+    phase: 'issues',
+    message: 'Fetching issues…',
+    counts: {},
+    error: null,
+    started_at: new Date().toISOString(),
+    finished_at: null,
+  });
+
+  // forceDigests: true ⇒ phase 2 runs whatever the workspace's digest mode is.
+  void runSyncPhases({
+    supabase,
+    workspaceId: workspace.id,
+    store: ctx.store,
+    github: ctx.github,
+    config: ctx.config,
+    digestPolicy: ctx.digestPolicy,
+    forceDigests: true,
+  }).catch(async (err) => {
+    console.error('[generateDigestsNow] background sync crashed:', err);
+    await writeSyncStatus(supabase, workspace.id, {
+      status: 'error',
+      phase: null,
+      error: err instanceof Error ? err.message : String(err),
+      finished_at: new Date().toISOString(),
+    });
+  });
 
   return { ok: true };
 }

@@ -7,6 +7,7 @@ import { AutomationSection } from './automation-section';
 import { LabelsSection, type AcceptedLabelRow } from './labels-section';
 import { SettingsTabs, SettingsCard } from './settings-tabs';
 import type {
+  DigestMode,
   LabelAnalysisInputsSummary,
   LabelAnalysisResult,
   LabelAnalysisStatus,
@@ -21,11 +22,13 @@ async function loadWorkspaceConfig(workspaceId: string): Promise<{
   actionAutoComment: boolean;
   syncMode: 'auto' | 'manual';
   syncIntervalMinutes: number;
+  digestMode: DigestMode;
+  digestIntervalMinutes: number;
 }> {
   const supabase = createSupabaseAdminClient();
   const { data } = await supabase
     .from('workspaces')
-    .select('config, auto_triage_enabled, autofix_enabled, separate_comment_per_step, action_auto_comment, sync_mode, sync_interval_minutes')
+    .select('config, auto_triage_enabled, autofix_enabled, separate_comment_per_step, action_auto_comment, sync_mode, sync_interval_minutes, digest_mode, digest_interval_minutes')
     .eq('id', workspaceId)
     .single();
   return {
@@ -36,6 +39,8 @@ async function loadWorkspaceConfig(workspaceId: string): Promise<{
     actionAutoComment: data?.action_auto_comment ?? true,
     syncMode: data?.sync_mode ?? 'auto',
     syncIntervalMinutes: data?.sync_interval_minutes ?? 15,
+    digestMode: data?.digest_mode ?? 'auto',
+    digestIntervalMinutes: data?.digest_interval_minutes ?? 60,
   };
 }
 
@@ -92,7 +97,7 @@ export default async function SettingsPage() {
     );
   }
 
-  const [{ config, autoTriageEnabled, autofixEnabled, separateCommentPerStep, actionAutoComment, syncMode, syncIntervalMinutes }, members, labelsInitial, acceptedLabels] = await Promise.all([
+  const [{ config, autoTriageEnabled, autofixEnabled, separateCommentPerStep, actionAutoComment, syncMode, syncIntervalMinutes, digestMode, digestIntervalMinutes }, members, labelsInitial, acceptedLabels] = await Promise.all([
     loadWorkspaceConfig(workspace.id),
     loadMembers(workspace.id),
     loadLabelsInitial(workspace.id),
@@ -120,6 +125,8 @@ export default async function SettingsPage() {
             actionAutoComment={actionAutoComment}
             syncMode={syncMode}
             syncIntervalMinutes={syncIntervalMinutes}
+            digestMode={digestMode}
+            digestIntervalMinutes={digestIntervalMinutes}
             readOnly={!isAdmin}
           />
         </SettingsCard>
