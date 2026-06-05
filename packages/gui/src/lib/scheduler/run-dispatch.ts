@@ -7,6 +7,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { CiFollowupInput } from '@cezar/core';
 import { executeWorkflowJob } from '@/lib/execute-workflow-job';
 import { executeLabelAnalysisJob } from '@/lib/execute-label-analysis-job';
+import { executeSyncJob } from '@/lib/execute-sync-job';
 import type { Database } from '@/lib/supabase/types';
 
 type WorkflowJobKind = 'triage' | 'autofix' | 'ci-followup' | 'flow';
@@ -117,6 +118,20 @@ export async function runDispatch(supabase: SupabaseClient<Database>): Promise<D
         workspaceId: job.workspace_id,
         jobId: job.id,
         analysisId,
+      }).catch((err) => failStuckJob(supabase, job.id, err));
+      dispatched += 1;
+      continue;
+    }
+
+    if (job.kind === 'sync') {
+      // Reconcile sync (issues + PRs + digests + comments) — not a workflow_run;
+      // routes to its own executor which runs the shared sync engine.
+      const [repoOwner, repoName] = (job.repo ?? '/').split('/');
+      void executeSyncJob(supabase, {
+        workspaceId: job.workspace_id,
+        jobId: job.id,
+        repoOwner,
+        repoName,
       }).catch((err) => failStuckJob(supabase, job.id, err));
       dispatched += 1;
       continue;

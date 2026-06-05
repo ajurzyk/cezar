@@ -4,11 +4,21 @@ import { useActionState, useState } from 'react';
 import { cn } from '@/components/ui/cn';
 import { saveAutomationToggles, type SaveAutomationState } from './automation-actions';
 
+const SYNC_INTERVAL_OPTIONS = [5, 15, 30, 60, 120, 360] as const;
+
+function formatInterval(min: number): string {
+  if (min < 60) return `Every ${min} minutes`;
+  const hours = min / 60;
+  return `Every ${hours} hour${hours === 1 ? '' : 's'}`;
+}
+
 interface AutomationSectionProps {
   autoTriageEnabled: boolean;
   autofixEnabled: boolean;
   separateCommentPerStep: boolean;
   actionAutoComment: boolean;
+  syncMode: 'auto' | 'manual';
+  syncIntervalMinutes: number;
   readOnly: boolean;
 }
 
@@ -17,10 +27,13 @@ export function AutomationSection({
   autofixEnabled,
   separateCommentPerStep,
   actionAutoComment,
+  syncMode,
+  syncIntervalMinutes,
   readOnly,
 }: AutomationSectionProps) {
   const [state, formAction, pending] = useActionState<SaveAutomationState, FormData>(saveAutomationToggles, {});
   const [autofix, setAutofix] = useState(autofixEnabled);
+  const [syncAuto, setSyncAuto] = useState(syncMode === 'auto');
 
   return (
     <form action={formAction} className="space-y-4">
@@ -66,6 +79,47 @@ export function AutomationSection({
         defaultChecked={actionAutoComment}
         readOnly={readOnly}
       />
+
+      <Toggle
+        name="syncAuto"
+        label="Automatic sync"
+        hint="On (default): Cezar pulls issues and pull requests from GitHub on a schedule. Off (manual): the workspace syncs only when an admin clicks the sync indicator in the header."
+        defaultChecked={syncAuto}
+        readOnly={readOnly}
+        onChange={setSyncAuto}
+      />
+
+      {syncAuto && (
+        <label
+          className={cn(
+            'flex items-start gap-3 rounded-md border border-outline-variant bg-surface-container/40 p-4 transition-colors',
+            readOnly ? 'opacity-70' : 'hover:border-outline',
+          )}
+        >
+          <span className="min-w-0 flex-1 space-y-1">
+            <span className="block text-sm font-medium text-on-surface">Sync frequency</span>
+            <span className="block text-xs leading-relaxed text-on-surface-variant">
+              How often Cezar auto-syncs from GitHub. The minimum gap between automatic syncs — the cron
+              checks every 5 minutes, so faster than that has no effect.
+            </span>
+          </span>
+          <select
+            name="syncIntervalMinutes"
+            defaultValue={String(syncIntervalMinutes)}
+            disabled={readOnly}
+            className="mt-1 h-9 shrink-0 rounded-md border border-outline-variant bg-surface px-2 text-sm text-on-surface focus:border-primary focus:outline-none disabled:opacity-70"
+          >
+            {(SYNC_INTERVAL_OPTIONS.includes(syncIntervalMinutes as (typeof SYNC_INTERVAL_OPTIONS)[number])
+              ? SYNC_INTERVAL_OPTIONS
+              : [syncIntervalMinutes, ...SYNC_INTERVAL_OPTIONS]
+            ).map((min) => (
+              <option key={min} value={min}>
+                {formatInterval(min)}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
 
       {!readOnly && (
         <div className="flex justify-end pt-2">

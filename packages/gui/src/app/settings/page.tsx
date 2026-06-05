@@ -19,11 +19,13 @@ async function loadWorkspaceConfig(workspaceId: string): Promise<{
   autofixEnabled: boolean;
   separateCommentPerStep: boolean;
   actionAutoComment: boolean;
+  syncMode: 'auto' | 'manual';
+  syncIntervalMinutes: number;
 }> {
   const supabase = createSupabaseAdminClient();
   const { data } = await supabase
     .from('workspaces')
-    .select('config, auto_triage_enabled, autofix_enabled, separate_comment_per_step, action_auto_comment')
+    .select('config, auto_triage_enabled, autofix_enabled, separate_comment_per_step, action_auto_comment, sync_mode, sync_interval_minutes')
     .eq('id', workspaceId)
     .single();
   return {
@@ -32,6 +34,8 @@ async function loadWorkspaceConfig(workspaceId: string): Promise<{
     autofixEnabled: data?.autofix_enabled ?? false,
     separateCommentPerStep: data?.separate_comment_per_step ?? false,
     actionAutoComment: data?.action_auto_comment ?? true,
+    syncMode: data?.sync_mode ?? 'auto',
+    syncIntervalMinutes: data?.sync_interval_minutes ?? 15,
   };
 }
 
@@ -88,7 +92,7 @@ export default async function SettingsPage() {
     );
   }
 
-  const [{ config, autoTriageEnabled, autofixEnabled, separateCommentPerStep, actionAutoComment }, members, labelsInitial, acceptedLabels] = await Promise.all([
+  const [{ config, autoTriageEnabled, autofixEnabled, separateCommentPerStep, actionAutoComment, syncMode, syncIntervalMinutes }, members, labelsInitial, acceptedLabels] = await Promise.all([
     loadWorkspaceConfig(workspace.id),
     loadMembers(workspace.id),
     loadLabelsInitial(workspace.id),
@@ -114,6 +118,8 @@ export default async function SettingsPage() {
             autofixEnabled={autofixEnabled}
             separateCommentPerStep={separateCommentPerStep}
             actionAutoComment={actionAutoComment}
+            syncMode={syncMode}
+            syncIntervalMinutes={syncIntervalMinutes}
             readOnly={!isAdmin}
           />
         </SettingsCard>

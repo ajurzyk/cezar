@@ -2,12 +2,20 @@
 
 import { useMemo } from 'react';
 import { BellIcon } from './icons';
+import { SyncIndicator } from './sync-indicator';
+import type { Database } from '@/lib/supabase/types';
+
+type SyncStatusRow = Database['public']['Tables']['sync_status']['Row'];
 
 interface TopBarProps {
   user: { id: string; email: string; name: string; avatarUrl: string };
+  workspaceId: string | null;
+  readOnly: boolean;
+  initialSyncStatus: SyncStatusRow | null;
+  syncMode: 'auto' | 'manual';
 }
 
-export function TopBar({ user }: TopBarProps) {
+export function TopBar({ user, workspaceId, readOnly, initialSyncStatus, syncMode }: TopBarProps) {
   const initials = useMemo(
     () =>
       (user.name || user.email || '?')
@@ -23,6 +31,15 @@ export function TopBar({ user }: TopBarProps) {
   return (
     <header className="sticky top-0 z-10 flex h-topbar items-center justify-end gap-4 border-b border-outline-variant bg-surface px-6 backdrop-blur">
       <div className="flex items-center gap-2">
+        {workspaceId && (
+          <SyncIndicator
+            workspaceId={workspaceId}
+            readOnly={readOnly}
+            initialStatus={initialSyncStatus}
+            syncMode={syncMode}
+          />
+        )}
+
         <button
           type="button"
           className="flex h-9 w-9 items-center justify-center rounded-md text-on-surface-variant hover:bg-surface-container hover:text-on-surface"

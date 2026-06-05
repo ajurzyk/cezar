@@ -1,13 +1,11 @@
 'use client';
 
-import { useEffect, useMemo, useState, useTransition } from 'react';
-import { useRouter } from 'next/navigation';
+import { useEffect, useMemo, useState } from 'react';
 import { cn } from '@/components/ui/cn';
-import { SearchIcon, ChevronLeftIcon, ChevronRightIcon, RefreshIcon } from '@/components/icons';
+import { SearchIcon, ChevronLeftIcon, ChevronRightIcon } from '@/components/icons';
 import { RunStatusDots } from '@/components/run-status-dots';
 import type { ActionRunSummary, RunStatus } from '@/lib/action-runs-loader';
 import { PrRowMenu } from './pr-row-menu';
-import { syncPullRequests } from './prs-action';
 
 export interface PrRow {
   number: number;
@@ -66,7 +64,6 @@ function topStatus(runs: ActionRunSummary[]): RunStatus | 'none' {
 }
 
 export function PrsView({ rows, repoLabel, fetchedAt, readOnly }: PrsViewProps) {
-  const router = useRouter();
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<PageSize>(10);
   const [search, setSearch] = useState('');
@@ -75,8 +72,6 @@ export function PrsView({ rows, repoLabel, fetchedAt, readOnly }: PrsViewProps) 
   const [runStatusFilter, setRunStatusFilter] = useState<RunStatusFilter>('all');
   const [sortKey, setSortKey] = useState<SortKey>('number');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
-  const [syncState, setSyncState] = useState<{ ok?: boolean; error?: string; count?: number; capped?: boolean } | null>(null);
-  const [syncing, startSync] = useTransition();
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -154,15 +149,6 @@ export function PrsView({ rows, repoLabel, fetchedAt, readOnly }: PrsViewProps) 
     setPage(1);
   }
 
-  function handleSync() {
-    setSyncState(null);
-    startSync(async () => {
-      const result = await syncPullRequests();
-      setSyncState(result);
-      if (result.ok) router.refresh();
-    });
-  }
-
   return (
     <div className="px-6 py-6">
       <header className="mb-6 flex flex-wrap items-start justify-between gap-4">
@@ -172,32 +158,7 @@ export function PrsView({ rows, repoLabel, fetchedAt, readOnly }: PrsViewProps) 
             <span className="font-mono">{repoLabel}</span> — {totalPrs} PR{totalPrs === 1 ? '' : 's'} synced
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={handleSync}
-            disabled={syncing || readOnly}
-            className="inline-flex h-9 items-center gap-2 rounded-md border border-outline-variant bg-surface-container-low px-3 text-sm font-medium text-on-surface transition-colors hover:border-primary hover:bg-surface-container disabled:opacity-50"
-          >
-            <RefreshIcon className={cn('h-4 w-4', syncing && 'animate-spin')} />
-            {syncing ? 'Syncing…' : 'Sync from GitHub'}
-          </button>
-        </div>
       </header>
-
-      {syncState?.ok && (
-        <div className="mb-4 rounded-md border border-primary/30 bg-primary-container/20 px-4 py-2 text-sm text-primary">
-          Synced {syncState.count ?? 0} open PR{(syncState.count ?? 0) === 1 ? '' : 's'} from GitHub.
-          {syncState.capped && (
-            <> Page cap reached — the background sync will backfill the rest.</>
-          )}
-        </div>
-      )}
-      {syncState?.error && (
-        <div className="mb-4 rounded-md border border-error/30 bg-error-container/30 px-4 py-2 text-sm text-error">
-          {syncState.error}
-        </div>
-      )}
 
       <div className="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard label="TOTAL PRS" value={String(totalPrs)} tone="default" />
@@ -550,11 +511,14 @@ function BranchCell({ head, base }: { head: string | null; base: string | null }
   if (!head && !base) {
     return <span className="font-mono text-[13px] text-on-surface-variant">—</span>;
   }
+  // Each side caps its own width and truncates with an ellipsis — the table is
+  // auto-layout, so a `max-width` on the <td> alone is ignored and a long head
+  // ref would otherwise push into the labels column.
   return (
-    <span className="inline-flex items-center gap-1 truncate font-mono text-[12px] text-on-surface-variant" title={`${head ?? '?'} → ${base ?? '?'}`}>
-      <span className="truncate">{head ?? '?'}</span>
-      <span className="text-outline-variant">→</span>
-      <span className="truncate">{base ?? '?'}</span>
+    <span className="flex items-center gap-1 font-mono text-[12px] text-on-surface-variant" title={`${head ?? '?'} → ${base ?? '?'}`}>
+      <span className="max-w-[150px] truncate">{head ?? '?'}</span>
+      <span className="shrink-0 text-outline-variant">→</span>
+      <span className="max-w-[90px] truncate">{base ?? '?'}</span>
     </span>
   );
 }

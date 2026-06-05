@@ -55,9 +55,15 @@ const JOBS: CronJob[] = [
     },
   },
   {
-    path: '/api/cron/issue-sync',
+    path: '/api/cron/sync',
     defaultIntervalMs: 300_000,
-    envOverride: 'CEZAR_CRON_ISSUE_SYNC_INTERVAL_MS',
+    envOverride: 'CEZAR_CRON_SYNC_INTERVAL_MS',
+    formatLog: (b) => {
+      const r = b as { enqueued?: number; workspaces?: number; error?: string };
+      if (r.error) return `error: ${r.error}`;
+      if ((r.enqueued ?? 0) > 0) return `enqueued ${r.enqueued} across ${r.workspaces} workspace(s)`;
+      return null;
+    },
   },
 ];
 

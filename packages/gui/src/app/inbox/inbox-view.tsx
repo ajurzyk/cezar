@@ -31,7 +31,6 @@ import {
   dismissDecisions,
   snoozeDecision,
 } from './decision-actions';
-import { SyncButton, type SyncStatusRow } from '@/app/issues/sync-button';
 
 // ─────────────────────────────────────────────────────────────────────
 // Skill palette — each skill gets its own accent so confidence pills
@@ -114,7 +113,6 @@ interface InboxViewProps {
   syncedAt: number;
   healthAlerts: { id: string; text: string; severity: 'warn' | 'error' }[];
   actionNames: ActionFilterOption[];
-  initialSyncStatus: SyncStatusRow | null;
 }
 
 export function InboxView({
@@ -123,7 +121,6 @@ export function InboxView({
   syncedAt: initialSyncedAt,
   healthAlerts,
   actionNames,
-  initialSyncStatus,
 }: InboxViewProps) {
   const router = useRouter();
   const [, startTransition] = useTransition();
@@ -192,8 +189,9 @@ export function InboxView({
   const [syncedAt, setSyncedAt] = useState<number>(initialSyncedAt);
   const [toast, setToast] = useState<string | null>(null);
 
-  // The sync now runs in the background (see SyncButton); when it finishes it
-  // triggers a server refresh, which re-supplies a fresh `syncedAt` prop.
+  // The sync now runs in the background (see the global sync indicator); when
+  // it finishes it triggers a server refresh, which re-supplies a fresh
+  // `syncedAt` prop.
   useEffect(() => {
     setSyncedAt(initialSyncedAt);
   }, [initialSyncedAt]);
@@ -424,7 +422,6 @@ export function InboxView({
               </span>
             </div>
           </div>
-          <SyncButton workspaceId={workspaceId} readOnly={false} initialStatus={initialSyncStatus} />
         </div>
       </header>
 

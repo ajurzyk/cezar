@@ -1,6 +1,5 @@
 import Link from 'next/link';
 import { getActiveWorkspace } from '@/lib/workspace';
-import { createSupabaseServerClient } from '@/lib/supabase/server';
 import { loadInbox } from './load-inbox';
 import { InboxView } from './inbox-view';
 
@@ -22,11 +21,7 @@ export default async function InboxV2Page() {
     );
   }
 
-  const supabase = await createSupabaseServerClient();
-  const [loaded, sync] = await Promise.all([
-    loadInbox(workspace.id),
-    supabase.from('sync_status').select('*').eq('workspace_id', workspace.id).maybeSingle(),
-  ]);
+  const loaded = await loadInbox(workspace.id);
   return (
     <InboxView
       workspaceId={workspace.id}
@@ -34,7 +29,6 @@ export default async function InboxV2Page() {
       syncedAt={loaded.syncedAt}
       healthAlerts={loaded.healthAlerts}
       actionNames={loaded.actionNames}
-      initialSyncStatus={sync.data}
     />
   );
 }

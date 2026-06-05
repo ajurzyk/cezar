@@ -17,7 +17,7 @@ cloud — Cezar just needs the project URL and keys.
 
 - A Hetzner VPS running Dokploy with two containers:
   - `gui` — the Next.js cockpit on `https://<your-domain>`. The in-process
-    scheduler fires `/api/cron/{dispatch,triage-sweep,issue-sync}` at the
+    scheduler fires `/api/cron/{dispatch,triage-sweep,sync}` at the
     same cadences `vercel.json` uses.
   - `runner` — `@cezar/runner` daemon long-polling the GUI, ready to run
     jobs whose backend is `claude-cli` or `codex-cli`.
@@ -297,8 +297,8 @@ claims jobs independently.
 
 ### Disabling cron routes per-replica
 
-If you scale and want only one replica to drive `issue-sync`, set
-`CEZAR_INPROCESS_CRON_DISABLED=/api/cron/issue-sync` on the others.
+If you scale and want only one replica to drive `sync`, set
+`CEZAR_INPROCESS_CRON_DISABLED=/api/cron/sync` on the others.
 
 ---
 

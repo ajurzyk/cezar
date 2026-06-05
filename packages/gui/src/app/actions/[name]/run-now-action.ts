@@ -23,7 +23,7 @@ export interface RunNowResult {
  *
  * The `number` arg is the issue/PR number — which table it resolves against
  * is determined by `actionRow.target`. PRs live in `pull_requests` (synced by
- * /api/cron/prs-sync), not `issues`.
+ * /api/cron/sync), not `issues`.
  */
 export async function runActionNow(actionId: string, number: number): Promise<RunNowResult> {
   const user = await getSessionUser();
@@ -72,7 +72,7 @@ export async function runActionNow(actionId: string, number: number): Promise<Ru
       .eq('number', number)
       .maybeSingle();
     targetRow = data;
-    if (!targetRow) return { ok: false, error: `PR #${number} not in the workspace's PR store — run /api/cron/prs-sync to refresh` };
+    if (!targetRow) return { ok: false, error: `PR #${number} not in the workspace's PR store — run /api/cron/sync to refresh` };
   } else {
     const { data } = await supabase
       .from('issues')

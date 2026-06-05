@@ -18,7 +18,7 @@ export type WorkflowBackend = 'anthropic-api' | 'claude-cli' | 'codex-cli';
 // Note: `@cezar/core` also exports a `WorkflowRunStatus` (the in-process engine
 // state). These are the *DB* string sets — kept local + named distinctly to
 // avoid confusing the two.
-export type JobKind = 'triage' | 'autofix' | 'ci-followup' | 'flow' | 'label-analysis';
+export type JobKind = 'triage' | 'autofix' | 'ci-followup' | 'flow' | 'label-analysis' | 'sync';
 
 export type LabelAnalysisStatus =
   | 'queued'
@@ -130,14 +130,18 @@ export interface Database {
           autofix_enabled: boolean;
           separate_comment_per_step: boolean;
           action_auto_comment: boolean;
+          sync_mode: 'auto' | 'manual';
+          sync_interval_minutes: number;
           auto_triage_action_id: string | null;
           created_at: string;
           updated_at: string;
         };
-        Insert: Omit<Database['public']['Tables']['workspaces']['Row'], 'id' | 'created_at' | 'updated_at' | 'auto_triage_action_id' | 'action_auto_comment'> & {
+        Insert: Omit<Database['public']['Tables']['workspaces']['Row'], 'id' | 'created_at' | 'updated_at' | 'auto_triage_action_id' | 'action_auto_comment' | 'sync_mode' | 'sync_interval_minutes'> & {
           id?: string;
           auto_triage_action_id?: string | null;
           action_auto_comment?: boolean;
+          sync_mode?: 'auto' | 'manual';
+          sync_interval_minutes?: number;
           created_at?: string;
           updated_at?: string;
         };

@@ -10,7 +10,6 @@ import {
 import { RunStatusDots } from '@/components/run-status-dots';
 import type { ActionRunSummary, RunStatus } from '@/lib/action-runs-loader';
 import { IssueRowMenu } from './issue-row-menu';
-import { SyncButton, type SyncStatusRow } from './sync-button';
 
 export interface IssueRow {
   number: number;
@@ -33,8 +32,6 @@ interface IssuesViewProps {
   repoLabel: string;
   fetchedAt: string | null;
   readOnly: boolean;
-  workspaceId: string;
-  initialSyncStatus: SyncStatusRow | null;
 }
 
 type StateFilter = 'all' | 'open' | 'closed';
@@ -88,8 +85,6 @@ export function IssuesView({
   repoLabel,
   fetchedAt,
   readOnly,
-  workspaceId,
-  initialSyncStatus,
 }: IssuesViewProps) {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<PageSize>(10);
@@ -191,7 +186,6 @@ export function IssuesView({
             <span className="font-mono">{repoLabel}</span> — {totalIssues} issue{totalIssues === 1 ? '' : 's'} synced
           </p>
         </div>
-        <SyncButton workspaceId={workspaceId} readOnly={readOnly} initialStatus={initialSyncStatus} />
       </header>
 
       <div className="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">

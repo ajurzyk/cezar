@@ -24,7 +24,7 @@ function labelNames(labels: WebhookIssue['labels']): string[] {
 /**
  * Phase 5 — upsert a single issue from a GitHub App `issues` webhook into the
  * workspace's issue store, so the `triage` job that follows has data to work
- * with. Mirrors the row shape `SupabaseStoreAdapter` / `api/cron/issue-sync`
+ * with. Mirrors the row shape `SupabaseStoreAdapter` / `api/cron/sync`
  * write; on conflict it merges title/body/labels/state/etc. but does NOT touch
  * `digest`/`analysis` (those are owned by the pipeline). `content_hash` is
  * computed the same way `GitHubService` does so the store's change-detection
@@ -33,14 +33,14 @@ function labelNames(labels: WebhookIssue['labels']): string[] {
  * We deliberately write only the columns the webhook payload authoritatively
  * carries. In particular:
  *  - `reactions` is never written here — the webhook `issue` object has no
- *    reaction count, so the periodic `api/cron/issue-sync` reconcile owns it.
+ *    reaction count, so the periodic `api/cron/sync` reconcile owns it.
  *    (Previously this was hardcoded to `0`, zeroing the synced value on every
  *    `edited` delivery.)
  *  - `comment_count` is only written when the payload actually includes the
  *    `comments` field. On events like `issues.assigned` it can be absent, and
  *    `?? 0` would otherwise regress the synced count back to `0`.
  * On the initial INSERT of a brand-new issue these columns fall back to their
- * schema defaults (`0`), which `issue-sync` then reconciles to real values.
+ * schema defaults (`0`), which `sync` then reconciles to real values.
  */
 export async function upsertIssueFromWebhook(
   adminSupabase: SupabaseClient<Database>,
@@ -50,7 +50,7 @@ export async function upsertIssueFromWebhook(
   const core = await import('@cezar/core');
   const title = issue.title ?? '';
   const body = issue.body ?? '';
-  // Mirrors api/cron/issue-sync's row shape — we intentionally omit `digest` /
+  // Mirrors api/cron/sync's row shape — we intentionally omit `digest` /
   // `analysis` so an `edited` upsert doesn't clobber pipeline-owned data
   // (PostgREST `ON CONFLICT DO UPDATE` only sets the columns present here).
   const row: Record<string, unknown> = {

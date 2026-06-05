@@ -1,7 +1,7 @@
 {
   "crons": [
     {
-      "path": "/api/cron/issue-sync",
+      "path": "/api/cron/sync",
       "schedule": "*/5 * * * *"
     },
     {

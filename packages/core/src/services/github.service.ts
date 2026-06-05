@@ -188,7 +188,18 @@ export class GitHubService {
     }
   }
 
-  async listOpenPullRequests(maxItems?: number): Promise<RawPullRequest[]> {
+  /**
+   * Lists pull requests for the repo, newest-activity first, across *all*
+   * states (open + closed/merged). Fetching `state: 'all'` sorted by `updated`
+   * descending is what lets the periodic sync self-heal: closing or merging a
+   * PR bumps its `updated_at`, so every PR that recently changed state surfaces
+   * near the top and gets re-upserted with its current state — without it,
+   * a PR synced while open and later closed upstream stays `open` in the store
+   * forever (the webhook covers live transitions; this is the backfill +
+   * missed-delivery safety net). `maxItems` caps the walk so a repo with
+   * thousands of historical PRs can't blow the request budget.
+   */
+  async listPullRequests(maxItems?: number): Promise<RawPullRequest[]> {
     const mapPr = (
       p: Awaited<ReturnType<Octokit['rest']['pulls']['list']>>['data'][number],
     ): RawPullRequest => ({
@@ -218,7 +229,9 @@ export class GitHubService {
         const iterator = this.octokit.paginate.iterator(this.octokit.rest.pulls.list, {
           owner: this.owner,
           repo: this.repo,
-          state: 'open',
+          state: 'all',
+          sort: 'updated',
+          direction: 'desc',
           per_page: 100,
         });
         for await (const { data } of iterator) {
@@ -233,7 +246,9 @@ export class GitHubService {
       const prs = await this.octokit.paginate(this.octokit.rest.pulls.list, {
         owner: this.owner,
         repo: this.repo,
-        state: 'open',
+        state: 'all',
+        sort: 'updated',
+        direction: 'desc',
         per_page: 100,
       });
       return prs.map(mapPr);

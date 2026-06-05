@@ -4,7 +4,6 @@ import { getActiveWorkspace } from '@/lib/workspace';
 import type { StoredIssue } from '@cezar/core';
 import { fetchRecentActionRuns, type ActionRunSummary } from '@/lib/action-runs-loader';
 import { IssuesView, type IssueRow } from './issues-view';
-import type { SyncStatusRow } from './sync-button';
 
 export default async function IssuesPage() {
   const workspace = await getActiveWorkspace();
@@ -24,20 +23,17 @@ export default async function IssuesPage() {
   let actionRunsByIssue = new Map<number, ActionRunSummary[]>();
   let loadError: string | null = null;
   let fetchedAt: string | null = null;
-  let syncStatus: SyncStatusRow | null = null;
 
   try {
     const supabase = await createSupabaseServerClient();
     const adapter = new SupabaseStoreAdapter(supabase, workspace.id);
-    const [store, runs, sync] = await Promise.all([
+    const [store, runs] = await Promise.all([
       adapter.load(),
       fetchRecentActionRuns(workspace.id, 'issue'),
-      supabase.from('sync_status').select('*').eq('workspace_id', workspace.id).maybeSingle(),
     ]);
     issues = store.issues;
     actionRunsByIssue = runs;
     fetchedAt = store.meta.lastSyncedAt ?? null;
-    syncStatus = sync.data;
   } catch (err) {
     loadError = (err as Error).message;
   }
@@ -72,8 +68,6 @@ export default async function IssuesPage() {
       repoLabel={`${workspace.repoOwner}/${workspace.repoName}`}
       fetchedAt={fetchedAt}
       readOnly={workspace.role !== 'admin'}
-      workspaceId={workspace.id}
-      initialSyncStatus={syncStatus}
     />
   );
 }
