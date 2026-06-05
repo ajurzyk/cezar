@@ -82,6 +82,7 @@ const ALL_EFFECTS = [
 ] as const;
 
 const AUTOSAVE_DEBOUNCE_MS = 800;
+const SKILL_SEARCH_DEBOUNCE_MS = 200;
 
 type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 
@@ -154,14 +155,16 @@ export function ActionDetailView({ action, readOnly }: Props) {
   ]);
 
   // Lazy skill suggestion fetch — only when the user opens the autocomplete.
+  // Debounced so a fast typist doesn't fire one server round-trip per keystroke.
   useEffect(() => {
     let cancelled = false;
-    (async () => {
+    const id = setTimeout(async () => {
       const items = await searchSkills(skillQuery);
       if (!cancelled) setSkillSuggestions(items);
-    })();
+    }, SKILL_SEARCH_DEBOUNCE_MS);
     return () => {
       cancelled = true;
+      clearTimeout(id);
     };
   }, [skillQuery]);
 
