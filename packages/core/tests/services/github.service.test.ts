@@ -163,21 +163,93 @@ describe('GitHubService', () => {
       mockPaginate.mockRejectedValue({ status: 401 });
 
       const service = new GitHubService(makeConfig());
-      await expect(service.fetchAllIssues()).rejects.toThrow('Invalid GitHub token');
+      await expect(service.fetchAllIssues()).rejects.toThrow(/Invalid or expired GitHub token/);
     });
 
     it('throws descriptive error on 404', async () => {
       mockPaginate.mockRejectedValue({ status: 404 });
 
       const service = new GitHubService(makeConfig());
-      await expect(service.fetchAllIssues()).rejects.toThrow('not found or inaccessible');
+      await expect(service.fetchAllIssues()).rejects.toThrow(/not found or is inaccessible/);
     });
 
-    it('throws descriptive error on 403', async () => {
+    it('treats a bare 403 (no rate-limit signal) as a permission denial', async () => {
       mockPaginate.mockRejectedValue({ status: 403 });
 
       const service = new GitHubService(makeConfig());
-      await expect(service.fetchAllIssues()).rejects.toThrow('rate limit exceeded');
+      // No longer the misleading "rate limit exceeded" — a 403 without any
+      // rate-limit headers/message is a real permission problem.
+      await expect(service.fetchAllIssues()).rejects.toThrow(/denied this action/);
+    });
+
+    it('reports a primary rate limit (x-ratelimit-remaining: 0) distinctly', async () => {
+      mockPaginate.mockRejectedValue({
+        status: 403,
+        response: { headers: { 'x-ratelimit-remaining': '0' }, data: { message: 'API rate limit exceeded' } },
+      });
+
+      const service = new GitHubService(makeConfig());
+      await expect(service.fetchAllIssues()).rejects.toThrow(/API rate limit exhausted/);
+    });
+  });
+
+  describe('label writes', () => {
+    async function labelMocks() {
+      const mod = (await import('@octokit/rest')) as unknown as {
+        __mockGetLabel: ReturnType<typeof vi.fn>;
+        __mockCreateLabel: ReturnType<typeof vi.fn>;
+        __mockAddLabels: ReturnType<typeof vi.fn>;
+      };
+      return { getLabel: mod.__mockGetLabel, createLabel: mod.__mockCreateLabel, addLabels: mod.__mockAddLabels };
+    }
+
+    it('adds a label in a single request when it already exists (no getLabel probe)', async () => {
+      const { getLabel, createLabel, addLabels } = await labelMocks();
+      addLabels.mockResolvedValue({});
+
+      await new GitHubService(makeConfig()).addLabel(42, 'priority-high');
+
+      expect(addLabels).toHaveBeenCalledTimes(1);
+      expect(getLabel).not.toHaveBeenCalled();
+      expect(createLabel).not.toHaveBeenCalled();
+    });
+
+    it('creates the repo label then retries when addLabels 404s', async () => {
+      const { createLabel, addLabels } = await labelMocks();
+      addLabels.mockRejectedValueOnce({ status: 404 }).mockResolvedValueOnce({});
+      createLabel.mockResolvedValue({});
+
+      await new GitHubService(makeConfig()).addLabel(42, 'brand-new');
+
+      expect(createLabel).toHaveBeenCalledTimes(1);
+      expect(addLabels).toHaveBeenCalledTimes(2);
+    });
+
+    it('retries a secondary rate limit and succeeds (self-heals)', async () => {
+      const { addLabels } = await labelMocks();
+      // retry-after: 0 → instant retry, keeps the test fast.
+      addLabels
+        .mockRejectedValueOnce({
+          status: 403,
+          response: {
+            headers: { 'retry-after': '0', 'x-ratelimit-remaining': '4999' },
+            data: { message: 'You have exceeded a secondary rate limit' },
+          },
+        })
+        .mockResolvedValueOnce({});
+
+      await new GitHubService(makeConfig()).addLabel(7, 'priority-high');
+
+      expect(addLabels).toHaveBeenCalledTimes(2);
+    });
+
+    it('does NOT retry a permission 403 and surfaces a permission error', async () => {
+      const { addLabels } = await labelMocks();
+      addLabels.mockRejectedValue({ status: 403, response: { headers: {}, data: { message: 'Resource not accessible by integration' } } });
+
+      await expect(new GitHubService(makeConfig()).addLabel(7, 'priority-high')).rejects.toThrow(/GitHub App installation lacks permission/);
+      // One real attempt — permission denials are fatal, not retried.
+      expect(addLabels).toHaveBeenCalledTimes(1);
     });
   });
 });

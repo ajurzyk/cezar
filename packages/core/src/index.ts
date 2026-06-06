@@ -25,6 +25,10 @@ export { loadConfig } from './config/loader.js';
 // Services
 export {
   GitHubService,
+  GitHubApiError,
+  classifyGitHubError,
+  toGitHubApiError,
+  isAuthOrRateLimitError,
   summarizeCi,
   parseCheckRunUrl,
   extractReferencedIssues,
@@ -34,6 +38,8 @@ export {
   type CheckRunSummary,
   type CiOverall,
   type CiSummary,
+  type GitHubErrorKind,
+  type ClassifiedGitHubError,
 } from './services/github.service.js';
 export {
   LLMService,

@@ -259,70 +259,77 @@ export class GitHubService {
   }
 
   async addLabel(issueNumber: number, label: string): Promise<void> {
-    try {
-      // Ensure label exists
+    // Common case is one request: `addLabels` succeeds when the repo label
+    // exists. Only when GitHub rejects a missing repo label (404/422) do we
+    // create it and retry — this drops the unconditional getLabel probe that
+    // used to make every add 2-3 requests (which itself worsened rate limits).
+    // The closure throws the RAW error so `withWriteRetry` can classify it
+    // (retry-after / rate-limit headers intact) and retry secondary limits.
+    await this.withWriteRetry(`addLabel #${issueNumber}`, async () => {
       try {
-        await this.octokit.rest.issues.getLabel({
+        await this.octokit.rest.issues.addLabels({
           owner: this.owner,
           repo: this.repo,
-          name: label,
+          issue_number: issueNumber,
+          labels: [label],
         });
-      } catch {
-        await this.octokit.rest.issues.createLabel({
+      } catch (error) {
+        const status = errorStatus(error);
+        if (status !== 404 && status !== 422) throw error; // rate-limit/permission → withWriteRetry
+        // Repo label missing — create it once (with our color), then add.
+        // createLabel may 422 if a concurrent attempt already created it — ok.
+        try {
+          await this.octokit.rest.issues.createLabel({
+            owner: this.owner,
+            repo: this.repo,
+            name: label,
+            color: 'e4e669',
+            description: 'Managed by cezar',
+          });
+        } catch (createErr) {
+          if (errorStatus(createErr) !== 422) throw createErr;
+        }
+        await this.octokit.rest.issues.addLabels({
           owner: this.owner,
           repo: this.repo,
-          name: label,
-          color: 'e4e669',
-          description: 'Managed by cezar',
+          issue_number: issueNumber,
+          labels: [label],
         });
       }
-
-      await this.octokit.rest.issues.addLabels({
-        owner: this.owner,
-        repo: this.repo,
-        issue_number: issueNumber,
-        labels: [label],
-      });
-    } catch (error) {
-      this.handleError(error);
-      throw error;
-    }
+    });
   }
 
   async removeLabel(issueNumber: number, label: string): Promise<void> {
-    try {
-      await this.octokit.rest.issues.removeLabel({
-        owner: this.owner,
-        repo: this.repo,
-        issue_number: issueNumber,
-        name: label,
-      });
-    } catch (error) {
-      // Ignore 404 — label wasn't on the issue
-      if (error && typeof error === 'object' && 'status' in error && (error as { status: number }).status === 404) {
-        return;
+    await this.withWriteRetry(`removeLabel #${issueNumber}`, async () => {
+      try {
+        await this.octokit.rest.issues.removeLabel({
+          owner: this.owner,
+          repo: this.repo,
+          issue_number: issueNumber,
+          name: label,
+        });
+      } catch (error) {
+        // Ignore 404 — label wasn't on the issue. Everything else (incl. rate
+        // limits) propagates raw to withWriteRetry for classification/retry.
+        if (errorStatus(error) === 404) return;
+        throw error;
       }
-      this.handleError(error);
-      throw error;
-    }
+    });
   }
 
   async setLabels(issueNumber: number, labels: string[]): Promise<void> {
-    try {
-      await this.octokit.rest.issues.setLabels({
+    await this.withWriteRetry(`setLabels #${issueNumber}`, () =>
+      this.octokit.rest.issues.setLabels({
         owner: this.owner,
         repo: this.repo,
         issue_number: issueNumber,
         labels,
-      });
-    } catch (error) {
-      this.handleError(error);
-      throw error;
-    }
+      }).then(() => undefined),
+    );
   }
 
   async addComment(issueNumber: number, body: string): Promise<number> {
-    try {
+    return this.withWriteRetry(`addComment #${issueNumber}`, async () => {
       const resp = await this.octokit.rest.issues.createComment({
         owner: this.owner,
         repo: this.repo,
@@ -330,10 +337,7 @@ export class GitHubService {
         body,
       });
       return resp.data.id;
-    } catch (error) {
-      this.handleError(error);
-      throw error;
-    }
+    });
   }
 
   /** Edit an existing issue/PR comment in place — the "living comment" per run (docs §3.6). */
@@ -829,19 +833,212 @@ export class GitHubService {
   }
 
   private handleError(error: unknown): void {
+    // Only translate the structured Octokit/HTTP errors (those with a numeric
+    // `status`). The classifier distinguishes a genuine permission denial from
+    // a primary/secondary rate limit — historically all of these collapsed into
+    // one misleading "rate limit exceeded or access forbidden" message, which
+    // made a transient anti-burst limit look like a missing App permission.
     if (error && typeof error === 'object' && 'status' in error) {
       const status = (error as { status: number }).status;
-      if (status === 401) {
-        throw new Error('Invalid GitHub token. Check GITHUB_TOKEN env var.');
-      }
-      if (status === 403) {
-        throw new Error('GitHub API rate limit exceeded or access forbidden.');
-      }
-      if (status === 404) {
-        throw new Error(`Repo '${this.owner}/${this.repo}' not found or inaccessible.`);
+      if (status === 401 || status === 403 || status === 404 || status === 429) {
+        throw toGitHubApiError(error, classifyGitHubError(error), { owner: this.owner, repo: this.repo });
       }
     }
   }
+
+  /**
+   * Run a mutating GitHub call, retrying ONLY GitHub's secondary (anti-burst)
+   * rate limit — which is transient and clears within seconds — honoring the
+   * server's `Retry-After` when present, else exponential backoff (capped). A
+   * genuine permission denial, auth failure, primary-budget exhaustion, or any
+   * other error fails fast: retrying those just wastes a job's time. On final
+   * failure throws a {@link GitHubApiError} carrying the real cause so the
+   * effect audit can say *why* instead of "apply manually".
+   */
+  private async withWriteRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
+    const MAX_ATTEMPTS = 4;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await fn();
+      } catch (error) {
+        const classified = classifyGitHubError(error);
+        if (classified.kind === 'secondary-rate-limit' && attempt < MAX_ATTEMPTS) {
+          const waitMs = Math.min(60_000, classified.retryAfterMs ?? 1000 * 2 ** (attempt - 1));
+          console.warn(
+            `[github] secondary rate limit on ${label} (attempt ${attempt}/${MAX_ATTEMPTS}); ` +
+              `retrying in ${Math.round(waitMs / 1000)}s ` +
+              `[remaining=${classified.rateLimitRemaining ?? '?'} retry-after=${classified.retryAfterMs != null ? Math.round(classified.retryAfterMs / 1000) + 's' : 'n/a'}]`,
+          );
+          await delay(waitMs);
+          continue;
+        }
+        if (classified.kind === 'primary-rate-limit') {
+          console.warn(
+            `[github] primary rate limit on ${label} ` +
+              `[remaining=${classified.rateLimitRemaining ?? '?'} resets-in=${classified.retryAfterMs != null ? Math.round(classified.retryAfterMs / 1000) + 's' : 'n/a'}]`,
+          );
+        }
+        throw toGitHubApiError(error, classified, { owner: this.owner, repo: this.repo });
+      }
+    }
+  }
+}
+
+const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** Extract the numeric HTTP status off a raw Octokit/HTTP error, if present. */
+function errorStatus(error: unknown): number | undefined {
+  return error && typeof error === 'object' && 'status' in error
+    ? (error as { status: number }).status
+    : undefined;
+}
+
+/** Distinct failure modes that a 401/403/404/429 from GitHub can actually mean. */
+export type GitHubErrorKind =
+  | 'auth'
+  | 'permission'
+  | 'primary-rate-limit'
+  | 'secondary-rate-limit'
+  | 'not-found'
+  | 'other';
+
+export interface ClassifiedGitHubError {
+  kind: GitHubErrorKind;
+  status?: number;
+  /** ms to wait before retrying — from `Retry-After` (secondary) or `x-ratelimit-reset` (primary). */
+  retryAfterMs?: number;
+  /** `x-ratelimit-remaining` header, when present. */
+  rateLimitRemaining?: string;
+  /** The raw message GitHub returned (e.g. "Resource not accessible by integration"). */
+  message: string;
+}
+
+/** A GitHub failure with the real cause preserved (status + classified kind). */
+export class GitHubApiError extends Error {
+  readonly status?: number;
+  readonly kind: GitHubErrorKind;
+  readonly retryAfterMs?: number;
+  constructor(message: string, classified: ClassifiedGitHubError) {
+    super(message);
+    this.name = 'GitHubApiError';
+    this.status = classified.status;
+    this.kind = classified.kind;
+    this.retryAfterMs = classified.retryAfterMs;
+  }
+}
+
+function headerValue(headers: Record<string, unknown> | undefined, name: string): string | undefined {
+  if (!headers) return undefined;
+  const v = headers[name] ?? headers[name.toLowerCase()];
+  return v == null ? undefined : String(v);
+}
+
+/**
+ * Classify a raw Octokit error into the cause GitHub actually signaled.
+ *
+ * The key distinctions, all of which arrive as HTTP 403 (or 429):
+ *   - secondary rate limit → message contains "secondary rate limit", or a
+ *     `Retry-After` header is present while budget remains. Transient; retry.
+ *   - primary rate limit    → `x-ratelimit-remaining: 0` (resets on the hour).
+ *   - permission            → a 403 with no rate-limit signal, typically
+ *     "Resource not accessible by integration" (the App lacks the permission).
+ */
+export function classifyGitHubError(error: unknown): ClassifiedGitHubError {
+  if (!error || typeof error !== 'object') {
+    return { kind: 'other', message: String(error) };
+  }
+  const e = error as {
+    status?: number;
+    message?: string;
+    response?: { headers?: Record<string, unknown>; data?: { message?: string } };
+  };
+  const status = e.status;
+  const headers = e.response?.headers;
+  const apiMessage = e.response?.data?.message ?? e.message ?? '';
+  const lower = apiMessage.toLowerCase();
+  const remaining = headerValue(headers, 'x-ratelimit-remaining');
+
+  const retryAfterRaw = headerValue(headers, 'retry-after');
+  const retryAfterMs = retryAfterRaw != null && Number.isFinite(Number(retryAfterRaw))
+    ? Number(retryAfterRaw) * 1000
+    : undefined;
+  const resetRaw = headerValue(headers, 'x-ratelimit-reset');
+  const resetMs = resetRaw != null && Number.isFinite(Number(resetRaw))
+    ? Math.max(0, Number(resetRaw) * 1000 - Date.now())
+    : undefined;
+
+  if (status === 401) return { kind: 'auth', status, message: apiMessage, rateLimitRemaining: remaining };
+
+  if (status === 403 || status === 429) {
+    // Secondary (anti-burst) limit: explicit message, or a Retry-After while
+    // the primary budget is NOT exhausted.
+    if (lower.includes('secondary rate limit') || (retryAfterMs != null && remaining !== '0')) {
+      return { kind: 'secondary-rate-limit', status, retryAfterMs, rateLimitRemaining: remaining, message: apiMessage };
+    }
+    // Primary budget exhausted.
+    if (remaining === '0' || (lower.includes('rate limit') && remaining !== undefined)) {
+      return { kind: 'primary-rate-limit', status, retryAfterMs: resetMs, rateLimitRemaining: remaining, message: apiMessage };
+    }
+    if (lower.includes('rate limit')) {
+      return { kind: 'primary-rate-limit', status, retryAfterMs: resetMs, rateLimitRemaining: remaining, message: apiMessage };
+    }
+    // A 403 with no rate-limit signal is a real permission denial.
+    return { kind: 'permission', status, message: apiMessage, rateLimitRemaining: remaining };
+  }
+
+  if (status === 404) return { kind: 'not-found', status, message: apiMessage };
+  return { kind: 'other', status, message: apiMessage };
+}
+
+/** Build a human-readable {@link GitHubApiError} from a classified error. */
+export function toGitHubApiError(
+  error: unknown,
+  classified: ClassifiedGitHubError,
+  repo?: { owner: string; repo: string },
+): GitHubApiError {
+  const detail = classified.message ? ` (${classified.message})` : '';
+  const slug = repo ? `${repo.owner}/${repo.repo}` : 'the repo';
+  let message: string;
+  switch (classified.kind) {
+    case 'auth':
+      message = 'Invalid or expired GitHub token — re-authenticate (or reinstall the GitHub App).';
+      break;
+    case 'permission': {
+      // Distinguish the two real causes of a write 403, because the fix differs:
+      //   - GitHub App token ("Resource not accessible by integration"): the App
+      //     installation lacks the permission — grant it and re-accept.
+      //   - User OAuth token / PAT: the *account* Cezar is acting as lacks the
+      //     repo role. Crucially, on GitHub a user with read access can COMMENT
+      //     but needs the Triage (or Write/Maintain/Admin) role to add/remove
+      //     LABELS — so "comment worked but labeling 403'd" is expected here and
+      //     is NOT a rate limit. Installing the GitHub App fixes it regardless of
+      //     who connected the workspace.
+      const isApp = /integration/i.test(classified.message);
+      message = isApp
+        ? `GitHub denied this action (403): the GitHub App installation lacks permission${detail}. ` +
+          `Grant "Issues: Read & write" (and "Pull requests: Read & write" for PRs) on ${slug} and re-accept the install.`
+        : `GitHub denied this action (403): the connected GitHub account lacks the repo role for it${detail}. ` +
+          `Commenting only needs read access, but adding/removing labels needs the Triage (or Write) role on ${slug} — ` +
+          `install the Cezar GitHub App (recommended), or give that account Triage+ access.`;
+      break;
+    }
+    case 'secondary-rate-limit':
+      message =
+        `GitHub secondary (anti-burst) rate limit hit${detail} — exhausted in-run retries. ` +
+        `This is transient (not a permission problem); re-run the action shortly.`;
+      break;
+    case 'primary-rate-limit': {
+      const resets = classified.retryAfterMs != null ? ` (resets in ~${Math.round(classified.retryAfterMs / 1000)}s)` : '';
+      message = `GitHub API rate limit exhausted${resets}${detail}.`;
+      break;
+    }
+    case 'not-found':
+      message = `'${slug}' or the target resource was not found or is inaccessible${detail}.`;
+      break;
+    default:
+      message = error instanceof Error ? error.message : String(error);
+  }
+  return new GitHubApiError(message, classified);
 }
 
 // Auth (401) and access/rate-limit (403) failures are not transient per-item
@@ -850,9 +1047,14 @@ export class GitHubService {
 // silently dropping every item. Matches both the raw Octokit error shape
 // (`.status`) and the normalized Error messages thrown by `handleError`.
 export function isAuthOrRateLimitError(error: unknown): boolean {
+  // GitHubApiError carries the classified kind directly.
+  if (error instanceof GitHubApiError) {
+    return error.kind === 'auth' || error.kind === 'permission'
+      || error.kind === 'primary-rate-limit' || error.kind === 'secondary-rate-limit';
+  }
   if (error && typeof error === 'object' && 'status' in error) {
     const status = (error as { status: unknown }).status;
-    if (status === 401 || status === 403) return true;
+    if (status === 401 || status === 403 || status === 429) return true;
   }
   if (error instanceof Error) {
     return (
