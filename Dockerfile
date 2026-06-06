@@ -64,6 +64,11 @@ ENV NODE_ENV=production \
     HOSTNAME=0.0.0.0 \
     HOME=/home/nextjs
 
+# ensureRepoClone() shells out to `git`, which the slim base image omits.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
 # `--create-home` materializes /home/nextjs (a --system user gets the passwd
 # entry but not the directory). ensureRepoClone() clones into ~/.cezar/repos via
 # os.homedir(), so without a writable HOME every clone fails with
