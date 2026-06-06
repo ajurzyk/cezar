@@ -27,6 +27,14 @@ export interface CreateWorkflowRunOpts {
   issueNumber: number | null;
   prNumber?: number | null;
   /**
+   * Bind to an already-created `workflow_runs` row instead of inserting a new
+   * one. Used by the queued-action path: `enqueueActionRun` creates the row up
+   * front (status `queued`) so the modal can navigate to `/cockpit/[runId]`
+   * immediately, then the dispatch worker's executor builds a persister with
+   * this id, which flips the row to `running` and stamps `started_at`/`job_id`.
+   */
+  existingRunId?: string;
+  /**
    * Reports a per-write persistence failure (Supabase rejection / network blip),
    * after retries are exhausted for the run's lifecycle writes (insert /
    * finalize / fail) and on first failure for best-effort writes (events, step
@@ -97,7 +105,7 @@ export async function createWorkflowRunPersister(
   supabase: SupabaseClient<Database>,
   opts: CreateWorkflowRunOpts,
 ): Promise<WorkflowRunPersister> {
-  const { workspaceId, jobId, workflow, repo, issueNumber, prNumber, onPersistError } = opts;
+  const { workspaceId, jobId, workflow, repo, issueNumber, prNumber, existingRunId, onPersistError } = opts;
 
   let failedWrites = 0;
 
@@ -143,6 +151,19 @@ export async function createWorkflowRunPersister(
   // hits `ON CONFLICT DO NOTHING` on the primary key instead of inserting a
   // duplicate run.
   let workflowRunId: string | null = null;
+  if (existingRunId) {
+    // Bind to the pre-created row (enqueueActionRun inserted it as `queued`),
+    // and flip it to `running` — stamping started_at and the draining job id —
+    // as this executor takes ownership.
+    workflowRunId = existingRunId;
+    await safe('workflow_runs bind', async () => {
+      const { error } = await supabase
+        .from('workflow_runs')
+        .update({ status: 'running', started_at: new Date().toISOString(), job_id: jobId ?? null })
+        .eq('id', existingRunId);
+      if (error) throw error;
+    }, { critical: true });
+  } else {
   const candidateId = randomUUID();
   await safe('workflow_runs insert', async () => {
     const { data, error } = await supabase
@@ -171,6 +192,7 @@ export async function createWorkflowRunPersister(
     // same `candidateId`) — that row already landed, so reuse the id we minted.
     workflowRunId = data?.id ?? candidateId;
   }, { critical: true });
+  }
 
   const recordEvent: WorkflowRunPersister['recordEvent'] = async (type, payload, agentRunId) => {
     if (!workflowRunId) return;

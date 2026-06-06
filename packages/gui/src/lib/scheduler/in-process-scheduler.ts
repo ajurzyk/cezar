@@ -1,11 +1,14 @@
-// In-process scheduler for self-hosted Node deployments — drives every cron
-// route on `setInterval` from inside the Next.js server process.
+// In-process scheduler — the sole cron driver. Drives every cron route on
+// `setInterval` from inside the Next.js server process (the Vercel `vercel.json`
+// schedules were removed; this replaces them everywhere).
 //
-// Booted by `src/instrumentation.ts` when `CEZAR_INPROCESS_CRON=true` and the
-// runtime is `nodejs`. Idempotent via a `globalThis` flag so dev-mode HMR
+// Booted by `src/instrumentation.ts` on the Node.js runtime — on by default
+// when `CRON_SECRET` is set, with `CEZAR_INPROCESS_CRON` as the force-on/off
+// override (see that file). Idempotent via a `globalThis` flag so dev-mode HMR
 // reloads don't spawn duplicate timers. In multi-replica deployments every
 // replica ticks — that's safe (the cron handlers all dedupe / atomically claim)
-// just wasteful.
+// just wasteful; disable extras with `CEZAR_INPROCESS_CRON=false` or pare them
+// back with `CEZAR_INPROCESS_CRON_DISABLED`.
 //
 // Implementation note: this driver `fetch`es the local cron routes rather than
 // importing their handler modules. That keeps `@cezar/core` (and its
@@ -13,16 +16,13 @@
 // generates for the Edge-runtime build of `instrumentation.ts`. The cron
 // routes themselves run on the Node runtime, so the actual work happens in
 // the same process — the `fetch` is a localhost round-trip.
-//
-// Vercel deployments should keep using the `vercel.json` cron schedules and
-// leave `CEZAR_INPROCESS_CRON` unset.
 
 const FLAG = Symbol.for('cezar.inProcessScheduler.started');
 
 interface CronJob {
   /** e.g. '/api/cron/dispatch' */
   path: string;
-  /** tick interval in ms; default keyed to the `vercel.json` schedule */
+  /** tick interval in ms */
   defaultIntervalMs: number;
   /** env var that overrides `defaultIntervalMs` */
   envOverride: string;
@@ -30,7 +30,7 @@ interface CronJob {
   formatLog?: (body: unknown) => string | null;
 }
 
-// Defaults mirror `packages/gui/vercel.json` cadences.
+// Cron cadences: dispatch every 60s, triage-sweep every 10 min, sync every 5 min.
 const JOBS: CronJob[] = [
   {
     path: '/api/cron/dispatch',
@@ -93,8 +93,7 @@ function resolveBaseUrl(): string {
   // (which in a Docker/Traefik deploy points at the external LB, adding a
   // pointless TLS round-trip and risking dropped `Authorization` headers → 401s).
   // `CEZAR_INPROCESS_CRON_BASE_URL` is the explicit escape hatch for the rare
-  // reverse-proxy case. (Vercel deploys leave `CEZAR_INPROCESS_CRON` unset and
-  // use the `vercel.json` HTTP cron schedules instead — see the module header.)
+  // reverse-proxy case.
   return (
     process.env.CEZAR_INPROCESS_CRON_BASE_URL ||
     `http://127.0.0.1:${process.env.PORT || '3000'}`

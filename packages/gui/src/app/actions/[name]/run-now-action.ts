@@ -5,8 +5,6 @@ import { revalidatePath } from 'next/cache';
 import { getSessionUser } from '@/lib/auth';
 import { getActiveWorkspace } from '@/lib/workspace';
 import { createSupabaseAdminClient } from '@/lib/supabase/server';
-import { createWorkflowRunPersister } from '@/lib/persist-workflow-run';
-import { loadWorkspaceConfig } from '@/lib/load-workspace-config';
 
 export interface RunNowResult {
   ok: boolean;
@@ -15,17 +13,21 @@ export interface RunNowResult {
 }
 
 /**
- * Real, synchronous "run this action against this issue or PR" — the
- * cockpit-bound counterpart to the dry-run simulator. Persists a one-row
- * `workflow_runs` entry plus one `agent_runs` row and per-effect
- * `agent_run_events` so the cockpit page renders the same shape as a
- * cron-dispatched triage pass.
+ * Queue a "run this action against this issue or PR" job and return
+ * immediately so the modal can close and navigate to `/cockpit/[runId]`
+ * without blocking the UI for the whole run.
  *
- * The `number` arg is the issue/PR number — which table it resolves against
- * is determined by `actionRow.target`. PRs live in `pull_requests` (synced by
+ * Validates fast (auth, action exists, target is in the local store), creates
+ * the `workflow_runs` row up front as `queued` so the cockpit has something to
+ * render, then enqueues an `action` job. The dispatch worker claims it and runs
+ * `core.runAction` in the background via `executeActionJob` — flipping the run
+ * to `running`, applying effects, and finalizing it.
+ *
+ * The `number` arg is the issue/PR number — which table it resolves against is
+ * determined by `actionRow.target`. PRs live in `pull_requests` (synced by
  * /api/cron/sync), not `issues`.
  */
-export async function runActionNow(actionId: string, number: number): Promise<RunNowResult> {
+export async function enqueueActionRun(actionId: string, number: number): Promise<RunNowResult> {
   const user = await getSessionUser();
   if (!user) return { ok: false, error: 'Not authenticated' };
 
@@ -34,229 +36,81 @@ export async function runActionNow(actionId: string, number: number): Promise<Ru
   if (workspace.role !== 'admin') return { ok: false, error: 'Only admins can run actions' };
 
   const supabase = createSupabaseAdminClient();
-  const core = await import('@cezar/core');
 
   const { data: actionRow } = await supabase
     .from('actions')
-    .select('id, name, kind, description, system_prompt, skill_refs, target, triggers, effects, output_schema, enabled')
+    .select('id, name, target')
     .eq('id', actionId)
     .eq('workspace_id', workspace.id)
     .maybeSingle();
   if (!actionRow) return { ok: false, error: 'Action not found' };
 
-  const { data: workspaceRow } = await supabase
-    .from('workspaces')
-    .select('action_auto_comment')
-    .eq('id', workspace.id)
-    .single();
-  const autoCommentEnabled = workspaceRow?.action_auto_comment ?? true;
+  const isPr = actionRow.target === 'pr';
 
-  // Branch on target: issues live in `issues` (with cached comments), PRs in
-  // `pull_requests` (no cached comments — fetched on demand if a skill needs
-  // them). Validation error mentions the right noun so the modal makes sense.
-  type TargetRow = {
-    number: number;
-    title: string | null;
-    body: string | null;
-    state: string | null;
-    labels: string[] | null;
-    html_url: string | null;
-    comments?: unknown;
-  };
-  let targetRow: TargetRow | null = null;
-  if (actionRow.target === 'pr') {
+  // Fail fast with the right noun if the target isn't in the local store —
+  // the executor re-reads the full row later in the dispatch context.
+  if (isPr) {
     const { data } = await supabase
       .from('pull_requests')
-      .select('number, title, body, state, labels, html_url')
+      .select('number')
       .eq('workspace_id', workspace.id)
       .eq('number', number)
       .maybeSingle();
-    targetRow = data;
-    if (!targetRow) return { ok: false, error: `PR #${number} not in the workspace's PR store — run /api/cron/sync to refresh` };
+    if (!data) return { ok: false, error: `PR #${number} not in the workspace's PR store — run /api/cron/sync to refresh` };
   } else {
     const { data } = await supabase
       .from('issues')
-      .select('number, title, body, state, labels, html_url, comments')
+      .select('number')
       .eq('workspace_id', workspace.id)
       .eq('number', number)
       .maybeSingle();
-    targetRow = data;
-    if (!targetRow) return { ok: false, error: `Issue #${number} not in the workspace's issue store` };
+    if (!data) return { ok: false, error: `Issue #${number} not in the workspace's issue store` };
   }
 
-  // Resolve a GitHub token: prefer GitHub App install token, fall back to
-  // the caller's OAuth token.
-  let githubToken: string | null = null;
-  if (core.GitHubAppService.isConfigured()) {
-    try {
-      githubToken = await new core.GitHubAppService().getInstallationToken(workspace.repoOwner);
-    } catch (err) {
-      console.warn('[run-now] GitHub App token failed, falling back to OAuth:', err instanceof Error ? err.message : err);
-    }
-  }
-  if (!githubToken) githubToken = user.githubToken || process.env.GITHUB_TOKEN || null;
-  if (!githubToken) return { ok: false, error: 'No GitHub token — sign out and back in to re-auth' };
-
-  let config: Awaited<ReturnType<typeof loadWorkspaceConfig>>;
-  try {
-    config = await loadWorkspaceConfig(workspace.id, supabase, {
-      githubToken,
-      repoOwner: workspace.repoOwner,
-      repoName: workspace.repoName,
-    });
-  } catch (err) {
-    return { ok: false, error: `Failed to load workspace config: ${err instanceof Error ? err.message : String(err)}` };
-  }
-
-  const github = new core.GitHubService(config);
   const repoSlug = `${workspace.repoOwner}/${workspace.repoName}`;
 
-  const isPr = actionRow.target === 'pr';
-
-  // ── persistence ─────────────────────────────────────────────────────────
-  const persister = await createWorkflowRunPersister(supabase, {
-    workspaceId: workspace.id,
-    jobId: null,
+  // Pre-create the workflow_runs row as `queued` so the modal can navigate to
+  // /cockpit/[runId] immediately; the executor binds to it and flips it to
+  // `running` when the worker picks the job up.
+  const runId = randomUUID();
+  const { error: runErr } = await supabase.from('workflow_runs').insert({
+    id: runId,
+    workspace_id: workspace.id,
     workflow: 'single-action',
     repo: repoSlug,
-    issueNumber: isPr ? null : number,
-    prNumber: isPr ? number : null,
-    onPersistError: (label, err) =>
-      console.error(`[run-now] persist ${label} failed:`, err instanceof Error ? err.message : err),
+    issue_number: isPr ? null : number,
+    pr_number: isPr ? number : null,
+    status: 'queued',
   });
-  if (!persister.id) return { ok: false, error: 'Could not create workflow_runs row' };
+  if (runErr) return { ok: false, error: `Could not create workflow run: ${runErr.message}` };
 
-  await persister.recordEvent('lifecycle', {
-    message: `run-now: ${actionRow.name} on ${isPr ? 'PR' : 'issue'} #${number} (manual)`,
+  const { error: jobErr } = await supabase.from('jobs').insert({
+    workspace_id: workspace.id,
+    repo: repoSlug,
+    kind: 'action',
+    issue_number: isPr ? null : number,
+    pr_number: isPr ? number : null,
+    priority: 5,
+    status: 'queued',
+    max_attempts: 1,
+    // Anthropic-API-only (like label-analysis): runs via `core.runAction`, which
+    // the cron dispatcher executes. Stamping the backend keeps self-hosted CLI
+    // runners — which only know the workflow kinds — from claiming it.
+    required_backend: 'anthropic-api',
+    payload: { trigger: 'manual', actionId, runId, target: actionRow.target },
   });
-
-  // Build an ActionTarget mirroring run-triage-pass-job.ts. Issues carry a
-  // cached comments array; PRs don't (pull_requests has no comments column).
-  const labels = Array.isArray(targetRow.labels) ? targetRow.labels.filter((l): l is string => typeof l === 'string') : [];
-  const commentsArr = Array.isArray(targetRow.comments) ? targetRow.comments : [];
-  type CommentLike = { author?: unknown; createdAt?: unknown; body?: unknown };
-  const commentsText =
-    commentsArr.length > 0
-      ? commentsArr
-          .map((c) => {
-            const co = c as CommentLike;
-            const author = typeof co.author === 'string' ? co.author : 'unknown';
-            const createdAt = typeof co.createdAt === 'string' ? co.createdAt : '';
-            const body = typeof co.body === 'string' ? co.body : '';
-            return `- ${author} (${createdAt}): ${body.slice(0, 500)}`;
-          })
-          .join('\n')
-      : undefined;
-
-  const target: import('@cezar/core').ActionTarget = {
-    kind: actionRow.target,
-    number: targetRow.number,
-    title: targetRow.title ?? '',
-    body: targetRow.body ?? '',
-    state: targetRow.state ?? 'open',
-    labels,
-    htmlUrl: targetRow.html_url ?? '',
-    comments: commentsText,
-  };
-
-  const action: import('@cezar/core').ActionDef = {
-    id: actionRow.id,
-    workspaceId: workspace.id,
-    name: actionRow.name,
-    kind: actionRow.kind as 'built-in' | 'user',
-    description: actionRow.description,
-    systemPrompt: actionRow.system_prompt,
-    skillRefs: Array.isArray(actionRow.skill_refs)
-      ? (actionRow.skill_refs as unknown[]).filter((s): s is string => typeof s === 'string')
-      : [],
-    target: actionRow.target as 'issue' | 'pr',
-    triggers: Array.isArray(actionRow.triggers)
-      ? ((actionRow.triggers as unknown[]).filter((s): s is string => typeof s === 'string') as import('@cezar/core').ActionTrigger[])
-      : [],
-    effects:
-      actionRow.effects == null
-        ? null
-        : Array.isArray(actionRow.effects)
-          ? ((actionRow.effects as unknown[]).filter((s): s is string => typeof s === 'string') as import('@cezar/core').EffectName[])
-          : null,
-    outputSchema:
-      actionRow.output_schema && typeof actionRow.output_schema === 'object' && !Array.isArray(actionRow.output_schema)
-        ? (actionRow.output_schema as Record<string, unknown>)
-        : null,
-    enabled: actionRow.enabled,
-  };
-
-  const startedAt = new Date().toISOString();
-  let runStatus: 'succeeded' | 'failed' = 'succeeded';
-  let reason: string | undefined;
-  let tokensUsed = 0;
-  let summary: string | undefined;
-  let runError: string | undefined;
-  let effectsApplied: Array<{ call: import('@cezar/core').EffectCall; summary: string }> = [];
-
-  try {
-    const skills = await core.discoverBuiltinSkills();
-    const result = await core.runAction(action, target, {
-      skills,
-      effectCtx: { github, targetNumber: number, supabase },
-      autoComment: { enabled: autoCommentEnabled, triggeredBy: 'manual · run now' },
-    });
-    summary = result.text?.slice(0, 500);
-    effectsApplied = result.effectsApplied;
-    tokensUsed = result.usage.inputTokens + result.usage.outputTokens;
-  } catch (err) {
-    runStatus = 'failed';
-    runError = err instanceof Error ? err.message : String(err);
-    reason = runError;
+  if (jobErr) {
+    // Roll the orphaned run forward to a terminal state so it doesn't sit
+    // stuck on `queued` forever in the cockpit.
+    await supabase
+      .from('workflow_runs')
+      .update({ status: 'failed', reason: `enqueue failed: ${jobErr.message}`, finished_at: new Date().toISOString() })
+      .eq('id', runId);
+    return { ok: false, error: `Could not queue action: ${jobErr.message}` };
   }
-
-  const finishedAt = new Date().toISOString();
-  const record: import('@cezar/core').AgentRunRecord = {
-    id: randomUUID(),
-    workflow: 'single-action',
-    stepId: action.name,
-    kind: 'agent',
-    iteration: 0,
-    backend: 'anthropic-api',
-    model: 'claude-sonnet-4-6',
-    status: runStatus,
-    startedAt,
-    finishedAt,
-    tokensUsed,
-    summary,
-    error: runError,
-  };
-  await persister.recordAgentRun(record);
-
-  for (const e of effectsApplied) {
-    await persister.recordEvent('tool-call', {
-      action: action.name,
-      effect: e.call.effect,
-      args: e.call.args,
-      summary: e.summary,
-    });
-  }
-
-  await persister.recordEvent('lifecycle', {
-    message:
-      runStatus === 'succeeded'
-        ? `run-now: ${action.name} succeeded (${effectsApplied.length} effect${effectsApplied.length === 1 ? '' : 's'})`
-        : `run-now: ${action.name} failed: ${runError ?? 'unknown error'}`,
-  });
-
-  await persister.finalize({
-    status: runStatus,
-    reason: reason ?? null,
-    tokens_used: tokensUsed,
-    finished_at: finishedAt,
-    outcome: {
-      action: action.name,
-      effectsApplied: effectsApplied.map((e) => ({ effect: e.call.effect, args: e.call.args as never, summary: e.summary })),
-    } as never,
-  });
 
   revalidatePath('/cockpit');
-  return { ok: true, workflowRunId: persister.id };
+  return { ok: true, workflowRunId: runId };
 }
 
 export interface RunNowIssue {

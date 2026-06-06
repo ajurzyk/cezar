@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import { cn } from '@/components/ui/cn';
 import {
   listRecentIssuesForRunNow,
-  runActionNow,
+  enqueueActionRun,
   type RunNowIssue,
 } from '@/app/actions/[name]/run-now-action';
 
@@ -112,9 +112,9 @@ export function RunNowModal({ actionId, actionName, target, onClose }: RunNowMod
       return;
     }
     startTransition(async () => {
-      const r = await runActionNow(actionId, number);
+      const r = await enqueueActionRun(actionId, number);
       if (!r.ok || !r.workflowRunId) {
-        setError(r.error ?? 'Run failed');
+        setError(r.error ?? 'Could not queue action');
         return;
       }
       onClose();
@@ -141,7 +141,7 @@ export function RunNowModal({ actionId, actionName, target, onClose }: RunNowMod
           Run action — <span className="font-mono">{actionName}</span>
         </h2>
         <p className="mt-1 text-xs text-on-surface-variant">
-          Runs this action against the chosen {target === 'pr' ? 'PR' : 'issue'} immediately, applying any effects for real.
+          Queues this action against the chosen {target === 'pr' ? 'PR' : 'issue'}, applying any effects for real. Runs in the background — you&apos;ll land on its run page.
         </p>
 
         <div className="mt-4 space-y-3">
@@ -223,7 +223,7 @@ export function RunNowModal({ actionId, actionName, target, onClose }: RunNowMod
                 className="h-3 w-3 animate-spin rounded-full border-2 border-primary-on/40 border-t-primary-on"
               />
             )}
-            {pending ? 'Running…' : 'Run now'}
+            {pending ? 'Queuing…' : 'Run now'}
           </button>
         </div>
       </div>

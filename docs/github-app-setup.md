@@ -88,8 +88,8 @@ issues in real time and auto-triages them.
 
 ### Poll fallback
 
-`GET /api/cron/triage-sweep` (Vercel cron, every 10 min; same `CRON_SECRET`
-auth as the other crons) finds open issues that have never been triaged and
+`GET /api/cron/triage-sweep` (driven by the in-process scheduler every 10 min;
+same `CRON_SECRET` auth as the other crons) finds open issues that have never been triaged and
 enqueues `triage` jobs for them — the catch-up path for installs without
 webhooks or missed deliveries. Tunable batch via `CEZAR_TRIAGE_SWEEP_BATCH`
 (default 10 issues / workspace / tick).

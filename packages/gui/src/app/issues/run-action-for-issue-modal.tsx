@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
 import { cn } from '@/components/ui/cn';
-import { runActionNow } from '@/app/actions/[name]/run-now-action';
+import { enqueueActionRun } from '@/app/actions/[name]/run-now-action';
 import {
   listActionsForIssueTarget,
   type IssueTargetAction,
@@ -92,9 +92,9 @@ export function RunActionForIssueModal({ issueNumber, issueTitle, onClose }: Run
       return;
     }
     startTransition(async () => {
-      const r = await runActionNow(selectedId, issueNumber);
+      const r = await enqueueActionRun(selectedId, issueNumber);
       if (!r.ok || !r.workflowRunId) {
-        setError(r.error ?? 'Run failed');
+        setError(r.error ?? 'Could not queue action');
         return;
       }
       onClose();
@@ -124,8 +124,8 @@ export function RunActionForIssueModal({ issueNumber, issueTitle, onClose }: Run
           Run action on <span className="font-mono">#{issueNumber}</span>
         </h2>
         <p className="mt-1 text-xs text-on-surface-variant">
-          Runs the chosen action against <span className="font-medium text-on-surface">{issueTitle || `issue #${issueNumber}`}</span>{' '}
-          immediately, applying any effects for real.
+          Queues the chosen action against <span className="font-medium text-on-surface">{issueTitle || `issue #${issueNumber}`}</span>,
+          applying any effects for real. Runs in the background — you&apos;ll land on its run page.
         </p>
 
         <div className="mt-4 space-y-3">
@@ -182,7 +182,7 @@ export function RunActionForIssueModal({ issueNumber, issueTitle, onClose }: Run
                 className="h-3 w-3 animate-spin rounded-full border-2 border-primary-on/40 border-t-primary-on"
               />
             )}
-            {pending ? 'Running…' : 'Run now'}
+            {pending ? 'Queuing…' : 'Run now'}
           </button>
         </div>
       </div>

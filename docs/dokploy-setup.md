@@ -17,8 +17,8 @@ cloud — Cezar just needs the project URL and keys.
 
 - A Hetzner VPS running Dokploy with two containers:
   - `gui` — the Next.js cockpit on `https://<your-domain>`. The in-process
-    scheduler fires `/api/cron/{dispatch,triage-sweep,sync}` at the
-    same cadences `vercel.json` uses.
+    scheduler fires `/api/cron/{dispatch,triage-sweep,sync}` (dispatch every
+    1 min, triage-sweep every 10 min, sync every 5 min).
   - `runner` — `@cezar/runner` daemon long-polling the GUI, ready to run
     jobs whose backend is `claude-cli` or `codex-cli`.
 - Traefik (managed by Dokploy) terminating TLS via Let's Encrypt.
