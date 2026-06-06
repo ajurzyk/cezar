@@ -5,6 +5,8 @@ import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { createSupabaseBrowserClient } from '@/lib/supabase/browser';
 import { cn } from '@/components/ui/cn';
+import { PageContainer } from '@/components/ui/page-container';
+import { EntityCard, MetaRow, MetaItem, CardActions } from '@/components/ui/data-card-list';
 import { timeAgo, humanizeTokens } from '@/lib/time-ago';
 import type { Database, DbWorkflowRunStatus, WorkspaceRole } from '@/lib/supabase/types';
 import {
@@ -178,16 +180,16 @@ export function CockpitList({
   );
 
   return (
-    <div className="px-8 py-6">
+    <PageContainer>
       <header className="mb-6 border-b border-border pb-5">
-        <div className="flex items-start justify-between gap-4">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div>
-            <h1 className="text-2xl font-semibold tracking-tight">Cockpit</h1>
+            <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">Cockpit</h1>
             <p className="mt-1 text-sm text-fg-muted">Agent workflow runs — autofix, CI follow-up, triage.</p>
           </div>
           <EnqueueRunButton disabled={role === 'viewer'} />
         </div>
-        <div className="mt-4 flex items-center gap-6 text-sm">
+        <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
           <Count label="Running" value={counts.running} tone={counts.running > 0 ? 'blue' : 'muted'} />
           <Count label="Paused" value={counts.paused} tone={counts.paused > 0 ? 'amber' : 'muted'} />
           <Count label="Queued" value={counts.queued} tone="muted" />
@@ -196,76 +198,82 @@ export function CockpitList({
       </header>
 
       {/* Filter bar */}
-      <div className="mb-4 flex flex-wrap items-center gap-2">
-        {STATUS_PILLS.map((s) => {
-          const on = filters.statuses.includes(s);
-          return (
-            <button
-              key={s}
-              onClick={() => toggleStatus(s)}
-              className={cn(
-                'rounded-full border px-3 py-1 text-xs font-medium uppercase transition-colors',
-                on ? 'border-accent/50 bg-bg-subtle text-fg' : 'border-border text-fg-muted hover:bg-bg-subtle',
-              )}
-            >
-              {s}
-            </button>
-          );
-        })}
-        <select
-          value={filters.workflow ?? ''}
-          onChange={(e) => setParam('workflow', e.target.value || null)}
-          className="rounded-md border border-border bg-bg-elevated px-2 py-1 text-xs text-fg"
-        >
-          <option value="">All workflows</option>
-          {WORKFLOW_OPTIONS.map((w) => (
-            <option key={w} value={w}>
-              {w}
-            </option>
-          ))}
-        </select>
-        {repoOptions.length > 0 && (
+      <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+        <div className="flex flex-wrap items-center gap-2">
+          {STATUS_PILLS.map((s) => {
+            const on = filters.statuses.includes(s);
+            return (
+              <button
+                key={s}
+                onClick={() => toggleStatus(s)}
+                className={cn(
+                  'rounded-full border px-3 py-1 text-xs font-medium uppercase transition-colors',
+                  on ? 'border-accent/50 bg-bg-subtle text-fg' : 'border-border text-fg-muted hover:bg-bg-subtle',
+                )}
+              >
+                {s}
+              </button>
+            );
+          })}
+        </div>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-2">
           <select
-            value={filters.repo ?? ''}
-            onChange={(e) => setParam('repo', e.target.value || null)}
-            className="rounded-md border border-border bg-bg-elevated px-2 py-1 text-xs text-fg"
+            value={filters.workflow ?? ''}
+            onChange={(e) => setParam('workflow', e.target.value || null)}
+            className="w-full rounded-md border border-border bg-bg-elevated px-2 py-1 text-xs text-fg sm:w-auto"
           >
-            <option value="">All repos</option>
-            {repoOptions.map((r) => (
-              <option key={r} value={r}>
-                {r}
+            <option value="">All workflows</option>
+            {WORKFLOW_OPTIONS.map((w) => (
+              <option key={w} value={w}>
+                {w}
               </option>
             ))}
           </select>
-        )}
+          {repoOptions.length > 0 && (
+            <select
+              value={filters.repo ?? ''}
+              onChange={(e) => setParam('repo', e.target.value || null)}
+              className="w-full rounded-md border border-border bg-bg-elevated px-2 py-1 text-xs text-fg sm:w-auto"
+            >
+              <option value="">All repos</option>
+              {repoOptions.map((r) => (
+                <option key={r} value={r}>
+                  {r}
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
         {(filters.statuses.length > 0 || filters.workflow || filters.repo) && (
-          <button onClick={() => router.push('/cockpit')} className="text-xs text-fg-subtle hover:text-fg underline">
+          <button onClick={() => router.push('/cockpit')} className="self-start text-xs text-fg-subtle hover:text-fg underline sm:self-auto">
             clear
           </button>
         )}
-        <div className="ml-auto flex items-center gap-2">
-          {canControl && cancellableSelected.length > 0 && (
-            <button
-              disabled={pending}
-              onClick={() => run(() => cancelRuns(cancellableSelected))}
-              className="rounded-md border border-danger/40 px-3 py-1 text-xs text-danger hover:bg-danger/10 disabled:opacity-50"
-            >
-              Cancel selected ({cancellableSelected.length})
-            </button>
-          )}
-          {canControl && deletableSelected.length > 0 && (
-            <button
-              disabled={pending}
-              onClick={() => {
-                if (!window.confirm(`Delete ${deletableSelected.length} run record(s)? Step history and events go with it.`)) return;
-                run(() => deleteRuns(deletableSelected));
-              }}
-              className="rounded-md border border-danger/40 px-3 py-1 text-xs text-danger hover:bg-danger/10 disabled:opacity-50"
-            >
-              Delete selected ({deletableSelected.length})
-            </button>
-          )}
-        </div>
+        {canControl && (cancellableSelected.length > 0 || deletableSelected.length > 0) && (
+          <div className="flex flex-wrap items-center gap-2 sm:ml-auto">
+            {cancellableSelected.length > 0 && (
+              <button
+                disabled={pending}
+                onClick={() => run(() => cancelRuns(cancellableSelected))}
+                className="flex-1 rounded-md border border-danger/40 px-3 py-1 text-xs text-danger hover:bg-danger/10 disabled:opacity-50 sm:flex-none"
+              >
+                Cancel selected ({cancellableSelected.length})
+              </button>
+            )}
+            {deletableSelected.length > 0 && (
+              <button
+                disabled={pending}
+                onClick={() => {
+                  if (!window.confirm(`Delete ${deletableSelected.length} run record(s)? Step history and events go with it.`)) return;
+                  run(() => deleteRuns(deletableSelected));
+                }}
+                className="flex-1 rounded-md border border-danger/40 px-3 py-1 text-xs text-danger hover:bg-danger/10 disabled:opacity-50 sm:flex-none"
+              >
+                Delete selected ({deletableSelected.length})
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {err && (
@@ -280,7 +288,8 @@ export function CockpitList({
           </div>
         </div>
       ) : (
-        <div className="overflow-hidden rounded-lg border border-border">
+        <>
+        <div className="hidden overflow-hidden rounded-lg border border-border md:block">
           <table className="w-full text-sm">
             <thead className="bg-bg-elevated text-xs uppercase text-fg-subtle">
               <tr>
@@ -352,8 +361,82 @@ export function CockpitList({
             </tbody>
           </table>
         </div>
+
+        {/* Phone: stacked cards (P1). */}
+        <div className="md:hidden">
+          <label className="mb-3 flex min-h-11 items-center gap-2 text-sm text-fg-muted">
+            <input type="checkbox" checked={allSelected} onChange={toggleAll} className="h-4 w-4" aria-label="Select all" />
+            Select all
+          </label>
+          <div className="space-y-3">
+            {runs.map((r) => {
+              const gh = githubUrlForRun(r, repoOwner, repoName);
+              const startedish = r.started_at ?? r.created_at;
+              return (
+                <EntityCard
+                  key={r.id}
+                  leading={
+                    <input
+                      type="checkbox"
+                      checked={selected.has(r.id)}
+                      onChange={() => toggleOne(r.id)}
+                      className="h-4 w-4"
+                      aria-label={`Select run ${r.id}`}
+                    />
+                  }
+                  title={
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Link href={`/cockpit/${r.id}`} className="font-medium text-fg hover:text-accent">
+                        {runRefLabel(r)}
+                      </Link>
+                      {gh && (
+                        <a
+                          href={gh}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-xs text-fg-subtle hover:text-accent"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          ↗
+                        </a>
+                      )}
+                      {r.repo && <span className="text-xs text-fg-subtle">{r.repo}</span>}
+                    </div>
+                  }
+                  badge={
+                    <div className="flex items-center gap-1">
+                      <RunStatusBadge status={r.status} />
+                      {r.pause_requested && r.status === 'running' && (
+                        <span className="text-xs text-amber-400" title="Pause requested — will stop at the next step boundary">
+                          ⏸
+                        </span>
+                      )}
+                    </div>
+                  }
+                  actions={
+                    canControl ? (
+                      <CardActions>
+                        <RowActions run={r} canControl={canControl} pending={pending} run_={run} />
+                      </CardActions>
+                    ) : undefined
+                  }
+                >
+                  <MetaRow>
+                    <MetaItem label="Workflow">{r.workflow}</MetaItem>
+                    <MetaItem label="Step">{stepLabel(r.current_step_id)}</MetaItem>
+                  </MetaRow>
+                  <MetaRow>
+                    <MetaItem label="Tokens">{humanizeTokens(r.tokens_used)}</MetaItem>
+                    <MetaItem label="Age">{timeAgo(startedish)}</MetaItem>
+                  </MetaRow>
+                </EntityCard>
+              );
+            })}
+          </div>
+        </div>
+        </>
       )}
-    </div>
+    </PageContainer>
   );
 }
 

@@ -152,8 +152,8 @@ function LabelRow({
   const [expanded, setExpanded] = useState<boolean>(!draft.name);
 
   return (
-    <div className="px-5 py-3">
-      <div className="flex items-center gap-3">
+    <div className="px-4 py-3 sm:px-5">
+      <div className="flex items-center gap-2 sm:gap-3">
         <ColorSwatch hex={draft.color ?? null} />
         <input
           type="text"
@@ -161,7 +161,7 @@ function LabelRow({
           onChange={(e) => onChange({ name: e.target.value })}
           placeholder="label-name"
           aria-invalid={error !== null}
-          className={`flex-1 rounded-md border bg-bg px-2 py-1 font-mono text-sm text-on-surface focus:outline-none ${
+          className={`flex-1 rounded-md border bg-bg px-2 py-1 font-mono text-base text-on-surface focus:outline-none lg:text-sm ${
             error !== null
               ? 'border-error focus:border-error'
               : 'border-outline-variant focus:border-primary'
@@ -175,21 +175,21 @@ function LabelRow({
         <button
           type="button"
           onClick={() => setExpanded((e) => !e)}
-          className="text-xs text-on-surface-variant hover:text-on-surface"
+          className="inline-flex min-h-11 items-center text-xs text-on-surface-variant hover:text-on-surface lg:min-h-0"
         >
           {expanded ? 'Collapse' : 'Edit'}
         </button>
         <button
           type="button"
           onClick={onRemove}
-          className="text-xs text-error hover:underline"
+          className="inline-flex min-h-11 items-center text-xs text-error hover:underline lg:min-h-0"
         >
           Remove
         </button>
       </div>
 
       {error !== null && (
-        <p className="ml-7 mt-1 text-xs text-error">
+        <p className="ml-0 mt-1 text-xs text-error sm:ml-7">
           {error === 'blank'
             ? 'Name is required and cannot be only whitespace.'
             : 'Duplicate name — labels must be unique (case-insensitive).'}
@@ -197,17 +197,17 @@ function LabelRow({
       )}
 
       {error === null && mixedScript && (
-        <p className="ml-7 mt-1 text-xs text-tertiary">
+        <p className="ml-0 mt-1 text-xs text-tertiary sm:ml-7">
           Mixed Latin/Cyrillic characters — this may create a confusable duplicate label on GitHub.
         </p>
       )}
 
       {!expanded && draft.description && (
-        <p className="ml-7 mt-1 line-clamp-1 text-xs text-on-surface-variant">{draft.description}</p>
+        <p className="ml-0 mt-1 line-clamp-1 text-xs text-on-surface-variant sm:ml-7">{draft.description}</p>
       )}
 
       {expanded && (
-        <div className="ml-7 mt-3 grid gap-3 sm:grid-cols-2">
+        <div className="ml-0 mt-3 grid gap-3 sm:ml-7 sm:grid-cols-2">
           <Field label="Color (hex without #)" value={draft.color ?? ''} onChange={(v) => onChange({ color: v || null })} />
           <Field
             label="Description"
@@ -271,7 +271,7 @@ function Field({
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder}
           rows={2}
-          className="w-full resize-y rounded-md border border-outline-variant bg-bg px-2 py-1 text-sm text-on-surface focus:border-primary focus:outline-none"
+          className="w-full resize-y rounded-md border border-outline-variant bg-bg px-2 py-1 text-base text-on-surface focus:border-primary focus:outline-none lg:text-sm"
         />
       ) : (
         <input
@@ -279,7 +279,7 @@ function Field({
           value={value}
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder}
-          className="w-full rounded-md border border-outline-variant bg-bg px-2 py-1 text-sm text-on-surface focus:border-primary focus:outline-none"
+          className="w-full rounded-md border border-outline-variant bg-bg px-2 py-1 text-base text-on-surface focus:border-primary focus:outline-none lg:text-sm"
         />
       )}
     </label>

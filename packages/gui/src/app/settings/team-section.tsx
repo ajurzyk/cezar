@@ -53,8 +53,8 @@ export function TeamSection({ members, isAdmin, currentUserId }: TeamSectionProp
           {memberError}
         </div>
       )}
-      {/* Members table */}
-      <div className="overflow-hidden rounded-md border border-outline-variant">
+      {/* Members table (md+) */}
+      <div className="hidden overflow-hidden rounded-md border border-outline-variant md:block">
         <table className="min-w-full text-sm">
           <thead className="bg-surface-container">
             <tr>
@@ -93,7 +93,7 @@ export function TeamSection({ members, isAdmin, currentUserId }: TeamSectionProp
                       value={m.role}
                       onChange={(e) => onRoleChange(m.userId, e.target.value as WorkspaceRole)}
                       disabled={pending}
-                      className="h-8 rounded-md border border-outline-variant bg-surface px-2 text-xs text-on-surface focus:border-primary focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+                      className="min-h-11 rounded-md border border-outline-variant bg-surface px-2 text-xs text-on-surface focus:border-primary focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 lg:h-8 lg:min-h-0"
                     >
                       <option value="admin">admin</option>
                       <option value="actor">actor</option>
@@ -112,7 +112,7 @@ export function TeamSection({ members, isAdmin, currentUserId }: TeamSectionProp
                       <button
                         onClick={() => onRemove(m.userId, m.name || m.email)}
                         disabled={pending}
-                        className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-outline-variant text-on-surface-variant transition-colors hover:border-error/40 hover:text-error disabled:cursor-not-allowed disabled:opacity-50"
+                        className="inline-flex h-11 w-11 items-center justify-center rounded-md border border-outline-variant text-on-surface-variant transition-colors hover:border-error/40 hover:text-error disabled:cursor-not-allowed disabled:opacity-50 lg:h-7 lg:w-7"
                         title="Remove member"
                         aria-label={`Remove ${m.name || m.email}`}
                       >
@@ -134,14 +134,73 @@ export function TeamSection({ members, isAdmin, currentUserId }: TeamSectionProp
         </table>
       </div>
 
+      {/* Members cards (< md) */}
+      <div className="space-y-3 md:hidden">
+        {members.length === 0 ? (
+          <div className="rounded-md border border-outline-variant px-4 py-6 text-center text-sm text-on-surface-variant">
+            No members yet.
+          </div>
+        ) : (
+          members.map((m) => (
+            <div
+              key={m.userId}
+              className="rounded-md border border-outline-variant bg-surface-container-low p-3"
+            >
+              <div className="flex items-center gap-3">
+                {m.avatarUrl ? (
+                  <img src={m.avatarUrl} alt="" className="h-9 w-9 shrink-0 rounded-md object-cover" />
+                ) : (
+                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-primary-container text-xs font-semibold text-primary-on-container">
+                    {initialsOf(m.name || m.email)}
+                  </div>
+                )}
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-medium text-on-surface">{m.name}</div>
+                  <div className="truncate text-xs text-on-surface-variant">{m.email}</div>
+                </div>
+              </div>
+              <div className="mt-3 flex items-center gap-2">
+                {isAdmin && m.userId !== currentUserId ? (
+                  <>
+                    <select
+                      value={m.role}
+                      onChange={(e) => onRoleChange(m.userId, e.target.value as WorkspaceRole)}
+                      disabled={pending}
+                      className="h-11 flex-1 rounded-md border border-outline-variant bg-surface px-2 text-base text-on-surface focus:border-primary focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <option value="admin">admin</option>
+                      <option value="actor">actor</option>
+                      <option value="viewer">viewer</option>
+                    </select>
+                    <button
+                      onClick={() => onRemove(m.userId, m.name || m.email)}
+                      disabled={pending}
+                      className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-outline-variant text-on-surface-variant transition-colors hover:border-error/40 hover:text-error disabled:cursor-not-allowed disabled:opacity-50"
+                      aria-label={`Remove ${m.name || m.email}`}
+                    >
+                      <TrashIcon className="h-4 w-4" />
+                    </button>
+                  </>
+                ) : (
+                  <RoleChip role={m.role}>
+                    {m.role}
+                    {m.userId === currentUserId && <span className="ml-1 text-outline">· you</span>}
+                  </RoleChip>
+                )}
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+
       {/* Invite form */}
       {isAdmin && (
         <form action={inviteAction} className="rounded-md border border-outline-variant bg-surface-container/40 p-4">
           <div className="mb-3 font-display text-[11px] font-semibold uppercase tracking-[0.05em] text-on-surface-variant">
             Invite a member
           </div>
-          <div className="flex flex-wrap items-end gap-3">
-            <div className="min-w-[220px] flex-1">
+          <div className="flex flex-col flex-wrap items-stretch gap-3 sm:flex-row sm:items-end">
+            <div className="w-full sm:min-w-[220px] sm:flex-1">
               <label htmlFor="invite-email" className="mb-1 block text-xs text-on-surface-variant">
                 Email
               </label>
@@ -149,19 +208,20 @@ export function TeamSection({ members, isAdmin, currentUserId }: TeamSectionProp
                 id="invite-email"
                 name="email"
                 type="email"
+                inputMode="email"
                 placeholder="user@example.com"
                 required
-                className="h-9 w-full rounded-md border border-outline-variant bg-surface px-3 text-sm text-on-surface placeholder:text-outline focus:border-primary focus:outline-none"
+                className="h-9 w-full rounded-md border border-outline-variant bg-surface px-3 text-base text-on-surface placeholder:text-outline focus:border-primary focus:outline-none lg:text-sm"
               />
             </div>
-            <div>
+            <div className="w-full sm:w-auto">
               <label htmlFor="invite-role" className="mb-1 block text-xs text-on-surface-variant">
                 Role
               </label>
               <select
                 id="invite-role"
                 name="role"
-                className="h-9 rounded-md border border-outline-variant bg-surface px-3 text-sm text-on-surface focus:border-primary focus:outline-none"
+                className="h-9 w-full rounded-md border border-outline-variant bg-surface px-3 text-base text-on-surface focus:border-primary focus:outline-none sm:w-auto lg:text-sm"
               >
                 <option value="actor">actor</option>
                 <option value="admin">admin</option>
@@ -171,11 +231,11 @@ export function TeamSection({ members, isAdmin, currentUserId }: TeamSectionProp
             <button
               type="submit"
               disabled={invitePending}
-              className="inline-flex h-9 items-center rounded-md bg-primary px-4 text-sm font-semibold text-primary-on transition-colors hover:bg-primary-container hover:text-on-surface disabled:cursor-not-allowed disabled:opacity-50"
+              className="inline-flex h-9 w-full items-center justify-center rounded-md bg-primary px-4 text-sm font-semibold text-primary-on transition-colors hover:bg-primary-container hover:text-on-surface disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
             >
               {invitePending ? 'Inviting…' : 'Invite'}
             </button>
-            <div className="ml-auto flex items-center gap-2 text-xs">
+            <div className="flex items-center gap-2 text-xs sm:ml-auto">
               {inviteState.ok && <span className="text-primary">Invited</span>}
               {inviteState.error && <span className="text-error">{inviteState.error}</span>}
             </div>

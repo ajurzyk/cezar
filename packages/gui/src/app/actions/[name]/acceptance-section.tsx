@@ -341,7 +341,7 @@ function SingleThreshold({
         />
         <SliderStyles />
       </div>
-      <div className="grid grid-cols-2 gap-3 text-xs">
+      <div className="grid grid-cols-1 gap-3 text-xs sm:grid-cols-2">
         <div className="flex items-center justify-between rounded-md border border-outline-variant bg-surface px-3 py-2">
           <span className="text-on-surface-variant">Cutoff</span>
           <NumberPill value={value} onChange={onChange} readOnly={readOnly} />
@@ -406,7 +406,7 @@ function DualThreshold({
         />
         <SliderStyles />
       </div>
-      <div className="grid grid-cols-3 gap-3 text-xs">
+      <div className="grid grid-cols-1 gap-3 text-xs sm:grid-cols-3">
         <ThresholdCell tone="muted" label="Auto-deny below" value={low} onChange={onLow} readOnly={readOnly} />
         <div className="flex items-center justify-center text-outline">
           <BucketDot tone="info" />
@@ -460,6 +460,7 @@ function NumberPill({
     <span className="inline-flex items-center gap-0.5">
       <input
         type="number"
+        inputMode="numeric"
         min={0}
         max={100}
         value={value}
@@ -469,7 +470,7 @@ function NumberPill({
           if (Number.isNaN(n)) return;
           onChange(Math.max(0, Math.min(100, n)));
         }}
-        className="w-12 rounded border border-outline-variant bg-surface-container px-1.5 py-0.5 text-right font-mono text-xs text-on-surface focus:border-primary focus:outline-none read-only:opacity-70"
+        className="w-12 rounded border border-outline-variant bg-surface-container px-1.5 py-0.5 text-right font-mono text-base text-on-surface focus:border-primary focus:outline-none read-only:opacity-70 lg:text-xs"
       />
       <span className="text-outline">%</span>
     </span>
@@ -499,7 +500,7 @@ function BucketRow({
     muted: 'text-on-surface-variant',
   }[tone];
   return (
-    <div className="grid grid-cols-[200px_1fr_60px] items-center gap-3">
+    <div className="grid grid-cols-1 items-center gap-2 sm:grid-cols-[200px_1fr_60px] sm:gap-3">
       <div className={cn('flex items-center gap-1.5 text-xs font-medium', labelClass)}>
         <BucketDot tone={tone} />
         {label}

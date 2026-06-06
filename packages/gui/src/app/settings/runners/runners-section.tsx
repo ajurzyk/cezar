@@ -123,7 +123,7 @@ export function RunnersSection({ ownRunners, managedRunners, isAdmin, appUrl }: 
                   required
                   maxLength={80}
                   placeholder="e.g. ci-box-1"
-                  className="h-9 w-full max-w-md rounded-md border border-outline-variant bg-surface px-3 text-sm text-on-surface placeholder:text-outline focus:border-primary focus:outline-none"
+                  className="h-9 w-full sm:max-w-md rounded-md border border-outline-variant bg-surface px-3 text-base lg:text-sm text-on-surface placeholder:text-outline focus:border-primary focus:outline-none"
                 />
               </div>
               <div>
@@ -188,8 +188,9 @@ function EmptyState({ body }: { body: string }) {
 
 function RunnerRow({ runner, canRevoke }: { runner: RunnerRowView; canRevoke: boolean }) {
   return (
-    <li className="flex items-center gap-4 py-3 first:pt-0 last:pb-0">
-      <StatusDotIcon className="h-3 w-3 shrink-0" tone={STATUS_TONE[runner.displayStatus]} />
+    <li className="flex flex-col gap-2 py-3 first:pt-0 last:pb-0 sm:flex-row sm:items-center sm:gap-4">
+      <div className="flex min-w-0 flex-1 items-start gap-4">
+      <StatusDotIcon className="mt-0.5 h-3 w-3 shrink-0 sm:mt-0" tone={STATUS_TONE[runner.displayStatus]} />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2 text-sm">
           <span className="truncate font-medium text-on-surface">{runner.name}</span>
@@ -216,11 +217,14 @@ function RunnerRow({ runner, canRevoke }: { runner: RunnerRowView; canRevoke: bo
           ))}
         </div>
       </div>
-      <div className="shrink-0 text-right text-[11px] text-outline">
-        <div>heartbeat {timeAgo(runner.lastHeartbeatAt)}</div>
-        <div>added {timeAgo(runner.createdAt)}</div>
       </div>
-      {canRevoke && !runner.managed && <RevokeButton runnerId={runner.id} name={runner.name} />}
+      <div className="flex items-center justify-between gap-3 pl-7 sm:pl-0">
+        <div className="shrink-0 text-left text-[11px] text-outline sm:text-right">
+          <div>heartbeat {timeAgo(runner.lastHeartbeatAt)}</div>
+          <div>added {timeAgo(runner.createdAt)}</div>
+        </div>
+        {canRevoke && !runner.managed && <RevokeButton runnerId={runner.id} name={runner.name} />}
+      </div>
     </li>
   );
 }
@@ -332,7 +336,7 @@ function CopyBox({
                 setTimeout(() => setCopied(false), 1500);
               });
             }}
-            className="text-xs text-primary hover:underline"
+            className="inline-flex min-h-11 items-center text-xs text-primary hover:underline lg:min-h-0"
           >
             {copied ? 'Copied!' : 'Copy'}
           </button>

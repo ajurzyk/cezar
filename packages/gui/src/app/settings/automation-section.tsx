@@ -129,7 +129,7 @@ export function AutomationSection({
             name="syncIntervalMinutes"
             defaultValue={String(syncIntervalMinutes)}
             disabled={readOnly}
-            className="mt-1 h-9 shrink-0 rounded-md border border-outline-variant bg-surface px-2 text-sm text-on-surface focus:border-primary focus:outline-none disabled:opacity-70"
+            className="mt-1 h-9 shrink-0 rounded-md border border-outline-variant bg-surface px-2 text-base text-on-surface focus:border-primary focus:outline-none disabled:opacity-70 lg:text-sm"
           >
             {(SYNC_INTERVAL_OPTIONS.includes(syncIntervalMinutes as (typeof SYNC_INTERVAL_OPTIONS)[number])
               ? SYNC_INTERVAL_OPTIONS
@@ -164,7 +164,7 @@ export function AutomationSection({
             value={digest}
             onChange={(e) => setDigest(e.target.value as DigestMode)}
             disabled={readOnly}
-            className="h-9 shrink-0 rounded-md border border-outline-variant bg-surface px-2 text-sm text-on-surface focus:border-primary focus:outline-none disabled:opacity-70"
+            className="h-9 shrink-0 rounded-md border border-outline-variant bg-surface px-2 text-base text-on-surface focus:border-primary focus:outline-none disabled:opacity-70 lg:text-sm"
           >
             <option value="auto">Auto</option>
             <option value="manual">On-demand</option>
@@ -185,7 +185,7 @@ export function AutomationSection({
               name="digestIntervalMinutes"
               defaultValue={String(digestIntervalMinutes)}
               disabled={readOnly}
-              className="h-9 shrink-0 rounded-md border border-outline-variant bg-surface px-2 text-sm text-on-surface focus:border-primary focus:outline-none disabled:opacity-70"
+              className="h-9 shrink-0 rounded-md border border-outline-variant bg-surface px-2 text-base text-on-surface focus:border-primary focus:outline-none disabled:opacity-70 lg:text-sm"
             >
               {(DIGEST_INTERVAL_OPTIONS.includes(digestIntervalMinutes as (typeof DIGEST_INTERVAL_OPTIONS)[number])
                 ? DIGEST_INTERVAL_OPTIONS

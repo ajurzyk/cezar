@@ -266,6 +266,12 @@ function parseTriggers(raw: unknown): FlowTrigger[] {
 
 // ─── Write ──────────────────────────────────────────────────────────────────
 
+/** Single flow by id (for the per-workflow detail/edit page). */
+export async function getFlow(id: string): Promise<FlowSummary | null> {
+  const flows = await listFlows();
+  return flows.find((f) => f.id === id) ?? null;
+}
+
 export async function upsertFlow(params: {
   id?: string;
   name: string;

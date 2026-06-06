@@ -1,5 +1,6 @@
 import { createSupabaseServerClient } from '@/lib/supabase/server';
 import { getActiveWorkspace } from '@/lib/workspace';
+import { PageContainer } from '@/components/ui/page-container';
 import type { Database, DbWorkflowRunStatus } from '@/lib/supabase/types';
 
 type WorkflowRunRow = Database['public']['Tables']['workflow_runs']['Row'];
@@ -103,19 +104,19 @@ export default async function ActivityPage() {
   const workspace = await getActiveWorkspace();
   if (!workspace) {
     return (
-      <div className="px-8 py-6">
-        <h1 className="text-2xl font-semibold tracking-tight">Activity</h1>
+      <PageContainer>
+        <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">Activity</h1>
         <p className="mt-2 text-sm text-fg-muted">No workspace selected.</p>
-      </div>
+      </PageContainer>
     );
   }
 
   const items = await loadActivity(workspace.id);
 
   return (
-    <div className="px-8 py-6">
+    <PageContainer>
       <header className="mb-8 border-b border-border pb-5">
-        <h1 className="text-2xl font-semibold tracking-tight">Activity</h1>
+        <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">Activity</h1>
         <p className="mt-1 text-sm text-fg-muted">
           Recent events — {workspace.repoOwner}/{workspace.repoName}
         </p>
@@ -128,8 +129,8 @@ export default async function ActivityPage() {
       ) : (
         <div className="space-y-0">
           {items.map((item) => (
-            <div key={item.id} className="flex gap-4 border-l-2 border-border py-2 pl-4">
-              <div className="w-16 shrink-0 text-right text-xs text-fg-subtle">
+            <div key={item.id} className="flex gap-2 border-l-2 border-border py-2 pl-4 sm:gap-4">
+              <div className="w-12 shrink-0 text-right text-xs text-fg-subtle sm:w-16">
                 {formatTime(item.timestamp)}
               </div>
               <div className="flex-1">
@@ -150,7 +151,7 @@ export default async function ActivityPage() {
           ))}
         </div>
       )}
-    </div>
+    </PageContainer>
   );
 }
 

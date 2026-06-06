@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState, useTransition, type KeyboardEvent } from 'react';
+import { cn } from '@/components/ui/cn';
 import {
   renderStepPreview,
   type FlowStep,
@@ -32,6 +33,7 @@ export interface FlowCardProps {
   onStepChange: (idx: number, patch: Partial<FlowStep>) => void;
   onAddStep: () => void;
   onRemoveStep: (idx: number) => void;
+  onMoveStepUp: (idx: number) => void;
   onMoveStepDown: (idx: number) => void;
   onTriggersChange: (triggers: FlowTrigger[]) => void;
   onPausedChange: (paused: boolean) => void;
@@ -62,8 +64,8 @@ export function FlowCard(props: FlowCardProps) {
       }
     >
       {/* Name + pause toggle + flow actions */}
-      <div className="flex items-end gap-3">
-        <div className="flex-1">
+      <div className="flex flex-wrap items-end gap-3">
+        <div className="min-w-[12rem] flex-1">
           <label className="block text-[11px] font-medium uppercase tracking-wide text-fg-muted">
             Name
           </label>
@@ -72,7 +74,7 @@ export function FlowCard(props: FlowCardProps) {
             value={flow.name}
             onChange={(e) => props.onNameChange(e.target.value)}
             disabled={!props.canWrite}
-            className="mt-1 w-full rounded-md border border-border bg-bg-subtle px-3 py-2 text-sm text-fg focus:border-accent/50 focus:outline-none"
+            className="mt-1 w-full rounded-md border border-border bg-bg-subtle px-3 py-2 text-base text-fg focus:border-accent/50 focus:outline-none lg:text-sm"
             placeholder="fix github issue"
           />
         </div>
@@ -154,14 +156,7 @@ export function FlowCard(props: FlowCardProps) {
             No steps yet. {props.canWrite && 'Click "+ Step" to add one.'}
           </p>
         ) : (
-          <div className="space-y-2">
-            <div className="grid grid-cols-[auto_minmax(220px,1fr)_minmax(220px,2fr)_auto_auto] gap-3 px-1 text-[11px] font-medium uppercase tracking-wide text-fg-muted">
-              <div>Step</div>
-              <div>Skill</div>
-              <div>Args template</div>
-              <div></div>
-              <div></div>
-            </div>
+          <div className="space-y-3">
             {flow.steps.map((step, idx) => (
               <StepRow
                 key={idx}
@@ -174,6 +169,7 @@ export function FlowCard(props: FlowCardProps) {
                 stepOutcome={flow.lastRun?.steps.find((s) => s.stepId === `step-${idx + 1}`)}
                 onChange={(patch) => props.onStepChange(idx, patch)}
                 onRemove={() => props.onRemoveStep(idx)}
+                onMoveUp={() => props.onMoveStepUp(idx)}
                 onMoveDown={() => props.onMoveStepDown(idx)}
               />
             ))}
@@ -216,7 +212,7 @@ export function FlowCard(props: FlowCardProps) {
 
 // ─── Pause toggle ───────────────────────────────────────────────────────────
 
-function PauseToggle({ paused, onChange }: { paused: boolean; onChange: (v: boolean) => void }) {
+export function PauseToggle({ paused, onChange }: { paused: boolean; onChange: (v: boolean) => void }) {
   return (
     <button
       type="button"
@@ -283,36 +279,30 @@ function StopChainInput({
   disabled: boolean;
   onChange: (v: string) => void;
 }) {
-  const empty = !value;
   return (
-    <div className="mt-1 flex items-center gap-1.5 px-1">
-      <span className={`text-[10px] uppercase tracking-wide ${empty ? 'text-fg-muted/60' : 'text-amber-300/80'}`}>
-        Stop chain if output contains
-      </span>
-      <input
-        type="text"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        disabled={disabled}
-        placeholder="NO_ACTION_NEEDED"
-        className={
-          'flex-1 rounded border border-border bg-bg-subtle px-1.5 py-0.5 font-mono text-[11px] text-fg focus:border-accent/50 focus:outline-none ' +
-          (empty ? 'opacity-60 focus:opacity-100' : '')
-        }
-      />
-    </div>
+    <input
+      type="text"
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      disabled={disabled}
+      placeholder="NO_ACTION_NEEDED — leave empty to never stop early"
+      className={cn(
+        'w-full rounded-md border bg-bg-subtle px-3 py-2 font-mono text-base text-fg focus:outline-none lg:text-xs',
+        value ? 'border-amber-500/40 focus:border-amber-400/60' : 'border-border focus:border-accent/50',
+      )}
+    />
   );
 }
 
 // ─── Helpers (formatting + history dots) ────────────────────────────────────
 
-function formatTokens(n: number): string {
+export function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
   return String(n);
 }
 
-function historyDotClass(status: string): string {
+export function historyDotClass(status: string): string {
   if (status === 'succeeded') return 'bg-emerald-500/70';
   if (status === 'failed') return 'bg-rose-500/70';
   if (status === 'running') return 'bg-amber-400/80';
@@ -333,12 +323,16 @@ function StepRow(props: {
   stepOutcome?: FlowStepOutcome;
   onChange: (patch: Partial<FlowStep>) => void;
   onRemove: () => void;
+  onMoveUp: () => void;
   onMoveDown: () => void;
 }) {
   const { step, idx } = props;
   const [previewOpen, setPreviewOpen] = useState(false);
   const [outputOpen, setOutputOpen] = useState(false);
   const [notesOpen, setNotesOpen] = useState(false);
+
+  const isNew = props.flowId.startsWith('__new__');
+  const hasNotes = !!step.systemNotes && step.systemNotes.trim().length > 0;
 
   const skillDescription = useMemo(
     () => props.availableSkills.find((s) => s.name === step.skill)?.description ?? '',
@@ -351,132 +345,178 @@ function StepRow(props: {
   );
 
   return (
-    <div className="rounded-md border border-border/60 bg-bg-subtle/40 p-2">
-      <div className="grid grid-cols-[auto_minmax(220px,1fr)_minmax(220px,2fr)_auto_auto] items-start gap-3">
-        <div className="rounded-md border border-border bg-bg-subtle px-3 py-2 text-sm text-fg-muted">
-          Step {idx + 1}
-        </div>
-        <div>
-          <SkillPicker
-            value={step.skill}
-            options={props.availableSkills}
-            onChange={(skill) => props.onChange({ skill })}
-            disabled={!props.canWrite}
-          />
-          {step.skill && skillDescription && (
-            <p className="mt-1 px-1 text-[11px] text-fg-muted/80 leading-snug">
-              {skillDescription}
-            </p>
-          )}
-          {step.skill && !skillDescription && (
-            <p className="mt-1 px-1 text-[11px] text-fg-muted/50">
-              (no description — add one in the skill\'s frontmatter)
-            </p>
-          )}
-        </div>
-        <div>
-          <ArgsTemplateInput
-            value={step.argsTemplate}
-            disabled={!props.canWrite}
-            onChange={(argsTemplate) => props.onChange({ argsTemplate })}
-          />
-          <StopChainInput
-            value={step.stopChainIfContains ?? ''}
-            disabled={!props.canWrite}
-            onChange={(v) =>
-              props.onChange({ stopChainIfContains: v ? v : undefined })
-            }
-          />
-          {lintWarnings.length > 0 && (
-            <ul className="mt-1 space-y-0.5 px-1">
-              {lintWarnings.map((w, i) => (
-                <li key={i} className="text-[11px] text-amber-300/90 leading-snug">
-                  ⚠ {w}
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-        <div className="flex flex-col gap-1">
-          <IconButton
-            disabled={!props.canWrite || idx === props.steps.length - 1}
-            ariaLabel="Move step down"
-            onClick={props.onMoveDown}
-          >
-            <ArrowDownIcon />
-          </IconButton>
-          {!props.flowId.startsWith('__new__') && (
-            <IconButton
-              ariaLabel="Toggle preview"
-              onClick={() => setPreviewOpen((v) => !v)}
-              tone={previewOpen ? 'accent' : 'neutral'}
-            >
-              <EyeIcon />
+    <div className="overflow-hidden rounded-lg border border-border bg-bg-subtle/30">
+      {/* Header: step number + reorder/delete cluster. */}
+      <div className="flex items-center gap-2 border-b border-border/50 bg-bg-subtle/40 px-3 py-2">
+        <span className="flex h-6 min-w-6 items-center justify-center rounded-md bg-accent/15 px-1.5 text-xs font-semibold text-fg">
+          {idx + 1}
+        </span>
+        <span className="text-[11px] font-medium uppercase tracking-wide text-fg-muted">Step</span>
+        {props.canWrite && (
+          <div className="ml-auto flex items-center gap-1">
+            <IconButton disabled={idx === 0} ariaLabel="Move step up" onClick={props.onMoveUp}>
+              <ArrowUpIcon />
             </IconButton>
-          )}
-          <IconButton
-            ariaLabel={
-              step.systemNotes && step.systemNotes.trim()
-                ? 'Edit step notes (overrides default)'
-                : 'Edit step notes (using default marker contract)'
-            }
-            onClick={() => setNotesOpen((v) => !v)}
-            tone={notesOpen ? 'accent' : step.systemNotes && step.systemNotes.trim() ? 'accent' : 'neutral'}
-          >
-            <PencilIcon />
-          </IconButton>
-        </div>
-        <div className="flex flex-col gap-1">
-          <IconButton
-            disabled={!props.canWrite}
-            ariaLabel="Remove step"
-            tone="danger"
-            onClick={props.onRemove}
-          >
-            <TrashIcon />
-          </IconButton>
-          {props.stepOutcome && (
-            <IconButton
-              ariaLabel="Toggle output"
-              onClick={() => setOutputOpen((v) => !v)}
-              tone={outputOpen ? 'accent' : 'neutral'}
-            >
-              <ChatIcon />
+            <IconButton disabled={idx === props.steps.length - 1} ariaLabel="Move step down" onClick={props.onMoveDown}>
+              <ArrowDownIcon />
             </IconButton>
-          )}
-        </div>
+            <IconButton ariaLabel="Remove step" tone="danger" onClick={props.onRemove}>
+              <TrashIcon />
+            </IconButton>
+          </div>
+        )}
       </div>
 
-      {notesOpen && (
-        <StepNotesPanel
-          value={step.systemNotes ?? ''}
-          disabled={!props.canWrite}
-          onChange={(systemNotes) =>
-            props.onChange({ systemNotes: systemNotes ? systemNotes : undefined })
-          }
-        />
-      )}
+      {/* Body. */}
+      <div className="p-3">
+        <div className="space-y-3">
+          <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
+            <Field label="Skill">
+              <SkillPicker
+                value={step.skill}
+                options={props.availableSkills}
+                onChange={(skill) => props.onChange({ skill })}
+                disabled={!props.canWrite}
+              />
+              {step.skill && skillDescription && (
+                <p className="mt-1 text-[11px] leading-snug text-fg-muted/80">{skillDescription}</p>
+              )}
+              {step.skill && !skillDescription && (
+                <p className="mt-1 text-[11px] text-fg-muted/50">
+                  (no description — add one in the skill&apos;s frontmatter)
+                </p>
+              )}
+            </Field>
 
-      {previewOpen && !props.flowId.startsWith('__new__') && (
-        <StepPreview flowId={props.flowId} stepIdx={idx} />
-      )}
-
-      {outputOpen && props.stepOutcome && (
-        <div className="mt-2 rounded-md border border-border bg-bg p-3">
-          <div className="mb-1 flex items-center justify-between text-[10px] uppercase tracking-wide text-fg-muted">
-            <span>Last run · {props.stepOutcome.stepId}</span>
-            <StatusBadge status={props.stepOutcome.status} />
+            <Field label="Args template">
+              <ArgsTemplateInput
+                value={step.argsTemplate}
+                disabled={!props.canWrite}
+                onChange={(argsTemplate) => props.onChange({ argsTemplate })}
+              />
+              {lintWarnings.length > 0 && (
+                <ul className="mt-1 space-y-0.5">
+                  {lintWarnings.map((w, i) => (
+                    <li key={i} className="text-[11px] leading-snug text-amber-300/90">
+                      ⚠ {w}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </Field>
           </div>
-          {props.stepOutcome.output ? (
-            <pre className="max-h-48 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-fg/90">
-              {props.stepOutcome.output}
-            </pre>
-          ) : (
-            <p className="text-[11px] text-fg-muted">(no captured output)</p>
-          )}
+
+          <Field
+            label="Stop chain if output contains"
+            tone={step.stopChainIfContains ? 'amber' : 'muted'}
+          >
+            <StopChainInput
+              value={step.stopChainIfContains ?? ''}
+              disabled={!props.canWrite}
+              onChange={(v) => props.onChange({ stopChainIfContains: v ? v : undefined })}
+            />
+          </Field>
+
+          {/* Tool toggles. */}
+          <div className="flex flex-wrap items-center gap-2">
+            <ToolButton active={notesOpen || hasNotes} onClick={() => setNotesOpen((v) => !v)} icon={<PencilIcon />}>
+              Notes
+              {hasNotes && <span className="ml-0.5 h-1.5 w-1.5 rounded-full bg-accent" aria-label="custom notes set" />}
+            </ToolButton>
+            {!isNew && (
+              <ToolButton active={previewOpen} onClick={() => setPreviewOpen((v) => !v)} icon={<EyeIcon />}>
+                Preview
+              </ToolButton>
+            )}
+            {props.stepOutcome && (
+              <ToolButton active={outputOpen} onClick={() => setOutputOpen((v) => !v)} icon={<ChatIcon />}>
+                Last output
+                <StatusBadge status={props.stepOutcome.status} />
+              </ToolButton>
+            )}
+          </div>
         </div>
-      )}
+
+        {/* Expandable panels. */}
+        {notesOpen && (
+          <StepNotesPanel
+            value={step.systemNotes ?? ''}
+            disabled={!props.canWrite}
+            onChange={(systemNotes) => props.onChange({ systemNotes: systemNotes ? systemNotes : undefined })}
+          />
+        )}
+
+        {previewOpen && !isNew && <StepPreview flowId={props.flowId} stepIdx={idx} />}
+
+        {outputOpen && props.stepOutcome && (
+          <div className="mt-2 rounded-md border border-border bg-bg p-3">
+            <div className="mb-1 flex items-center justify-between text-[10px] uppercase tracking-wide text-fg-muted">
+              <span>Last run · {props.stepOutcome.stepId}</span>
+              <StatusBadge status={props.stepOutcome.status} />
+            </div>
+            {props.stepOutcome.output ? (
+              <pre className="max-h-48 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-fg/90">
+                {props.stepOutcome.output}
+              </pre>
+            ) : (
+              <p className="text-[11px] text-fg-muted">(no captured output)</p>
+            )}
+          </div>
+        )}
+      </div>
     </div>
+  );
+}
+
+function Field({
+  label,
+  tone = 'muted',
+  children,
+}: {
+  label: string;
+  tone?: 'muted' | 'amber';
+  children: React.ReactNode;
+}) {
+  return (
+    <div>
+      <label
+        className={cn(
+          'mb-1 block text-[11px] font-medium uppercase tracking-wide',
+          tone === 'amber' ? 'text-amber-300/80' : 'text-fg-muted',
+        )}
+      >
+        {label}
+      </label>
+      {children}
+    </div>
+  );
+}
+
+function ToolButton({
+  active,
+  onClick,
+  icon,
+  children,
+}: {
+  active?: boolean;
+  onClick: () => void;
+  icon: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        'inline-flex min-h-11 items-center gap-1.5 rounded-md border px-2.5 text-xs transition-colors lg:min-h-8',
+        active
+          ? 'border-accent/50 bg-accent/10 text-fg'
+          : 'border-border bg-bg-subtle text-fg-muted hover:bg-bg hover:text-fg',
+      )}
+    >
+      {icon}
+      {children}
+    </button>
   );
 }
 
@@ -501,7 +541,7 @@ function SkillPicker({
         onChange={(e) => onChange(e.target.value)}
         disabled={disabled}
         placeholder="auto-fix-github"
-        className="w-full rounded-md border border-border bg-bg-subtle px-3 py-2 font-mono text-xs text-fg focus:border-accent/50 focus:outline-none"
+        className="w-full rounded-md border border-border bg-bg-subtle px-3 py-2 font-mono text-base text-fg focus:border-accent/50 focus:outline-none lg:text-xs"
       />
     );
   }
@@ -510,7 +550,7 @@ function SkillPicker({
       value={value}
       onChange={(e) => onChange(e.target.value)}
       disabled={disabled}
-      className="w-full rounded-md border border-border bg-bg-subtle px-3 py-2 font-mono text-xs text-fg focus:border-accent/50 focus:outline-none"
+      className="w-full rounded-md border border-border bg-bg-subtle px-3 py-2 font-mono text-base text-fg focus:border-accent/50 focus:outline-none lg:text-xs"
     >
       <option value="">— pick a skill —</option>
       {!options.find((o) => o.name === value) && value && (
@@ -607,10 +647,10 @@ function ArgsTemplateInput({
         onBlur={() => window.setTimeout(() => setShowAutocomplete(false), 100)}
         disabled={disabled}
         placeholder="{{input}}"
-        className="w-full rounded-md border border-border bg-bg-subtle px-3 py-2 font-mono text-xs text-fg focus:border-accent/50 focus:outline-none"
+        className="w-full rounded-md border border-border bg-bg-subtle px-3 py-2 font-mono text-base text-fg focus:border-accent/50 focus:outline-none lg:text-xs"
       />
       {showAutocomplete && (
-        <div className="absolute left-0 top-full z-20 mt-1 w-full rounded-md border border-border bg-bg-elevated shadow-lg">
+        <div className="absolute left-0 top-full z-20 mt-1 w-full max-w-[calc(100vw-2rem)] rounded-md border border-border bg-bg-elevated shadow-lg">
           {TEMPLATE_VARS.map((v, i) => (
             <button
               key={v.name}
@@ -753,7 +793,7 @@ function TriggersPanel({
               </span>
             ))}
             {canWrite && (
-              <span className="inline-flex items-center gap-1">
+              <span className="flex w-full items-center gap-1 sm:inline-flex sm:w-auto">
                 <input
                   type="text"
                   value={draftLabel}
@@ -765,7 +805,7 @@ function TriggersPanel({
                     }
                   }}
                   placeholder="auto-fix"
-                  className="w-32 rounded-md border border-border bg-bg-subtle px-2 py-1 font-mono text-[11px] text-fg focus:border-accent/50 focus:outline-none"
+                  className="w-full rounded-md border border-border bg-bg-subtle px-2 py-1 font-mono text-base text-fg focus:border-accent/50 focus:outline-none sm:w-32 lg:text-[11px]"
                 />
                 <button
                   type="button"
@@ -787,7 +827,7 @@ function TriggersPanel({
   );
 }
 
-function describeTriggers(triggers: FlowTrigger[]): string {
+export function describeTriggers(triggers: FlowTrigger[]): string {
   const parts: string[] = [];
   if (triggers.some((t) => t.kind === 'issue.opened')) parts.push('issue opened');
   const labels = triggers
@@ -928,16 +968,17 @@ function RunOnIssue({ onRun }: { onRun: (issue: number) => void }) {
   const [issueInput, setIssueInput] = useState('');
   const [running, startTransition] = useTransition();
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex flex-wrap items-center gap-2">
       <label className="text-xs text-fg-muted">Run on issue</label>
       <span className="text-xs text-fg-muted">#</span>
       <input
         type="number"
+        inputMode="numeric"
         min={1}
         value={issueInput}
         onChange={(e) => setIssueInput(e.target.value)}
         placeholder="42"
-        className="w-20 rounded-md border border-border bg-bg-subtle px-2 py-1 text-xs text-fg"
+        className="w-20 rounded-md border border-border bg-bg-subtle px-2 py-1 text-base text-fg lg:text-xs"
       />
       <button
         disabled={running || !issueInput.trim()}
@@ -952,7 +993,7 @@ function RunOnIssue({ onRun }: { onRun: (issue: number) => void }) {
             setIssueInput('');
           });
         }}
-        className="rounded-md border border-accent/50 bg-accent/10 px-2.5 py-1 text-xs font-medium text-fg hover:bg-accent/20 disabled:opacity-50"
+        className="inline-flex min-h-11 flex-1 items-center justify-center rounded-md border border-accent/50 bg-accent/10 px-2.5 py-1 text-xs font-medium text-fg hover:bg-accent/20 disabled:opacity-50 sm:min-h-0 sm:flex-none"
       >
         {running ? 'Queueing…' : 'Run'}
       </button>
@@ -962,7 +1003,7 @@ function RunOnIssue({ onRun }: { onRun: (issue: number) => void }) {
 
 // ─── Small UI primitives ───────────────────────────────────────────────────
 
-function StatusBadge({ status }: { status: string }) {
+export function StatusBadge({ status }: { status: string }) {
   const cls =
     status === 'succeeded' ? 'text-emerald-400 bg-emerald-500/15'
     : status === 'failed' ? 'text-rose-400 bg-rose-500/15'
@@ -998,7 +1039,10 @@ function IconButton({
       onClick={onClick}
       disabled={disabled}
       aria-label={ariaLabel}
-      className={`rounded-md border px-2 py-1.5 disabled:opacity-30 ${cls}`}
+      className={cn(
+        'inline-flex min-h-11 min-w-11 items-center justify-center rounded-md border px-2 py-1.5 disabled:opacity-30 lg:min-h-0 lg:min-w-0',
+        cls,
+      )}
     >
       {children}
     </button>
@@ -1025,6 +1069,14 @@ function ArrowDownIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M12 5v14M5 12l7 7 7-7" />
+    </svg>
+  );
+}
+
+function ArrowUpIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 19V5M5 12l7-7 7 7" />
     </svg>
   );
 }

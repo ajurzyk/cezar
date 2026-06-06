@@ -12,6 +12,7 @@ import {
   SparkleSmallIcon,
   CodeIcon,
   ChevronDownIcon,
+  ChevronLeftIcon,
 } from '@/components/icons';
 import {
   saveSkillOverride,
@@ -311,6 +312,14 @@ export function SkillDetailView({ skill, readOnly }: Props) {
 
   return (
     <div className="flex min-h-[calc(100vh-56px)] flex-col">
+      {/* Mobile back affordance (no sidebar on < lg) */}
+      <Link
+        href="/skills"
+        className="flex min-h-11 items-center gap-1 border-b border-outline-variant bg-surface px-4 text-sm text-on-surface-variant hover:text-on-surface lg:hidden"
+      >
+        <ChevronLeftIcon className="h-4 w-4" />
+        Skills
+      </Link>
       {/* Page header */}
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-outline-variant bg-surface px-6 py-4">
         <div className="flex flex-wrap items-center gap-3">
@@ -429,7 +438,7 @@ export function SkillDetailView({ skill, readOnly }: Props) {
                       }
                     }}
                     placeholder="stdout.json, slack:#bugs, …"
-                    className="h-9 flex-1 rounded-md border border-dashed border-outline-variant bg-surface px-3 text-sm text-on-surface placeholder:text-on-surface-variant focus:border-primary focus:outline-none"
+                    className="h-9 flex-1 rounded-md border border-dashed border-outline-variant bg-surface px-3 text-base text-on-surface placeholder:text-on-surface-variant focus:border-primary focus:outline-none lg:text-sm"
                   />
                   <button
                     type="button"
@@ -447,7 +456,7 @@ export function SkillDetailView({ skill, readOnly }: Props) {
 
           <div className="mt-8">
             <SectionLabel>AI Skill Capabilities</SectionLabel>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               {CAPABILITIES.map((cap) => {
                 const active = capabilities.has(cap.id);
                 return (
@@ -534,7 +543,7 @@ export function SkillDetailView({ skill, readOnly }: Props) {
                 }}
                 readOnly={readOnly}
                 spellCheck={false}
-                className="block h-full min-h-[420px] w-full resize-none bg-surface-container-lowest p-5 font-mono text-[13px] leading-[20px] text-on-surface focus:outline-none"
+                className="block h-full min-h-[240px] w-full resize-none bg-surface-container-lowest p-5 font-mono text-base leading-[20px] text-on-surface focus:outline-none lg:min-h-[420px] lg:text-[13px]"
               />
             )}
           </div>
@@ -594,7 +603,7 @@ export function SkillDetailView({ skill, readOnly }: Props) {
         >
           {hasOverride ? 'Delete override' : 'Discard changes'}
         </button>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {saveError && <span className="text-xs text-error">{saveError}</span>}
           <button
             type="button"
@@ -677,7 +686,7 @@ function Input({ value, readOnly }: { value: string; readOnly?: boolean }) {
     <input
       value={value}
       readOnly={readOnly}
-      className="h-9 w-full rounded-md border border-outline-variant bg-surface px-3 text-sm text-on-surface read-only:opacity-80 focus:border-primary focus:outline-none"
+      className="h-9 w-full rounded-md border border-outline-variant bg-surface px-3 text-base text-on-surface read-only:opacity-80 focus:border-primary focus:outline-none lg:text-sm"
     />
   );
 }
@@ -699,7 +708,7 @@ function Select({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         disabled={disabled}
-        className="h-9 w-full appearance-none rounded-md border border-outline-variant bg-surface px-3 pr-9 text-sm text-on-surface focus:border-primary focus:outline-none disabled:opacity-60"
+        className="h-9 w-full appearance-none rounded-md border border-outline-variant bg-surface px-3 pr-9 text-base text-on-surface focus:border-primary focus:outline-none disabled:opacity-60 lg:text-sm"
       >
         {options.map((o) => (
           <option key={o.value} value={o.value}>

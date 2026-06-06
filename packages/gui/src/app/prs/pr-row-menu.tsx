@@ -1,9 +1,10 @@
 'use client';
 
-import { useCallback, useEffect, useId, useRef, useState, useTransition } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, useTransition } from 'react';
 import { cn } from '@/components/ui/cn';
 import { MoreVerticalIcon } from '@/components/icons';
 import { RowMenuPortal } from '@/components/row-menu-portal';
+import { ActionSheet, type ActionSheetItem } from '@/components/ui/action-sheet';
 import { RunActionForPrModal } from './run-action-for-pr-modal';
 
 export interface PrRowMenuProps {
@@ -26,12 +27,24 @@ export function PrRowMenu({ prNumber, prTitle, prUrl, readOnly = false }: PrRowM
   const [open, setOpen] = useState(false);
   const [runActionOpen, setRunActionOpen] = useState(false);
   const [pending] = useTransition();
+  const [coarse, setCoarse] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
   const menuId = useId();
 
+  // Coarse pointer (touch) → open a bottom ActionSheet instead of the 224px
+  // portal popover anchored to a tiny kebab.
   useEffect(() => {
-    if (!open) return;
+    if (typeof window === 'undefined' || !window.matchMedia) return;
+    const mq = window.matchMedia('(pointer: coarse)');
+    const update = () => setCoarse(mq.matches);
+    update();
+    mq.addEventListener('change', update);
+    return () => mq.removeEventListener('change', update);
+  }, []);
+
+  useEffect(() => {
+    if (!open || coarse) return;
     function onDocClick(e: MouseEvent) {
       const target = e.target as Node | null;
       if (!target) return;
@@ -52,7 +65,7 @@ export function PrRowMenu({ prNumber, prTitle, prUrl, readOnly = false }: PrRowM
       document.removeEventListener('mousedown', onDocClick);
       document.removeEventListener('keydown', onKey);
     };
-  }, [open]);
+  }, [open, coarse]);
 
   const doCopyNumber = useCallback(() => {
     void navigator.clipboard.writeText(`#${prNumber}`).then(
@@ -92,6 +105,25 @@ export function PrRowMenu({ prNumber, prTitle, prUrl, readOnly = false }: PrRowM
     }
     item.onSelect?.();
   }
+
+  // Same items, mapped to the touch ActionSheet's shape. The sheet closes
+  // itself before invoking onSelect, so each handler just runs its action.
+  const sheetItems = useMemo<ActionSheetItem[]>(
+    () =>
+      items.map((item) => ({
+        label: item.label,
+        disabled: item.disabled || pending,
+        onSelect: () => {
+          if (item.href) {
+            window.open(item.href, '_blank', 'noopener,noreferrer');
+            return;
+          }
+          item.onSelect?.();
+        },
+      })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [items, pending],
+  );
 
   function handleTriggerKey(e: React.KeyboardEvent<HTMLButtonElement>) {
     if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
@@ -156,21 +188,30 @@ export function PrRowMenu({ prNumber, prTitle, prUrl, readOnly = false }: PrRowM
         aria-label={`PR #${prNumber} actions`}
         onClick={() => setOpen((v) => !v)}
         onKeyDown={handleTriggerKey}
-        className="flex h-7 w-7 items-center justify-center rounded-md text-on-surface-variant hover:bg-surface-container hover:text-on-surface"
+        className="flex min-h-11 min-w-11 items-center justify-center rounded-md text-on-surface-variant hover:bg-surface-container hover:text-on-surface lg:h-7 lg:w-7 lg:min-h-0 lg:min-w-0"
       >
         <MoreVerticalIcon className="h-4 w-4" />
       </button>
-      <RowMenuPortal
-        open={open}
-        triggerRef={triggerRef}
-        popoverRef={popoverRef}
-        onClose={() => setOpen(false)}
-        id={menuId}
-        ariaLabel={`PR #${prNumber} actions menu`}
-        onKeyDown={handleMenuKey}
-      >
-        {rendered}
-      </RowMenuPortal>
+      {coarse ? (
+        <ActionSheet
+          open={open}
+          onClose={() => setOpen(false)}
+          items={sheetItems}
+          title={`PR #${prNumber}`}
+        />
+      ) : (
+        <RowMenuPortal
+          open={open}
+          triggerRef={triggerRef}
+          popoverRef={popoverRef}
+          onClose={() => setOpen(false)}
+          id={menuId}
+          ariaLabel={`PR #${prNumber} actions menu`}
+          onKeyDown={handleMenuKey}
+        >
+          {rendered}
+        </RowMenuPortal>
+      )}
       {runActionOpen && (
         <RunActionForPrModal
           prNumber={prNumber}

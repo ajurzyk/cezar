@@ -1,33 +1,10 @@
 import Link from 'next/link';
 import { signOut } from '@/app/auth/actions';
 import { switchWorkspace } from '@/app/workspace/actions';
-import { NavLink } from './nav-link';
-import {
-  InboxIcon,
-  IssuesIcon,
-  PullRequestIcon,
-  SparkleIcon,
-  BoltIcon,
-  TerminalIcon,
-  ClockIcon,
-  SettingsIcon,
-  PlayIcon,
-} from './icons';
+import { NavItems } from './shell/nav-items';
 import type { SessionUser } from '@/lib/auth';
 import type { ActiveWorkspace, WorkspaceListItem } from '@/lib/workspace';
 import { cn } from './ui/cn';
-
-const NAV = [
-  { href: '/inbox',     label: 'Inbox',    icon: <InboxIcon className="h-5 w-5" /> },
-  { href: '/issues',    label: 'Issues',   icon: <IssuesIcon className="h-5 w-5" /> },
-  { href: '/prs',       label: 'PRs',      icon: <PullRequestIcon className="h-5 w-5" /> },
-  { href: '/skills',    label: 'Skills',   icon: <SparkleIcon className="h-5 w-5" /> },
-  { href: '/actions',   label: 'Actions',  icon: <BoltIcon className="h-5 w-5" /> },
-  { href: '/cockpit',   label: 'Runs',     icon: <TerminalIcon className="h-5 w-5" /> },
-  { href: '/workflows', label: 'Workflows', icon: <PlayIcon className="h-5 w-5" /> },
-  { href: '/activity',  label: 'Activity', icon: <ClockIcon className="h-5 w-5" /> },
-  { href: '/settings',  label: 'Settings', icon: <SettingsIcon className="h-5 w-5" /> },
-] as const;
 
 interface SidebarProps {
   user: SessionUser;
@@ -45,7 +22,7 @@ export function Sidebar({ user, workspace, workspaces }: SidebarProps) {
     .toUpperCase();
 
   return (
-    <aside className="sticky top-0 flex h-screen w-sidebar shrink-0 flex-col overflow-y-auto border-r border-outline-variant bg-surface-container-low">
+    <aside className="sticky top-0 hidden h-screen w-sidebar shrink-0 flex-col overflow-y-auto border-r border-outline-variant bg-surface-container-low lg:flex">
       {/* Brand */}
       <div className="px-6 pt-6 pb-5">
         <svg
@@ -87,9 +64,7 @@ export function Sidebar({ user, workspace, workspaces }: SidebarProps) {
 
       {/* Nav */}
       <nav className="flex flex-col gap-1 px-3">
-        {NAV.map((item) => (
-          <NavLink key={item.href} href={item.href} label={item.label} icon={item.icon} />
-        ))}
+        <NavItems />
         {workspace?.role === 'admin' && (
           <Link
             href="/workspaces/new"
@@ -130,7 +105,7 @@ export function Sidebar({ user, workspace, workspaces }: SidebarProps) {
   );
 }
 
-function WorkspaceSwitcher({
+export function WorkspaceSwitcher({
   current,
   workspaces,
 }: {

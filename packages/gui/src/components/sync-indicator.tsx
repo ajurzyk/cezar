@@ -14,9 +14,6 @@ type SyncStatusRow = Database['public']['Tables']['sync_status']['Row'];
  *  server-side guard in sync-action.ts and sync-button.tsx. */
 const STALE_SYNC_MS = 10 * 60 * 1000;
 
-/** Synced within this window → render a subtle "fresh" tint on the dot. */
-const FRESH_SYNC_MS = 5 * 60 * 1000;
-
 /** A webhook delivery within this window counts as "recent activity" — older
  *  than this and a Live workspace's tooltip softens to "(no recent activity)". */
 const WEBHOOK_FRESH_MS = 24 * 60 * 60 * 1000;
@@ -197,11 +194,6 @@ export function SyncIndicator({ workspaceId, initialStatus, readOnly, syncMode, 
   })();
 
   const lastSyncedAt = status?.finished_at ?? (status?.status === 'done' ? status?.updated_at : null);
-  const isFresh =
-    !syncing &&
-    !isError &&
-    Boolean(lastSyncedAt) &&
-    Date.now() - new Date(lastSyncedAt as string).getTime() < FRESH_SYNC_MS;
 
   // ── Staleness (spec §3): amber when the last successful sync is older than
   // max(2 × interval, 30 min) and nothing is in flight. Suppressed for manual
@@ -296,19 +288,19 @@ export function SyncIndicator({ workspaceId, initialStatus, readOnly, syncMode, 
     return { lines, cta: null };
   })();
 
-  // Dot color: amber (tertiary) for transient errors + stale data; red for
-  // permanent failures; primary tints for syncing/fresh; outline otherwise.
-  const dotColor = syncing
-    ? 'bg-primary animate-pulse'
-    : isTransientError
-      ? 'bg-tertiary'
-      : isError
-        ? 'bg-error'
-        : isStaleData
-          ? 'bg-tertiary'
-          : isFresh
-            ? 'bg-primary/60'
-            : 'bg-outline';
+  // Sync-icon color (traffic light): green when up to date, amber/yellow when
+  // data is stale or a transient rate-limit is in play, red when sync isn't
+  // possible (permanent failure). While syncing the icon spins in the primary
+  // tint; a never-synced workspace stays muted/neutral.
+  const iconColor = syncing
+    ? 'text-primary animate-spin'
+    : isError
+      ? 'text-error'
+      : isTransientError || isStaleData
+        ? 'text-tertiary'
+        : lastSyncedAt
+          ? 'text-emerald-400'
+          : 'text-on-surface-variant';
 
   const aria = syncing ? 'Syncing…' : isError ? 'Sync failed' : 'Sync now';
 
@@ -328,7 +320,7 @@ export function SyncIndicator({ workspaceId, initialStatus, readOnly, syncMode, 
           syncing && 'cursor-wait',
         )}
       >
-        <span className={cn('h-2 w-2 shrink-0 rounded-full transition-colors', dotColor)} aria-hidden />
+        <SyncIcon className={cn('h-4 w-4 shrink-0 transition-colors', iconColor)} />
         {/* First-import (spec §2): a thin determinate bar + count, replacing the
          *  bare pulsing dot so the slow onboarding import shows real progress. */}
         {importProgress && (
@@ -397,7 +389,7 @@ export function SyncIndicator({ workspaceId, initialStatus, readOnly, syncMode, 
       </div>
 
       {/* "What changed" toast (spec §4) — a transient popover anchored under the
-       *  dot, shown only after a user-initiated "sync now" completes. Auto-
+       *  icon, shown only after a user-initiated "sync now" completes. Auto-
        *  dismisses after ~5s; dismissable on click. */}
       {toast && (
         <div
@@ -409,5 +401,26 @@ export function SyncIndicator({ workspaceId, initialStatus, readOnly, syncMode, 
         </div>
       )}
     </div>
+  );
+}
+
+/** Two-arrow "sync" glyph (Feather refresh-cw). Color + spin come from the
+ *  caller via `className` so the status palette / animation stay in one place. */
+function SyncIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <polyline points="23 4 23 10 17 10" />
+      <polyline points="1 20 1 14 7 14" />
+      <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+    </svg>
   );
 }

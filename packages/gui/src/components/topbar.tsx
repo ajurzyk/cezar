@@ -32,7 +32,7 @@ export function TopBar({ user, workspaceId, readOnly, initialSyncStatus, syncMod
   );
 
   return (
-    <header className="sticky top-0 z-10 flex h-topbar items-center justify-end gap-4 border-b border-outline-variant bg-surface px-6 backdrop-blur">
+    <header className="sticky top-0 z-sticky hidden h-topbar items-center justify-end gap-4 border-b border-outline-variant bg-surface px-6 backdrop-blur lg:flex">
       <div className="flex items-center gap-2">
         {workspaceId && (
           <SyncIndicator

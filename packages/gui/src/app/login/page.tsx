@@ -7,7 +7,7 @@ export default async function LoginPage({
 }) {
   const { error } = await searchParams;
   return (
-    <div className="flex min-h-screen items-center justify-center bg-bg">
+    <div className="flex min-h-screen min-h-dvh items-center justify-center bg-bg px-4">
       <div className="w-full max-w-sm rounded-xl border border-border bg-bg-elevated p-8">
         <div className="mb-6 text-center">
           <h1 className="text-2xl font-semibold tracking-tight">CEZAR</h1>

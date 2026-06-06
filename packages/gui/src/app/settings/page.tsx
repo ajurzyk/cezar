@@ -6,6 +6,7 @@ import { TeamSection } from './team-section';
 import { AutomationSection } from './automation-section';
 import { LabelsSection, type AcceptedLabelRow } from './labels-section';
 import { SettingsTabs, SettingsCard } from './settings-tabs';
+import { PageContainer } from '@/components/ui/page-container';
 import type {
   DigestMode,
   LabelAnalysisInputsSummary,
@@ -84,16 +85,16 @@ export default async function SettingsPage() {
 
   if (!workspace || !user) {
     return (
-      <div className="mx-auto max-w-[1080px] px-8 py-6">
+      <PageContainer max="max-w-[1080px]">
         <header className="mb-6">
-          <h1 className="font-display text-[28px] font-semibold leading-tight tracking-tight text-on-surface">
+          <h1 className="font-display text-xl font-semibold leading-tight tracking-tight text-on-surface sm:text-2xl lg:text-[28px]">
             Settings
           </h1>
         </header>
         <div className="rounded-lg border border-dashed border-outline-variant bg-surface-container-low p-8 text-center text-sm text-on-surface-variant">
           No workspace selected. Create one first.
         </div>
-      </div>
+      </PageContainer>
     );
   }
 

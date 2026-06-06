@@ -109,7 +109,7 @@ function RunTooltip({ run }: { run: ActionRunSummary }) {
   const durationMs =
     run.finishedAt ? Math.max(0, new Date(run.finishedAt).getTime() - ranAt.getTime()) : null;
   return (
-    <div className="min-w-[260px] max-w-[320px] text-xs leading-relaxed">
+    <div className="w-[min(320px,calc(100vw-16px))] text-xs leading-relaxed">
       <header className="flex items-start justify-between gap-3 border-b border-outline-variant/60 px-3 py-2.5">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
@@ -171,7 +171,7 @@ function RunTooltip({ run }: { run: ActionRunSummary }) {
 
 function OverflowTooltip({ runs }: { runs: ActionRunSummary[] }) {
   return (
-    <div className="max-h-[320px] min-w-[260px] max-w-[320px] overflow-y-auto py-1.5">
+    <div className="max-h-[320px] w-[min(320px,calc(100vw-16px))] overflow-y-auto py-1.5">
       <div className="px-3 py-1 font-display text-[10px] font-semibold uppercase tracking-wider text-outline">
         Older runs
       </div>
@@ -238,11 +238,25 @@ function HoverPopover({
   const showTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [open, setOpen] = useState(false);
+  const [coarse, setCoarse] = useState(false);
+  const wrapRef = useRef<HTMLSpanElement | null>(null);
+
+  // Coarse pointers (touch) get no hover events — detect and switch to a
+  // tap-to-toggle interaction instead, keeping the hover path for `pointer:fine`.
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return;
+    const mq = window.matchMedia('(pointer: coarse)');
+    const update = () => setCoarse(mq.matches);
+    update();
+    mq.addEventListener('change', update);
+    return () => mq.removeEventListener('change', update);
+  }, []);
 
   // Defer opening by OPEN_DELAY_MS to avoid noisy flicker as the cursor
   // brushes past rows of dots. Close has its own grace so mouse can travel
-  // from anchor into the tooltip.
+  // from anchor into the tooltip. Skipped on coarse pointers (tap-driven).
   useEffect(() => {
+    if (coarse) return;
     if (hover) {
       if (hideTimer.current) clearTimeout(hideTimer.current);
       showTimer.current = setTimeout(() => setOpen(true), OPEN_DELAY_MS);
@@ -254,7 +268,7 @@ function HoverPopover({
       if (showTimer.current) clearTimeout(showTimer.current);
       if (hideTimer.current) clearTimeout(hideTimer.current);
     };
-  }, [hover]);
+  }, [hover, coarse]);
 
   // Esc closes immediately.
   useEffect(() => {
@@ -266,12 +280,39 @@ function HoverPopover({
     return () => window.removeEventListener('keydown', onKey);
   }, [open]);
 
+  // Coarse-pointer (tap) variant: dismiss on outside tap / scroll, like the
+  // shared ResponsiveTooltip. The trigger itself toggles via onClick below.
+  useEffect(() => {
+    if (!open || !coarse) return;
+    function onDown(e: Event) {
+      const t = e.target as Node | null;
+      if (t && wrapRef.current?.contains(t)) return;
+      setOpen(false);
+    }
+    const onScroll = () => setOpen(false);
+    document.addEventListener('pointerdown', onDown, true);
+    window.addEventListener('scroll', onScroll, true);
+    return () => {
+      document.removeEventListener('pointerdown', onDown, true);
+      window.removeEventListener('scroll', onScroll, true);
+    };
+  }, [open, coarse]);
+
   return (
     <span
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      onFocus={() => setHover(true)}
-      onBlur={() => setHover(false)}
+      ref={wrapRef}
+      onMouseEnter={() => !coarse && setHover(true)}
+      onMouseLeave={() => !coarse && setHover(false)}
+      onFocus={() => !coarse && setHover(true)}
+      onBlur={() => !coarse && setHover(false)}
+      onClick={(e) => {
+        if (!coarse) return;
+        // The dot is a <Link>; on touch the first tap should reveal the
+        // tooltip rather than navigate. Suppress navigation while closed.
+        if (!open) e.preventDefault();
+        e.stopPropagation();
+        setOpen((v) => !v);
+      }}
       className="inline-flex"
     >
       {children}
@@ -346,7 +387,7 @@ function TooltipPortal({
         left: coords?.left ?? -9999,
         opacity: coords ? 1 : 0,
       }}
-      className="z-50 overflow-hidden rounded-md border border-outline-variant bg-surface-container-high shadow-ambient"
+      className="z-tooltip overflow-hidden rounded-md border border-outline-variant bg-surface-container-high shadow-ambient"
     >
       {children}
     </div>,

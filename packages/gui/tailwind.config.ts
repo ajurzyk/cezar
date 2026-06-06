@@ -76,9 +76,21 @@ const config: Config = {
         },
       },
       fontFamily: {
-        sans: ['Inter', 'ui-sans-serif', 'system-ui', '-apple-system', 'Segoe UI', 'sans-serif'],
-        display: ['"Space Grotesk"', 'Inter', 'ui-sans-serif', 'sans-serif'],
-        mono: ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+        sans: ['var(--font-sans)', 'ui-sans-serif', 'system-ui', '-apple-system', 'Segoe UI', 'sans-serif'],
+        display: ['var(--font-display)', 'var(--font-sans)', 'ui-sans-serif', 'sans-serif'],
+        mono: ['var(--font-mono)', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+      },
+      // Documented layering scale (spec §3.6) — replaces scattered z-* literals
+      // for every new overlay/nav/toast layer. Use the tokens (z-overlay,
+      // z-backdrop, …) rather than raw numbers going forward.
+      zIndex: {
+        sticky: '30',
+        nav: '40',
+        backdrop: '50',
+        overlay: '60',
+        popover: '70',
+        toast: '80',
+        tooltip: '90',
       },
       fontSize: {
         'label-caps': ['11px', { lineHeight: '16px', letterSpacing: '0.05em', fontWeight: '600' }],

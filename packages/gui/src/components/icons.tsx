@@ -147,6 +147,32 @@ export function MoreVerticalIcon(props: IconProps) {
   );
 }
 
+export function MoreIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <circle cx="5.5" cy="12" r="1.1" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="12" r="1.1" fill="currentColor" stroke="none" />
+      <circle cx="18.5" cy="12" r="1.1" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+export function MenuIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M4 6h16M4 12h16M4 18h16" />
+    </svg>
+  );
+}
+
+export function CloseIcon(props: IconProps) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M6 6l12 12M18 6L6 18" />
+    </svg>
+  );
+}
+
 export function FileIcon(props: IconProps) {
   return (
     <svg {...base} {...props}>

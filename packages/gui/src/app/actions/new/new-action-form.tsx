@@ -75,8 +75,9 @@ export function NewActionForm({ readOnly }: NewActionFormProps) {
           disabled={readOnly || pending}
           aria-invalid={shownNameError ? 'true' : undefined}
           aria-describedby={shownNameError ? 'new-action-name-error' : 'new-action-name-hint'}
+          enterKeyHint="next"
           className={cn(
-            'h-9 w-full rounded-md border bg-surface px-3 text-sm text-on-surface focus:outline-none disabled:opacity-60',
+            'h-9 w-full rounded-md border bg-surface px-3 text-base lg:text-sm text-on-surface focus:outline-none disabled:opacity-60',
             shownNameError
               ? 'border-error focus:border-error'
               : 'border-outline-variant focus:border-primary',
@@ -102,7 +103,8 @@ export function NewActionForm({ readOnly }: NewActionFormProps) {
           placeholder="One-line description (optional)"
           disabled={readOnly || pending}
           maxLength={200}
-          className="h-9 w-full rounded-md border border-outline-variant bg-surface px-3 text-sm text-on-surface focus:border-primary focus:outline-none disabled:opacity-60"
+          enterKeyHint="done"
+          className="h-9 w-full rounded-md border border-outline-variant bg-surface px-3 text-base lg:text-sm text-on-surface focus:border-primary focus:outline-none disabled:opacity-60"
         />
       </label>
 
@@ -113,7 +115,7 @@ export function NewActionForm({ readOnly }: NewActionFormProps) {
           value={target}
           onChange={(e) => setTarget(e.target.value === 'pr' ? 'pr' : 'issue')}
           disabled={readOnly || pending}
-          className="h-9 w-full rounded-md border border-outline-variant bg-surface px-3 text-sm text-on-surface focus:border-primary focus:outline-none disabled:opacity-60"
+          className="h-9 w-full rounded-md border border-outline-variant bg-surface px-3 text-base lg:text-sm text-on-surface focus:border-primary focus:outline-none disabled:opacity-60"
         >
           <option value="issue">Issue</option>
           <option value="pr">Pull request</option>
@@ -129,17 +131,17 @@ export function NewActionForm({ readOnly }: NewActionFormProps) {
         </div>
       )}
 
-      <div className="flex justify-end gap-2 pt-2">
+      <div className="flex flex-col-reverse gap-2 pt-2 sm:flex-row sm:flex-wrap sm:justify-end">
         <Link
           href="/actions"
-          className="inline-flex h-9 items-center rounded-md border border-outline-variant bg-surface px-3 text-sm text-on-surface-variant transition-colors hover:border-primary hover:text-on-surface"
+          className="inline-flex h-9 w-full sm:w-auto items-center justify-center rounded-md border border-outline-variant bg-surface px-3 text-sm text-on-surface-variant transition-colors hover:border-primary hover:text-on-surface"
         >
           Cancel
         </Link>
         <button
           type="submit"
           disabled={submitDisabled}
-          className="inline-flex h-9 items-center gap-2 rounded-md bg-primary px-3 text-sm font-semibold text-primary-on transition-colors hover:bg-primary-container hover:text-on-surface disabled:cursor-not-allowed disabled:opacity-50"
+          className="inline-flex h-9 w-full sm:w-auto items-center justify-center gap-2 rounded-md bg-primary px-3 text-sm font-semibold text-primary-on transition-colors hover:bg-primary-container hover:text-on-surface disabled:cursor-not-allowed disabled:opacity-50"
         >
           {pending && (
             <span

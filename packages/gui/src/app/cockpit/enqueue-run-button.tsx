@@ -37,30 +37,33 @@ export function EnqueueRunButton({ disabled }: { disabled?: boolean }) {
   }
 
   return (
-    <div className="flex items-center gap-2 text-sm">
+    <div className="flex flex-col gap-2 text-sm sm:flex-row sm:items-center">
       <select
         value={workflow}
         onChange={(e) => setWorkflow(e.target.value as 'autofix' | 'triage')}
         disabled={disabled || pending}
-        className="rounded border border-border bg-bg px-2 py-1 text-fg-muted"
+        className="min-h-11 w-full rounded border border-border bg-bg px-2 py-1 text-fg-muted sm:min-h-0 sm:w-auto"
       >
         <option value="autofix">autofix</option>
         <option value="triage">triage</option>
       </select>
-      <input
-        value={issue}
-        onChange={(e) => setIssue(e.target.value)}
-        placeholder="issue #"
-        disabled={disabled || pending}
-        className="w-20 rounded border border-border bg-bg px-2 py-1"
-      />
-      <button
-        onClick={submit}
-        disabled={disabled || pending}
-        className="rounded-md bg-accent px-2.5 py-1 text-xs font-medium text-bg hover:bg-accent-hover disabled:opacity-50"
-      >
-        {pending ? 'Queuing…' : 'Run workflow'}
-      </button>
+      <div className="flex items-center gap-2">
+        <input
+          value={issue}
+          onChange={(e) => setIssue(e.target.value)}
+          placeholder="issue #"
+          inputMode="numeric"
+          disabled={disabled || pending}
+          className="min-h-11 w-20 rounded border border-border bg-bg px-2 py-1 text-base sm:min-h-0 sm:text-sm"
+        />
+        <button
+          onClick={submit}
+          disabled={disabled || pending}
+          className="min-h-11 flex-1 rounded-md bg-accent px-2.5 py-1 text-xs font-medium text-bg hover:bg-accent-hover disabled:opacity-50 sm:min-h-0 sm:flex-none"
+        >
+          {pending ? 'Queuing…' : 'Run workflow'}
+        </button>
+      </div>
       {msg && <span className="text-xs text-fg-muted">{msg}</span>}
     </div>
   );

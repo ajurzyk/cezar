@@ -249,7 +249,7 @@ export function LabelsSection({ initial, acceptedLabels, readOnly }: LabelsSecti
             )}
           </div>
           {a.inputs_summary && (
-            <dl className="mt-3 grid grid-cols-2 gap-x-6 gap-y-1 text-xs text-on-surface-variant">
+            <dl className="mt-3 grid grid-cols-1 gap-x-6 gap-y-1 text-xs text-on-surface-variant sm:grid-cols-2">
               <dt>GitHub labels</dt>
               <dd className="text-on-surface">{a.inputs_summary.github_labels}</dd>
               <dt>Issues scanned</dt>

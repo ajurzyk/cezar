@@ -20,7 +20,7 @@ export function CockpitTabs() {
   if (isDetail) return null;
   return (
     <div className="border-b border-border bg-bg">
-      <div className="flex items-center gap-1 px-8 pt-4">
+      <div className="flex items-center gap-1 overflow-x-auto whitespace-nowrap px-4 pt-4 sm:px-6 lg:px-8">
         <TabLink href="/cockpit" active={!isRunners}>Runs</TabLink>
         <TabLink href="/cockpit/runners" active={isRunners}>Runners</TabLink>
       </div>
@@ -34,8 +34,8 @@ function TabLink({ href, active, children }: { href: string; active: boolean; ch
       href={href}
       className={
         active
-          ? 'border-b-2 border-accent px-4 py-2 text-sm font-medium text-fg'
-          : 'border-b-2 border-transparent px-4 py-2 text-sm text-fg-muted hover:text-fg'
+          ? 'inline-flex min-h-11 items-center border-b-2 border-accent px-4 py-2 text-sm font-medium text-fg lg:min-h-0'
+          : 'inline-flex min-h-11 items-center border-b-2 border-transparent px-4 py-2 text-sm text-fg-muted hover:text-fg lg:min-h-0'
       }
     >
       {children}

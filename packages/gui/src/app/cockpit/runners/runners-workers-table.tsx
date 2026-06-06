@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { createSupabaseBrowserClient } from '@/lib/supabase/browser';
 import { timeAgo } from '@/lib/time-ago';
 import { cn } from '@/components/ui/cn';
+import { EntityCard, MetaRow, MetaItem } from '@/components/ui/data-card-list';
 import type { RunnerKind, RunnerUtilization } from '@/lib/supabase/types';
 
 export interface RunnerWorkerRow {
@@ -72,7 +73,8 @@ export function RunnersWorkersTable({
   }
 
   return (
-    <div className="overflow-x-auto rounded-md border border-border bg-bg-elevated">
+    <>
+    <div className="hidden overflow-x-auto rounded-md border border-border bg-bg-elevated md:block">
       <table className="w-full text-left text-sm">
         <thead className="border-b border-border bg-bg text-xs uppercase tracking-wider text-fg-subtle">
           <tr>
@@ -92,6 +94,73 @@ export function RunnersWorkersTable({
         </tbody>
       </table>
     </div>
+
+    {/* Phone: stacked cards (P1). */}
+    <div className="space-y-3 md:hidden">
+      {rows.map((r) => (
+        <RunnerCard key={r.id} row={r} />
+      ))}
+    </div>
+    </>
+  );
+}
+
+function RunnerCard({ row }: { row: RunnerWorkerRow }) {
+  const u = row.utilization;
+  return (
+    <EntityCard
+      title={
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-medium text-fg">{row.name}</span>
+          {row.managed && (
+            <span className="rounded border border-border bg-bg px-1.5 py-0.5 font-mono text-[11px] text-fg-muted">
+              managed
+            </span>
+          )}
+          <span className="font-mono text-[11px] text-fg-subtle">{row.id.slice(0, 8)}…</span>
+        </div>
+      }
+      badge={<StatusBadge status={row.displayStatus} />}
+    >
+      <MetaRow>
+        <MetaItem label="Backends">
+          <span className="flex flex-wrap gap-1">
+            {(row.managed ? ['anthropic-api'] : row.backends).map((b) => (
+              <span key={b} className="rounded border border-border bg-bg px-1.5 py-0.5 font-mono text-[11px] text-fg-muted">
+                {b}
+              </span>
+            ))}
+          </span>
+        </MetaItem>
+      </MetaRow>
+      <MetaRow>
+        <MetaItem label="Heartbeat">
+          {row.lastHeartbeatAt ? timeAgo(row.lastHeartbeatAt) : <span className="text-fg-subtle">never</span>}
+        </MetaItem>
+        <MetaItem label="Identity">
+          <span className="font-mono">{row.ghIdentity}</span>
+        </MetaItem>
+      </MetaRow>
+      <div className="text-xs">
+        <span className="font-display text-[11px] font-semibold uppercase tracking-[0.05em] text-outline">
+          Utilization
+        </span>
+        <div className="mt-0.5 text-on-surface">
+          {u ? <UtilizationCell utilization={u} /> : <span className="text-fg-subtle">—</span>}
+        </div>
+      </div>
+      <MetaRow>
+        <MetaItem label="p50 / p95 (24h)">
+          {row.sampleCount === 0 ? (
+            <span className="text-fg-subtle">no samples</span>
+          ) : (
+            <span title={`${row.sampleCount} step${row.sampleCount === 1 ? '' : 's'} in 24h`}>
+              {formatMs(row.p50Ms)} <span className="text-fg-subtle">/</span> {formatMs(row.p95Ms)}
+            </span>
+          )}
+        </MetaItem>
+      </MetaRow>
+    </EntityCard>
   );
 }
 

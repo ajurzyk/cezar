@@ -193,7 +193,7 @@ function ProjectEnvSection({ autofix, readOnly }: { autofix: Record<string, unkn
       {!readOnly && (
         <div className="mb-5 rounded-md border border-outline-variant/60 bg-surface-container-lowest p-3">
           <div className="flex flex-wrap items-end gap-3">
-            <div className="min-w-[18rem] grow">
+            <div className="w-full grow sm:min-w-[18rem]">
               <FieldLabel htmlFor="projectEnvPreset" label="Load preset" hint="prefills the fields below — Save to persist" />
               <select
                 id="projectEnvPreset"
@@ -211,7 +211,7 @@ function ProjectEnvSection({ autofix, readOnly }: { autofix: Record<string, unkn
               type="button"
               onClick={applyPreset}
               disabled={!selectedPreset}
-              className="inline-flex h-9 items-center rounded-md border border-outline-variant px-4 text-sm font-medium text-on-surface transition-colors hover:bg-surface-container disabled:cursor-not-allowed disabled:opacity-50"
+              className="inline-flex h-9 w-full items-center justify-center rounded-md border border-outline-variant px-4 text-sm font-medium text-on-surface transition-colors hover:bg-surface-container disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto sm:justify-start"
             >
               Apply preset
             </button>
@@ -291,7 +291,7 @@ function FieldLabel({ htmlFor, label, hint }: { htmlFor: string; label: string; 
 }
 
 const INPUT_BASE =
-  'h-9 w-full rounded-md border border-outline-variant bg-surface px-3 text-sm text-on-surface placeholder:text-outline focus:border-primary focus:outline-none read-only:opacity-70 disabled:opacity-60';
+  'h-9 w-full rounded-md border border-outline-variant bg-surface px-3 text-base lg:text-sm text-on-surface placeholder:text-outline focus:border-primary focus:outline-none read-only:opacity-70 disabled:opacity-60';
 
 function TextField({ name, label, value, readOnly, hint }: { name: string; label: string; value: string; readOnly: boolean; hint?: string }) {
   return (
@@ -355,7 +355,7 @@ function TextareaField({
         readOnly={readOnly}
         placeholder={placeholder}
         rows={4}
-        className="block w-full resize-y rounded-md border border-outline-variant bg-surface-container-lowest px-3 py-2 font-mono text-[12px] leading-[18px] text-on-surface placeholder:text-outline focus:border-primary focus:outline-none read-only:opacity-70"
+        className="block w-full resize-y rounded-md border border-outline-variant bg-surface-container-lowest px-3 py-2 font-mono text-base leading-[18px] text-on-surface placeholder:text-outline focus:border-primary focus:outline-none read-only:opacity-70 lg:text-[12px]"
       />
     </div>
   );
@@ -375,7 +375,7 @@ function SelectField({
   options: Array<{ value: string; label: string }>;
 }) {
   return (
-    <div className="max-w-md">
+    <div className="w-full sm:max-w-md">
       <FieldLabel htmlFor={name} label={label} />
       <select id={name} name={name} defaultValue={value} disabled={readOnly} className={INPUT_BASE}>
         {options.map((o) => (

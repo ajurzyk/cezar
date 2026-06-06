@@ -3,6 +3,7 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { cn } from '@/components/ui/cn';
+import { PageContainer } from '@/components/ui/page-container';
 import { SparkleIcon, BoltIcon, TerminalIcon, RefreshIcon } from '@/components/icons';
 
 // ─────────────────────────────────────────────────────────────────────
@@ -39,12 +40,12 @@ export function SettingsTabs({ workspace, automation, labels, team, configuratio
   const roleLabel = useMemo(() => workspace.role.toUpperCase(), [workspace.role]);
 
   return (
-    <div className="mx-auto max-w-[1080px] px-8 py-6">
+    <PageContainer max="max-w-[1080px]">
       {/* ── Page header (matches /inbox + /issues style) ── */}
       <header className="mb-6">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
-            <h1 className="font-display text-[28px] font-semibold leading-tight tracking-tight text-on-surface">
+            <h1 className="font-display text-xl font-semibold leading-tight tracking-tight text-on-surface sm:text-2xl lg:text-[28px]">
               Settings
             </h1>
             <p className="mt-2 flex flex-wrap items-center gap-2 text-sm text-on-surface-variant">
@@ -59,16 +60,19 @@ export function SettingsTabs({ workspace, automation, labels, team, configuratio
         </div>
       </header>
 
-      {/* ── Tab bar (sticky) ── */}
-      <div className="sticky top-0 z-10 mb-6 -mx-8 border-b border-outline-variant bg-surface px-8 py-2">
-        <nav className="flex flex-wrap items-center gap-1" aria-label="Settings sections">
+      {/* ── Tab bar (sticky, horizontally scrollable on phone) ── */}
+      <div className="sticky top-0 z-sticky mb-6 -mx-4 border-b border-outline-variant bg-surface px-4 py-2 sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
+        <nav
+          className="flex items-center gap-1 overflow-x-auto whitespace-nowrap [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          aria-label="Settings sections"
+        >
           {TABS.map((tab) => (
             <button
               key={tab.id}
               type="button"
               onClick={() => setActive(tab.id)}
               className={cn(
-                'rounded-md px-3 py-1.5 text-sm transition-colors',
+                'inline-flex min-h-11 shrink-0 items-center rounded-md px-3 py-1.5 text-sm transition-colors lg:min-h-0',
                 active === tab.id
                   ? 'bg-primary/10 text-primary'
                   : 'text-on-surface-variant hover:bg-surface-container hover:text-on-surface',
@@ -89,7 +93,7 @@ export function SettingsTabs({ workspace, automation, labels, team, configuratio
         {active === 'team' && team}
         {active === 'configuration' && configuration}
       </div>
-    </div>
+    </PageContainer>
   );
 }
 
@@ -190,7 +194,7 @@ export function SettingsCard({
   return (
     <section className="rounded-lg border border-outline-variant bg-surface-container-low">
       {(title || description) && (
-        <header className="border-b border-outline-variant/60 px-6 py-4">
+        <header className="border-b border-outline-variant/60 p-4 lg:px-6 lg:py-4">
           {title && (
             <h2 className="font-display text-[15px] font-semibold tracking-tight text-on-surface">
               {title}
@@ -201,9 +205,9 @@ export function SettingsCard({
           )}
         </header>
       )}
-      <div className="px-6 py-5">{children}</div>
+      <div className="p-4 lg:px-6 lg:py-5">{children}</div>
       {footer && (
-        <footer className="border-t border-outline-variant/60 bg-surface-container/40 px-6 py-3">
+        <footer className="border-t border-outline-variant/60 bg-surface-container/40 p-4 lg:px-6 lg:py-3">
           {footer}
         </footer>
       )}

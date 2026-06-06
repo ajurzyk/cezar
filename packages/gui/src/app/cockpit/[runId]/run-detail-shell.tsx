@@ -1,7 +1,8 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState, useTransition } from 'react';
+import { useCallback, useEffect, useRef, useState, useTransition, type ReactNode } from 'react';
 import Link from 'next/link';
+import { ResponsiveTooltip } from '@/components/ui/responsive-tooltip';
 import { useRouter } from 'next/navigation';
 import { createSupabaseBrowserClient } from '@/lib/supabase/browser';
 import { cn } from '@/components/ui/cn';
@@ -58,6 +59,9 @@ export function RunDetailShell({ run: initialRun, repoOwner, repoName, role, ini
   const stickToBottom = useRef(true);
   const seenEventIds = useRef(new Set(initialEvents.map((e) => e.id)));
   const [showJump, setShowJump] = useState(false);
+  // Phone-only: which pane is visible (the two-pane grid collapses to tabs
+  // below `lg`). On `lg+` both panes render and this state is ignored.
+  const [mobileTab, setMobileTab] = useState<'steps' | 'log'>('log');
 
   // ── Realtime: agent_runs + agent_run_events scoped to this workflow_run,
   //    plus workflow_runs to refresh the header. ──
@@ -116,7 +120,7 @@ export function RunDetailShell({ run: initialRun, repoOwner, repoName, role, ini
     } else {
       setShowJump(true);
     }
-  }, [events.length]);
+  }, [events.length, mobileTab]);
 
   const onFeedScroll = () => {
     const el = feedRef.current;
@@ -161,13 +165,16 @@ export function RunDetailShell({ run: initialRun, repoOwner, repoName, role, ini
   }
 
   return (
-    <div className="flex h-screen flex-col">
+    <div className="flex h-screen h-dvh flex-col">
       {/* Header */}
-      <div className="border-b border-border px-6 py-4">
-        <div className="flex items-start justify-between gap-4">
+      <div className="border-b border-border px-4 py-4 sm:px-6">
+        <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <div className="flex items-center gap-3">
-              <Link href="/cockpit" className="text-sm text-fg-subtle hover:text-accent">
+            <div className="flex flex-wrap items-center gap-3">
+              <Link
+                href="/cockpit"
+                className="-ml-1 inline-flex min-h-11 items-center px-1 text-sm text-fg-subtle hover:text-accent lg:min-h-0 lg:ml-0 lg:px-0"
+              >
                 ← Cockpit
               </Link>
               <h1 className="text-lg font-semibold">{run.workflow}</h1>
@@ -195,7 +202,7 @@ export function RunDetailShell({ run: initialRun, repoOwner, repoName, role, ini
             </div>
             {run.reason && <div className="mt-1 text-xs text-fg-subtle">{run.reason}</div>}
           </div>
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
             {showPause && (
               <HeaderBtn label="Pause" onClick={() => act(() => pauseRun(run.id))} disabled={pending} />
             )}
@@ -237,11 +244,32 @@ export function RunDetailShell({ run: initialRun, repoOwner, repoName, role, ini
         )}
       </div>
 
-      {/* Body: step list (left) + event log (right) */}
-      <div className="grid flex-1 grid-cols-[minmax(320px,420px)_1fr] overflow-hidden">
+      {/* Phone-only segmented control: the two-pane grid below collapses to a
+          single full-width scroll region per tab. Hidden on `lg+`, where both
+          panes render side-by-side as before. */}
+      <div className="flex shrink-0 gap-1 border-b border-border px-4 py-2 lg:hidden">
+        <TabBtn active={mobileTab === 'steps'} onClick={() => setMobileTab('steps')}>
+          Steps
+          {steps.length > 0 && <span className="ml-1.5 text-fg-subtle">{steps.length}</span>}
+        </TabBtn>
+        <TabBtn active={mobileTab === 'log'} onClick={() => setMobileTab('log')}>
+          Event log
+          {!terminal && <span className="ml-1.5 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent align-middle" />}
+        </TabBtn>
+      </div>
+
+      {/* Body: step list (left) + event log (right).
+          Phone: stacked — exactly one pane shown via the segmented control above.
+          `lg`: the original two-pane grid, unchanged. */}
+      <div className="flex flex-1 flex-col overflow-hidden lg:grid lg:grid-cols-[minmax(320px,420px)_1fr]">
         {/* Steps */}
-        <div className="overflow-y-auto border-r border-border bg-bg-elevated p-4">
-          <div className="mb-3 text-xs font-medium uppercase tracking-wider text-fg-subtle">Steps</div>
+        <div
+          className={cn(
+            'flex-1 overflow-y-auto border-border bg-bg-elevated p-4 lg:flex-none lg:border-r',
+            mobileTab === 'steps' ? 'block' : 'hidden lg:block',
+          )}
+        >
+          <div className="mb-3 hidden text-xs font-medium uppercase tracking-wider text-fg-subtle lg:block">Steps</div>
           {/* TODO(phase-3b): "re-run from step N" (§3.4) needs the Phase-3c dispatcher —
               steps are read-only here for now (the disabled button below is a placeholder). */}
           {steps.length === 0 ? (
@@ -261,8 +289,13 @@ export function RunDetailShell({ run: initialRun, repoOwner, repoName, role, ini
         </div>
 
         {/* Event log */}
-        <div className="relative flex flex-col overflow-hidden">
-          <div className="border-b border-border px-4 py-2 text-xs font-medium uppercase tracking-wider text-fg-subtle">
+        <div
+          className={cn(
+            'relative flex-1 flex-col overflow-hidden',
+            mobileTab === 'log' ? 'flex' : 'hidden lg:flex',
+          )}
+        >
+          <div className="hidden border-b border-border px-4 py-2 text-xs font-medium uppercase tracking-wider text-fg-subtle lg:block">
             Event log
             {!terminal && (
               <span className="ml-2 inline-flex items-center gap-1 text-fg-subtle">
@@ -280,7 +313,7 @@ export function RunDetailShell({ run: initialRun, repoOwner, repoName, role, ini
           {showJump && (
             <button
               onClick={jumpToBottom}
-              className="absolute bottom-4 right-4 rounded-full border border-border bg-bg-elevated px-3 py-1 text-xs text-fg-muted shadow hover:text-fg"
+              className="absolute bottom-[calc(1rem+env(safe-area-inset-bottom))] right-4 inline-flex min-h-11 items-center rounded-full border border-border bg-bg-elevated px-4 text-xs text-fg-muted shadow hover:text-fg lg:min-h-0 lg:px-3 lg:py-1"
             >
               ↓ jump to bottom
             </button>
@@ -288,6 +321,32 @@ export function RunDetailShell({ run: initialRun, repoOwner, repoName, role, ini
         </div>
       </div>
     </div>
+  );
+}
+
+function TabBtn({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={cn(
+        'inline-flex min-h-11 flex-1 items-center justify-center rounded-md border px-3 text-xs font-medium transition-colors',
+        active
+          ? 'border-border bg-bg-subtle text-fg'
+          : 'border-transparent text-fg-muted hover:bg-bg-subtle/60 hover:text-fg',
+      )}
+    >
+      {children}
+    </button>
   );
 }
 
@@ -430,13 +489,12 @@ function RunnerChip({ runnerId, runner }: { runnerId: string; runner?: RunnerLoo
     ? `${runner.name} · ${runner.status}${runner.lastHeartbeatAt ? ` · heartbeat ${timeAgo(runner.lastHeartbeatAt)}` : ''} · gh: ${runner.ghIdentity}`
     : `runner ${runnerId}`;
   return (
-    <span
-      title={tip}
-      className="inline-flex items-center gap-1 rounded border border-border bg-bg-elevated px-1.5 py-0.5 font-mono text-[10px] text-fg-muted"
-    >
-      <span className="inline-block h-1.5 w-1.5 rounded-full bg-accent/60" aria-hidden />
-      {label}
-    </span>
+    <ResponsiveTooltip content={tip}>
+      <span className="inline-flex items-center gap-1 rounded border border-border bg-bg-elevated px-1.5 py-0.5 font-mono text-xs text-fg-muted lg:text-[10px]">
+        <span className="inline-block h-1.5 w-1.5 rounded-full bg-accent/60" aria-hidden />
+        {label}
+      </span>
+    </ResponsiveTooltip>
   );
 }
 
@@ -459,7 +517,7 @@ function HeaderBtn({
       disabled={disabled}
       title={title}
       className={cn(
-        'rounded-md border px-3 py-1 text-xs transition-colors disabled:opacity-50',
+        'inline-flex min-h-11 items-center rounded-md border px-3 text-xs transition-colors disabled:opacity-50 lg:min-h-0 lg:py-1',
         danger
           ? 'border-danger/40 text-danger hover:bg-danger/10'
           : 'border-border text-fg-muted hover:bg-bg-subtle hover:text-fg',

@@ -1,4 +1,5 @@
 import { getActiveWorkspace } from '@/lib/workspace';
+import { PageContainer } from '@/components/ui/page-container';
 import { loadAnalytics } from './load-analytics';
 import type { WeekBucket, DistributionEntry } from './load-analytics';
 
@@ -6,27 +7,27 @@ export default async function AnalyticsPage() {
   const workspace = await getActiveWorkspace();
   if (!workspace) {
     return (
-      <div className="px-8 py-6">
-        <h1 className="text-2xl font-semibold tracking-tight">Analytics</h1>
+      <PageContainer>
+        <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">Analytics</h1>
         <p className="mt-2 text-sm text-fg-muted">No workspace selected.</p>
-      </div>
+      </PageContainer>
     );
   }
 
   const data = await loadAnalytics(workspace.id);
   if (!data) {
     return (
-      <div className="px-8 py-6">
-        <h1 className="text-2xl font-semibold tracking-tight">Analytics</h1>
+      <PageContainer>
+        <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">Analytics</h1>
         <p className="mt-2 text-sm text-fg-muted">Failed to load analytics.</p>
-      </div>
+      </PageContainer>
     );
   }
 
   return (
-    <div className="px-8 py-6">
+    <PageContainer>
       <header className="mb-8 border-b border-border pb-5">
-        <h1 className="text-2xl font-semibold tracking-tight">Analytics</h1>
+        <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">Analytics</h1>
         <p className="mt-1 text-sm text-fg-muted">
           {workspace.repoOwner}/{workspace.repoName}
         </p>
@@ -91,7 +92,7 @@ export default async function AnalyticsPage() {
           )}
         </Card>
       </div>
-    </div>
+    </PageContainer>
   );
 }
 
@@ -113,13 +114,13 @@ function VelocityChart({ buckets }: { buckets: WeekBucket[] }) {
   return (
     <div className="flex items-end gap-1" style={{ height: 120 }}>
       {buckets.map((b) => (
-        <div key={b.week} className="flex flex-1 flex-col items-center gap-1">
+        <div key={b.week} className="flex min-w-0 flex-1 flex-col items-center gap-1">
           <div
             className="w-full rounded-sm bg-accent transition-all"
             style={{ height: `${Math.max(2, (b.opened / max) * 100)}px` }}
             title={`${b.week}: ${b.opened} opened`}
           />
-          <span className="text-[9px] text-fg-subtle">{b.week}</span>
+          <span className="truncate text-[10px] text-fg-subtle sm:text-[9px]">{b.week}</span>
         </div>
       ))}
     </div>
@@ -146,7 +147,7 @@ function HBar({ entries, colorMap }: { entries: DistributionEntry[]; colorMap?: 
     <div className="space-y-2">
       {entries.map((e) => (
         <div key={e.label} className="flex items-center gap-3">
-          <span className="w-24 truncate text-right text-xs text-fg-muted">{e.label}</span>
+          <span className="w-20 truncate text-right text-xs text-fg-muted sm:w-24">{e.label}</span>
           <div className="flex-1">
             <div
               className={`h-4 rounded-sm ${colorMap?.[e.label] ?? 'bg-accent/70'} transition-all`}

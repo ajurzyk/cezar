@@ -9,6 +9,7 @@ import {
   type CreateWorkspaceState,
 } from '../actions';
 import { LabelListEditor } from '@/components/labels/label-editor';
+import { PageContainer } from '@/components/ui/page-container';
 import type {
   LabelAnalysisInputsSummary,
   LabelAnalysisResult,
@@ -105,9 +106,9 @@ export function WorkspaceWizard() {
   }, [step, analysis, urlAnalysisId, urlWorkspaceId, syncUrl]);
 
   return (
-    <div className="mx-auto max-w-[920px] px-8 py-6">
+    <PageContainer max="max-w-[920px]">
       <header className="mb-6 border-b border-outline-variant pb-5">
-        <h1 className="font-display text-[28px] font-semibold tracking-tight text-on-surface">Create Workspace</h1>
+        <h1 className="font-display text-xl sm:text-[28px] font-semibold tracking-tight text-on-surface">Create Workspace</h1>
         <p className="mt-1 text-sm text-on-surface-variant">
           One workspace = one GitHub repository. After creation we&apos;ll analyse your label usage so
           Cezar knows when to add and remove each label.
@@ -160,7 +161,7 @@ export function WorkspaceWizard() {
           <Spinner /> Restoring your draft…
         </div>
       )}
-    </div>
+    </PageContainer>
   );
 }
 
@@ -177,7 +178,7 @@ function StepCreate({ onCreated }: { onCreated: (id: string) => void }) {
   }, [state.workspaceId, onCreated]);
 
   return (
-    <form action={formAction} className="max-w-md space-y-5">
+    <form action={formAction} className="w-full sm:max-w-md space-y-5">
       {state.error && (
         <div className="rounded-md border border-error/40 bg-error/10 px-4 py-2 text-sm text-error">{state.error}</div>
       )}
@@ -187,7 +188,7 @@ function StepCreate({ onCreated }: { onCreated: (id: string) => void }) {
       <button
         type="submit"
         disabled={pending}
-        className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-on-primary transition-colors hover:bg-primary/90 disabled:opacity-50"
+        className="w-full sm:w-auto rounded-lg bg-primary px-4 py-2 text-sm font-medium text-on-primary transition-colors hover:bg-primary/90 disabled:opacity-50"
       >
         {pending ? 'Creating…' : 'Create workspace'}
       </button>
@@ -205,7 +206,7 @@ function Field({ label, name, placeholder }: { label: string; name: string; plac
         type="text"
         placeholder={placeholder}
         required
-        className="w-full rounded-md border border-outline-variant bg-bg px-3 py-2 text-sm text-on-surface placeholder:text-outline focus:border-primary focus:outline-none"
+        className="w-full rounded-md border border-outline-variant bg-bg px-3 py-2 text-base lg:text-sm text-on-surface placeholder:text-outline focus:border-primary focus:outline-none"
       />
     </div>
   );
@@ -291,7 +292,7 @@ function StepAnalyze({
   const isTerminal = snapshot?.status && TERMINAL.includes(snapshot.status);
 
   return (
-    <div className="max-w-2xl space-y-4">
+    <div className="w-full sm:max-w-2xl space-y-4">
       <p className="text-sm text-on-surface-variant">
         Cezar is pulling every label, scanning your codebase, walking the last 100 issues and PRs
         (timeline events + comments), and asking Claude to draft a labeling guide. This usually takes
@@ -316,11 +317,11 @@ function StepAnalyze({
         </div>
       </div>
 
-      <div className="flex gap-3">
+      <div className="flex flex-col gap-3 sm:flex-row">
         <button
           type="button"
           onClick={onSkip}
-          className="rounded-md border border-outline-variant px-4 py-2 text-sm text-on-surface-variant hover:bg-surface-container"
+          className="w-full sm:w-auto rounded-md border border-outline-variant px-4 py-2 text-sm text-on-surface-variant hover:bg-surface-container"
         >
           Skip for now
         </button>
@@ -404,19 +405,19 @@ function StepReview({
         onValidityChange={setPrLabelsValid}
       />
 
-      <div className="flex items-center gap-3 border-t border-outline-variant pt-4">
+      <div className="flex flex-col gap-3 border-t border-outline-variant pt-4 sm:flex-row sm:items-center">
         <button
           type="button"
           onClick={accept}
           disabled={pending || !issueLabelsValid || !prLabelsValid}
-          className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-on-primary transition-colors hover:bg-primary/90 disabled:opacity-50"
+          className="w-full sm:w-auto rounded-md bg-primary px-4 py-2 text-sm font-medium text-on-primary transition-colors hover:bg-primary/90 disabled:opacity-50"
         >
           {pending ? 'Saving…' : 'Accept and finish'}
         </button>
         <button
           type="button"
           onClick={onSkip}
-          className="rounded-md border border-outline-variant px-4 py-2 text-sm text-on-surface-variant hover:bg-surface-container"
+          className="w-full sm:w-auto rounded-md border border-outline-variant px-4 py-2 text-sm text-on-surface-variant hover:bg-surface-container"
         >
           Skip for now
         </button>
@@ -434,9 +435,9 @@ function StepIndicator({ current }: { current: WizardStep }) {
     { id: 'review', label: '3. Review' },
   ];
   return (
-    <ol className="mb-6 flex items-center gap-2 text-xs">
+    <ol className="mb-6 flex items-center gap-2 overflow-x-auto whitespace-nowrap text-xs">
       {steps.map((s, i) => (
-        <li key={s.id} className="flex items-center gap-2">
+        <li key={s.id} className="flex shrink-0 items-center gap-2">
           <span
             className={
               s.id === current

@@ -1,6 +1,7 @@
 import { createSupabaseAdminClient } from '@/lib/supabase/server';
 import { getActiveWorkspace } from '@/lib/workspace';
 import { fetchRecentActionRuns } from '@/lib/action-runs-loader';
+import { PageContainer } from '@/components/ui/page-container';
 import { PrsView, type PrRow } from './prs-view';
 
 /**
@@ -18,12 +19,12 @@ export default async function PrsPage() {
 
   if (!workspace) {
     return (
-      <div className="px-6 py-6">
+      <PageContainer>
         <header className="mb-6">
-          <h1 className="text-[24px] font-semibold leading-tight tracking-tight text-on-surface">Pull requests</h1>
+          <h1 className="text-xl font-semibold leading-tight tracking-tight text-on-surface sm:text-[24px]">Pull requests</h1>
         </header>
         <EmptyState title="No workspace connected" body="Create a workspace first." />
-      </div>
+      </PageContainer>
     );
   }
 
@@ -73,12 +74,12 @@ export default async function PrsPage() {
 
   if (loadError) {
     return (
-      <div className="px-6 py-6">
+      <PageContainer>
         <header className="mb-6">
-          <h1 className="text-[24px] font-semibold leading-tight tracking-tight text-on-surface">Pull requests</h1>
+          <h1 className="text-xl font-semibold leading-tight tracking-tight text-on-surface sm:text-[24px]">Pull requests</h1>
         </header>
         <EmptyState title="Load failed" body={loadError} tone="danger" />
-      </div>
+      </PageContainer>
     );
   }
 

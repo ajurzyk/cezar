@@ -1,5 +1,6 @@
 import { getActiveWorkspace } from '@/lib/workspace';
 import { createSupabaseAdminClient } from '@/lib/supabase/server';
+import { PageContainer } from '@/components/ui/page-container';
 import { SkillsView, type SkillRow } from './skills-view';
 
 interface RepoSkillsRow {
@@ -62,12 +63,12 @@ export default async function SkillsPage() {
 
   if (!workspace) {
     return (
-      <div className="px-6 py-6">
+      <PageContainer>
         <PageHeader />
         <div className="mt-6 rounded-md border border-dashed border-outline-variant bg-surface-container-low p-8 text-center text-sm text-on-surface-variant">
           No workspace selected. Create one first.
         </div>
-      </div>
+      </PageContainer>
     );
   }
 

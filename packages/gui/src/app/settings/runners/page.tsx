@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { getActiveWorkspace } from '@/lib/workspace';
 import { createSupabaseAdminClient } from '@/lib/supabase/server';
 import type { RunnerKind, RunnerStatus } from '@/lib/supabase/types';
+import { PageContainer } from '@/components/ui/page-container';
 import { RunnersSection, type RunnerRowView, type RunnerDisplayStatus } from './runners-section';
 
 interface RunnerDbRow {
@@ -47,16 +48,16 @@ export default async function RunnersPage() {
 
   if (!workspace) {
     return (
-      <div className="mx-auto max-w-[1080px] px-8 py-6">
+      <PageContainer max="max-w-[1080px]">
         <header className="mb-6">
-          <h1 className="font-display text-[28px] font-semibold leading-tight tracking-tight text-on-surface">
+          <h1 className="font-display text-xl sm:text-[28px] font-semibold leading-tight tracking-tight text-on-surface">
             Runners
           </h1>
         </header>
         <div className="rounded-lg border border-dashed border-outline-variant bg-surface-container-low p-8 text-center text-sm text-on-surface-variant">
           No workspace selected. Create one first.
         </div>
-      </div>
+      </PageContainer>
     );
   }
 
@@ -83,14 +84,14 @@ export default async function RunnersPage() {
     '';
 
   return (
-    <div className="mx-auto max-w-[1080px] px-8 py-6">
+    <PageContainer max="max-w-[1080px]">
       <header className="mb-6">
         <nav className="mb-2 flex items-center gap-2 text-xs text-on-surface-variant" aria-label="Breadcrumb">
           <Link href="/settings" className="hover:text-on-surface">Settings</Link>
           <span className="text-outline">›</span>
           <span className="text-on-surface">Runners</span>
         </nav>
-        <h1 className="font-display text-[28px] font-semibold leading-tight tracking-tight text-on-surface">
+        <h1 className="font-display text-xl sm:text-[28px] font-semibold leading-tight tracking-tight text-on-surface">
           Runners
         </h1>
         <p className="mt-2 max-w-[820px] text-sm leading-relaxed text-on-surface-variant">
@@ -115,6 +116,6 @@ export default async function RunnersPage() {
         isAdmin={isAdmin}
         appUrl={appUrl}
       />
-    </div>
+    </PageContainer>
   );
 }

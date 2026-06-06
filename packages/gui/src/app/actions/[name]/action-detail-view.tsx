@@ -8,6 +8,7 @@ import {
   CheckIcon,
   RotateLeftIcon,
   ChevronDownIcon,
+  ChevronLeftIcon,
   TrashIcon,
   SparkleSmallIcon,
 } from '@/components/icons';
@@ -384,6 +385,13 @@ export function ActionDetailView({ action, readOnly }: Props) {
 
   return (
     <div className="flex min-h-[calc(100vh-56px)] flex-col">
+      <Link
+        href="/actions"
+        className="flex min-h-11 items-center gap-1 border-b border-outline-variant bg-surface px-4 text-sm text-on-surface-variant hover:text-on-surface lg:hidden"
+      >
+        <ChevronLeftIcon className="h-4 w-4" />
+        Actions
+      </Link>
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-outline-variant bg-surface px-6 py-4">
         <div className="flex flex-wrap items-center gap-3">
           <nav className="flex items-center gap-2 text-sm text-on-surface-variant">
@@ -457,7 +465,7 @@ export function ActionDetailView({ action, readOnly }: Props) {
               }}
               readOnly={readOnly}
               rows={2}
-              className="min-h-[60px] w-full resize-y rounded-md border border-outline-variant bg-surface px-3 py-2 text-sm text-on-surface placeholder:text-on-surface-variant focus:border-primary focus:outline-none"
+              className="min-h-[60px] w-full resize-y rounded-md border border-outline-variant bg-surface px-3 py-2 text-base text-on-surface placeholder:text-on-surface-variant focus:border-primary focus:outline-none lg:text-sm"
               placeholder="One-line description of what this action does."
             />
           </Field>
@@ -533,7 +541,7 @@ export function ActionDetailView({ action, readOnly }: Props) {
                     value={skillQuery}
                     onChange={(e) => setSkillQuery(e.target.value)}
                     placeholder="Search skills to add…"
-                    className="h-9 w-full rounded-md border border-dashed border-outline-variant bg-surface px-3 text-sm text-on-surface placeholder:text-on-surface-variant focus:border-primary focus:outline-none"
+                    className="h-9 w-full rounded-md border border-dashed border-outline-variant bg-surface px-3 text-base text-on-surface placeholder:text-on-surface-variant focus:border-primary focus:outline-none lg:text-sm"
                   />
                   {skillQuery.trim().length > 0 && filteredSuggestions.length > 0 && (
                     <ul className="absolute left-0 right-0 z-10 mt-1 max-h-48 overflow-auto rounded-md border border-outline-variant bg-surface-container shadow-ambient">
@@ -619,7 +627,7 @@ export function ActionDetailView({ action, readOnly }: Props) {
                   rows={6}
                   spellCheck={false}
                   placeholder='{ "type": "object", "properties": { … } }'
-                  className="w-full resize-y rounded-md border border-outline-variant bg-surface-container-lowest px-3 py-2 font-mono text-[12px] text-on-surface placeholder:text-on-surface-variant focus:border-primary focus:outline-none"
+                  className="w-full resize-y rounded-md border border-outline-variant bg-surface-container-lowest px-3 py-2 font-mono text-base text-on-surface placeholder:text-on-surface-variant focus:border-primary focus:outline-none lg:text-[12px]"
                 />
               </Field>
             </>
@@ -684,7 +692,7 @@ export function ActionDetailView({ action, readOnly }: Props) {
               }}
               readOnly={readOnly}
               spellCheck={false}
-              className="block h-full min-h-[420px] w-full resize-none bg-surface-container-lowest p-5 font-mono text-[13px] leading-[20px] text-on-surface focus:outline-none"
+              className="block h-full min-h-[240px] w-full resize-none bg-surface-container-lowest p-5 font-mono text-base leading-[20px] text-on-surface focus:outline-none lg:min-h-[420px] lg:text-[13px]"
             />
           </div>
         </section>
@@ -889,7 +897,7 @@ function Input({ value, readOnly }: { value: string; readOnly?: boolean }) {
     <input
       value={value}
       readOnly={readOnly}
-      className="h-9 w-full rounded-md border border-outline-variant bg-surface px-3 text-sm text-on-surface read-only:opacity-80 focus:border-primary focus:outline-none"
+      className="h-9 w-full rounded-md border border-outline-variant bg-surface px-3 text-base text-on-surface read-only:opacity-80 focus:border-primary focus:outline-none lg:text-sm"
     />
   );
 }
@@ -911,7 +919,7 @@ function Select({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         disabled={disabled}
-        className="h-9 w-full appearance-none rounded-md border border-outline-variant bg-surface px-3 pr-9 text-sm text-on-surface focus:border-primary focus:outline-none disabled:opacity-60"
+        className="h-9 w-full appearance-none rounded-md border border-outline-variant bg-surface px-3 pr-9 text-base text-on-surface focus:border-primary focus:outline-none disabled:opacity-60 lg:text-sm"
       >
         {options.map((o) => (
           <option key={o.value} value={o.value}>

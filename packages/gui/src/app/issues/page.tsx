@@ -3,6 +3,7 @@ import { SupabaseStoreAdapter } from '@/lib/adapters/supabase-store';
 import { getActiveWorkspace } from '@/lib/workspace';
 import type { StoredIssue } from '@cezar/core';
 import { fetchRecentActionRuns, type ActionRunSummary } from '@/lib/action-runs-loader';
+import { PageContainer } from '@/components/ui/page-container';
 import { IssuesView, type IssueRow } from './issues-view';
 
 export default async function IssuesPage() {
@@ -10,12 +11,12 @@ export default async function IssuesPage() {
 
   if (!workspace) {
     return (
-      <div className="px-6 py-6">
+      <PageContainer>
         <header className="mb-6">
-          <h1 className="text-[24px] font-semibold leading-tight tracking-tight text-on-surface">Issues</h1>
+          <h1 className="text-xl font-semibold leading-tight tracking-tight text-on-surface sm:text-[24px]">Issues</h1>
         </header>
         <EmptyState title="No workspace connected" body="Create a workspace first." />
-      </div>
+      </PageContainer>
     );
   }
 
@@ -40,12 +41,12 @@ export default async function IssuesPage() {
 
   if (loadError) {
     return (
-      <div className="px-6 py-6">
+      <PageContainer>
         <header className="mb-6">
-          <h1 className="text-[24px] font-semibold leading-tight tracking-tight text-on-surface">Issues</h1>
+          <h1 className="text-xl font-semibold leading-tight tracking-tight text-on-surface sm:text-[24px]">Issues</h1>
         </header>
         <EmptyState title="Load failed" body={loadError} tone="danger" />
-      </div>
+      </PageContainer>
     );
   }
 

@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import { getActiveWorkspace } from '@/lib/workspace';
+import { PageContainer } from '@/components/ui/page-container';
 import { loadInbox } from './load-inbox';
 import { InboxView } from './inbox-view';
 
@@ -9,7 +10,7 @@ export default async function InboxV2Page() {
   const workspace = await getActiveWorkspace();
   if (!workspace) {
     return (
-      <div className="px-8 py-6">
+      <PageContainer>
         <div className="rounded-md border border-dashed border-outline-variant bg-surface-container-low p-8 text-center text-sm text-on-surface-variant">
           No workspace selected.{' '}
           <Link href="/workspaces/new" className="text-primary hover:underline">
@@ -17,7 +18,7 @@ export default async function InboxV2Page() {
           </Link>
           .
         </div>
-      </div>
+      </PageContainer>
     );
   }
 

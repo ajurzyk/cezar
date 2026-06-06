@@ -8,6 +8,14 @@ import {
   ChevronRightIcon,
 } from '@/components/icons';
 import { RunStatusDots } from '@/components/run-status-dots';
+import { PageContainer } from '@/components/ui/page-container';
+import { FilterBar } from '@/components/ui/filter-bar';
+import {
+  EntityCard,
+  MetaRow,
+  MetaItem,
+  CardActions,
+} from '@/components/ui/data-card-list';
 import type { ActionRunSummary, RunStatus } from '@/lib/action-runs-loader';
 import { IssueRowMenu } from './issue-row-menu';
 
@@ -34,10 +42,7 @@ interface IssuesViewProps {
   readOnly: boolean;
 }
 
-type StateFilter = 'all' | 'open' | 'closed';
-type PriorityFilter = 'all' | NonNullable<IssueRow['priority']> | 'unset';
-type TypeFilter = 'all' | NonNullable<IssueRow['issueType']> | 'unset';
-type RunStatusFilter = 'all' | 'has-runs' | 'running' | 'enqueued' | 'succeeded' | 'failed' | 'none';
+type RunStatusFilter = 'has-runs' | 'running' | 'enqueued' | 'succeeded' | 'failed' | 'none';
 
 type SortKey = 'runStatus' | 'number' | 'title' | 'state' | 'priority' | 'comments';
 type SortDir = 'asc' | 'desc';
@@ -80,6 +85,16 @@ function topStatus(runs: ActionRunSummary[]): RunStatus | 'none' {
   return best;
 }
 
+/** Whether a single run-status filter value applies to a row. Each value's
+ *  meaning matches the legacy single-select predicate exactly. */
+function matchesRunStatus(row: IssueRow, value: RunStatusFilter): boolean {
+  const top = topStatus(row.actionRuns);
+  if (value === 'has-runs') return row.actionRuns.length > 0;
+  if (value === 'none') return row.actionRuns.length === 0;
+  if (value === 'enqueued') return top === 'queued';
+  return top === value;
+}
+
 export function IssuesView({
   rows,
   repoLabel,
@@ -89,34 +104,30 @@ export function IssuesView({
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<PageSize>(10);
   const [search, setSearch] = useState('');
-  const [stateFilter, setStateFilter] = useState<StateFilter>('all');
-  const [priorityFilter, setPriorityFilter] = useState<PriorityFilter>('all');
-  const [typeFilter, setTypeFilter] = useState<TypeFilter>('all');
-  const [runStatusFilter, setRunStatusFilter] = useState<RunStatusFilter>('all');
+  const [stateFilters, setStateFilters] = useState<string[]>([]);
+  const [priorityFilters, setPriorityFilters] = useState<string[]>([]);
+  const [typeFilters, setTypeFilters] = useState<string[]>([]);
+  const [runStatusFilters, setRunStatusFilters] = useState<string[]>([]);
   const [sortKey, setSortKey] = useState<SortKey>('number');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return rows.filter((r) => {
-      if (stateFilter !== 'all' && r.state !== stateFilter) return false;
-      if (priorityFilter !== 'all') {
-        if (priorityFilter === 'unset' ? r.priority !== null : r.priority !== priorityFilter) return false;
+      if (stateFilters.length > 0 && !stateFilters.includes(r.state)) return false;
+      if (priorityFilters.length > 0) {
+        const key = r.priority ?? 'unset';
+        if (!priorityFilters.includes(key)) return false;
       }
-      if (typeFilter !== 'all') {
-        if (typeFilter === 'unset' ? r.issueType !== null : r.issueType !== typeFilter) return false;
+      if (typeFilters.length > 0) {
+        const key = r.issueType ?? 'unset';
+        if (!typeFilters.includes(key)) return false;
       }
-      if (runStatusFilter !== 'all') {
-        const top = topStatus(r.actionRuns);
-        if (runStatusFilter === 'has-runs') {
-          if (r.actionRuns.length === 0) return false;
-        } else if (runStatusFilter === 'enqueued') {
-          if (top !== 'queued') return false;
-        } else if (runStatusFilter === 'none') {
-          if (r.actionRuns.length > 0) return false;
-        } else if (top !== runStatusFilter) {
-          return false;
-        }
+      if (
+        runStatusFilters.length > 0 &&
+        !runStatusFilters.some((v) => matchesRunStatus(r, v as RunStatusFilter))
+      ) {
+        return false;
       }
       if (q.length > 0) {
         const hay = `${r.number} ${r.title} ${r.labels.join(' ')}`.toLowerCase();
@@ -124,7 +135,7 @@ export function IssuesView({
       }
       return true;
     });
-  }, [rows, search, stateFilter, priorityFilter, typeFilter, runStatusFilter]);
+  }, [rows, search, stateFilters, priorityFilters, typeFilters, runStatusFilters]);
 
   const sorted = useMemo(() => {
     const out = [...filtered];
@@ -154,10 +165,10 @@ export function IssuesView({
 
   const filtersActive =
     search.trim().length > 0 ||
-    stateFilter !== 'all' ||
-    priorityFilter !== 'all' ||
-    typeFilter !== 'all' ||
-    runStatusFilter !== 'all';
+    stateFilters.length > 0 ||
+    priorityFilters.length > 0 ||
+    typeFilters.length > 0 ||
+    runStatusFilters.length > 0;
 
   function handleSort(key: SortKey) {
     if (key === sortKey) {
@@ -170,18 +181,18 @@ export function IssuesView({
 
   function resetFilters() {
     setSearch('');
-    setStateFilter('all');
-    setPriorityFilter('all');
-    setTypeFilter('all');
-    setRunStatusFilter('all');
+    setStateFilters([]);
+    setPriorityFilters([]);
+    setTypeFilters([]);
+    setRunStatusFilters([]);
     setPage(1);
   }
 
   return (
-    <div className="px-6 py-6">
+    <PageContainer>
       <header className="mb-6 flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-[24px] font-semibold leading-tight tracking-tight text-on-surface">Issues</h1>
+          <h1 className="text-xl font-semibold leading-tight tracking-tight text-on-surface sm:text-[24px]">Issues</h1>
           <p className="mt-1 text-sm text-on-surface-variant">
             <span className="font-mono">{repoLabel}</span> — {totalIssues} issue{totalIssues === 1 ? '' : 's'} synced
           </p>
@@ -200,97 +211,119 @@ export function IssuesView({
         />
       </div>
 
-      <div className="mb-4 flex flex-wrap items-center gap-2 rounded-lg border border-outline-variant bg-surface-container-low p-3">
-        <label className="relative flex min-w-[220px] flex-1 items-center">
-          <SearchIcon className="absolute left-3 h-4 w-4 text-on-surface-variant" aria-hidden />
-          <input
-            type="search"
-            value={search}
-            onChange={(e) => {
-              setSearch(e.target.value);
-              setPage(1);
-            }}
-            placeholder="Search by title, label, or number…"
-            className="h-9 w-full rounded-md border border-outline-variant bg-surface pl-9 pr-3 text-sm text-on-surface placeholder:text-on-surface-variant focus:border-primary focus:shadow-focus-primary focus:outline-none"
-          />
-        </label>
-
-        <FilterSelect
-          label="State"
-          value={stateFilter}
-          onChange={(v) => {
-            setStateFilter(v as StateFilter);
-            setPage(1);
-          }}
-          options={[
-            { value: 'all', label: 'All states' },
-            { value: 'open', label: 'Open' },
-            { value: 'closed', label: 'Closed' },
+      <div className="mb-4 rounded-lg border border-outline-variant bg-surface-container-low p-3">
+        <FilterBar
+          search={
+            <label className="relative flex w-full items-center">
+              <SearchIcon className="absolute left-3 h-4 w-4 text-on-surface-variant" aria-hidden />
+              <input
+                type="search"
+                enterKeyHint="search"
+                value={search}
+                onChange={(e) => {
+                  setSearch(e.target.value);
+                  setPage(1);
+                }}
+                placeholder="Search by title, label, or number…"
+                className="h-9 w-full rounded-md border border-outline-variant bg-surface pl-9 pr-3 text-base text-on-surface placeholder:text-on-surface-variant focus:border-primary focus:shadow-focus-primary focus:outline-none sm:text-sm"
+              />
+            </label>
+          }
+          filters={[
+            {
+              id: 'state',
+              label: 'State',
+              values: stateFilters,
+              onChange: (v) => {
+                setStateFilters(v);
+                setPage(1);
+              },
+              options: [
+                { value: 'open', label: 'Open' },
+                { value: 'closed', label: 'Closed' },
+              ],
+            },
+            {
+              id: 'priority',
+              label: 'Priority',
+              values: priorityFilters,
+              onChange: (v) => {
+                setPriorityFilters(v);
+                setPage(1);
+              },
+              options: [
+                { value: 'critical', label: 'Critical' },
+                { value: 'high', label: 'High' },
+                { value: 'medium', label: 'Medium' },
+                { value: 'low', label: 'Low' },
+                { value: 'unset', label: 'Unset' },
+              ],
+            },
+            {
+              id: 'type',
+              label: 'Type',
+              values: typeFilters,
+              onChange: (v) => {
+                setTypeFilters(v);
+                setPage(1);
+              },
+              options: [
+                { value: 'bug', label: 'Bug' },
+                { value: 'feature', label: 'Feature' },
+                { value: 'question', label: 'Question' },
+                { value: 'other', label: 'Other' },
+                { value: 'unset', label: 'Unset' },
+              ],
+            },
+            {
+              id: 'runStatus',
+              label: 'Run status',
+              values: runStatusFilters,
+              onChange: (v) => {
+                setRunStatusFilters(v);
+                setPage(1);
+              },
+              options: [
+                { value: 'has-runs', label: 'Has any run' },
+                { value: 'running', label: 'Running' },
+                { value: 'enqueued', label: 'Enqueued' },
+                { value: 'succeeded', label: 'Succeeded' },
+                { value: 'failed', label: 'Failed' },
+                { value: 'none', label: 'No runs' },
+              ],
+            },
           ]}
+          onClearAll={resetFilters}
         />
-        <FilterSelect
-          label="Priority"
-          value={priorityFilter}
-          onChange={(v) => {
-            setPriorityFilter(v as PriorityFilter);
-            setPage(1);
-          }}
-          options={[
-            { value: 'all', label: 'All priorities' },
-            { value: 'critical', label: 'Critical' },
-            { value: 'high', label: 'High' },
-            { value: 'medium', label: 'Medium' },
-            { value: 'low', label: 'Low' },
-            { value: 'unset', label: 'Unset' },
-          ]}
-        />
-        <FilterSelect
-          label="Type"
-          value={typeFilter}
-          onChange={(v) => {
-            setTypeFilter(v as TypeFilter);
-            setPage(1);
-          }}
-          options={[
-            { value: 'all', label: 'All types' },
-            { value: 'bug', label: 'Bug' },
-            { value: 'feature', label: 'Feature' },
-            { value: 'question', label: 'Question' },
-            { value: 'other', label: 'Other' },
-            { value: 'unset', label: 'Unset' },
-          ]}
-        />
-        <FilterSelect
-          label="Run status"
-          value={runStatusFilter}
-          onChange={(v) => {
-            setRunStatusFilter(v as RunStatusFilter);
-            setPage(1);
-          }}
-          options={[
-            { value: 'all', label: 'All' },
-            { value: 'has-runs', label: 'Has any run' },
-            { value: 'running', label: 'Running' },
-            { value: 'enqueued', label: 'Enqueued' },
-            { value: 'succeeded', label: 'Succeeded' },
-            { value: 'failed', label: 'Failed' },
-            { value: 'none', label: 'No runs' },
-          ]}
-        />
-
-        {filtersActive && (
-          <button
-            type="button"
-            onClick={resetFilters}
-            className="h-9 rounded-md border border-outline-variant bg-surface px-3 text-sm text-on-surface-variant transition-colors hover:border-primary hover:text-on-surface"
-          >
-            Clear filters
-          </button>
-        )}
       </div>
 
       <div className="overflow-hidden rounded-lg border border-outline-variant bg-surface-container-low">
-        <div className="overflow-x-auto">
+        {/* Phone: stacked cards (P1). */}
+        <div className="space-y-3 p-3 md:hidden">
+          {pageRows.length === 0 ? (
+            <div className="px-2 py-10 text-center text-sm text-on-surface-variant">
+              {totalIssues === 0 ? (
+                <>No issues in this workspace yet. Sync to pull them in from GitHub.</>
+              ) : (
+                <>
+                  No issues match these filters.{' '}
+                  <button
+                    type="button"
+                    onClick={resetFilters}
+                    className="underline underline-offset-2 hover:text-on-surface"
+                  >
+                    Clear filters
+                  </button>
+                </>
+              )}
+            </div>
+          ) : (
+            pageRows.map((row) => <IssueCard key={row.number} row={row} readOnly={readOnly} />)
+          )}
+        </div>
+
+        {/* Tablet/desktop: the table (md+). */}
+        <div className="hidden overflow-x-auto md:block">
           <table className="min-w-full text-sm">
             <thead>
               <tr className="bg-surface-container">
@@ -333,7 +366,7 @@ export function IssuesView({
           </table>
         </div>
 
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-outline-variant bg-surface-container-low px-6 py-4 text-sm text-on-surface-variant">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-outline-variant bg-surface-container-low px-4 py-4 text-sm text-on-surface-variant sm:px-6">
           <div className="flex flex-wrap items-center gap-3">
             <span>
               Showing {pageRows.length === 0 ? 0 : (page - 1) * pageSize + 1}
@@ -367,7 +400,7 @@ export function IssuesView({
           {totalPages > 1 && <Pagination page={page} totalPages={totalPages} onChange={setPage} />}
         </div>
       </div>
-    </div>
+    </PageContainer>
   );
 }
 
@@ -431,37 +464,6 @@ function SortIndicator({ active, dir }: { active: boolean; dir: SortDir }) {
       <span className={cn(active && dir === 'asc' ? 'text-primary' : 'text-outline-variant')}>▲</span>
       <span className={cn(active && dir === 'desc' ? 'text-primary' : 'text-outline-variant')}>▼</span>
     </span>
-  );
-}
-
-function FilterSelect<T extends string>({
-  label,
-  value,
-  onChange,
-  options,
-}: {
-  label: string;
-  value: T;
-  onChange: (value: T) => void;
-  options: { value: T; label: string }[];
-}) {
-  return (
-    <label className="flex items-center gap-2">
-      <span className="font-display text-[11px] font-semibold uppercase tracking-[0.05em] text-on-surface-variant">
-        {label}
-      </span>
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value as T)}
-        className="h-9 min-w-[7.5rem] rounded-md border border-outline-variant bg-surface px-2 text-sm text-on-surface focus:border-primary focus:outline-none"
-      >
-        {options.map((opt) => (
-          <option key={opt.value} value={opt.value}>
-            {opt.label}
-          </option>
-        ))}
-      </select>
-    </label>
   );
 }
 
@@ -542,6 +544,64 @@ function IssueTableRow({ row, readOnly }: { row: IssueRow; readOnly: boolean }) 
         </div>
       </td>
     </tr>
+  );
+}
+
+function IssueCard({ row, readOnly }: { row: IssueRow; readOnly: boolean }) {
+  const hasInflight = row.actionRuns.some(
+    (r) => r.status === 'running' || r.status === 'queued',
+  );
+  const autofixDisabled =
+    row.state === 'closed' || row.autofixStatus === 'pr-opened' || hasInflight;
+  return (
+    <EntityCard
+      leading={<RunStatusDots runs={row.actionRuns} />}
+      title={
+        <a
+          href={row.htmlUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex min-w-0 items-baseline gap-2 hover:text-primary"
+          title={row.title}
+        >
+          <span className="shrink-0 font-mono text-[13px] text-on-surface-variant">#{row.number}</span>
+          <span className="truncate">{row.title}</span>
+        </a>
+      }
+      badge={
+        <span
+          className={cn(
+            'font-mono text-[13px]',
+            row.state === 'open' ? 'text-primary' : 'text-on-surface-variant',
+          )}
+        >
+          {row.state}
+        </span>
+      }
+      actions={
+        <CardActions>
+          <IssueRowMenu
+            issueNumber={row.number}
+            issueTitle={row.title}
+            issueUrl={row.htmlUrl}
+            autofixDisabled={autofixDisabled}
+            readOnly={readOnly}
+          />
+        </CardActions>
+      }
+    >
+      <MetaRow>
+        <MetaItem label="Priority">
+          <PriorityBadge priority={row.priority} />
+        </MetaItem>
+        <MetaItem label="Comments">{row.commentCount}</MetaItem>
+      </MetaRow>
+      {row.labels.length > 0 && (
+        <MetaRow>
+          <LabelChips labels={row.labels} />
+        </MetaRow>
+      )}
+    </EntityCard>
   );
 }
 
@@ -633,29 +693,45 @@ function Pagination({
 }) {
   const pages = Array.from({ length: totalPages }, (_, i) => i + 1);
   return (
-    <div className="flex items-center gap-1">
-      <PagerButton onClick={() => onChange(Math.max(1, page - 1))} disabled={page === 1} aria-label="Previous page">
-        <ChevronLeftIcon className="h-4 w-4" />
-      </PagerButton>
-      {pages.map((p) => (
-        <button
-          key={p}
-          type="button"
-          onClick={() => onChange(p)}
-          className={cn(
-            'h-8 min-w-[2rem] rounded-md border px-2 text-sm transition-colors',
-            p === page
-              ? 'border-primary/40 bg-surface-container text-on-surface'
-              : 'border-outline-variant bg-surface-container-low text-on-surface-variant hover:border-primary hover:text-on-surface',
-          )}
-        >
-          {p}
-        </button>
-      ))}
-      <PagerButton onClick={() => onChange(Math.min(totalPages, page + 1))} disabled={page === totalPages} aria-label="Next page">
-        <ChevronRightIcon className="h-4 w-4" />
-      </PagerButton>
-    </div>
+    <>
+      {/* Phone: compact Prev · N / M · Next. */}
+      <div className="flex items-center gap-2 sm:hidden">
+        <PagerButton onClick={() => onChange(Math.max(1, page - 1))} disabled={page === 1} aria-label="Previous page">
+          <ChevronLeftIcon className="h-4 w-4" />
+        </PagerButton>
+        <span className="text-sm tabular-nums text-on-surface-variant">
+          {page} / {totalPages}
+        </span>
+        <PagerButton onClick={() => onChange(Math.min(totalPages, page + 1))} disabled={page === totalPages} aria-label="Next page">
+          <ChevronRightIcon className="h-4 w-4" />
+        </PagerButton>
+      </div>
+
+      {/* Desktop: full numeric pager. */}
+      <div className="hidden items-center gap-1 sm:flex">
+        <PagerButton onClick={() => onChange(Math.max(1, page - 1))} disabled={page === 1} aria-label="Previous page">
+          <ChevronLeftIcon className="h-4 w-4" />
+        </PagerButton>
+        {pages.map((p) => (
+          <button
+            key={p}
+            type="button"
+            onClick={() => onChange(p)}
+            className={cn(
+              'h-8 min-w-[2rem] rounded-md border px-2 text-sm transition-colors',
+              p === page
+                ? 'border-primary/40 bg-surface-container text-on-surface'
+                : 'border-outline-variant bg-surface-container-low text-on-surface-variant hover:border-primary hover:text-on-surface',
+            )}
+          >
+            {p}
+          </button>
+        ))}
+        <PagerButton onClick={() => onChange(Math.min(totalPages, page + 1))} disabled={page === totalPages} aria-label="Next page">
+          <ChevronRightIcon className="h-4 w-4" />
+        </PagerButton>
+      </div>
+    </>
   );
 }
 
@@ -670,7 +746,7 @@ function PagerButton({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className="flex h-8 w-8 items-center justify-center rounded-md border border-outline-variant bg-surface-container-low text-on-surface-variant transition-colors hover:border-primary hover:text-on-surface disabled:cursor-not-allowed disabled:opacity-40"
+      className="flex min-h-11 min-w-11 items-center justify-center rounded-md border border-outline-variant bg-surface-container-low text-on-surface-variant transition-colors hover:border-primary hover:text-on-surface disabled:cursor-not-allowed disabled:opacity-40 sm:h-8 sm:w-8 sm:min-h-0 sm:min-w-0"
       {...rest}
     >
       {children}

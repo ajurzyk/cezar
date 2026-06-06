@@ -2,6 +2,7 @@ import { redirect } from 'next/navigation';
 import { createSupabaseAdminClient, createSupabaseServerClient } from '@/lib/supabase/server';
 import { getActiveWorkspace } from '@/lib/workspace';
 import type { Database, RunnerUtilization } from '@/lib/supabase/types';
+import { PageContainer } from '@/components/ui/page-container';
 import { RunnersWorkersTable, type RunnerWorkerRow } from './runners-workers-table';
 
 type RunnerRow = Database['public']['Tables']['runners']['Row'];
@@ -105,16 +106,16 @@ export default async function CockpitRunnersPage() {
   });
 
   return (
-    <div className="px-8 py-6">
+    <PageContainer>
       <header className="mb-6 border-b border-border pb-5">
-        <h1 className="text-2xl font-semibold tracking-tight">Runners</h1>
+        <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">Runners</h1>
         <p className="mt-1 text-sm text-fg-muted">
           Workers serving this workspace. Self-hosted runners appear when they heartbeat in;
           managed entries handle the anthropic-api path through the dispatch cron.
         </p>
       </header>
       <RunnersWorkersTable rows={rows} workspaceId={workspace.id} />
-    </div>
+    </PageContainer>
   );
 }
 
