@@ -61,10 +61,15 @@ WORKDIR /app
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     PORT=3000 \
-    HOSTNAME=0.0.0.0
+    HOSTNAME=0.0.0.0 \
+    HOME=/home/nextjs
 
+# `--create-home` materializes /home/nextjs (a --system user gets the passwd
+# entry but not the directory). ensureRepoClone() clones into ~/.cezar/repos via
+# os.homedir(), so without a writable HOME every clone fails with
+# `EACCES: mkdir '/home/nextjs'`. Exporting HOME pins the lookup too.
 RUN groupadd --system --gid 1001 nodejs \
- && useradd  --system --uid 1001 --gid nodejs nextjs
+ && useradd  --system --uid 1001 --gid nodejs --create-home --home-dir /home/nextjs nextjs
 
 # `output: 'standalone'` produces a self-contained tree under
 # `packages/gui/.next/standalone/` that mirrors the monorepo layout and
