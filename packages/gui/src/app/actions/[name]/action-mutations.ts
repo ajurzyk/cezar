@@ -26,6 +26,8 @@ export interface ActionPayload {
   model: ActionModel;
   acceptanceMode: AcceptanceMode;
   confidenceConfig: ConfidenceConfig;
+  /** `flows.id` this action may suggest via suggest-workflow; null = tool not exposed. */
+  suggestedFlowId: string | null;
 }
 
 export interface SaveActionResult {
@@ -113,6 +115,19 @@ export async function saveAction(
   if (!confidenceParse.ok) return { ok: false, error: confidenceParse.error };
 
   const supabase = createSupabaseAdminClient();
+
+  // The suggested workflow must be one of this workspace's flows — the FK
+  // alone wouldn't stop a cross-workspace id.
+  if (payload.suggestedFlowId) {
+    const { data: flow } = await supabase
+      .from('flows')
+      .select('id')
+      .eq('id', payload.suggestedFlowId)
+      .eq('workspace_id', workspace.id)
+      .maybeSingle();
+    if (!flow) return { ok: false, error: 'Suggested workflow not found in this workspace' };
+  }
+
   const current = await loadCurrentRows(workspace.id, name);
 
   // When the caller omits `enable`, preserve the current effective enabled
@@ -133,6 +148,7 @@ export async function saveAction(
     model: payload.model,
     acceptance_mode: payload.acceptanceMode,
     confidence_config: confidenceParse.value,
+    suggested_flow_id: payload.suggestedFlowId,
   };
 
   if (current.user) {
@@ -202,7 +218,7 @@ export async function autosaveActionPrompt(
   const { data: source, error: sourceErr } = await supabase
     .from('actions')
     .select(
-      'description, skill_refs, target, triggers, effects, output_schema, enabled, model, acceptance_mode, confidence_config',
+      'description, skill_refs, target, triggers, effects, output_schema, enabled, model, acceptance_mode, confidence_config, effect_routing, suggested_flow_id',
     )
     .eq('id', current.builtin.id)
     .single();
@@ -228,6 +244,8 @@ export async function autosaveActionPrompt(
       model: source.model,
       acceptance_mode: source.acceptance_mode,
       confidence_config: source.confidence_config,
+      effect_routing: source.effect_routing,
+      suggested_flow_id: source.suggested_flow_id,
       created_by: user.id,
       updated_by: user.id,
     })
@@ -271,7 +289,7 @@ export async function setActionEnabled(
   const { data: source, error: sourceErr } = await supabase
     .from('actions')
     .select(
-      'description, system_prompt, skill_refs, target, triggers, effects, output_schema, model, acceptance_mode, confidence_config',
+      'description, system_prompt, skill_refs, target, triggers, effects, output_schema, model, acceptance_mode, confidence_config, effect_routing, suggested_flow_id',
     )
     .eq('id', current.builtin.id)
     .single();
@@ -297,6 +315,8 @@ export async function setActionEnabled(
       model: source.model,
       acceptance_mode: source.acceptance_mode,
       confidence_config: source.confidence_config,
+      effect_routing: source.effect_routing,
+      suggested_flow_id: source.suggested_flow_id,
       created_by: user.id,
       updated_by: user.id,
     })
@@ -366,6 +386,8 @@ interface SourceActionFields {
   model: string;
   acceptance_mode: string;
   confidence_config: unknown;
+  effect_routing: unknown;
+  suggested_flow_id: string | null;
 }
 
 /**
@@ -389,7 +411,7 @@ export async function overrideBuiltInAction(
 
   const { data: source, error: sourceErr } = await supabase
     .from('actions')
-    .select('description, system_prompt, skill_refs, target, triggers, effects, output_schema, model, acceptance_mode, confidence_config')
+    .select('description, system_prompt, skill_refs, target, triggers, effects, output_schema, model, acceptance_mode, confidence_config, effect_routing, suggested_flow_id')
     .eq('id', current.builtin.id)
     .single<SourceActionFields>();
   if (sourceErr || !source) {
@@ -414,6 +436,8 @@ export async function overrideBuiltInAction(
       model: source.model,
       acceptance_mode: source.acceptance_mode,
       confidence_config: source.confidence_config as never,
+      effect_routing: source.effect_routing as never,
+      suggested_flow_id: source.suggested_flow_id,
       created_by: user.id,
       updated_by: user.id,
     })
@@ -464,7 +488,7 @@ export async function duplicateAction(name: string): Promise<SaveActionResult & 
 
   const { data: source, error: sourceErr } = await supabase
     .from('actions')
-    .select('description, system_prompt, skill_refs, target, triggers, effects, output_schema, model, acceptance_mode, confidence_config')
+    .select('description, system_prompt, skill_refs, target, triggers, effects, output_schema, model, acceptance_mode, confidence_config, effect_routing, suggested_flow_id')
     .eq('id', sourceRow.id)
     .single<SourceActionFields>();
   if (sourceErr || !source) {
@@ -507,6 +531,8 @@ export async function duplicateAction(name: string): Promise<SaveActionResult & 
       model: source.model,
       acceptance_mode: source.acceptance_mode,
       confidence_config: source.confidence_config as never,
+      effect_routing: source.effect_routing as never,
+      suggested_flow_id: source.suggested_flow_id,
       created_by: user.id,
       updated_by: user.id,
     });

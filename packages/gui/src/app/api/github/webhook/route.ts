@@ -185,6 +185,12 @@ async function handleIssues(admin: SupabaseAdmin, payload: WebhookPayload, event
   const isTriageRelevant =
     TRIAGE_ACTIONS.has(action) ||
     (action === 'edited' && !!payload.changes && ('title' in payload.changes || 'body' in payload.changes));
+  // Phase 4 (trigger honesty) — the real ActionTrigger rides in the job
+  // payload so the triage pass matches actions on what actually happened.
+  // Note the open-job dedup below means an 'edited' enqueue is dropped while
+  // an 'opened' job is still in flight — acceptable; the opened pass covers it.
+  const triageTrigger: 'on-issue-opened' | 'on-issue-reopened' | 'on-issue-edited' =
+    action === 'reopened' ? 'on-issue-reopened' : action === 'edited' ? 'on-issue-edited' : 'on-issue-opened';
   const isFlowRelevant = action === 'opened' || action === 'labeled';
   if (!isTriageRelevant && !isFlowRelevant) {
     return NextResponse.json({ ok: true, ignored: `issues.${action}` });
@@ -236,7 +242,7 @@ async function handleIssues(admin: SupabaseAdmin, payload: WebhookPayload, event
           priority: 5,
           status: 'queued',
           max_attempts: 1,
-          payload: { trigger: 'webhook', action },
+          payload: { trigger: triageTrigger, action },
         });
         if (error) {
           // A concurrent delivery (opened+edited, webhook+sweep) may have

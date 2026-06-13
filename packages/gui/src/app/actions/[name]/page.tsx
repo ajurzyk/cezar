@@ -29,11 +29,17 @@ interface DbActionRow {
   model: string | null;
   acceptance_mode: string | null;
   confidence_config: unknown;
+  suggested_flow_id: string | null;
 }
 
 interface IssueRow {
   number: number;
   title: string;
+}
+
+interface FlowOptionRow {
+  id: string;
+  name: string;
 }
 
 function asStringArray(value: unknown): string[] {
@@ -65,11 +71,11 @@ export default async function ActionDetailPage({
   }
 
   const supabase = createSupabaseAdminClient();
-  const [{ data: rows }, { data: workspaceRow }, { data: issueRows }] = await Promise.all([
+  const [{ data: rows }, { data: workspaceRow }, { data: issueRows }, { data: flowRows }] = await Promise.all([
     supabase
       .from('actions')
       .select(
-        'id, workspace_id, name, kind, description, system_prompt, skill_refs, target, triggers, effects, output_schema, enabled, replaces_built_in, updated_at, model, acceptance_mode, confidence_config',
+        'id, workspace_id, name, kind, description, system_prompt, skill_refs, target, triggers, effects, output_schema, enabled, replaces_built_in, updated_at, model, acceptance_mode, confidence_config, suggested_flow_id',
       )
       .eq('workspace_id', workspace.id)
       .eq('name', name)
@@ -86,6 +92,12 @@ export default async function ActionDetailPage({
       .order('updated_at', { ascending: false })
       .limit(20)
       .returns<IssueRow[]>(),
+    supabase
+      .from('flows')
+      .select('id, name')
+      .eq('workspace_id', workspace.id)
+      .order('name', { ascending: true })
+      .returns<FlowOptionRow[]>(),
   ]);
 
   const allRows = rows ?? [];
@@ -121,6 +133,8 @@ export default async function ActionDetailPage({
     model,
     acceptanceMode,
     confidenceConfig,
+    suggestedFlowId: preferred.suggested_flow_id,
+    availableFlows: (flowRows ?? []).map((f) => ({ id: f.id, name: f.name })),
   };
 
   const isAdmin = workspace.role === 'admin';

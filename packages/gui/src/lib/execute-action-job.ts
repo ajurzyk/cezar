@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { loadWorkspaceConfig } from './load-workspace-config';
+import { buildOpenIssuesContextProviders } from './open-issues-context';
 import { createWorkflowRunPersister } from './persist-workflow-run';
 import type { Database } from './supabase/types';
 
@@ -59,7 +60,7 @@ export async function executeActionJob(
 
     const { data: actionRow } = await supabase
       .from('actions')
-      .select('id, name, kind, description, system_prompt, skill_refs, target, triggers, effects, output_schema, enabled')
+      .select('id, name, kind, description, system_prompt, skill_refs, context_refs, target, triggers, effects, output_schema, enabled, effect_routing, suggested_flow_id')
       .eq('id', actionId)
       .eq('workspace_id', workspaceId)
       .maybeSingle();
@@ -169,6 +170,9 @@ export async function executeActionJob(
       skillRefs: Array.isArray(actionRow.skill_refs)
         ? (actionRow.skill_refs as unknown[]).filter((s): s is string => typeof s === 'string')
         : [],
+      contextRefs: Array.isArray(actionRow.context_refs)
+        ? (actionRow.context_refs as unknown[]).filter((s): s is string => typeof s === 'string')
+        : [],
       target: actionRow.target as 'issue' | 'pr',
       triggers: Array.isArray(actionRow.triggers)
         ? ((actionRow.triggers as unknown[]).filter((s): s is string => typeof s === 'string') as import('@cezar/core').ActionTrigger[])
@@ -184,6 +188,9 @@ export async function executeActionJob(
           ? (actionRow.output_schema as Record<string, unknown>)
           : null,
       enabled: actionRow.enabled,
+      effectRouting: parseEffectRouting(actionRow.effect_routing),
+      suggestedFlowId:
+        typeof actionRow.suggested_flow_id === 'string' ? actionRow.suggested_flow_id : null,
     };
 
     const startedAt = new Date().toISOString();
@@ -198,8 +205,39 @@ export async function executeActionJob(
       const skills = await core.discoverBuiltinSkills();
       const result = await core.runAction(action, target, {
         skills,
-        effectCtx: { github, targetNumber: number, supabase },
+        effectCtx: { github, targetNumber: number, supabase, workspaceId },
         autoComment: { enabled: autoCommentEnabled, triggeredBy: 'manual · run now' },
+        // Always passed — the runner only invokes providers for refs the
+        // action declares via `contextRefs`. For PR targets the `open-issues`
+        // provider still returns issues, which is what dedupe-style actions want.
+        contextProviders: buildOpenIssuesContextProviders(supabase, workspaceId, number),
+        // Mirror the triage path's deferSink (execute-workflow-job.ts):
+        // without it, always-defer effects (workflow suggestions) and
+        // mid-confidence HITL effects from a manual "run now" are silently
+        // dropped instead of landing in the inbox. Each deferral is also
+        // surfaced as a 'tool-call' event via the effectsApplied loop below,
+        // same as the triage path.
+        deferSink: async ({ call, confidence, summary }) => {
+          const { error } = await supabase.from('pending_decisions').insert({
+            workspace_id: workspaceId,
+            action_id: action.id,
+            workflow_run_id: runId,
+            target_kind: target.kind,
+            issue_number: target.kind === 'issue' ? target.number : null,
+            pr_number: target.kind === 'pr' ? target.number : null,
+            target_title: target.title,
+            effect: call.effect,
+            effect_args: (call.args ?? {}) as Database['public']['Tables']['pending_decisions']['Insert']['effect_args'],
+            summary,
+            confidence,
+          });
+          // 23505 = unique_violation against the pending-decisions dedup
+          // index: a pending decision for this (action, target, effect, args)
+          // already exists — intended dedup behaviour, not a failure.
+          if (error && error.code !== '23505') {
+            console.error('[action-job] pending_decisions insert failed:', error.message);
+          }
+        },
       });
       summary = result.text?.slice(0, 500);
       effectsApplied = result.effectsApplied;
@@ -261,6 +299,25 @@ export async function executeActionJob(
     await persister.fail(message).catch(() => {});
     await finishJob('failed').catch(() => {});
   }
+}
+
+/**
+ * Defensive map of the `effect_routing` jsonb column onto
+ * `ActionDef.effectRouting` — keeps only entries with a valid routing mode.
+ */
+function parseEffectRouting(
+  value: unknown,
+): import('@cezar/core').ActionDef['effectRouting'] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const out: NonNullable<import('@cezar/core').ActionDef['effectRouting']> = {};
+  let any = false;
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (v === 'auto' || v === 'always-defer') {
+      out[k as import('@cezar/core').EffectName] = v;
+      any = true;
+    }
+  }
+  return any ? out : undefined;
 }
 
 /**

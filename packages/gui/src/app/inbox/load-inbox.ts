@@ -325,6 +325,12 @@ function deriveFindingBody(r: PendingRow): FindingBody {
         : [];
       return { kind: 'label', labels: labels.length > 0 ? labels : ['(none)'] };
     }
+    case 'suggest-workflow': {
+      // Args carry only { flowId, reason } — display the reason (cheap; no
+      // flows join). The flow name shows up in the summary on accept.
+      const reason = typeof args.reason === 'string' && args.reason.trim() ? args.reason : r.summary;
+      return { kind: 'workflow', reason };
+    }
   }
   return { kind: 'bug', note: r.summary };
 }

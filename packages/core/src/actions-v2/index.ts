@@ -10,6 +10,7 @@ export type {
   AutoConfidenceConfig,
   HitlConfidenceConfig,
   ConfidenceConfig,
+  EffectRoutingMode,
 } from './action.js';
 export type {
   ActionTarget,
@@ -35,6 +36,7 @@ export {
   type EffectContext,
   type EffectName,
 } from './effects.js';
+export { formatOpenIssuesKb, type OpenIssueKbEntry } from './context-providers.js';
 export { loadActionByName, loadAutoTriageAction, listEnabledActions } from './loader.js';
 export { DEFAULT_ACTIONS } from './default-actions.js';
 export {

@@ -8,8 +8,28 @@ import type {
   TriagePassDeferSink,
   WorkspaceLabel,
 } from '@cezar/core';
+import { buildOpenIssuesContextProviders } from './open-issues-context';
 import type { WorkflowRunPersister } from './persist-workflow-run';
 import type { Database } from './supabase/types';
+
+/** The triage triggers the webhook can actually derive from a GitHub `issues`
+ *  event (Phase 4 — trigger honesty). A subset of core's `ActionTrigger`. */
+export type TriageTrigger = 'on-issue-opened' | 'on-issue-reopened' | 'on-issue-edited';
+
+const TRIAGE_TRIGGERS: ReadonlySet<string> = new Set<TriageTrigger>([
+  'on-issue-opened',
+  'on-issue-reopened',
+  'on-issue-edited',
+]);
+
+/**
+ * Validate a raw `jobs.payload.trigger` value. Anything absent or unknown
+ * (in-flight jobs enqueued before this field existed, sweep jobs carrying the
+ * legacy `'sweep'` marker) falls back to `'on-issue-opened'`.
+ */
+export function parseTriageTrigger(value: unknown): TriageTrigger {
+  return typeof value === 'string' && TRIAGE_TRIGGERS.has(value) ? (value as TriageTrigger) : 'on-issue-opened';
+}
 
 export interface RunTriagePassJobParams {
   workspaceId: string;
@@ -17,8 +37,9 @@ export interface RunTriagePassJobParams {
   github: GitHubService;
   supabase: SupabaseClient<Database>;
   persister: WorkflowRunPersister;
-  /** Free-form label describing what initiated the pass (e.g. `'on-issue-opened'`). */
-  trigger?: string;
+  /** What initiated the pass — drives action trigger matching AND the
+   *  auto-comment `triggeredBy` label. Defaults to `'on-issue-opened'`. */
+  trigger?: TriageTrigger;
   /** Optional sink — receives effects deferred to human review. When omitted
    *  the runner drops them. */
   deferSink?: TriagePassDeferSink;
@@ -58,7 +79,8 @@ export interface RunTriagePassJobResult {
  */
 export async function runTriagePassJob(params: RunTriagePassJobParams): Promise<RunTriagePassJobResult> {
   const core = await import('@cezar/core');
-  const { issueNumber, github, supabase, persister, workspaceId, trigger, deferSink, labels } = params;
+  const { issueNumber, github, supabase, persister, workspaceId, deferSink, labels } = params;
+  const trigger: TriageTrigger = params.trigger ?? 'on-issue-opened';
 
   let actionAutoComment: boolean | null;
   if (params.actionAutoComment !== undefined) {
@@ -99,13 +121,14 @@ export async function runTriagePassJob(params: RunTriagePassJobParams): Promise<
       target,
       supabase,
       github,
-      trigger: 'on-issue-opened',
+      trigger,
       autoComment: {
         enabled: autoCommentEnabled,
-        triggeredBy: `cron · ${trigger ?? 'on-issue-opened'}`,
+        triggeredBy: `cron · ${trigger}`,
       },
       deferSink,
       labels,
+      contextProviders: buildOpenIssuesContextProviders(supabase, workspaceId, issueNumber),
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

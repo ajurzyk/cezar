@@ -49,10 +49,6 @@ Run a single core test file:
 cd packages/core && npx vitest run tests/store/store.test.ts
 ```
 
-> Known pre-existing failure: `packages/core` ends at 1 failing test —
-> `tests/actions/stale/runner.test.ts > computes daysSinceUpdate correctly`
-> (a date-arithmetic flake, unrelated to current work). Everything else green.
-
 ## Tech Stack
 
 - **TypeScript 5.x** (strict, ES2022, NodeNext/ESM; `.js` on relative imports in core)
@@ -76,16 +72,18 @@ cd packages/core && npx vitest run tests/store/store.test.ts
 
 ### Key Design Patterns
 
-**Action Plugin System** (`packages/core/src/actions/`): every analysis capability is a
-self-contained action conforming to the `ActionDefinition` interface. Actions register via
-side-effect imports in `packages/cli/src/index.ts`; the hub auto-discovers registered actions.
-To add one: create `packages/core/src/actions/{name}/` with `prompt.ts`, `runner.ts`,
-`interactive.ts`, `index.ts`; export the runner/prompt from `packages/core/src/index.ts`;
-add the side-effect import to `packages/cli/src/index.ts`. The triage workflow reuses
-`bug-detector`, `priority`, and `duplicates` (the real `dedupe-check` step against the
-open-issue knowledge base); `auto-label`/`security`/etc. are used directly. (The four
-display-only orphans — `issue-check`, `release-notes`, `milestone-planner`, `needs-response`
-— were dropped in the legacy-path cleanup; if you need them, restore from git history.)
+**Actions v2** (`packages/core/src/actions-v2/`): analysis capabilities are data-driven
+`ActionDef` rows — `system_prompt` + `skill_refs` + `triggers` + `effects` — no bespoke
+TypeScript per action. Two run modes in `runner.ts`: *declared* (`effects` non-null —
+the model returns JSON validated against `output_schema`, the runner executes the listed
+effects) and *tool-use* (`effects: null` — the effect registry in `effects.ts` is exposed
+as Anthropic tools and the model calls them itself, self-reporting `_confidence` for
+human-in-the-loop routing). Skills (`packages/core/skills/*.md`, plus repo `.ai/skills/`)
+are the reusable prompt building blocks an action composes via `skillRefs`. 2 built-in
+defaults ship in `default-actions.ts`: `auto-triage` (adds a `bug`/`feature` label and
+links confident duplicates; HITL 90/60) and `security`. They're seeded per workspace
+(SaaS) and users override by copy; the CLI reads the TS catalog directly plus
+`.ai/actions/**/*.md`. Retired actions/skills are restorable from git history.
 
 **Agent runner abstraction** (`packages/core/src/agents/`): `AgentRunner` interface with
 three implementations — `AnthropicApiRunner`, `ClaudeCodeCliRunner`, `CodexCliRunner` —

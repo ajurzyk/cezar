@@ -155,6 +155,9 @@ export async function runDispatch(supabase: SupabaseClient<Database>): Promise<D
       analysisId?: string;
       actionId?: string;
       runId?: string;
+      /** Triage jobs: the derived ActionTrigger (webhook) or a legacy marker
+       *  ('sweep'/'webhook'); executeWorkflowJob validates + defaults it. */
+      trigger?: string;
     };
 
     // Manual "run action on issue/PR" — not a multi-step workflow_run; it runs
@@ -234,6 +237,7 @@ export async function runDispatch(supabase: SupabaseClient<Database>): Promise<D
         ciFollowupSeed: payload.ciFollowup,
         flowId: payload.flowId,
         flowInput: payload.flowInput,
+        triageTrigger: payload.trigger,
       }),
     );
     dispatched += 1;

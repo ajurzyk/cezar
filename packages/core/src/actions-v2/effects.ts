@@ -17,9 +17,13 @@ export interface EffectContext {
   /** Issue or PR number the action is targeting. */
   targetNumber: number;
   /** Workspace-scoped Supabase client for effects that need to write rows
-   *  (e.g. link-duplicate writing to a relations table). Optional — many
+   *  (e.g. suggest-workflow enqueuing a `jobs` row). Optional — many
    *  effects don't need DB access. Wired by the runner. */
   supabase?: unknown;
+  /** Workspace id — needed (together with `supabase`) by effects that write
+   *  workspace-scoped rows. Absent on the CLI path; such effects degrade to a
+   *  "not supported" summary instead of throwing. */
+  workspaceId?: string;
 }
 
 export interface EffectDef<TArgs = unknown> {
@@ -67,7 +71,7 @@ const labelSet: EffectDef<{ labels: string[] }> = {
 const comment: EffectDef<{ body: string }> = {
   name: 'comment',
   description:
-    "Post a comment on the target. Use sparingly — keep tone professional, do not spam. Returns the new comment id.",
+    "Post a comment on the target. Keep it short and direct — state the point, no filler. Use sparingly, do not spam. Returns the new comment id.",
   schema: z.object({ body: z.string().min(1) }),
   async execute({ body }, { github, targetNumber }) {
     const commentId = await github.addComment(targetNumber, body);
@@ -145,6 +149,111 @@ const setPriority: EffectDef<{ priority: 'critical' | 'high' | 'medium' | 'low' 
   },
 };
 
+/**
+ * Minimal loose typing for the Supabase client the GUI passes through
+ * `EffectContext.supabase` (typed `unknown` at the package boundary — same
+ * pattern as loader.ts). Only the shapes suggest-workflow uses.
+ */
+interface SuggestFlowSupabase {
+  from(table: 'flows'): {
+    select(cols: 'id, name'): {
+      eq(col: 'id', value: string): {
+        eq(col: 'workspace_id', value: string): {
+          maybeSingle(): Promise<{ data: { id: string; name: string } | null; error: { message: string } | null }>;
+        };
+      };
+    };
+  };
+  from(table: 'jobs'): {
+    select(cols: 'id, payload'): {
+      eq(col: string, value: unknown): {
+        eq(col: string, value: unknown): {
+          eq(col: string, value: unknown): {
+            in(col: 'status', values: string[]): Promise<{
+              data: Array<{ id: string; payload: unknown }> | null;
+              error: { message: string } | null;
+            }>;
+          };
+        };
+      };
+    };
+    insert(row: Record<string, unknown>): Promise<{ error: { message: string; code?: string } | null }>;
+  };
+}
+
+const suggestWorkflow: EffectDef<{ flowId: string; flowName?: string; reason?: string }> = {
+  name: 'suggest-workflow',
+  description:
+    'Suggest running the configured workspace workflow on the target issue. Surfaces as a one-click suggestion for the user.',
+  schema: z.object({
+    flowId: z.string().min(1),
+    // Optional/ignored — the executor resolves the canonical name from the DB.
+    flowName: z.string().optional(),
+    reason: z.string().optional(),
+  }),
+  async execute({ flowId }, { supabase, workspaceId, targetNumber }) {
+    // The CLI path has no job queue — degrade, don't throw.
+    if (!supabase || !workspaceId) {
+      return 'suggest-workflow not supported in this environment';
+    }
+    const sb = supabase as SuggestFlowSupabase;
+
+    // Dangling config / stale suggestion: the flow may have been deleted
+    // after the suggestion was created.
+    const { data: flow, error: flowErr } = await sb
+      .from('flows')
+      .select('id, name')
+      .eq('id', flowId)
+      .eq('workspace_id', workspaceId)
+      .maybeSingle();
+    if (flowErr) throw new Error(`flow lookup failed: ${flowErr.message}`);
+    if (!flow) throw new Error('workflow no longer exists');
+
+    // Dedupe against in-flight (workspace, flow, issue) jobs — mirrors the
+    // webhook's enqueueFlowsForIssueEvent. The partial unique index
+    // (jobs_flow_open_uniq, 0036) is the real guard; this SELECT is the
+    // fast path.
+    const { data: open } = await sb
+      .from('jobs')
+      .select('id, payload')
+      .eq('workspace_id', workspaceId)
+      .eq('kind', 'flow')
+      .eq('issue_number', targetNumber)
+      .in('status', ['queued', 'claimed', 'running']);
+    const alreadyQueued = (open ?? []).some((row) => {
+      const p = (row.payload ?? {}) as { flowId?: string };
+      return p.flowId === flowId;
+    });
+    if (alreadyQueued) {
+      return `workflow "${flow.name}" already queued for #${targetNumber}`;
+    }
+
+    const { error } = await sb.from('jobs').insert({
+      workspace_id: workspaceId,
+      repo: null,
+      kind: 'flow',
+      issue_number: targetNumber,
+      pr_number: null,
+      priority: 5,
+      status: 'queued',
+      max_attempts: 1,
+      payload: {
+        trigger: 'suggestion',
+        flowId,
+        flowInput: String(targetNumber),
+      },
+    });
+    if (error) {
+      // 23505 = the unique index rejected a concurrent duplicate — benign.
+      if (error.code === '23505') {
+        return `workflow "${flow.name}" already queued for #${targetNumber}`;
+      }
+      throw new Error(`enqueue failed: ${error.message}`);
+    }
+    return `enqueued workflow "${flow.name}" for #${targetNumber}`;
+  },
+};
+
 // ─── Registry + helpers ────────────────────────────────────────────────────
 
 export const EFFECT_REGISTRY = {
@@ -156,6 +265,7 @@ export const EFFECT_REGISTRY = {
   assign,
   'link-duplicate': linkDuplicate,
   'set-priority': setPriority,
+  'suggest-workflow': suggestWorkflow,
 } as const satisfies Record<string, EffectDef<unknown>>;
 
 export type EffectName = keyof typeof EFFECT_REGISTRY;
@@ -229,8 +339,17 @@ export function effectsAsAnthropicTools(allowed: readonly EffectName[] = ALL_EFF
     // typed signature with HITL plumbing.
     const base = zodToInputSchema(def.schema as z.ZodType<unknown>) as {
       properties?: Record<string, unknown>;
+      required?: string[];
       [k: string]: unknown;
     };
+    // suggest-workflow: the model decides *whether* to suggest, never *which*
+    // workflow — the runner injects `flowId` from the action's configuration
+    // before routing. Expose only `reason` (+ `_confidence`) on the wire.
+    if (name === 'suggest-workflow') {
+      const { flowId: _f, flowName: _n, ...rest } = base.properties ?? {};
+      base.properties = rest;
+      base.required = (base.required ?? []).filter((k) => k !== 'flowId' && k !== 'flowName');
+    }
     return {
       name: wireToolName(name),
       description:

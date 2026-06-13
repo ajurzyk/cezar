@@ -646,6 +646,8 @@ function FindingRow({
   onSnooze: () => void;
 }) {
   const style = SKILL_STYLE[finding.skill];
+  // A suggest-workflow finding's accept enqueues the workflow — label it so.
+  const acceptLabel = finding.body.kind === 'workflow' ? 'Run workflow' : 'Accept';
   return (
     <div
       className={cn(
@@ -687,10 +689,10 @@ function FindingRow({
               type="button"
               onClick={onAccept}
               className="inline-flex min-h-11 items-center gap-1 rounded-md border border-outline-variant bg-surface-container px-2.5 py-1 text-xs text-on-surface-variant hover:border-emerald-400/40 hover:text-emerald-300 lg:min-h-0"
-              aria-label="Accept finding"
+              aria-label={acceptLabel === 'Run workflow' ? 'Run workflow' : 'Accept finding'}
             >
               <CheckIcon className="h-3 w-3" />
-              Accept
+              {acceptLabel}
             </button>
             <button
               type="button"
@@ -856,6 +858,12 @@ function FindingBodyText({ finding }: { finding: Finding }) {
               {i < b.labels.length - 1 ? ' · ' : ''}
             </span>
           ))}
+        </>
+      );
+    case 'workflow':
+      return (
+        <>
+          <span className="text-on-surface">Run workflow</span> — {b.reason}
         </>
       );
   }

@@ -49,3 +49,8 @@ title alone. Check comments for CVE references or severity clarifications.
 
 Set `isSecurityRelated: false` and leave category / severity / explanation
 empty — don't moralise about unrelated security best-practice.
+
+## Comment style
+
+Any comment you suggest or post must be short and direct: one line —
+finding, severity, evidence. No filler, no preamble.

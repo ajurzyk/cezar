@@ -4,6 +4,7 @@ import type {
   ActionDef,
   ActionTrigger,
   ConfidenceConfig,
+  EffectRoutingMode,
 } from './action.js';
 import type { EffectName } from './effects.js';
 
@@ -20,6 +21,7 @@ interface ActionRow {
   description: string | null;
   system_prompt: string;
   skill_refs: unknown;
+  context_refs: unknown;
   target: 'issue' | 'pr';
   triggers: unknown;
   effects: unknown;
@@ -28,10 +30,15 @@ interface ActionRow {
   model: string | null;
   acceptance_mode: string | null;
   confidence_config: unknown;
+  effect_routing: unknown;
+  suggested_flow_id: string | null;
 }
 
+// `context_refs`, `effect_routing`, `suggested_flow_id` are added by
+// migration 0044 (Phase 3/5 of the actions cleanup) — they ship in the same
+// release as this loader change.
 const ACTION_COLUMNS =
-  'id, workspace_id, name, kind, description, system_prompt, skill_refs, target, triggers, effects, output_schema, enabled, model, acceptance_mode, confidence_config';
+  'id, workspace_id, name, kind, description, system_prompt, skill_refs, context_refs, target, triggers, effects, output_schema, enabled, model, acceptance_mode, confidence_config, effect_routing, suggested_flow_id';
 
 interface QueryResult<T> {
   data: T | null;
@@ -76,7 +83,10 @@ function rowToAction(row: ActionRow): ActionDef {
     description: row.description,
     systemPrompt: row.system_prompt,
     skillRefs: asStringArray(row.skill_refs),
+    contextRefs: asStringArray(row.context_refs),
     target: row.target,
+    // Deliberately lenient cast: DB rows may still carry retired trigger
+    // strings (e.g. 'on-cron') — they simply never match a fired trigger.
     triggers: asStringArray(row.triggers) as ActionTrigger[],
     effects: row.effects == null ? null : (asStringArray(row.effects) as EffectName[]),
     outputSchema:
@@ -87,7 +97,29 @@ function rowToAction(row: ActionRow): ActionDef {
     model: row.model,
     acceptanceMode: parseAcceptanceMode(row.acceptance_mode),
     confidenceConfig: parseConfidenceConfig(row.confidence_config),
+    effectRouting: parseEffectRouting(row.effect_routing),
+    suggestedFlowId: typeof row.suggested_flow_id === 'string' ? row.suggested_flow_id : null,
   };
+}
+
+/**
+ * Defensive map of the `effect_routing` jsonb column. Keeps only entries
+ * whose value is a valid routing mode; returns undefined for empty/absent
+ * objects so the runner falls back to its built-in default map.
+ */
+function parseEffectRouting(
+  value: unknown,
+): Partial<Record<EffectName, EffectRoutingMode>> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const out: Partial<Record<EffectName, EffectRoutingMode>> = {};
+  let any = false;
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (v === 'auto' || v === 'always-defer') {
+      out[k as EffectName] = v;
+      any = true;
+    }
+  }
+  return any ? out : undefined;
 }
 
 function parseAcceptanceMode(value: string | null): AcceptanceMode {

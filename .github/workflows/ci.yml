@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable corepack (yarn 4)
+        run: corepack enable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: yarn
+
+      - name: Install
+        run: yarn install --immutable
+
+      - name: Migration numbering sanity
+        # Four legacy 0029_* migrations predate this check and are allowlisted;
+        # any new duplicate number fails the build.
+        run: |
+          dups=$(ls packages/gui/supabase/migrations/*.sql | sed -E 's/.*\/([0-9]+)_.*/\1/' | sort | uniq -d | grep -v '^0029$' || true)
+          if [ -n "$dups" ]; then
+            echo "Duplicate migration numbers: $dups"
+            exit 1
+          fi
+
+      - name: Cache Next.js build
+        uses: actions/cache@v4
+        with:
+          path: packages/gui/.next/cache
+          key: nextjs-${{ runner.os }}-${{ hashFiles('yarn.lock') }}-${{ hashFiles('packages/gui/src/**') }}
+          restore-keys: |
+            nextjs-${{ runner.os }}-${{ hashFiles('yarn.lock') }}-
+
+      - name: Build (topological)
+        run: yarn build
+        env:
+          # Supabase env access is lazy (env.ts throws at call time), but Next
+          # prerendering can evaluate it during `next build` — inert values
+          # keep the build honest without real secrets in CI.
+          NEXT_PUBLIC_SUPABASE_URL: http://localhost:54321
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-placeholder
+          SUPABASE_SERVICE_ROLE_KEY: ci-placeholder
+          NEXT_PUBLIC_APP_URL: http://localhost:3000
+
+      - name: Typecheck
+        run: yarn typecheck
+
+      - name: Test
+        run: yarn test

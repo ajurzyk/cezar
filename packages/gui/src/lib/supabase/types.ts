@@ -373,6 +373,9 @@ export interface Database {
           description: string | null;
           system_prompt: string;
           skill_refs: Json;
+          // Added by migration 0044 (actions-cleanup Phase 3) — ships in the
+          // same release as the code that selects it.
+          context_refs: Json;
           target: 'issue' | 'pr';
           triggers: Json;
           effects: Json | null;
@@ -386,17 +389,23 @@ export interface Database {
           model: string;
           acceptance_mode: 'auto' | 'human-in-the-loop';
           confidence_config: Json;
+          // Added by migration 0044 — Phase 5 schema (per-effect routing
+          // override + the configured suggest-workflow target).
+          effect_routing: Json;
+          suggested_flow_id: string | null;
         };
         Insert: Omit<Database['public']['Tables']['actions']['Row'],
-          'id' | 'kind' | 'description' | 'system_prompt' | 'skill_refs' | 'triggers' |
+          'id' | 'kind' | 'description' | 'system_prompt' | 'skill_refs' | 'context_refs' | 'triggers' |
           'effects' | 'output_schema' | 'enabled' | 'replaces_built_in' | 'created_at' | 'updated_at' |
-          'created_by' | 'updated_by' | 'model' | 'acceptance_mode' | 'confidence_config'
+          'created_by' | 'updated_by' | 'model' | 'acceptance_mode' | 'confidence_config' |
+          'effect_routing' | 'suggested_flow_id'
         > & {
           id?: string;
           kind?: 'built-in' | 'user';
           description?: string | null;
           system_prompt?: string;
           skill_refs?: Json;
+          context_refs?: Json;
           triggers?: Json;
           effects?: Json | null;
           output_schema?: Json | null;
@@ -409,6 +418,8 @@ export interface Database {
           model?: string;
           acceptance_mode?: 'auto' | 'human-in-the-loop';
           confidence_config?: Json;
+          effect_routing?: Json;
+          suggested_flow_id?: string | null;
         };
         Update: Partial<Database['public']['Tables']['actions']['Insert']>;
       };

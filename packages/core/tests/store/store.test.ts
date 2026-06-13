@@ -14,6 +14,7 @@ function makeIssue(number: number, overrides: Record<string, unknown> = {}) {
     body,
     state: 'open' as const,
     labels: [],
+    assignees: [],
     author: 'user1',
     createdAt: '2024-01-01T00:00:00Z',
     updatedAt: '2024-01-01T00:00:00Z',

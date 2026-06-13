@@ -13,6 +13,10 @@ export class IssueStore {
   private data: Store;
   private filePath: string;
   private port: StorePort | null;
+  /** Issue numbers mutated since load/last save. The port-backed save() only
+   *  overrides these in the fresh snapshot, so a stale copy of an issue this
+   *  run never touched can't clobber a concurrent run's write to it. */
+  private dirty = new Set<number>();
 
   private constructor(data: Store, filePath: string, port: StorePort | null = null) {
     this.data = data;
@@ -92,7 +96,9 @@ export class IssueStore {
         const fresh = await this.port.load();
         const byNumber = new Map(fresh.issues.map((i) => [i.number, i]));
         for (const issue of this.data.issues) {
-          byNumber.set(issue.number, issue);
+          if (this.dirty.has(issue.number) || !byNumber.has(issue.number)) {
+            byNumber.set(issue.number, issue);
+          }
         }
         toSave = {
           meta: { ...fresh.meta, ...this.data.meta },
@@ -104,6 +110,7 @@ export class IssueStore {
         // than dropping the save entirely.
       }
       await this.port.save(toSave);
+      this.dirty.clear();
       return;
     }
     const dir = dirname(this.filePath);
@@ -124,21 +131,24 @@ export class IssueStore {
     if (!existing) {
       const full = StoredIssueSchema.parse({ ...issue, digest: null, analysis: {} });
       this.data.issues.push(full);
+      this.dirty.add(issue.number);
       return { action: 'created' };
     }
 
+    // The schema defaults assignees to []; guard the raw input the same way.
+    const incomingAssignees = issue.assignees ?? [];
     const stateChanged = existing.state !== issue.state;
     const commentCountChanged = existing.commentCount !== issue.commentCount;
     const assigneesChanged =
-      existing.assignees.length !== issue.assignees.length ||
-      existing.assignees.some((a, i) => a !== issue.assignees[i]);
+      existing.assignees.length !== incomingAssignees.length ||
+      existing.assignees.some((a, i) => a !== incomingAssignees[i]);
 
     if (existing.contentHash !== issue.contentHash) {
       existing.title = issue.title;
       existing.body = issue.body;
       existing.state = issue.state;
       existing.labels = issue.labels;
-      existing.assignees = issue.assignees;
+      existing.assignees = incomingAssignees;
       existing.author = issue.author;
       existing.updatedAt = issue.updatedAt;
       existing.htmlUrl = issue.htmlUrl;
@@ -151,21 +161,24 @@ export class IssueStore {
       if (commentCountChanged) {
         existing.commentsFetchedAt = null;
       }
+      this.dirty.add(issue.number);
       return { action: 'updated', stateChanged };
     }
 
     // Update mutable fields that don't affect content hash
     existing.state = issue.state;
     existing.labels = issue.labels;
-    existing.assignees = issue.assignees;
+    existing.assignees = incomingAssignees;
     // Invalidate comments when comment count changes
     if (commentCountChanged) {
       existing.commentsFetchedAt = null;
     }
     existing.commentCount = issue.commentCount;
     existing.reactions = issue.reactions;
+    const updated = stateChanged || commentCountChanged || assigneesChanged;
+    if (updated) this.dirty.add(issue.number);
     return {
-      action: stateChanged || commentCountChanged || assigneesChanged ? 'updated' : 'unchanged',
+      action: updated ? 'updated' : 'unchanged',
       stateChanged,
     };
   }
@@ -174,6 +187,7 @@ export class IssueStore {
     const issue = this.data.issues.find(i => i.number === issueNumber);
     if (!issue) throw new Error(`Issue #${issueNumber} not found in store`);
     issue.digest = digest;
+    this.dirty.add(issueNumber);
   }
 
   setComments(issueNumber: number, comments: StoredComment[]): void {
@@ -181,12 +195,14 @@ export class IssueStore {
     if (!issue) throw new Error(`Issue #${issueNumber} not found in store`);
     issue.comments = comments;
     issue.commentsFetchedAt = new Date().toISOString();
+    this.dirty.add(issueNumber);
   }
 
   setAnalysis(issueNumber: number, analysis: Partial<IssueAnalysis>): void {
     const issue = this.data.issues.find(i => i.number === issueNumber);
     if (!issue) throw new Error(`Issue #${issueNumber} not found in store`);
     issue.analysis = { ...issue.analysis, ...analysis };
+    this.dirty.add(issueNumber);
   }
 
   getIssues(filter: IssueFilter = {}): StoredIssue[] {

@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { DEFAULT_AUTO_ACCEPT_ABOVE } from './action.js';
-import type { ActionDef, ActionRunResult } from './action.js';
+import type { ActionDef, ActionRunResult, EffectRoutingMode } from './action.js';
 import type { Skill } from '../skills/skill-catalog.js';
 import {
   formatLabelCatalogPrompt,
@@ -86,6 +86,14 @@ export interface RunActionDeps {
    * *which* names to use and *when*.
    */
   labels?: WorkspaceLabel[];
+  /**
+   * Resolver map for the action's `contextRefs`. Each provider returns a
+   * complete, pre-formatted markdown section (e.g. starting with
+   * `## Open-issue knowledge base`) appended to the user message, or '' to
+   * skip. A missing provider for a declared ref is silently skipped; a
+   * throwing provider is logged and skipped — the action still runs.
+   */
+  contextProviders?: Record<string, () => Promise<string>>;
 }
 
 /**
@@ -120,7 +128,20 @@ export async function runAction(
     .filter((s) => s && s.length > 0)
     .join('\n\n---\n\n');
 
-  const userMessage = formatTarget(target);
+  let userMessage = formatTarget(target);
+  for (const ref of action.contextRefs ?? []) {
+    const provider = deps.contextProviders?.[ref];
+    if (!provider) continue;
+    try {
+      const section = (await provider()).trim();
+      if (section.length > 0) userMessage = `${userMessage}\n\n${section}`;
+    } catch (err) {
+      console.error(
+        `[actions] context provider "${ref}" failed (action "${action.name}"):`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
   const model = action.model ?? deps.model ?? DEFAULT_MODEL;
 
   const result = action.effects && action.effects.length > 0
@@ -312,7 +333,11 @@ async function runToolUseMode(
   _target: ActionTarget,
   mode: RunMode,
 ): Promise<ActionRunResult> {
-  const tools = effectsAsAnthropicTools(ALL_EFFECT_NAMES);
+  // suggest-workflow is only exposed when the action has a workflow
+  // configured (`suggestedFlowId`) — no target, no tool.
+  const allowedEffects: EffectName[] = ALL_EFFECT_NAMES.filter((n) => n !== 'suggest-workflow');
+  if (action.suggestedFlowId) allowedEffects.push('suggest-workflow');
+  const tools = effectsAsAnthropicTools(allowedEffects);
   const effectsApplied: Array<{ call: EffectCall; summary: string }> = [];
   let usage = { inputTokens: 0, outputTokens: 0 };
 
@@ -403,6 +428,16 @@ async function runToolUseMode(
 // ─── Acceptance routing ────────────────────────────────────────────────────
 
 /**
+ * Built-in per-effect routing defaults, overridable via
+ * `ActionDef.effectRouting`. `suggest-workflow` is a suggestion by
+ * definition — it always lands in the inbox unless the workspace explicitly
+ * flips it to 'auto'.
+ */
+const DEFAULT_EFFECT_ROUTING: Partial<Record<EffectName, EffectRoutingMode>> = {
+  'suggest-workflow': 'always-defer',
+};
+
+/**
  * Per-effect routing chokepoint. Reads the action's acceptance_mode +
  * confidence_config and either applies the effect, defers it to the human
  * inbox via `deferSink`, or drops it silently.
@@ -411,6 +446,11 @@ async function runToolUseMode(
  *   human-in-the-loop     → ≥ autoAcceptAbove : apply,
  *                           ≥ autoDenyBelow   : defer,
  *                           <                 : drop
+ *
+ * An `effectRouting` entry on the action (or the built-in default map above)
+ * short-circuits the confidence logic entirely: 'auto' applies the effect
+ * unconditionally; 'always-defer' routes it to the inbox regardless of
+ * confidence (dropped when no sink is wired — the CLI case).
  *
  * When neither the model emits a confidence on the call nor the action
  * configures a `confidenceConfig`, the effect is treated as fully confident so
@@ -427,6 +467,46 @@ async function applyOrDefer(
   deferSink: DeferSink | undefined,
 ): Promise<{ outcome: 'applied' | 'deferred' | 'dropped' | 'error'; summary: string }> {
   const mode = action.acceptanceMode ?? 'auto';
+
+  // suggest-workflow: the model decides *whether*, the action's configuration
+  // decides *which*. Inject the configured flow id into the args here — the
+  // single chokepoint both run modes pass through — so neither the tool-use
+  // nor the declared path ever trusts a model-supplied flowId.
+  if (call.effect === 'suggest-workflow') {
+    if (!action.suggestedFlowId) {
+      return { outcome: 'dropped', summary: 'dropped (no workflow configured)' };
+    }
+    const args = call.args && typeof call.args === 'object' && !Array.isArray(call.args)
+      ? (call.args as Record<string, unknown>)
+      : {};
+    call = { ...call, args: { ...args, flowId: action.suggestedFlowId } };
+  }
+
+  // Per-effect routing override — checked before any confidence threshold.
+  const routing = action.effectRouting?.[call.effect] ?? DEFAULT_EFFECT_ROUTING[call.effect];
+  if (routing === 'auto') {
+    try {
+      const summary = await executeEffect(call, ctx);
+      return { outcome: 'applied', summary };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { outcome: 'error', summary: `error: ${message}` };
+    }
+  }
+  if (routing === 'always-defer') {
+    const confidence = call.confidence ?? 100;
+    if (!deferSink) {
+      return { outcome: 'dropped', summary: 'dropped (no review sink for always-defer)' };
+    }
+    try {
+      const summary = `deferred to inbox (${call.effect} @ ${confidence}%)`;
+      await deferSink({ call, confidence, summary });
+      return { outcome: 'deferred', summary };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { outcome: 'error', summary: `defer failed: ${message}` };
+    }
+  }
 
   // Legacy escape hatch: an action with no threshold processing whatsoever
   // (no configured confidenceConfig) AND a call carrying no model confidence is

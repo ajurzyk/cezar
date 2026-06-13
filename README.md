@@ -212,7 +212,7 @@ Four ideas, each one a thin wrapper over the next. Full reference in
 
 - **Actions** are your team's playbook, encoded once: a system prompt, a list
   of skills, a set of allowed effects (`label.add`, `comment`, `close`, …),
-  and a trigger. No bespoke TypeScript — just data. 15 built-ins ship; you
+  and a trigger. No bespoke TypeScript — just data. 2 built-ins ship; you
   can override any of them per workspace, or write new ones in the GUI.
 - **Skills** are Markdown playbooks pulled from your repo's `.ai/skills/`
   (built-in fallbacks ship with `@cezar/core`). Any Action composes them into

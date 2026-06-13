@@ -157,6 +157,9 @@ async function acceptDecisionsImpl(ids: string[]): Promise<DecisionResult> {
         github: ctx.github,
         targetNumber,
         supabase,
+        // Effects that write workspace-scoped rows (suggest-workflow's flow
+        // job enqueue) need the workspace id on accept too.
+        workspaceId: workspace.id,
       };
       await core.executeEffect(
         { effect: row.effect as core.EffectName, args: row.effect_args },

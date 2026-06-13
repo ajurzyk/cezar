@@ -14,7 +14,8 @@ export type FindingBody =
   | { kind: 'lint'; file: string; line: number; from: string; to: string }
   | { kind: 'bug'; note: string }
   | { kind: 'priority'; value: 'P0' | 'P1' | 'P2' | 'P3'; note: string }
-  | { kind: 'label'; labels: string[] };
+  | { kind: 'label'; labels: string[] }
+  | { kind: 'workflow'; reason: string };
 
 export type Finding = {
   id: string;

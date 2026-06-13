@@ -35,6 +35,9 @@ export interface TriagePassOptions {
   /** Workspace label catalog — forwarded into each action's `runAction` call
    *  so the per-action system message includes the catalog (see runner.ts). */
   labels?: WorkspaceLabel[];
+  /** Context-provider map forwarded to every `runAction` call — resolved
+   *  per-action against each action's `contextRefs` (see runner.ts). */
+  contextProviders?: Record<string, () => Promise<string>>;
 }
 
 /** Per-action result from a triage pass. */
@@ -67,6 +70,7 @@ export async function runTriagePass(opts: TriagePassOptions): Promise<TriagePass
     github: opts.github,
     targetNumber: opts.issueNumber,
     supabase: opts.supabase,
+    workspaceId: opts.workspaceId,
   };
 
   const autoTriage = await loadAutoTriageAction(opts.supabase, opts.workspaceId).catch((err) => {
@@ -105,6 +109,7 @@ export async function runTriagePass(opts: TriagePassOptions): Promise<TriagePass
         autoComment: opts.autoComment,
         deferSink: innerDeferSink,
         labels: opts.labels,
+        contextProviders: opts.contextProviders,
       });
       results.push({
         actionName: action.name,

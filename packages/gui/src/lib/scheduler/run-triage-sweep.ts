@@ -99,7 +99,10 @@ async function sweepOne(
       priority: 5,
       status: 'queued',
       max_attempts: 1,
-      payload: { trigger: 'sweep' },
+      // Backlog triage is semantically "treat as newly opened" — carry the
+      // real ActionTrigger; `source` keeps the provenance the old 'sweep'
+      // marker encoded.
+      payload: { trigger: 'on-issue-opened', source: 'sweep' },
     });
     if (error) {
       // The webhook (or a concurrent sweep tick) already enqueued a triage job

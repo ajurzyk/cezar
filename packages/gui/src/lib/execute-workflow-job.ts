@@ -5,7 +5,7 @@ import { loadWorkspaceConfig } from './load-workspace-config';
 import { loadWorkspaceLabels } from './load-workspace-labels';
 import { createWorkflowRunPersister, type WorkflowRunPersister } from './persist-workflow-run';
 import { acquireRepoLock, ensureRepoClone } from './repo-clone';
-import { runTriagePassJob } from './run-triage-pass-job';
+import { parseTriageTrigger, runTriagePassJob } from './run-triage-pass-job';
 import type { Database } from './supabase/types';
 
 type WorkflowKind = 'autofix' | 'ci-followup' | 'triage' | 'flow';
@@ -25,6 +25,10 @@ export interface ExecuteWorkflowJobParams {
   flowId?: string;
   /** For `flow` jobs — the `{{input}}` value passed to the first step (typically the issue number as a string). */
   flowInput?: string;
+  /** For `triage` jobs — the raw `jobs.payload.trigger`. Validated here via
+   *  `parseTriageTrigger`; absent/unknown values fall back to `'on-issue-opened'`
+   *  (covers in-flight jobs enqueued before the field existed and sweep jobs). */
+  triageTrigger?: string;
 }
 
 /**
@@ -47,7 +51,7 @@ export async function executeWorkflowJob(
   adminSupabase: SupabaseClient<Database>,
   params: ExecuteWorkflowJobParams,
 ): Promise<void> {
-  const { workspaceId, workflow, issueNumber, prNumber, jobId, ciFollowupSeed, flowId, flowInput } = params;
+  const { workspaceId, workflow, issueNumber, prNumber, jobId, ciFollowupSeed, flowId, flowInput, triageTrigger } = params;
   let persister: WorkflowRunPersister | null = null;
   // Held for the whole run: the engine clones into a per-repo shared worktree
   // and the agent edits it across steps, so concurrent jobs for the same repo
@@ -286,6 +290,7 @@ export async function executeWorkflowJob(
         github,
         supabase: adminSupabase,
         persister,
+        trigger: parseTriageTrigger(triageTrigger),
         labels,
         actionAutoComment: workspaceRow?.action_auto_comment ?? null,
         deferSink: async ({ call, confidence, summary, action, target }) => {

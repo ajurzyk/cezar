@@ -6,6 +6,7 @@ import {
   GitHubService,
   IssueStore,
   discoverBuiltinSkills,
+  formatOpenIssuesKb,
   runAction,
   type ActionDef,
   type ActionTarget,
@@ -33,9 +34,12 @@ export interface CliRunOptions {
 }
 
 /**
- * Load the merged action catalog: the 15 built-in defaults (mirrored from the
- * SQL seed) plus any user-defined actions found at `<repoRoot>/.ai/actions/**\/*.md`.
- * Markdown frontmatter mirrors the SQL columns one-for-one.
+ * Load the merged action catalog: the built-in defaults plus any user-defined
+ * actions found at `<repoRoot>/.ai/actions/**\/*.md`.
+ * Markdown frontmatter mirrors the SQL columns one-for-one. The optional
+ * `suggested-flow` key maps to `suggestedFlowId` — parsed but inert locally
+ * (the CLI has no job queue; the suggest-workflow effect degrades to a
+ * "not supported in this environment" summary).
  */
 export async function loadActionCatalog(repoRoot: string = process.cwd()): Promise<ActionDef[]> {
   const userActions = await discoverUserActions(resolve(repoRoot, '.ai/actions'));
@@ -105,6 +109,10 @@ function parseActionMarkdown(raw: string, fallbackName: string): ActionDef | nul
     effects,
     outputSchema: null,
     enabled: fm.enabled === false ? false : true,
+    suggestedFlowId:
+      typeof fm['suggested-flow'] === 'string' && fm['suggested-flow'].trim()
+        ? fm['suggested-flow'].trim()
+        : null,
   };
 }
 
@@ -210,6 +218,7 @@ export async function runActionAcrossIssues(
           targetNumber: issue.number,
           supabase: undefined,
         },
+        contextProviders: buildStoreContextProviders(store, issue.number),
       });
       ok++;
       const effectLine = result.effectsApplied.length === 0
@@ -228,6 +237,37 @@ export async function runActionAcrossIssues(
 
   console.log(`\n  ${chalk.bold('summary')} · ${ok} ok · ${failed} failed\n`);
   return { runs: issues.length, ok, failed };
+}
+
+const OPEN_ISSUES_KB_CAP = 100;
+
+/**
+ * Context-provider map resolved by the core runner against each action's
+ * `contextRefs`. `open-issues` builds the open-issue knowledge base from the
+ * local store: open issues lower-numbered than the target (the dedupe rule's
+ * "lower-numbered original"), newest first, capped at 100; summaries prefer
+ * the stored digest over a body excerpt.
+ */
+function buildStoreContextProviders(
+  store: IssueStore,
+  targetNumber: number,
+): Record<string, () => Promise<string>> {
+  return {
+    'open-issues': async () => {
+      const open = store
+        .getIssues()
+        .filter((i) => i.state === 'open' && i.number < targetNumber)
+        .sort((a, b) => b.number - a.number);
+      return formatOpenIssuesKb(
+        open.map((i) => ({
+          number: i.number,
+          title: i.title,
+          summary: i.digest?.summary ?? i.body,
+        })),
+        { cap: OPEN_ISSUES_KB_CAP },
+      );
+    },
+  };
 }
 
 function selectIssues(all: StoredIssue[], action: ActionDef, scope: IssueScope): StoredIssue[] {
