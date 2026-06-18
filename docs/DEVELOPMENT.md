@@ -152,3 +152,29 @@ Workspace-scoped Action (no code change):
    with a Zod schema for its input and an `execute(args, ctx)` impl.
 2. Register it in `EFFECT_REGISTRY`. The runner and the Anthropic-tools
    generator pick it up automatically — no other plumbing.
+
+---
+
+## Adding a Supabase migration
+
+Migrations live in [`packages/gui/supabase/migrations/`](../packages/gui/supabase/migrations/)
+and are applied in lexicographic filename order by
+[`infra/supabase/migrate.sh`](../infra/supabase/migrate.sh) (tracked once each
+in `public._cezar_migrations`).
+
+**Naming convention — use a UTC timestamp prefix, not a sequential number:**
+
+```
+YYYYMMDDHHMMSS_short_description.sql      e.g. 20260618143000_add_foo_index.sql
+```
+
+Generate the prefix with `date -u +%Y%m%d%H%M%S`. Timestamps sort correctly
+(every `2026…` file runs after every legacy `00xx_` file) and never collide
+across branches — the old zero-padded `0001`–`0044` scheme produced merge
+conflicts whenever two PRs grabbed the same number (see the four legacy
+`0029_*` files). Existing numbered migrations are left as-is; only **new**
+migrations use the timestamp form.
+
+CI's "Migration numbering sanity" step fails the build on any two migrations
+that share a numeric prefix (the legacy `0029` set is allowlisted), so a
+duplicate prefix is caught before merge.

@@ -117,7 +117,11 @@ queue is `jobs` → `workflow_runs` → `agent_runs` → `agent_run_events` plus
 `/api/cron/triage-sweep` is the missed-webhook poll fallback; `/api/cron/issue-sync` is
 the GitHub → `issues`-table reconcile; `/api/runner/*` is the long-poll API for
 self-hosted runners. Shared `workflow_runs` / `agent_runs` / `agent_run_events` writes
-go through `lib/persist-workflow-run.ts`.
+go through `lib/persist-workflow-run.ts`. New Supabase migrations
+(`packages/gui/supabase/migrations/`) use a UTC timestamp prefix —
+`YYYYMMDDHHMMSS_desc.sql` (`date -u +%Y%m%d%H%M%S`) — not a sequential number, so
+branches never collide; legacy `00xx_` files (≤ `0044`) are grandfathered. CI's
+"Migration naming sanity" step enforces this. See `docs/DEVELOPMENT.md`.
 
 **Webhook receiver** (`packages/gui/src/app/api/github/webhook/`): GitHub App deliveries —
 `issues.opened`/`reopened`/`edited` enqueue a deduped `triage` job; `check_run.completed`
