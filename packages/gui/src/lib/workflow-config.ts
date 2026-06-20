@@ -1,6 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import type { WorkflowBinding, WorkspaceWorkflowSettings } from '@cezar/core';
+import type { Skill, WorkflowBinding, WorkspaceWorkflowSettings } from '@cezar/core';
 import { DEFAULT_WORKSPACE_WORKFLOW_SETTINGS } from '@cezar/core';
+import { filterActiveSkills, getSkillActivationContext } from './skill-state';
 import type { Database, WorkflowBackend } from './supabase/types';
 
 const VALID_BACKENDS: WorkflowBackend[] = ['anthropic-api', 'claude-cli', 'codex-cli'];
@@ -84,4 +85,41 @@ export async function loadWorkflowSettings(
     separateCommentPerStep:
       data.separate_comment_per_step ?? DEFAULT_WORKSPACE_WORKFLOW_SETTINGS.separateCommentPerStep,
   };
+}
+
+/**
+ * Issue #262 — discover the workspace's full skill catalog, then narrow it to
+ * the skills the user has marked active in `workspace_skill_states`. The
+ * returned list is what the orchestrator/engine see at run time — disabled
+ * skills are silently dropped (even when an old binding still references them).
+ *
+ * Returns `undefined` on discovery or DB failure (NOT an empty array) so the
+ * orchestrator's `opts.skills ?? discoverSkillsSafe(...)` fallback fires and
+ * the per-issue event stream sees a real failure log instead of a silent
+ * zero-skill run.
+ */
+export async function loadActiveSkillCatalog(
+  workspaceId: string,
+  repoRoot: string | null | undefined,
+  skillsDir: string,
+  supabase: SupabaseClient<Database>,
+): Promise<Skill[] | undefined> {
+  const core = await import('@cezar/core');
+  let catalog: Skill[];
+  try {
+    catalog = repoRoot
+      ? await core.discoverSkills(repoRoot, skillsDir)
+      : await core.discoverBuiltinSkills();
+  } catch (err) {
+    console.warn('[workflow-config] discoverSkills failed:', err instanceof Error ? err.message : err);
+    return undefined;
+  }
+
+  const activation = await getSkillActivationContext(workspaceId, supabase);
+  if (activation.error) {
+    // Surface the failure to the orchestrator so its `??` fallback to
+    // `discoverSkillsSafe` fires (per-issue onEvent logging, no silent run).
+    return undefined;
+  }
+  return filterActiveSkills(catalog, activation.states, activation.seeded);
 }

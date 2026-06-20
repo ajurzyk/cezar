@@ -3,6 +3,7 @@
 import { revalidatePath } from 'next/cache';
 import {
   discoverSkills,
+  normalizeSkillSource,
   renderTemplate,
   FLOW_STEP_SCAFFOLDING,
   DEFAULT_STEP_NOTES,
@@ -12,6 +13,7 @@ import { createSupabaseAdminClient } from '@/lib/supabase/server';
 import { getActiveWorkspace } from '@/lib/workspace';
 import { loadWorkspaceConfig } from '@/lib/load-workspace-config';
 import { ensureRepoClone, withRepoLock } from '@/lib/repo-clone';
+import { getSkillActivationContext, isSkillActive } from '@/lib/skill-state';
 import type { Database } from '@/lib/supabase/types';
 
 /**
@@ -412,20 +414,38 @@ export async function runFlowOnIssue(params: {
 
 // ─── Skill catalog with descriptions ────────────────────────────────────────
 
+/**
+ * Returns the skill summaries that should appear in the workflow-step picker.
+ *
+ * Issue #262: only **active** skills (those flipped on via
+ * `workspace_skill_states`) are returned. A workspace that hasn't been seeded
+ * yet falls back to "every skill in the cached catalog is active" so an
+ * unmigrated workspace doesn't suddenly see an empty picker.
+ */
 export async function listAvailableSkills(): Promise<SkillSummary[]> {
   const workspace = await getActiveWorkspace();
   if (!workspace) return [];
   const supabase = createSupabaseAdminClient();
-  const { data } = await supabase
-    .from('repo_skills')
-    .select('skills')
-    .eq('workspace_id', workspace.id);
+  const [{ data }, activation] = await Promise.all([
+    supabase.from('repo_skills').select('skills').eq('workspace_id', workspace.id),
+    getSkillActivationContext(workspace.id, supabase),
+  ]);
   if (!data) return [];
+  const { states, seeded: workspaceSeeded } = activation;
   const byName = new Map<string, SkillSummary>();
   for (const row of data) {
     const arr = (row.skills as Array<Record<string, unknown>> | null) ?? [];
     for (const s of arr) {
       if (!s || typeof s.name !== 'string' || !s.name.trim()) continue;
+      // Use the canonical predicate so the picker can't drift from
+      // `filterActiveSkills` (the runtime). The cache may hold a legacy
+      // `'repo'` value, so bridge it through `normalizeSkillSource` first.
+      const active = isSkillActive(
+        states.get(s.name),
+        normalizeSkillSource(s.source),
+        workspaceSeeded,
+      );
+      if (!active) continue;
       const description =
         typeof s.description === 'string'
           ? s.description.split('\n')[0].trim().slice(0, 240)

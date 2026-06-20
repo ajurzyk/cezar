@@ -128,7 +128,10 @@ export {
   discoverSkills,
   discoverBuiltinSkills,
   skillsForStage,
+  normalizeSkillSource,
+  SKILL_SOURCE_PRIORITY,
   type Skill,
+  type SkillSource,
 } from './skills/skill-catalog.js';
 
 // Data-driven actions runtime — system prompt + skill_refs + effects/tools.
