@@ -104,7 +104,8 @@ The full template with every supported variable is in
 | `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY` | GitHub App auth (short-lived install tokens) |
 | `GITHUB_APP_WEBHOOK_SECRET` | Webhook signature verification (until set, the receiver returns 503) |
 | `CRON_SECRET` | Bearer check shared by `/api/cron/*` routes |
-| `CEZAR_RUNNER_URL` / `CEZAR_RUNNER_TOKEN` | `@cezar/runner` connection defaults |
+| `CEZAR_RUNNER_URL` / `CEZAR_RUNNER_JOIN_TOKEN` | `@cezar/runner` connection defaults (join token minted in Settings → Runners) |
+| `CEZAR_RUNNER_TOKEN` | **Deprecated — removed in v0.3.0.** Pre-issued runner token; migrate to `CEZAR_RUNNER_JOIN_TOKEN` |
 | Supabase + `NEXT_PUBLIC_APP_URL` | GUI |
 
 The CLI auto-loads `.env` from the project root; env vars override config-file

@@ -194,6 +194,7 @@ __metadata:
     "@cezar/core": "workspace:*"
     "@types/node": "npm:^20.0.0"
     typescript: "npm:^5.4.0"
+    zod: "npm:^3.23.0"
   bin:
     cezar-runner: ./dist/cli.js
   languageName: unknown

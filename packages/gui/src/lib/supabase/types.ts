@@ -760,6 +760,11 @@ export interface Database {
           /** Phase 4 (migration 0026) soft-affinity window. After this instant
            *  the preference is ignored and any matching runner may claim. */
           preferred_until: string | null;
+          /** Owner routing (migration 20260706075137) — the user who asked
+           *  for this work; NULL for system-initiated jobs (webhooks, sweeps,
+           *  schedulers). Non-NULL restricts runner claims to runners owned
+           *  by this user. */
+          requested_by: string | null;
           attempts: number;
           max_attempts: number;
           scheduled_at: string;
@@ -786,6 +791,7 @@ export interface Database {
           | 'claim_expires_at'
           | 'preferred_runner_id'
           | 'preferred_until'
+          | 'requested_by'
         > & {
           id?: string;
           repo?: string | null;
@@ -798,6 +804,7 @@ export interface Database {
           claim_expires_at?: string | null;
           preferred_runner_id?: string | null;
           preferred_until?: string | null;
+          requested_by?: string | null;
           attempts?: number;
           max_attempts?: number;
           scheduled_at?: string;
@@ -995,6 +1002,14 @@ export interface Database {
            *  time-series here. Shape: `RunnerUtilization`. NULL on older
            *  daemons that don't report. */
           utilization: RunnerUtilization | null;
+          /** Join-token registration (migration 20260706075137) — the user
+           *  who owns this runner (the join token's creator). NULL only on
+           *  legacy rows registered before the join-token flow. */
+          owner_user_id: string | null;
+          /** GitHub login of the owner, denormalized at registration. */
+          owner_login: string | null;
+          /** The join token this runner registered through. */
+          join_token_id: string | null;
         };
         Insert: Omit<
           Database['public']['Tables']['runners']['Row'],
@@ -1010,6 +1025,9 @@ export interface Database {
           | 'github_installation_id'
           | 'github_inherit_host'
           | 'utilization'
+          | 'owner_user_id'
+          | 'owner_login'
+          | 'join_token_id'
         > & {
           id?: string;
           workspace_id?: string | null;
@@ -1023,8 +1041,36 @@ export interface Database {
           github_installation_id?: number | null;
           github_inherit_host?: boolean;
           utilization?: RunnerUtilization | null;
+          owner_user_id?: string | null;
+          owner_login?: string | null;
+          join_token_id?: string | null;
         };
         Update: Partial<Database['public']['Tables']['runners']['Insert']>;
+        Relationships: [];
+      };
+      runner_join_tokens: {
+        Row: {
+          id: string;
+          workspace_id: string;
+          created_by: string;
+          /** GitHub login of the creator, denormalized at mint time. */
+          created_by_login: string;
+          label: string;
+          token_hash: string;
+          created_at: string;
+          revoked_at: string | null;
+        };
+        Insert: Omit<
+          Database['public']['Tables']['runner_join_tokens']['Row'],
+          'id' | 'created_by_login' | 'label' | 'created_at' | 'revoked_at'
+        > & {
+          id?: string;
+          created_by_login?: string;
+          label?: string;
+          created_at?: string;
+          revoked_at?: string | null;
+        };
+        Update: Partial<Database['public']['Tables']['runner_join_tokens']['Insert']>;
         Relationships: [];
       };
       pending_decisions: {
@@ -1165,7 +1211,12 @@ export interface Database {
         Returns: Database['public']['Tables']['jobs']['Row'][];
       };
       claim_next_job_for_runner: {
-        Args: { p_runner_id: string; p_backends: string[]; p_limit?: number };
+        Args: {
+          p_runner_id: string;
+          p_backends: string[];
+          p_limit?: number;
+          p_lease_seconds?: number;
+        };
         Returns: Database['public']['Tables']['jobs']['Row'][];
       };
       enqueue_autofix_if_not_open: {

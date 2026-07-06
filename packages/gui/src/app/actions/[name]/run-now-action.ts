@@ -101,6 +101,7 @@ export async function enqueueActionRun(actionId: string, number: number): Promis
     // the cron dispatcher executes. Stamping the backend keeps self-hosted CLI
     // runners — which only know the workflow kinds — from claiming it.
     required_backend: 'anthropic-api',
+    requested_by: user.id,
     payload: { trigger: 'manual', actionId, runId, target: actionRow.target },
   });
   if (jobErr) {
