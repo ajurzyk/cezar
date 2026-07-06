@@ -168,7 +168,7 @@ export async function deleteRun(runId: string): Promise<ActionResult> {
     .delete()
     .eq('id', runId)
     .eq('workspace_id', ctx.workspaceId)
-    .in('status', TERMINAL_STATUSES as readonly string[] as string[]);
+    .in('status', TERMINAL_STATUSES);
   if (error) return { error: error.message };
   revalidatePath('/cockpit');
   return { ok: true };
@@ -184,7 +184,7 @@ export async function deleteRuns(ids: string[]): Promise<ActionResult> {
     .delete()
     .in('id', ids)
     .eq('workspace_id', ctx.workspaceId)
-    .in('status', TERMINAL_STATUSES as readonly string[] as string[]);
+    .in('status', TERMINAL_STATUSES);
   if (error) return { error: error.message };
   revalidatePath('/cockpit');
   return { ok: true };

@@ -161,7 +161,9 @@ export interface Database {
           name: string;
           repo_owner: string;
           repo_name: string;
-          installation_id: number | null;
+          /** GitHub App installation id. `text` in the DB (migration 0001) even
+           *  though GitHub reports a number — compare/write as a string. */
+          installation_id: string | null;
           config: Json;
           meta: Json;
           auto_triage_enabled: boolean;
@@ -188,6 +190,12 @@ export interface Database {
         Insert: Omit<
           Database['public']['Tables']['workspaces']['Row'],
           | 'id'
+          | 'installation_id'
+          | 'config'
+          | 'meta'
+          | 'auto_triage_enabled'
+          | 'autofix_enabled'
+          | 'separate_comment_per_step'
           | 'created_at'
           | 'updated_at'
           | 'auto_triage_action_id'
@@ -202,6 +210,12 @@ export interface Database {
           | 'skill_states_seeded'
         > & {
           id?: string;
+          installation_id?: string | null;
+          config?: Json;
+          meta?: Json;
+          auto_triage_enabled?: boolean;
+          autofix_enabled?: boolean;
+          separate_comment_per_step?: boolean;
           auto_triage_action_id?: string | null;
           action_auto_comment?: boolean;
           sync_mode?: 'auto' | 'manual';
@@ -216,6 +230,7 @@ export interface Database {
           updated_at?: string;
         };
         Update: Partial<Database['public']['Tables']['workspaces']['Insert']>;
+        Relationships: [];
       };
       workspace_members: {
         Row: {
@@ -224,8 +239,15 @@ export interface Database {
           role: WorkspaceRole;
           joined_at: string;
         };
-        Insert: Database['public']['Tables']['workspace_members']['Row'];
+        Insert: Omit<
+          Database['public']['Tables']['workspace_members']['Row'],
+          'role' | 'joined_at'
+        > & {
+          role?: WorkspaceRole;
+          joined_at?: string;
+        };
         Update: Partial<Database['public']['Tables']['workspace_members']['Row']>;
+        Relationships: [];
       };
       issues: {
         Row: {
@@ -251,6 +273,7 @@ export interface Database {
         };
         Insert: Omit<Database['public']['Tables']['issues']['Row'], 'id'> & { id?: string };
         Update: Partial<Database['public']['Tables']['issues']['Insert']>;
+        Relationships: [];
       };
       pull_requests: {
         Row: {
@@ -281,6 +304,7 @@ export interface Database {
           updated_at?: string;
         };
         Update: Partial<Database['public']['Tables']['pull_requests']['Insert']>;
+        Relationships: [];
       };
       sync_status: {
         Row: {
@@ -315,6 +339,7 @@ export interface Database {
           updated_at?: string;
         };
         Update: Partial<Database['public']['Tables']['sync_status']['Insert']>;
+        Relationships: [];
       };
       user_github_tokens: {
         Row: {
@@ -327,6 +352,7 @@ export interface Database {
           updated_at?: string;
         };
         Update: Partial<Database['public']['Tables']['user_github_tokens']['Insert']>;
+        Relationships: [];
       };
       flows: {
         Row: {
@@ -353,6 +379,7 @@ export interface Database {
           updated_at?: string;
         };
         Update: Partial<Database['public']['Tables']['flows']['Insert']>;
+        Relationships: [];
       };
       workflow_bindings: {
         Row: {
@@ -369,7 +396,14 @@ export interface Database {
         };
         Insert: Omit<
           Database['public']['Tables']['workflow_bindings']['Row'],
-          'id' | 'extra_tools' | 'created_at' | 'updated_at'
+          | 'id'
+          | 'repo'
+          | 'skill_name'
+          | 'backend'
+          | 'model'
+          | 'extra_tools'
+          | 'created_at'
+          | 'updated_at'
         > & {
           id?: string;
           repo?: string | null;
@@ -381,6 +415,7 @@ export interface Database {
           updated_at?: string;
         };
         Update: Partial<Database['public']['Tables']['workflow_bindings']['Insert']>;
+        Relationships: [];
       };
       repo_skills: {
         Row: {
@@ -399,6 +434,7 @@ export interface Database {
           fetched_at?: string;
         };
         Update: Partial<Database['public']['Tables']['repo_skills']['Insert']>;
+        Relationships: [];
       };
       actions: {
         Row: {
@@ -475,6 +511,7 @@ export interface Database {
           suggested_flow_id?: string | null;
         };
         Update: Partial<Database['public']['Tables']['actions']['Insert']>;
+        Relationships: [];
       };
       skill_overrides: {
         Row: {
@@ -519,6 +556,7 @@ export interface Database {
           updated_by?: string | null;
         };
         Update: Partial<Database['public']['Tables']['skill_overrides']['Insert']>;
+        Relationships: [];
       };
       workspace_skill_states: {
         Row: {
@@ -553,6 +591,7 @@ export interface Database {
           updated_by?: string | null;
         };
         Update: Partial<Database['public']['Tables']['workspace_skill_states']['Insert']>;
+        Relationships: [];
       };
       skill_sources: {
         Row: {
@@ -594,6 +633,7 @@ export interface Database {
           updated_by?: string | null;
         };
         Update: Partial<Database['public']['Tables']['skill_sources']['Insert']>;
+        Relationships: [];
       };
       external_repo_skills: {
         Row: {
@@ -613,6 +653,7 @@ export interface Database {
           fetched_at?: string;
         };
         Update: Partial<Database['public']['Tables']['external_repo_skills']['Insert']>;
+        Relationships: [];
       };
       uploaded_skills: {
         Row: {
@@ -650,6 +691,7 @@ export interface Database {
           updated_by?: string | null;
         };
         Update: Partial<Database['public']['Tables']['uploaded_skills']['Insert']>;
+        Relationships: [];
       };
       skills_sh_skills: {
         Row: {
@@ -694,6 +736,7 @@ export interface Database {
           imported_by?: string | null;
         };
         Update: Partial<Database['public']['Tables']['skills_sh_skills']['Insert']>;
+        Relationships: [];
       };
       jobs: {
         Row: {
@@ -727,8 +770,13 @@ export interface Database {
         Insert: Omit<
           Database['public']['Tables']['jobs']['Row'],
           | 'id'
+          | 'repo'
+          | 'issue_number'
+          | 'pr_number'
           | 'priority'
           | 'status'
+          | 'required_backend'
+          | 'claimed_by_runner'
           | 'attempts'
           | 'max_attempts'
           | 'scheduled_at'
@@ -758,6 +806,7 @@ export interface Database {
           updated_at?: string;
         };
         Update: Partial<Database['public']['Tables']['jobs']['Insert']>;
+        Relationships: [];
       };
       workflow_runs: {
         Row: {
@@ -790,12 +839,25 @@ export interface Database {
         Insert: Omit<
           Database['public']['Tables']['workflow_runs']['Row'],
           | 'id'
+          | 'job_id'
+          | 'repo'
+          | 'issue_number'
+          | 'pr_number'
+          | 'branch'
+          | 'head_sha'
+          | 'pr_url'
           | 'status'
           | 'pause_requested'
+          | 'current_step_id'
+          | 'outcome'
+          | 'reason'
           | 'tokens_used'
+          | 'cost_estimate'
           | 'started_at'
+          | 'finished_at'
           | 'created_at'
           | 'updated_at'
+          | 'session_id'
         > & {
           id?: string;
           job_id?: string | null;
@@ -819,6 +881,7 @@ export interface Database {
           session_id?: string | null;
         };
         Update: Partial<Database['public']['Tables']['workflow_runs']['Insert']>;
+        Relationships: [];
       };
       agent_runs: {
         Row: {
@@ -848,7 +911,20 @@ export interface Database {
         };
         Insert: Omit<
           Database['public']['Tables']['agent_runs']['Row'],
-          'id' | 'iteration' | 'status' | 'started_at' | 'tokens_used'
+          | 'id'
+          | 'iteration'
+          | 'kind'
+          | 'backend'
+          | 'model'
+          | 'status'
+          | 'started_at'
+          | 'finished_at'
+          | 'tokens_used'
+          | 'cost_estimate'
+          | 'summary'
+          | 'error'
+          | 'session_id'
+          | 'runner_id'
         > & {
           id?: string;
           iteration?: number;
@@ -866,6 +942,7 @@ export interface Database {
           runner_id?: string | null;
         };
         Update: Partial<Database['public']['Tables']['agent_runs']['Insert']>;
+        Relationships: [];
       };
       agent_run_events: {
         Row: {
@@ -879,7 +956,7 @@ export interface Database {
         };
         Insert: Omit<
           Database['public']['Tables']['agent_run_events']['Row'],
-          'id' | 'payload' | 'created_at'
+          'id' | 'agent_run_id' | 'payload' | 'created_at'
         > & {
           id?: number;
           agent_run_id?: string | null;
@@ -887,6 +964,7 @@ export interface Database {
           created_at?: string;
         };
         Update: Partial<Database['public']['Tables']['agent_run_events']['Insert']>;
+        Relationships: [];
       };
       runners: {
         Row: {
@@ -921,9 +999,12 @@ export interface Database {
         Insert: Omit<
           Database['public']['Tables']['runners']['Row'],
           | 'id'
+          | 'workspace_id'
           | 'backends'
           | 'models'
+          | 'token_hash'
           | 'status'
+          | 'last_heartbeat_at'
           | 'created_at'
           | 'updated_at'
           | 'github_installation_id'
@@ -944,6 +1025,7 @@ export interface Database {
           utilization?: RunnerUtilization | null;
         };
         Update: Partial<Database['public']['Tables']['runners']['Insert']>;
+        Relationships: [];
       };
       pending_decisions: {
         Row: {
@@ -991,6 +1073,7 @@ export interface Database {
           expires_at?: string | null;
         };
         Update: Partial<Database['public']['Tables']['pending_decisions']['Insert']>;
+        Relationships: [];
       };
       workspace_label_analyses: {
         Row: {
@@ -1022,6 +1105,7 @@ export interface Database {
           updated_at?: string;
         };
         Update: Partial<Database['public']['Tables']['workspace_label_analyses']['Insert']>;
+        Relationships: [];
       };
       workspace_labels: {
         Row: {
@@ -1059,6 +1143,7 @@ export interface Database {
           updated_at?: string;
         };
         Update: Partial<Database['public']['Tables']['workspace_labels']['Insert']>;
+        Relationships: [];
       };
       webhook_deliveries: {
         Row: {
@@ -1070,6 +1155,59 @@ export interface Database {
           received_at?: string;
         };
         Update: Partial<Database['public']['Tables']['webhook_deliveries']['Insert']>;
+        Relationships: [];
+      };
+    };
+    Views: { [_ in never]: never };
+    Functions: {
+      claim_next_job: {
+        Args: { p_limit?: number };
+        Returns: Database['public']['Tables']['jobs']['Row'][];
+      };
+      claim_next_job_for_runner: {
+        Args: { p_runner_id: string; p_backends: string[]; p_limit?: number };
+        Returns: Database['public']['Tables']['jobs']['Row'][];
+      };
+      enqueue_autofix_if_not_open: {
+        Args: {
+          p_workspace_id: string;
+          p_repo: string | null;
+          p_issue_number: number;
+          p_payload?: Json;
+          p_priority?: number;
+          p_max_attempts?: number;
+          p_preferred_runner_id?: string | null;
+          p_preferred_until?: string | null;
+        };
+        Returns: string | null;
+      };
+      ingest_runner_events: {
+        Args: { p_run_id: string; p_workspace_id: string; p_events: Json };
+        Returns: undefined;
+      };
+      prune_webhook_deliveries: {
+        Args: { p_retention_hours?: number };
+        Returns: number;
+      };
+      renew_claim_leases: {
+        Args: { p_runner_id: string; p_job_ids: string[]; p_lease_seconds?: number };
+        Returns: { renewed_id: string }[];
+      };
+      requeue_jobs_for_offline_runners: {
+        Args: { p_stale_minutes?: number };
+        Returns: number;
+      };
+      requeue_stalled_jobs: {
+        Args: { p_stale_minutes?: number };
+        Returns: number;
+      };
+      runner_heartbeat: {
+        Args: { p_runner_id: string; p_status?: string };
+        Returns: { cancel_job_ids: string[] | null; pause_run_ids: string[] | null }[];
+      };
+      touch_runner_heartbeat: {
+        Args: { p_runner_id: string; p_status?: string };
+        Returns: undefined;
       };
     };
   };
