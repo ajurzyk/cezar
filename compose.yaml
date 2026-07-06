@@ -115,6 +115,11 @@ services:
     environment:
       CEZAR_RUNNER_URL: ${CEZAR_RUNNER_URL:-http://gui:3000}
       CEZAR_RUNNER_TOKEN: ${CEZAR_RUNNER_TOKEN}
+      # The default URL is plain http over the private compose network, which
+      # the runner's TLS guard would otherwise refuse (it protects the bearer
+      # token from leaving the host in plaintext). Set to 0 if you point
+      # CEZAR_RUNNER_URL at an external https:// endpoint.
+      CEZAR_RUNNER_ALLOW_INSECURE: ${CEZAR_RUNNER_ALLOW_INSECURE:-1}
     command:
       - 'start'
       - '--kind'
