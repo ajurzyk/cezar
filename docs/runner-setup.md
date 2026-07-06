@@ -25,8 +25,8 @@ yarn workspace @cezar/runner build
 ```
 
 This produces the `cezar-runner` binary (`packages/runner/dist/cli.js`). Run it
-via `yarn workspace @cezar/runner exec cezar-runner …`, or `npm link` /
-`yarn link` the package, or just call `node packages/runner/dist/cli.js …`.
+via `node packages/runner/dist/cli.js …`, or put it on your PATH globally with
+`yarn link:bins` (from the repo root; `yarn unlink:bins` removes it).
 
 ## 2. Register the runner in the web app
 

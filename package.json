@@ -15,6 +15,8 @@
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
     "dev": "yarn workspace cezar dev",
+    "link:bins": "(cd packages/cli && npm link) && (cd packages/runner && npm link)",
+    "unlink:bins": "npm rm -g cezar @cezar/runner",
     "db:start": "docker compose -f infra/supabase/docker-compose.yml up -d",
     "db:stop": "docker compose -f infra/supabase/docker-compose.yml down",
     "db:reset": "docker compose -f infra/supabase/docker-compose.yml down -v && docker compose -f infra/supabase/docker-compose.yml up -d",
