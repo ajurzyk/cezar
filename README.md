@@ -1,297 +1,294 @@
 <div align="center">
 
-<img src="docs/images/cezar-banner.svg" alt="CEZAR" width="528" height="120">
+# cezar ⚡
 
-**Software delivery life cycle cockpit for managing projects and co-working with agents.**
+**A local cockpit for running and tracking AI coding-agent tasks in your repo.**
 
-Coordinate humans and AI agent teams across the GitHub issue lifecycle — from
-intake and triage, through autofix, to a draft PR ready for review. Agents do
-the routine; you keep control of the judgment calls.
+Type a task, pick a workflow, watch the agent work live — steps, tool calls,
+tokens, diffs — in a browser cockpit that runs entirely on your machine.
+Your `claude` login, your `gh`, your files. No accounts, no database, no cloud.
 
-[What it solves](#what-it-solves) · [Who it's for](#who-its-for) · [Quick start](#quick-start) · [How the loop works](#how-the-humanagent-loop-works) · [Built-in actions](#built-in-actions)
+[What it solves](#what-it-solves) · [Who it's for](#who-its-for) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Core concepts](#core-concepts) · [Cockpit tour](#cockpit-tour)
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](#license)
 ![Node 20+](https://img.shields.io/badge/Node-20%2B-339933)
 ![TypeScript 5.x](https://img.shields.io/badge/TypeScript-5.x-3178c6)
-![Status: active](https://img.shields.io/badge/status-active-success)
+![Zero config](https://img.shields.io/badge/config-zero-success)
+![No database](https://img.shields.io/badge/database-none-success)
 
 </div>
 
-![Cockpit — every agent run across the workspace, with row-level controls](docs/images/cezar-runs.png)
+---
+
+```bash
+cd your-repo
+npx cezar-cli        # → cockpit at http://localhost:4321
+```
+
+That's the whole setup. If your `claude` CLI is logged in (Pro/Max) and `gh` is
+authenticated, there is nothing else to configure. State lives in `.ai/cezar/`
+inside your repo — plain JSON, NDJSON and Markdown you can `cat` and fix by hand.
 
 ---
 
 ## What it solves
 
-Most "AI for GitHub" tools are point solutions — a labeler, a duplicate
-detector, an autofix bot. Run a few side by side and you end up with no
-shared model, no shared visibility, and no clear place for the human to step
-in. Cezar is the **cockpit** that pulls those jobs into one delivery flow.
+Most "AI coding agent" tooling makes you choose between a **terminal** you can't
+see into once it's running, and a **cloud product** that wants your API key, your
+code on their servers, and an account. cezar is the third option: the agent runs
+locally under *your* subscription, and a cockpit shows you exactly what it's doing.
 
-- **Backlog outpaces triage.** New issues sit unlabeled and unprioritized for
-  days. Cezar auto-triages every incoming issue on webhook — type, priority,
-  duplicates, missing-info — and posts one summary comment, not a wall of bots.
-- **No visibility into what agents are doing.** Once you have more than one
-  agent running, you stop knowing which run is paused, which failed, which
-  ate its turn budget. The cockpit shows every run live, with pause / cancel
-  / resume / retry / delete on each row.
-- **Hand-off without losing control.** Agents handle the routine; **human-gate**
-  steps pause the workflow on low-confidence decisions so you approve before
-  anything ships. Fixes land as draft PRs — never auto-merge.
-- **Customization without forking.** Actions are data-driven specs, skills are
-  Markdown playbooks pulled from your repo's `.ai/skills/`. Override a built-in
-  via a clone-and-edit in the GUI, no TypeScript plugin required.
-- **Bring your own agent backend.** Anthropic API, Claude Code CLI, or Codex
-  CLI — pick per workflow step. Run subscription CLIs on your own infra under
-  your own login via the self-hosted runner.
+- **No visibility into a running agent.** A headless `claude` run is a black box
+  until it finishes. cezar streams every step — agent text, each tool call and
+  its result, tokens and cost per step — live, and keeps the full replay.
+- **One agent, one working tree, one thing at a time.** Kick off a second task and
+  it fights the first over your files. cezar runs each task in its **own git
+  worktree**, so two (or three) agents work in parallel without stepping on
+  each other — or on the branch you're editing.
+- **The agent finishes and you have to trust it.** cezar ends non-trivial runs at
+  a **review gate**: inspect the diff, send notes back into the same session, or
+  push a **draft PR** — never an auto-merge.
+- **Losing a session when it fails.** Every run records its `claude` session id.
+  Take it over interactively in one click (`claude --resume <id>`), or continue it
+  in-process from the cockpit.
+- **Setup tax.** No wizard, no env vars, no schema. Skills are Markdown, workflows
+  are short YAML, and everything degrades: no `gh` → works without PRs, no network
+  → local skills still load, no `.ai/skills` → the bare prompt still runs.
 
 ---
 
 ## Who it's for
 
-- **Engineering leads** managing a steady inbound of bug reports and feature
-  requests, who want delegation without losing the audit trail.
-- **OSS maintainers** whose backlog grows faster than triage time and who want
-  one consistent voice on issues — not five bot comments.
-- **Platform / DevEx teams** rolling out agent workflows across multiple repos
-  and looking for shared observability, shared playbooks, and shared gates.
-- **Solo devs** running through an issue backlog one-off — the CLI mode works
-  against a local JSON store, no SaaS or DB required.
-
----
-
-## Screenshots
-
-The cockpit shot above is the app as it stands today. Below — a tour of the rest of the surface area. Click any card for the full-size view.
-
-<table>
-<tr>
-<td align="center" width="33%" valign="top">
-  <a href="docs/images/cezar-run-details.png"><img src="docs/images/cezar-run-details.png" alt="Run detail" /></a>
-  <br/><sub><b>Run detail</b><br/>step graph + streaming event log</sub>
-</td>
-<td align="center" width="33%" valign="top">
-  <a href="docs/images/cezar-activity-log.png"><img src="docs/images/cezar-activity-log.png" alt="Activity feed" /></a>
-  <br/><sub><b>Activity feed</b><br/>workspace-wide audit trail</sub>
-</td>
-<td align="center" width="33%" valign="top">
-  <a href="docs/images/cezar-inbox.png"><img src="docs/images/cezar-inbox.png" alt="Inbox" /></a>
-  <br/><sub><b>Inbox</b><br/>pending decisions and paused runs</sub>
-</td>
-</tr>
-<tr>
-<td align="center" width="33%" valign="top">
-  <a href="docs/images/cezar-action-details-1.png"><img src="docs/images/cezar-action-details-1.png" alt="Action editor" /></a>
-  <br/><sub><b>Action editor</b><br/>system prompt, skills, effects</sub>
-</td>
-<td align="center" width="33%" valign="top">
-  <a href="docs/images/cezar-action-details-2.png"><img src="docs/images/cezar-action-details-2.png" alt="Acceptance settings" /></a>
-  <br/><sub><b>Acceptance settings</b><br/>model, auto-accept, confidence cutoff</sub>
-</td>
-<td align="center" width="33%" valign="top">
-  <a href="docs/images/cezar-actions.png"><img src="docs/images/cezar-actions.png" alt="Actions catalog" /></a>
-  <br/><sub><b>Actions catalog</b><br/>built-in + user-defined plays</sub>
-</td>
-</tr>
-<tr>
-<td align="center" width="33%" valign="top">
-  <a href="docs/images/cezar-skills.png"><img src="docs/images/cezar-skills.png" alt="Skills" /></a>
-  <br/><sub><b>Skills</b><br/>built-in + repo <code>.ai/skills/</code></sub>
-</td>
-<td align="center" width="33%" valign="top">
-  <a href="docs/images/cezar-skill-details.png"><img src="docs/images/cezar-skill-details.png" alt="Skill details" /></a>
-  <br/><sub><b>Skill details</b><br/>rendered body + prompt preview</sub>
-</td>
-<td align="center" width="33%" valign="top">
-  <a href="docs/images/cezar-workflows.png"><img src="docs/images/cezar-workflows.png" alt="Workflows" /></a>
-  <br/><sub><b>Workflows editor</b><br/>drag-orderable steps + skill bindings</sub>
-</td>
-</tr>
-<tr>
-<td align="center" width="33%" valign="top">
-  <a href="docs/images/cezar-settings.png"><img src="docs/images/cezar-settings.png" alt="Settings" /></a>
-  <br/><sub><b>Settings landing</b><br/>workspace-level switches in one place</sub>
-</td>
-<td align="center" width="33%" valign="top">
-  <a href="docs/images/cezar-setting-runner.png"><img src="docs/images/cezar-setting-runner.png" alt="Runners" /></a>
-  <br/><sub><b>Settings → Runners</b><br/>registered runners with heartbeat</sub>
-</td>
-<td align="center" width="33%" valign="top">
-  <a href="docs/images/cezar-settings-runner-register.png"><img src="docs/images/cezar-settings-runner-register.png" alt="Register runner" /></a>
-  <br/><sub><b>Register a runner</b><br/>name + backend selection</sub>
-</td>
-</tr>
-</table>
+- **Solo devs and small teams** who want the leverage of coding agents without
+  handing their code and keys to a SaaS — the agent runs on your subscription,
+  on your machine.
+- **`claude` CLI power users** who love headless runs but want to *see* them,
+  compare a few attempts side by side, and review a diff before it lands.
+- **Anyone with a backlog** who'd rather queue three tasks into isolated worktrees
+  and pick the winners than babysit one terminal.
+- **Teams with shared conventions** who want their playbooks (skills) pulled from
+  a git repo, applied consistently, with zero per-project setup.
 
 ---
 
 ## Quick start
 
-The recommended path: self-hosted SaaS (full cockpit + auto-triage) against
-the local Supabase docker stack. Two other paths — solo-use CLI and an
-optional self-hosted runner — are in [`docs/INSTALL.md`](docs/INSTALL.md).
+**Prerequisites:** Node 20+, the [`claude` CLI](https://github.com/anthropics/claude-code)
+logged in (Pro/Max subscription), and — optionally — `git` and the `gh` CLI.
 
 ```bash
-git clone https://github.com/comerito/cezar.git
-cd cezar
-yarn install
-
-# 1. start the local Supabase stack (db + kong + Realtime in Docker)
-yarn db:start
-
-# 2. seed env from the local-dev example; everything but ANTHROPIC_API_KEY
-#    is pre-filled for the local Supabase stack
-cp packages/gui/.env.local.example packages/gui/.env.local
-# then edit packages/gui/.env.local and replace `sk-ant-REPLACE-ME` with
-# your Anthropic key. GitHub App vars are optional for local-only use.
-
-# 3. run
-yarn workspace @cezar/gui dev
+cd your-repo
+npx cezar-cli              # start the cockpit for the current repo
+#   or: npx @pat-lewczuk/cezar
 ```
 
-For self-hosted (non-local) deployments, see
-[`docs/SELF-HOSTING.md`](docs/SELF-HOSTING.md) for the full env-var list
-including hosted Supabase, the in-process scheduler, and tuning knobs.
+The cockpit opens at `http://localhost:4321` (auto-picks the next free port if
+busy). Type a task, pick a workflow, hit **Start**. That's it.
 
-Then install the GitHub App on your repo, walk through the **Workspaces → New**
-wizard (project env preset, label-catalog analysis, workflow defaults), and
-open `/dashboard`. New issues will start triaging automatically.
+```bash
+npx cezar-cli run "add a --json flag to the export command"   # headless, CI-friendly
+npx cezar-cli init                                            # scaffold .ai/cezar/
+```
 
-> Prefer a no-DB, no-SaaS path? The solo-use CLI runs against a local JSON
-> store. See [`docs/INSTALL.md`](docs/INSTALL.md#option-1--solo-use-cli).
+Both the `cezar` and `cez` commands are installed, so once it's on your PATH you
+can run either. No API key is ever used — cezar shells out to your logged-in
+`claude` CLI.
+
+> **Just kicking the tires?** Set `CEZ_DRY_RUN=1` to run against a bundled mock
+> instead of the real CLI — the whole cockpit works with no `claude` login, so
+> you can explore runs, diffs, variants and the review gate offline.
 
 ---
 
-## How the human–agent loop works
+## How it works
 
-A bug report lands on GitHub. The GitHub App webhook enqueues a **triage** job.
-The triage pass runs every enabled Action whose trigger matches `on-issue-opened`,
-in deterministic order. If a fix is in scope, the autofix workflow kicks off:
-`verify-in-repo → root-cause → fix → review-loop → open PR (draft)` — and any
-step can be a **human-gate** that pauses until you approve.
+You describe a task. cezar runs it as a **workflow** — an ordered list of agent
+steps and shell checks — shelling out to your `claude` CLI in headless
+stream-json mode. Each task gets its own git worktree; the cockpit streams every
+event live and parks the run at a review gate when there's a diff to inspect.
 
 ```
-                ┌────────────────────────────────────────────────┐
-GitHub  ──►─── │  webhook (issues.opened)                       │
-                │   └─► jobs (deduped)                           │
-                └────────────────────────────────────────────────┘
-                                  │
-                                  ▼
-            ┌─────────────────────┼─────────────────────┐
-            ▼                     ▼                     ▼
-      Triage pass         Autofix workflow       CI follow-up
-      ┌────────────┐      ┌──────────────────┐   ┌───────────────┐
-      │ bug detect │      │ verify-in-repo   │   │ classify CI   │
-      │ priority   │      │ root-cause       │   │ failure       │
-      │ duplicates │      │ fix              │   │ patch + push  │
-      │ auto-label │      │ review-loop      │   └───────────────┘
-      │ …          │      │ open PR (draft)  │
-      └────────────┘      └──────────────────┘
-            │                     │
-            ▼                     ▼
-   agent_run_events ──realtime──► Cockpit UI
-                                  │
-                          human-gates pause here
-                          for your approval
+   you type a task
+        │
+        ▼
+   ┌─────────────┐   optional: Plan → AI drafts a chain of steps you approve
+   │  workflow   │   (agent steps + shell checks, with bounded onFail retries)
+   └─────────────┘
+        │
+        ▼
+   ┌──────────────────────────────┐     ┌───────────────────────────────┐
+   │  git worktree per task       │     │  claude CLI  (your login)     │
+   │  (isolated branch, parallel) │◄───►│  stream-json · default-deny   │
+   └──────────────────────────────┘     │  tools · acceptEdits in-repo  │
+        │                                 └───────────────────────────────┘
+        │  agent text · tool calls · tool results · tokens · cost
+        ▼
+   ┌─────────────┐   SSE (replay + live)   ┌──────────────────────────┐
+   │ .ai/cezar/  │ ──────────────────────► │  cockpit  localhost:4321 │
+   │ JSON·NDJSON │                         │  Runs · Repo · GitHub ·  │
+   │ ·Markdown   │                         │  Skills · Workflows      │
+   └─────────────┘                         └──────────────────────────┘
+                                                  │
+                                          review gate: read the diff →
+                                          send notes back · draft PR · finish
 ```
 
-Every step writes structured events; the cockpit (`/cockpit`, `/cockpit/[runId]`)
-subscribes via Supabase Realtime and renders the step graph filling in live. A
-single *living comment* on the issue (then the PR) is edited as steps complete —
-one comment per run, not a wall of bot chatter.
-
-For the underlying data model, the Action spec, the workflow engine, and the
-runner abstraction, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+When a check fails, the workflow can loop back to an earlier step (bounded by
+`max`) with the failing output appended to the retried agent's prompt. Nothing
+auto-merges: a run with changes rests in `review` until you act on it.
 
 ---
 
 ## Core concepts
 
-Four ideas, each one a thin wrapper over the next. Full reference in
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+Three words, no jargon — **task**, **skill**, **chain**:
 
-- **Actions** are your team's playbook, encoded once: a system prompt, a list
-  of skills, a set of allowed effects (`label.add`, `comment`, `close`, …),
-  and a trigger. No bespoke TypeScript — just data. 2 built-ins ship; you
-  can override any of them per workspace, or write new ones in the GUI.
-- **Skills** are Markdown playbooks pulled from your repo's `.ai/skills/`
-  (built-in fallbacks ship with `@cezar/core`). Any Action composes them into
-  its prompt — so you customize *how* an agent reasons without forking Cezar.
-- **Workflows** chain steps into a multi-step pipeline (`agent` · `effect` ·
-  `human-gate` · `commit` · `open-pr` · `push`). The autofix workflow is one;
-  you can define your own per workspace.
-- **Human gates** are the coordination piece. Any workflow step can pause for
-  a decision — low-confidence triage, ambiguous fix, sensitive area of the
-  codebase. The run sits in `paused` in the cockpit until you approve.
+- **Tasks** are the unit of work. Every task is a **run**: `queued → running →
+  review / done / failed / cancelled`, with a live event log, per-step token and
+  cost usage, cancel/delete, and — for anything with a diff — a review gate. Paste
+  screenshots into the task, or send follow-up messages into the live session
+  while it works.
+- **Skills** are Markdown playbooks. Drop them in `.ai/skills/` or
+  `.ai/cezar/skills/`, or pull them from a shared **team skills repo** (a bare
+  git clone cached globally in `~/.cache/cez/`). A workflow step references one by
+  `skill: <name>` and its body becomes the agent's extra system prompt — so you
+  shape *how* the agent reasons without touching code.
+- **Chains (workflows)** stitch steps into a pipeline: agent steps plus shell
+  checks, with bounded `onFail` retry loops. Write the YAML yourself, build one by
+  drag-ordering skills in the **Workflows** tab, or press **Plan** and let the AI
+  draft a chain for your task that you review, trim and start. The built-in
+  `quick-task` (one agent step) works with zero setup.
 
-### Workspace label catalog
+Two moves that make the cockpit worth the browser tab:
 
-A per-workspace vocabulary of labels Cezar will apply, with add/remove
-guidance per label. A **label-analysis job** scans your repo's existing labels
-and the last 100 issues/PRs to learn maintainer conventions, then asks Claude
-to synthesize a draft you edit in **Settings → Labels**. The accepted catalog
-is appended to every agent step's system prompt — so agents apply *your*
-labels with *your* semantics, and stop inventing new ones.
-
----
-
-## Built-in actions
-
-15 Actions ship with `@cezar/core`. Each one is data — you can enable, disable,
-override, or clone any of them in the GUI without touching code.
-
-| Action | Triggers | Effects | What it does |
-|---|---|---|---|
-| `auto-triage` | `on-issue-opened`, `on-issue-reopened` | tool-use (`label.add`, `set-priority`) | First-pass orchestrator — type labels + priority for clear critical defects |
-| `bug-detector` | `on-issue-opened`, `on-issue-edited` | declared (`label.add`) | Classify bug / feature / question / other with calibrated confidence |
-| `priority` | `on-issue-opened` | declared (`set-priority`) | Impact-and-urgency rubric with cited signals |
-| `duplicates` | `on-issue-opened` | tool-use (`link-duplicate`) | Detect duplicates against the open-issue knowledge base (conf ≥ 0.80) |
-| `auto-label` | `on-issue-opened`, `on-issue-edited` | tool-use (`label.add`, `label.remove`) | Apply repo-defined labels — never invents new ones |
-| `missing-info` | `on-issue-opened` | declared (`comment`, `label.add`) | Ask for missing repro info (3-5 bullets max) |
-| `security` | `on-issue-opened`, `on-issue-edited` | declared (`label.add`, `comment`) | Flag security implications, false positives preferred |
-| `quality` | `on-issue-opened` | declared (`label.add`) | Detect spam / vague / test / wrong-language submissions |
-| `good-first-issue` | `on-issue-opened` | declared (`label.add`) | Surface newcomer-friendly issues with a code hint |
-| `claim-detector` | `on-cron` | declared (`comment`) | Find stale claims (>14 days, no PR) and post a polite nudge |
-| `contributor-welcome` | `on-issue-opened` | declared (`comment`) | Personalised first-timer welcome — references issue specifics |
-| `recurring-questions` | `on-cron` | declared (`comment`) | Redirect open questions already answered in closed issues |
-| `categorize` | `on-issue-opened` | declared (`label.add`) | Framework / domain / integration categorization |
-| `done-detector` | `on-cron` | declared (`comment`, `close`) | Find issues silently resolved by merged PRs (conf ≥ 0.70) |
-| `stale` | `on-cron` | declared (`comment`, `close`, `label.add`) | Triage stale issues — close / label / keep-open |
+- **Parallel variants (×2 / ×3).** Run the same task as competing agents in
+  separate worktrees, then compare their diffs side by side and **pick** one —
+  the losers are archived and their worktrees cleaned up.
+- **Review gate.** A finished run with changes waits in `review`. Read the diff,
+  type notes that go straight back into the agent's session, or push a
+  `gh pr create --draft`. You stay the merge button.
 
 ---
 
-## Self-hosting
+## Cockpit tour
 
-Cezar runs on a managed cloud path (`ANTHROPIC_API_KEY` + the in-process
-dispatcher) by default. Add the optional `@cezar/runner` daemon if you want
-subscription CLIs (`claude`, `codex`) to run under your own login on your
-own infra. Full setup: [`docs/SELF-HOSTING.md`](docs/SELF-HOSTING.md).
+Six tabs, one browser window, all live over Server-Sent Events:
 
----
+| Tab | What's in it |
+|---|---|
+| **Runs** | Every task with its status, live event stream (agent text · tool calls · tool results · pasted/generated screenshots), tokens and cost. Continue, cancel, open in terminal (`claude --resume`), review the diff, or push a draft PR. |
+| **Inbox** | Follow-ups an agent left behind (`todos.json`) — one click turns a suggestion into the next task, pre-wired to its suggested skill. |
+| **Repo** | Branch, working-tree status, diff vs HEAD, recent commits (click one for its inline patch + GitHub link), and the configurable base branch that worktrees fork from and PRs target. |
+| **GitHub** | Open issues and PRs of the repo's origin, read through your logged-in `gh`. Drag an issue onto the task box to prefill the prompt. |
+| **Skills** | Local skills plus the team skills repo, with a rendered body + prompt preview. Refresh pulls the latest from the remote. |
+| **Workflows** | Build a chain by drag-ordering skills, save it as portable YAML, import/export, or delete. Built-ins always come back. |
 
-## Documentation
-
-- [`docs/INSTALL.md`](docs/INSTALL.md) — the three install paths (CLI · SaaS · self-hosted runner).
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — Action model, workflow engine, packages, data flow, runner abstraction.
-- [`docs/SELF-HOSTING.md`](docs/SELF-HOSTING.md) — self-hosted runner, configuration, env vars.
-- [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) — local dev, tech stack, adding new Actions and effects.
-- [`docs/dokploy-setup.md`](docs/dokploy-setup.md) — deploying the Docker Compose stack on a Hetzner VPS via Dokploy.
-- [`CLAUDE.md`](CLAUDE.md) — operating manual for AI assistants editing this repo.
-- [`DESIGN.md`](DESIGN.md) — design system spec for the GUI.
-- [`cezar-ROADMAP.md`](cezar-ROADMAP.md) — what's next.
+The whole GUI is dependency-free vanilla JS with no build step, a dark/light
+theme toggle, and bookmarklets that launch a task straight from a GitHub page.
 
 ---
 
-## Contributing
+## Workflow format
 
-Bug fixes, new Actions, new skills, new effects — all welcome. Please read
-[`CONTRIBUTING.md`](CONTRIBUTING.md) for the development workflow and code
-standards (TypeScript strict, ESM, Zod at every boundary, tests for new logic).
+A workflow is a small YAML file in `.ai/cezar/workflows/`:
 
-Found a bug? Open an issue — Cezar will auto-triage it.
+```yaml
+name: fix-and-verify
+description: Implement the task, then verify; retry with failing output on red.
+steps:
+  - id: implement
+    name: Implement
+    prompt: "{{task}}"
+    skill: project-conventions   # optional — from .ai/skills or .ai/cezar/skills
+    # model: opus                # optional per-step model override
+    # allowedTools: [Read, Edit, Write, Grep, Glob, Bash]
+  - id: verify
+    name: Verify
+    command: "npm test"          # a check step: exit 0 passes
+    onFail:
+      retry: implement           # loop back to an earlier step…
+      max: 2                     # …at most twice
+```
+
+`{{task}}` is replaced with the task text you typed. When a check fails and loops
+back, its failing output is appended to the retried agent's prompt so the next
+attempt can see what broke.
+
+Prefer skills over steps? A workflow can also be written in the portable
+shorthand — an ordered list of skill names, each becoming one agent step:
+
+```yaml
+name: triage-and-fix
+skills: [reproduce, root-cause, implement, self-review]
+```
+
+---
+
+## How it runs agents
+
+cezar shells out to your locally installed, logged-in `claude` CLI in headless
+`stream-json` mode — **your subscription, no API key**. Tool access is
+default-deny via `--allowedTools`, and edits are auto-accepted
+(`--permission-mode acceptEdits`) inside the task's worktree. Nothing runs on a
+server you don't own.
+
+Useful environment variables:
+
+| Var | Effect |
+|---|---|
+| `CEZ_DRY_RUN=1` | Use the bundled mock instead of the real `claude` CLI — the entire cockpit works offline, for demos and development. |
+| `CEZ_CLAUDE_BIN=/path/to/claude` | Override which `claude` binary is used. |
+| `GITHUB_TOKEN` | Fallback for GitHub reads/PRs when `gh` isn't authenticated. |
+
+---
+
+## Configuration (optional)
+
+Zero config is the default — everything below is opt-in via
+`.ai/cezar/config.json` (a missing or invalid file simply uses the defaults, and
+never blocks startup):
+
+```jsonc
+{
+  "skillsRepos": [{ "repo": "open-mercato/skills", "ref": "main" }], // team skills; [] disables
+  "maxParallel": 2,          // how many tasks may run at once (non-git dirs always run 1)
+  "plannerModel": "sonnet",  // model the Plan button uses to draft chains
+  "baseBranch": "develop"    // branch worktrees fork from + PRs target (also settable in the Repo tab)
+}
+```
+
+Run data (`runs.json`, NDJSON event logs, worktrees, `todos.json`) is
+git-ignored automatically; your workflows and skills stay committable.
+
+---
+
+## Development
+
+```bash
+npm install
+npm run dev          # tsx src/index.ts — the cockpit, live-reloaded
+npm run build        # tsc → dist/
+npm run typecheck    # tsc --noEmit
+```
+
+The stack is deliberately small: **TypeScript** (strict, ESM), **Hono** + SSE for
+the server, **Zod** at every boundary, **YAML** for workflows, and **vanilla JS**
+for the GUI (no framework, no bundler). Every module is meant to be read in one
+sitting.
+
+---
+
+## Relationship to cezar (the SaaS)
+
+cez is the radically-simple, single-user sibling of
+[**cezar**](https://github.com/comerito/cezar) — the team SaaS cockpit for
+running agents across the whole GitHub issue lifecycle (auto-triage, webhooks,
+Supabase, multi-repo). Same core ideas — agent runner, skills, declarative
+workflows, a live run cockpit — with none of the accounts, database or cloud.
+Start here; graduate to cezar when a team needs shared visibility.
 
 ---
 
 ## License
 
-[MIT](LICENSE) © [Comerito](https://github.com/comerito)
+**MIT** © Patryk Lewczuk

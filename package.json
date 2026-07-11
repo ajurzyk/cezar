@@ -1,35 +1,44 @@
 {
-  "name": "cezar-monorepo",
-  "private": true,
-  "version": "0.1.5",
+  "name": "@pat-lewczuk/cezar",
+  "version": "0.1.2",
+  "description": "Local cockpit for running and tracking AI agent tasks in your repo. Uses your logged-in `claude` CLI and `gh` — zero config, zero database.",
+  "license": "MIT",
   "type": "module",
-  "workspaces": [
-    "packages/*"
+  "bin": {
+    "cezar": "dist/index.js",
+    "cez": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "web",
+    "scripts",
+    "README.md"
   ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
-    "build": "yarn workspaces foreach -A --topological-dev run build",
-    "test": "yarn workspaces foreach -A run test",
-    "typecheck": "yarn workspaces foreach -A run typecheck",
-    "lint": "oxlint",
-    "lint:fix": "oxlint --fix",
-    "format": "oxfmt .",
-    "format:check": "oxfmt --check .",
-    "dev": "yarn workspace cezar dev",
-    "link:bins": "(cd packages/cli && npm link) && (cd packages/runner && npm link)",
-    "unlink:bins": "npm rm -g cezar @cezar/runner",
-    "db:start": "docker compose -f infra/supabase/docker-compose.yml up -d",
-    "db:stop": "docker compose -f infra/supabase/docker-compose.yml down",
-    "db:reset": "docker compose -f infra/supabase/docker-compose.yml down -v && docker compose -f infra/supabase/docker-compose.yml up -d",
-    "db:logs": "docker compose -f infra/supabase/docker-compose.yml logs -f",
-    "db:psql": "docker compose -f infra/supabase/docker-compose.yml exec db psql -U postgres -d postgres"
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.0",
+    "hono": "^4.6.0",
+    "yaml": "^2.5.0",
+    "zod": "^3.23.0"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
-    "oxfmt": "^0.57.0",
-    "oxlint": "^1.72.0",
-    "tsx": "^4.23.0",
-    "typescript": "^5.4.0",
-    "vitest": "^4.1.9"
+    "@types/node": "^20.14.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
   },
-  "packageManager": "yarn@4.12.0"
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/open-mercato/cezar"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }
