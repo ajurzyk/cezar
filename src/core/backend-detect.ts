@@ -4,19 +4,21 @@ import { promisify } from 'node:util';
 const exec = promisify(execFile);
 
 export interface BackendCheck {
-  name: 'claude' | 'gh' | 'git';
+  name: 'claude' | 'codex' | 'opencode' | 'gh' | 'git';
   available: boolean;
   version?: string;
   hint?: string;
 }
 
 /**
- * Probe the host for everything cez leans on: the `claude` CLI (the agent
- * backend), `gh` (GitHub auth for PR creation) and `git`. Nothing is required
- * except `claude` — the GUI degrades gracefully and shows the hints instead.
+ * Probe the host for everything cez leans on: the agent CLIs (`claude`, and
+ * the optional `codex` / `opencode` alternatives), `gh` (GitHub auth for PR
+ * creation) and `git`. Nothing is required except at least one agent CLI — the
+ * GUI degrades gracefully, only offers the runners that are present, and shows
+ * the hints for the rest.
  */
 export async function detectEnvironment(): Promise<BackendCheck[]> {
-  return Promise.all([probeClaude(), probeGh(), probeGit()]);
+  return Promise.all([probeClaude(), probeCodex(), probeOpencode(), probeGh(), probeGit()]);
 }
 
 async function probeClaude(): Promise<BackendCheck> {
@@ -46,6 +48,44 @@ async function probeClaude(): Promise<BackendCheck> {
       name: 'claude',
       available: false,
       hint: 'install Claude Code (npm i -g @anthropic-ai/claude-code) and log in',
+    };
+  }
+}
+
+async function probeCodex(): Promise<BackendCheck> {
+  const bin = process.env.CEZ_CODEX_BIN ?? 'codex';
+  try {
+    const { stdout } = await exec(bin, ['--version'], { timeout: 10_000 });
+    return {
+      name: 'codex',
+      available: true,
+      version: stdout.trim(),
+      hint: 'if not authenticated, run `codex` once and log in',
+    };
+  } catch {
+    return {
+      name: 'codex',
+      available: false,
+      hint: 'optional: install the Codex CLI (npm i -g @openai/codex) and log in to use the Codex runner',
+    };
+  }
+}
+
+async function probeOpencode(): Promise<BackendCheck> {
+  const bin = process.env.CEZ_OPENCODE_BIN ?? 'opencode';
+  try {
+    const { stdout } = await exec(bin, ['--version'], { timeout: 10_000 });
+    return {
+      name: 'opencode',
+      available: true,
+      version: stdout.trim(),
+      hint: 'if no provider is configured, run `opencode` once to set one up',
+    };
+  } catch {
+    return {
+      name: 'opencode',
+      available: false,
+      hint: 'optional: install OpenCode (https://opencode.ai) and configure a provider to use the OpenCode runner',
     };
   }
 }

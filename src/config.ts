@@ -24,6 +24,12 @@ const configSchema = z.object({
   skillsRepos: z.array(skillsRepoSchema).default(DEFAULT_SKILLS_REPOS),
   /** How many tasks may run at once (spec 006). Non-git dirs always run 1. */
   maxParallel: z.number().int().min(1).max(16).default(2),
+  /**
+   * Which agent backend a task uses unless overridden per task (GUI) or per
+   * step (workflow). The GUI only offers runners actually installed; this is
+   * the preselected default. Also the runner the chain planner uses.
+   */
+  defaultRunner: z.enum(['claude', 'codex', 'opencode']).default('claude'),
   /** Model for the chain planner (spec 008) — cheap but reliable at JSON. */
   plannerModel: z.string().min(1).default('sonnet'),
   /**

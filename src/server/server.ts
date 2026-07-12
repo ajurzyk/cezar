@@ -50,6 +50,8 @@ const startRunSchema = z
     steps: z.array(workflowStepSchema).min(1).max(8).optional(),
     task: z.string().min(1),
     model: z.string().optional(),
+    // Agent backend for this task (falls back to config `defaultRunner`).
+    runner: z.enum(['claude', 'codex', 'opencode']).optional(),
     // Parallel variants (spec 010): ×2/×3 runs the task as 2–3 competing
     // agents in separate worktrees; the user compares diffs and picks one.
     variants: z.number().int().min(1).max(3).optional(),
@@ -165,8 +167,12 @@ export function createApp(deps: ServerDeps): Hono {
     await next();
   });
   app.get('/api/health', async (c) => {
-    const [checks, repo] = await Promise.all([detectEnvironment(), getRepoInfo(repoRoot)]);
-    return c.json({ version, repoRoot, repo, checks });
+    const [checks, repo, config] = await Promise.all([
+      detectEnvironment(),
+      getRepoInfo(repoRoot),
+      loadConfig(repoRoot),
+    ]);
+    return c.json({ version, repoRoot, repo, checks, defaultRunner: config.defaultRunner });
   });
 
   // The bookmarklet generator bakes this key into the `javascript:` URLs —
@@ -345,7 +351,7 @@ export function createApp(deps: ServerDeps): Hono {
         source: { type: 'base64', media_type: img.mediaType, data: img.data },
       }),
     );
-    const input = { task: parsed.data.task, model: parsed.data.model, images };
+    const input = { task: parsed.data.task, model: parsed.data.model, runner: parsed.data.runner, images };
     const variants = parsed.data.variants ?? 1;
     if (variants > 1) {
       // Variants live in worktrees — without git there's nothing to isolate
@@ -506,7 +512,7 @@ export function createApp(deps: ServerDeps): Hono {
     const sessionId = [...run.steps].reverse().find((s) => s.sessionId)?.sessionId;
     if (!sessionId) return c.json({ error: 'no agent session to resume' }, 409);
     const cwd = run.worktreePath && existsSync(run.worktreePath) ? run.worktreePath : repoRoot;
-    const command = `claude --resume ${sessionId}`;
+    const command = resumeCommand(run.runner, sessionId);
     const opened = await openInTerminal(cwd, command);
     if (!opened) {
       return c.json({ error: 'no terminal emulator found', command: `cd '${cwd}' && ${command}` }, 409);
@@ -746,7 +752,8 @@ export function createApp(deps: ServerDeps): Hono {
   // config.json so user keys (skillsRepos…) survive and schema defaults are
   // never materialized into the file.
   const setConfigSchema = z.object({
-    baseBranch: z.string().trim().min(1).max(200).nullable(),
+    baseBranch: z.string().trim().min(1).max(200).nullable().optional(),
+    defaultRunner: z.enum(['claude', 'codex', 'opencode']).optional(),
   });
   app.put('/api/config', async (c) => {
     const parsed = setConfigSchema.safeParse(await c.req.json().catch(() => null));
@@ -761,15 +768,19 @@ export function createApp(deps: ServerDeps): Hono {
     } catch {
       // missing or malformed — start fresh
     }
-    if (parsed.data.baseBranch === null) delete raw.baseBranch;
-    else raw.baseBranch = parsed.data.baseBranch;
+    if (parsed.data.baseBranch !== undefined) {
+      if (parsed.data.baseBranch === null) delete raw.baseBranch;
+      else raw.baseBranch = parsed.data.baseBranch;
+    }
+    if (parsed.data.defaultRunner !== undefined) raw.defaultRunner = parsed.data.defaultRunner;
     try {
       await mkdir(dataDir, { recursive: true });
       await writeFile(configPath, `${JSON.stringify(raw, null, 2)}\n`, 'utf8');
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
     }
-    return c.json({ baseBranch: parsed.data.baseBranch });
+    const config = await loadConfig(repoRoot);
+    return c.json({ baseBranch: config.baseBranch ?? null, defaultRunner: config.defaultRunner });
   });
 
   app.get('/api/repo/diff', async (c) => {
@@ -801,4 +812,17 @@ function resolveWebDir(): string {
   const here = dirname(fileURLToPath(import.meta.url));
   // here = <pkg>/dist/server (built) or <pkg>/src/server (tsx dev).
   return join(here, '..', '..', 'web');
+}
+
+/** The CLI command that reopens a run's session for interactive take-over,
+ *  per backend. Legacy/undefined records default to Claude. */
+function resumeCommand(runner: string | undefined, sessionId: string): string {
+  switch (runner) {
+    case 'codex':
+      return `codex resume ${sessionId}`;
+    case 'opencode':
+      return `opencode --session ${sessionId}`;
+    default:
+      return `claude --resume ${sessionId}`;
+  }
 }

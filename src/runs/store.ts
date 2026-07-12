@@ -37,6 +37,8 @@ const runRecordSchema = z.object({
   workflow: z.string(),
   task: z.string(),
   model: z.string().optional(),
+  /** Agent backend this run used — drives "open in CLI" resume command. */
+  runner: z.enum(['claude', 'codex', 'opencode']).optional(),
   status: z.enum(['queued', 'running', 'waiting', 'review', 'done', 'failed', 'cancelled']),
   createdAt: z.string(),
   startedAt: z.string().optional(),
@@ -144,6 +146,7 @@ export class RunStore extends EventEmitter {
     workflow: string;
     task: string;
     model?: string;
+    runner?: 'claude' | 'codex' | 'opencode';
     groupId?: string;
     variant?: string;
     steps: Array<Pick<StepState, 'id' | 'name' | 'kind'>>;
@@ -154,6 +157,7 @@ export class RunStore extends EventEmitter {
       workflow: input.workflow,
       task: input.task,
       model: input.model,
+      runner: input.runner,
       groupId: input.groupId,
       variant: input.variant,
       status: 'queued',

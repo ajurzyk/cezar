@@ -16,7 +16,9 @@ const state = {
   taskSource: 'workflow', // 'workflow' (a chain) | 'skill' — what taskRef names
   taskRef: null,          // selected chain/skill name (the "≡ fix-and-verify" pill)
   taskModel: '',          // model override ('' = auto; the "⊞ auto" pill)
-  modelsAvailable: false, // claude CLI detected → model menu lists Claude models
+  modelsAvailable: false, // agent CLI detected → model menu lists that runner's models
+  taskRunner: 'claude',   // selected agent backend (the "⚙ claude" pill)
+  runnersAvailable: ['claude'], // runner ids detected on the host (from /api/health)
   srcMenuTab: 'workflow', // Workflows | Skills tab inside the source pill menu
   srcMenuQuery: '',       // search box inside the source pill menu
   pendingImages: [],      // [{mediaType, data, preview}] queued for the next message
@@ -437,6 +439,7 @@ const PILL_ICONS = {
   chain: 'M4 6h16M4 12h16M4 18h10', // ≡ list
   skill: 'M4 19.5A2.5 2.5 0 016.5 17H20M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z', // book
   model: 'M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3M6 6h12v12H6z', // chip
+  runner: 'M12 2l9 5v10l-9 5-9-5V7l9-5zM12 2v20M3 7l9 5 9-5', // 3D box (backend/engine)
 };
 
 /* Small inline icons for the run-detail action bar (design: every action has
@@ -526,7 +529,33 @@ function renderTaskPills() {
     srcMenu,
   );
 
-  const models = state.modelsAvailable ? CLAUDE_MODELS : CLAUDE_MODELS.slice(0, 1);
+  // Runner pill — only shown when more than one backend is installed, so a
+  // single-runner (claude-only) host stays as simple as before.
+  const runnerPill = $('#runner-pill');
+  if (runnerPill) {
+    const runners = RUNNERS.filter((r) => state.runnersAvailable.includes(r.id));
+    if (runners.length > 1) {
+      runnerPill.hidden = false;
+      const selected = runners.find((r) => r.id === state.taskRunner) ?? runners[0];
+      const runnerMenu = runners
+        .map((r) =>
+          menuItemHtml(
+            `data-mi="runner" data-value="${esc(r.id)}"`,
+            r.label,
+            r.desc,
+            r.id === selected.id,
+            PILL_ICONS.runner,
+          ),
+        )
+        .join('');
+      runnerPill.innerHTML = pillHtml(PILL_ICONS.runner, selected.label, runnerMenu);
+    } else {
+      runnerPill.hidden = true;
+    }
+  }
+
+  const all = modelsForRunner(state.taskRunner);
+  const models = state.modelsAvailable ? all : all.slice(0, 1);
   const selectedModel = models.find((m) => m.id === state.taskModel) ?? models[0];
   const modelMenu = models
     .map((m) =>
@@ -564,24 +593,63 @@ function renderChrome(health) {
     )
     .join('');
 
-  // Model pill fed by what's actually connected: claude CLI present → the
-  // Claude catalog; otherwise only "auto".
-  state.modelsAvailable = health.checks.some((c) => c.name === 'claude' && c.available);
+  // Which agent backends are installed → which runners the pill offers.
+  const available = RUNNERS.map((r) => r.id).filter((id) =>
+    health.checks.some((c) => c.name === id && c.available),
+  );
+  state.runnersAvailable = available.length ? available : ['claude'];
+  // Preselect the configured default when it's installed, else the first
+  // available runner.
+  const preferred = health.defaultRunner;
+  if (preferred && state.runnersAvailable.includes(preferred)) {
+    state.taskRunner = preferred;
+  } else if (!state.runnersAvailable.includes(state.taskRunner)) {
+    state.taskRunner = state.runnersAvailable[0];
+  }
+  // Model pill is populated only when the selected runner's CLI is present;
+  // otherwise it collapses to "auto".
+  state.modelsAvailable = state.runnersAvailable.includes(state.taskRunner);
   renderTaskPills();
 }
 
-/* What `claude --model` accepts: "auto" (no flag — each step decides), the
-   stable tier aliases (they track the newest release), then current pinned
-   versions for reproducible runs. */
-const CLAUDE_MODELS = [
-  { id: '', label: 'auto', desc: 'Pick the best model per step' },
-  { id: 'opus', label: 'opus', desc: 'Deep reasoning for hard tasks' },
-  { id: 'sonnet', label: 'sonnet', desc: 'Fast and cheap' },
-  { id: 'haiku', label: 'haiku', desc: 'Fastest — simple, scoped tasks' },
-  { id: 'claude-opus-4-8', label: 'Opus 4.8', desc: 'Pinned version' },
-  { id: 'claude-sonnet-5', label: 'Sonnet 5', desc: 'Pinned version' },
-  { id: 'claude-haiku-4-5', label: 'Haiku 4.5', desc: 'Pinned version' },
+/* The selectable agent backends. Only those actually installed on the host
+   (detected via /api/health checks) are offered in the pill. */
+const RUNNERS = [
+  { id: 'claude', label: 'claude', desc: 'Claude Code CLI' },
+  { id: 'codex', label: 'codex', desc: 'OpenAI Codex (app-server)' },
+  { id: 'opencode', label: 'opencode', desc: 'OpenCode (serve)' },
 ];
+
+/* Model presets per runner. `id: ''` is always "auto" — no model flag, the
+   runner decides. Claude takes tier aliases + pinned versions; Codex takes
+   gpt-*-codex ids; OpenCode takes `provider/model` ids. */
+const MODELS_BY_RUNNER = {
+  claude: [
+    { id: '', label: 'auto', desc: 'Pick the best model per step' },
+    { id: 'opus', label: 'opus', desc: 'Deep reasoning for hard tasks' },
+    { id: 'sonnet', label: 'sonnet', desc: 'Fast and cheap' },
+    { id: 'haiku', label: 'haiku', desc: 'Fastest — simple, scoped tasks' },
+    { id: 'claude-opus-4-8', label: 'Opus 4.8', desc: 'Pinned version' },
+    { id: 'claude-sonnet-5', label: 'Sonnet 5', desc: 'Pinned version' },
+    { id: 'claude-haiku-4-5', label: 'Haiku 4.5', desc: 'Pinned version' },
+  ],
+  codex: [
+    { id: '', label: 'auto', desc: 'Use your Codex default model' },
+    { id: 'gpt-5.1-codex', label: 'gpt-5.1-codex', desc: 'Codex-tuned' },
+    { id: 'gpt-5.1-codex-mini', label: 'gpt-5.1-codex-mini', desc: 'Faster, cheaper' },
+    { id: 'gpt-5-codex', label: 'gpt-5-codex', desc: 'Previous generation' },
+  ],
+  opencode: [
+    { id: '', label: 'auto', desc: 'Use your OpenCode default model' },
+    { id: 'anthropic/claude-sonnet-4-5', label: 'claude-sonnet-4.5', desc: 'via Anthropic' },
+    { id: 'openai/gpt-5.1', label: 'gpt-5.1', desc: 'via OpenAI' },
+    { id: 'openai/gpt-5.1-codex', label: 'gpt-5.1-codex', desc: 'via OpenAI' },
+  ],
+};
+
+function modelsForRunner(runner) {
+  return MODELS_BY_RUNNER[runner] ?? MODELS_BY_RUNNER.claude;
+}
 
 /* The global stream replays nothing after a drop (laptop sleep, server
    restart) — a missed `run` event would leave a stale status in the sidebar
@@ -720,6 +788,10 @@ function bindUi() {
         state.taskRef = item.dataset.value;
       } else if (item.dataset.mi === 'model') {
         state.taskModel = item.dataset.value;
+      } else if (item.dataset.mi === 'runner') {
+        // Switching backend invalidates the model list — reset to auto.
+        state.taskRunner = item.dataset.value;
+        state.taskModel = '';
       }
       closePillMenus();
       renderTaskPills();
@@ -864,6 +936,7 @@ function bindUi() {
     const body = {
       task: form.task.value.trim(),
       model: state.taskModel || undefined,
+      runner: state.runnersAvailable.length > 1 ? state.taskRunner : undefined,
       variants: state.variants > 1 ? state.variants : undefined,
       images: state.taskImages.length
         ? state.taskImages.map((i) => ({ mediaType: i.mediaType, data: i.data }))
@@ -1649,6 +1722,7 @@ function updateDetail(run) {
     run.costUsd ? esc(fmtCost(run.costUsd)) : null,
     `started ${esc(timeAgo(run.startedAt ?? run.createdAt))}`,
     run.finishedAt ? `finished ${esc(timeAgo(run.finishedAt))}` : null,
+    run.runner && run.runner !== 'claude' ? `runner ${esc(run.runner)}` : null,
     run.model ? `model ${esc(run.model)}` : null,
     run.branch ? esc(run.branch) : null,
     prLink(run) || null,
@@ -1892,6 +1966,53 @@ function toolArg(input) {
   return null;
 }
 
+/* Claude-Code-style collapsing for tool streaks: consecutive tool calls /
+   results stack in one group — the last few stay visible, older ones fold
+   under a "\u25b8 N earlier tool calls" toggle. Any other event breaks the
+   streak. Selecting another run clears the log, which disconnects the group —
+   the isConnected check below then starts a fresh one. */
+const STREAK_TAIL = 3;
+let toolStreak = null; // { wrap, toggle, hiddenBox, tailBox }
+
+function streakLabel(hiddenBox) {
+  const n = hiddenBox.children.length;
+  return `${hiddenBox.hidden ? '\u25b8' : '\u25be'} ${n} earlier tool call${n === 1 ? '' : 's'}`;
+}
+
+function newToolStreak(inner) {
+  const wrap = document.createElement('div');
+  wrap.className = 'ev tool-streak';
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'streak-toggle';
+  toggle.hidden = true;
+  const hiddenBox = document.createElement('div');
+  hiddenBox.className = 'streak-box';
+  hiddenBox.hidden = true;
+  const tailBox = document.createElement('div');
+  tailBox.className = 'streak-box';
+  toggle.addEventListener('click', () => {
+    hiddenBox.hidden = !hiddenBox.hidden;
+    toggle.textContent = streakLabel(hiddenBox);
+  });
+  wrap.append(toggle, hiddenBox, tailBox);
+  inner.appendChild(wrap);
+  return { wrap, toggle, hiddenBox, tailBox };
+}
+
+function appendToStreak(inner, el) {
+  if (!toolStreak || !toolStreak.wrap.isConnected) toolStreak = newToolStreak(inner);
+  toolStreak.tailBox.appendChild(el);
+  // Overflow rolls the oldest visible chip into the folded box (order kept).
+  while (toolStreak.tailBox.children.length > STREAK_TAIL) {
+    toolStreak.hiddenBox.appendChild(toolStreak.tailBox.firstElementChild);
+  }
+  if (toolStreak.hiddenBox.children.length > 0) {
+    toolStreak.toggle.hidden = false;
+    toolStreak.toggle.textContent = streakLabel(toolStreak.hiddenBox);
+  }
+}
+
 function appendLog(evt) {
   const inner = $('#log-inner');
   const log = $('#log');
@@ -1985,7 +2106,12 @@ function appendLog(evt) {
       el.textContent = JSON.stringify(evt);
   }
 
-  inner.appendChild(el);
+  if (evt.type === 'tool-call' || evt.type === 'tool-result') {
+    appendToStreak(inner, el);
+  } else {
+    toolStreak = null; // anything else breaks the streak
+    inner.appendChild(el);
+  }
   if (state.autoScroll) log.scrollTop = log.scrollHeight;
 }
 
@@ -2725,7 +2851,7 @@ function wbSkillStack(steps) {
     if (s.command || !s.skill) return null;
     if (s.prompt !== undefined && s.prompt !== '{{task}}') return null;
     if (s.name !== undefined && s.name !== s.skill) return null;
-    if (s.model || s.allowedTools || s.bashAllowlist || s.onFail) return null;
+    if (s.model || s.runner || s.allowedTools || s.bashAllowlist || s.onFail) return null;
     skills.push(s.skill);
   }
   return skills.length ? skills : null;
@@ -2764,6 +2890,7 @@ function wbYamlText() {
       if (s.skill) lines.push(`    skill: ${yamlScalar(s.skill)}`);
       if (s.prompt) lines.push(...yamlBlock('prompt', s.prompt, 4));
       if (s.model) lines.push(`    model: ${yamlScalar(s.model)}`);
+      if (s.runner) lines.push(`    runner: ${yamlScalar(s.runner)}`);
       if (s.allowedTools) lines.push(`    allowedTools: [${s.allowedTools.map(yamlScalar).join(', ')}]`);
       if (s.bashAllowlist) lines.push(`    bashAllowlist: [${s.bashAllowlist.map(yamlScalar).join(', ')}]`);
       if (s.command) lines.push(...yamlBlock('command', s.command, 4));

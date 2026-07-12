@@ -6,10 +6,16 @@ import type {
   AgentRunResult,
   AgentRunSpec,
   AgentRunner,
+  AgentSession,
   AgentToolCallRecord,
   ContentBlock,
+  SessionOptions,
 } from './agent-runner.js';
+
+// Re-exported for backends and the run manager that still import them from here.
+export type { AgentSession, SessionOptions } from './agent-runner.js';
 import { costWeightedTokens, type RawUsage } from './usage.js';
+import { readNdjson } from './ndjson.js';
 
 /** Default wall-clock cap for a single run before SIGTERM → SIGKILL.
  *  Interactive sessions pass `timeoutMs: 0` to disable it entirely. */
@@ -30,31 +36,6 @@ export interface ClaudeCliRunnerOptions {
   timeoutMs?: number;
 }
 
-export interface SessionOptions {
-  /** Close the session shortly after the first turn ends (single-turn
-   *  behavior, used for non-interactive workflow steps). Interactive
-   *  sessions omit this and control `end()` themselves. */
-  autoEndAfterFirstTurn?: boolean;
-}
-
-/**
- * A live agent session over one spawned claude process. The process stays
- * alive between turns (no `-p`) and reads further user messages from stdin —
- * that's what makes mid-task follow-ups and pasted screenshots possible.
- */
-export interface AgentSession {
-  /** Resolves when the claude process exits — the session is fully over. */
-  result: Promise<AgentRunResult>;
-  /** Write a user message into the live session. False when stdin is closed. */
-  sendMessage(content: ContentBlock[]): boolean;
-  /** Graceful close: EOF on stdin, then the SIGTERM→SIGKILL watchdog. */
-  end(): void;
-  /** Hard stop (used by cancel). */
-  interrupt(): void;
-  /** True while the session still accepts messages. */
-  readonly open: boolean;
-}
-
 /**
  * `AgentRunner` over the Claude Code CLI in headless stream-json mode. Auth =
  * the host's logged-in Pro/Max subscription (no API key needed). Sandboxing is
@@ -66,7 +47,7 @@ export interface AgentSession {
  * came from @cezar/core's `ClaudeCodeCliRunner`.
  */
 export class ClaudeCliRunner implements AgentRunner {
-  readonly backend = 'claude-cli' as const;
+  readonly backend = 'claude' as const;
 
   private readonly bin: string;
   private readonly timeoutMs: number;
@@ -472,23 +453,6 @@ function imageBlocks(content: unknown): Array<{ media_type: string; data: string
 }
 
 // ---- subprocess plumbing --------------------------------------------------
-
-/** Async line iterator over a readable stream of UTF-8 NDJSON. */
-async function* readNdjson(stream: NodeJS.ReadableStream): AsyncGenerator<string> {
-  stream.setEncoding('utf8');
-  let buffer = '';
-  for await (const chunk of stream as AsyncIterable<string>) {
-    buffer += chunk;
-    let idx: number;
-    while ((idx = buffer.indexOf('\n')) >= 0) {
-      const line = buffer.slice(0, idx).trim();
-      buffer = buffer.slice(idx + 1);
-      if (line) yield line;
-    }
-  }
-  const tail = buffer.trim();
-  if (tail) yield tail;
-}
 
 function waitForExit(child: ChildProcessWithoutNullStreams): Promise<number | null> {
   if (child.exitCode != null) return Promise.resolve(child.exitCode);

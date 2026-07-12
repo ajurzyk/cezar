@@ -2,10 +2,21 @@
  * The backend-agnostic seam for running one agent task. Adapted from
  * @cezar/core's `agents/agent-runner.ts`, trimmed for single-user local use:
  * no token-budget circuit breaker, no zod response schemas — one run is one
- * `claude` CLI invocation streaming normalized events.
+ * agent-CLI session streaming normalized events.
+ *
+ * Three interchangeable backends implement this seam, each as a persistent
+ * process so multi-turn follow-ups, `waiting`, interrupt and resume all work:
+ *  - `claude`   — Claude Code CLI, stream-json over stdin/stdout;
+ *  - `codex`    — `codex app-server`, JSON-RPC 2.0 (JSONL) over stdin/stdout;
+ *  - `opencode` — `opencode serve`, HTTP + SSE.
  */
 
-export type AgentBackend = 'claude-cli';
+/** `claude-cli` is the legacy id kept so old run records still parse. */
+export type AgentBackend = 'claude' | 'codex' | 'opencode' | 'claude-cli';
+
+/** The user-selectable runners (what config/GUI expose). */
+export type RunnerId = 'claude' | 'codex' | 'opencode';
+export const RUNNER_IDS: readonly RunnerId[] = ['claude', 'codex', 'opencode'];
 
 export interface AgentRunSpec {
   /** Appended to the CLI's default system prompt (`--append-system-prompt`). */
@@ -56,6 +67,10 @@ export type AgentEvent =
   | { type: 'image'; mediaType: string; data: string }
   | { type: 'token-usage'; tokensUsed: number }
   | { type: 'cost'; usd: number }
+  /** The backend's real session id, once known — codex threads and opencode
+   *  sessions mint their own id, so the run manager persists this to enable
+   *  resume ("Continue") and "open in CLI". Claude's equals `spec.sessionId`. */
+  | { type: 'session'; sessionId: string }
   | { type: 'turn-end' }
   | { type: 'note'; message: string }
   | { type: 'done' }
@@ -76,8 +91,39 @@ export interface AgentRunResult {
   sessionId?: string;
 }
 
+export interface SessionOptions {
+  /** Close the session shortly after the first turn ends (single-turn
+   *  behavior, used for non-interactive workflow steps). Interactive
+   *  sessions omit this and control `end()` themselves. */
+  autoEndAfterFirstTurn?: boolean;
+}
+
+/**
+ * A live agent session over one spawned backend process. The process stays
+ * alive between turns and reads further user messages — that's what makes
+ * mid-task follow-ups possible. Implemented identically by every backend
+ * (claude stdin, codex app-server, opencode serve).
+ */
+export interface AgentSession {
+  /** Resolves when the backend process exits — the session is fully over. */
+  result: Promise<AgentRunResult>;
+  /** Write a user message into the live session. False when it is closed. */
+  sendMessage(content: ContentBlock[]): boolean;
+  /** Graceful close: end input, then a SIGTERM→SIGKILL watchdog. */
+  end(): void;
+  /** Hard stop (used by cancel). */
+  interrupt(): void;
+  /** True while the session still accepts messages. */
+  readonly open: boolean;
+}
+
 export interface AgentRunner {
   readonly backend: AgentBackend;
   run(spec: AgentRunSpec, onEvent?: (event: AgentEvent) => void): Promise<AgentRunResult>;
+  startSession(
+    spec: AgentRunSpec,
+    onEvent?: (event: AgentEvent) => void,
+    opts?: SessionOptions,
+  ): AgentSession;
   interrupt(): Promise<void>;
 }

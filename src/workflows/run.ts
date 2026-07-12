@@ -2,7 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { ClaudeCliRunner, type AgentSession } from '../core/claude-cli-runner.js';
+import { type AgentSession } from '../core/claude-cli-runner.js';
+import { createRunner } from '../core/runner-factory.js';
+import type { RunnerId } from '../core/agent-runner.js';
 import {
   HANDOFF_INSTRUCTIONS,
   appendHandoffHeartbeat,
@@ -42,6 +44,8 @@ interface ActiveRun {
 export interface StartRunInput {
   task: string;
   model?: string;
+  /** Agent backend chosen for this task (GUI). Unset = the config default. */
+  runner?: RunnerId;
   /** Screenshots pasted into the new-task form — delivered once, with the
    *  first agent step's opening message. */
   images?: ContentBlock[];
@@ -106,6 +110,7 @@ export class RunManager {
       workflow: workflow.name,
       task: input.task,
       model: input.model,
+      runner: input.runner,
       groupId: group?.groupId,
       variant: group?.variant,
       steps: workflow.steps.map((s) => ({ id: s.id, name: s.name ?? s.id, kind: stepKind(s) })),
@@ -326,6 +331,9 @@ export class RunManager {
         return;
       }
       this.store.appendEvent(runId, { ...event, stepId });
+      if (event.type === 'session') {
+        this.store.updateStep(runId, stepId, { sessionId: event.sessionId });
+      }
       if (event.type === 'token-usage') {
         this.store.updateStep(runId, stepId, { tokensUsed: event.tokensUsed });
       }
@@ -344,7 +352,7 @@ export class RunManager {
       }
     };
 
-    const runner = new ClaudeCliRunner();
+    const runner = createRunner(record?.runner ?? 'claude');
     const session = runner.startSession(
       {
         systemPrompt: HANDOFF_INSTRUCTIONS,
@@ -406,8 +414,15 @@ export class RunManager {
     const emit = (event: { type: string; stepId?: string; [k: string]: unknown }) =>
       this.store.appendEvent(runId, event);
 
-    this.store.updateRun(runId, { status: 'running', startedAt: new Date().toISOString() });
-    emit({ type: 'lifecycle', message: `run started — workflow "${workflow.name}"` });
+    // Resolve the agent backend for this run: the task choice (GUI) wins over
+    // the config default. Per-step `runner` can still override it below.
+    const taskBackend: RunnerId = input.runner ?? (await loadConfig(this.repoRoot)).defaultRunner;
+    this.store.updateRun(runId, {
+      status: 'running',
+      startedAt: new Date().toISOString(),
+      runner: taskBackend,
+    });
+    emit({ type: 'lifecycle', message: `run started — workflow "${workflow.name}" (runner: ${taskBackend})` });
 
     // Worktree per task (spec 006): the agent works on its own branch in
     // `.ai/cezar/worktrees/<id>`, never in the user's working tree. Not a git
@@ -494,6 +509,7 @@ export class RunManager {
           interactive,
           emit,
           startImages,
+          taskBackend,
         );
         startImages = undefined;
         checkFailure = null;
@@ -576,7 +592,8 @@ export class RunManager {
     checkFailure: string | null,
     interactive: boolean,
     emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
-    images?: ContentBlock[],
+    images: ContentBlock[] | undefined,
+    taskBackend: RunnerId,
   ): Promise<string | null> {
     let systemPrompt: string | undefined;
     if (step.skill) {
@@ -631,6 +648,10 @@ export class RunManager {
         return;
       }
       emit({ ...event, stepId: step.id });
+      if (event.type === 'session') {
+        // Codex/OpenCode mint their own session id — persist it so resume works.
+        this.store.updateStep(runId, step.id, { sessionId: event.sessionId });
+      }
       if (event.type === 'token-usage') {
         this.store.updateStep(runId, step.id, { tokensUsed: startTokens + event.tokensUsed });
       }
@@ -652,7 +673,7 @@ export class RunManager {
       }
     };
 
-    const runner = new ClaudeCliRunner();
+    const runner = createRunner(step.runner ?? taskBackend);
     let session: AgentSession;
     try {
       session = runner.startSession(

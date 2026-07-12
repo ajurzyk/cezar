@@ -1,6 +1,6 @@
 {
   "name": "@pat-lewczuk/cezar",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Local cockpit for running and tracking AI agent tasks in your repo. Uses your logged-in `claude` CLI and `gh` — zero config, zero database.",
   "license": "MIT",
   "type": "module",

@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { ClaudeCliRunner } from './core/claude-cli-runner.js';
+import { createRunner } from './core/runner-factory.js';
 import { loadConfig } from './config.js';
 import { discoverSkills, type Skill } from './skills.js';
 import { workflowStepSchema, type WorkflowStepDef } from './workflows/types.js';
@@ -54,7 +54,11 @@ export async function planChain(repoRoot: string, task: string): Promise<PlanRes
   const skillNames = new Set(skills.map((s) => s.name));
   const userPrompt = buildPlannerPrompt(task, skills, verifyCommands);
 
-  const runner = new ClaudeCliRunner();
+  // Plan with the configured default runner. `plannerModel` ("sonnet") is a
+  // Claude alias, so only pass it when the planner runs on Claude — Codex /
+  // OpenCode pick their own default model instead.
+  const runner = createRunner(config.defaultRunner);
+  const plannerModel = config.defaultRunner === 'claude' ? config.plannerModel : undefined;
   // One retry on an unparseable answer; a runner error goes straight to fallback.
   for (let attempt = 0; attempt < 2; attempt++) {
     let text: string;
@@ -64,7 +68,7 @@ export async function planChain(repoRoot: string, task: string): Promise<PlanRes
         userPrompt,
         cwd: repoRoot,
         allowedTools: [],
-        model: config.plannerModel,
+        model: plannerModel,
         timeoutMs: PLANNER_TIMEOUT_MS,
       });
       text = result.text;
