@@ -8,7 +8,7 @@ Type a task, pick a workflow, watch the agent work live — steps, tool calls,
 tokens, diffs — in a browser cockpit that runs entirely on your machine.
 Your `claude` login, your `gh`, your files. No accounts, no database, no cloud.
 
-[What it solves](#what-it-solves) · [Who it's for](#who-its-for) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Core concepts](#core-concepts) · [Cockpit tour](#cockpit-tour)
+[A look inside](#a-look-inside) · [What it solves](#what-it-solves) · [Who it's for](#who-its-for) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Core concepts](#core-concepts) · [Cockpit tour](#cockpit-tour)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](#license)
 ![Node 20+](https://img.shields.io/badge/Node-20%2B-339933)
@@ -28,6 +28,18 @@ npx cezar-cli        # → cockpit at http://localhost:4321
 That's the whole setup. If your `claude` CLI is logged in (Pro/Max) and `gh` is
 authenticated, there is nothing else to configure. State lives in `.ai/cezar/`
 inside your repo — plain JSON, NDJSON and Markdown you can `cat` and fix by hand.
+
+## A look inside
+
+Click any thumbnail for the full-size screenshot.
+
+| Watch a run live | The review gate | Parallel variants |
+|:--:|:--:|:--:|
+| [![A running task streaming agent text, tool calls and screenshots live](docs/screenshots/live-run.png)](docs/screenshots/live-run.png) | [![A finished run parked at the review gate — read the diff, send notes back, or draft a PR](docs/screenshots/review-gate.png)](docs/screenshots/review-gate.png) | [![Two competing variants of the same task compared side by side — pick the winner](docs/screenshots/variants-compare.png)](docs/screenshots/variants-compare.png) |
+| *Every step, tool call, token and screenshot — streamed as it happens.* | *Nothing auto-merges: inspect the diff, send notes into the same session, or push a draft PR.* | *Run a task ×2/×3 in isolated worktrees, compare the diffs, keep one.* |
+| **Plan before you run** | **Workflow builder** | **GitHub, one drag away** |
+| [![The Plan overlay — an AI-drafted chain of steps you approve before anything runs](docs/screenshots/plan-chain.png)](docs/screenshots/plan-chain.png) | [![The workflow builder — drag skills into an ordered chain of agent steps and shell checks](docs/screenshots/workflow-builder.png)](docs/screenshots/workflow-builder.png) | [![The GitHub tab — hand an open issue to the agent with a workflow and skills](docs/screenshots/github-issues.png)](docs/screenshots/github-issues.png) |
+| *Press **Plan** and review the proposed chain — trim, reorder, then start.* | *Stitch skills and shell checks into a reusable YAML chain, no code.* | *Open issues and PRs via your `gh` — run the agent straight on an issue.* |
 
 ---
 
