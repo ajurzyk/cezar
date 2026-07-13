@@ -66,6 +66,9 @@ function writeHandoffAndTodo() {
 async function respond(userText, imageCount) {
   turn += 1;
   await sleep(250);
+  // `mock:done` anywhere in the message → the reply ends with the CEZ:DONE
+  // completion marker (#347), so the auto-close path is testable dry.
+  const doneMarker = userText.includes('mock:done') ? '\n\nCEZ:DONE' : '';
 
   // Spec 008: a planning call (marked `[cez-planner]` in the user prompt)
   // gets a canned chain plan. The `code-review` skill is deliberately made up:
@@ -167,7 +170,7 @@ async function respond(userText, imageCount) {
       type: 'assistant',
       message: {
         role: 'assistant',
-        content: [{ type: 'text', text: 'Done with the first pass — opened a draft PR: https://github.com/open-mercato/demo/pull/123. Anything to adjust? (dry-run mock)' }],
+        content: [{ type: 'text', text: `Done with the first pass — opened a draft PR: https://github.com/open-mercato/demo/pull/123. Anything to adjust? (dry-run mock)${doneMarker}` }],
         usage: { input_tokens: 300, output_tokens: 90 },
       },
     });
@@ -187,7 +190,7 @@ async function respond(userText, imageCount) {
     type: 'assistant',
     message: {
       role: 'assistant',
-      content: [{ type: 'text', text: `Follow-up #${turn - 1} received: "${userText.slice(0, 100)}".${imgNote} Applied (dry run).` }],
+      content: [{ type: 'text', text: `Follow-up #${turn - 1} received: "${userText.slice(0, 100)}".${imgNote} Applied (dry run).${doneMarker}` }],
       usage: { input_tokens: 200, output_tokens: 60 },
     },
   });

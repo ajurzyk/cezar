@@ -24,6 +24,20 @@ import { DEFAULT_ALLOWED_TOOLS, stepKind, type WorkflowDef, type WorkflowStepDef
 const CHECK_OUTPUT_CAP = 20_000;
 /** An interactive session that hears nothing from the user closes itself. */
 export const IDLE_TIMEOUT_MS = 15 * 60_000;
+/**
+ * Task-completion marker from the agent contract (HANDOFF_INSTRUCTIONS): a
+ * turn whose text ends with `CEZ:DONE` means "goal achieved, nothing to ask" —
+ * the session is closed right away instead of parking at `waiting` (#347).
+ * Detection runs on the accumulated turn text so delta-streaming backends
+ * (codex, opencode) can't split the marker across text events.
+ */
+const DONE_MARKER_RE = /CEZ:DONE\s*$/;
+/** Strip a trailing marker from one text event so transcripts stay free of
+ *  protocol noise. Delta backends may split the marker across events — then
+ *  it stays visible; detection above is unaffected. */
+function stripDoneMarker(text: string): string {
+  return text.replace(/\s*CEZ:DONE\s*$/, '');
+}
 /** Periodic "cezar autosave" commit in the task worktree (spec 006). */
 export const AUTOSAVE_INTERVAL_MS = 90_000;
 
@@ -77,6 +91,12 @@ export class RunManager {
   // registering in `active`, so parallel-slot counting is never racy.
   private readonly queue: string[] = [];
   private readonly starting = new Set<string>();
+  // Runs parked at `waiting` (open session, ball in the user's court). They
+  // don't consume a `maxParallel` slot (#347) — an idle claude process costs
+  // memory but no tokens, queued work progressing matters more, and the idle
+  // timeout already bounds how long a session can sit open. Invariant:
+  // `waiting ⊆ active` — always cleared together via dropActive().
+  private readonly waiting = new Set<string>();
   private readonly pendingJobs = new Map<string, { workflow: WorkflowDef; input: StartRunInput }>();
   private pumping = false;
 
@@ -150,7 +170,11 @@ export class RunManager {
     try {
       const repo = await getRepoInfo(this.repoRoot);
       const maxParallel = repo ? (await loadConfig(this.repoRoot)).maxParallel : 1;
-      while (this.queue.length > 0 && this.active.size + this.starting.size < maxParallel) {
+      // `waiting` runs don't hold a slot (#347). A message into a waiting run
+      // resumes it even when that momentarily exceeds maxParallel — resumed
+      // conversations must never be blocked by the queue.
+      const busy = () => this.active.size + this.starting.size - this.waiting.size;
+      while (this.queue.length > 0 && busy() < maxParallel) {
         const runId = this.queue.shift();
         if (!runId) break;
         const job = this.pendingJobs.get(runId);
@@ -170,13 +194,19 @@ export class RunManager {
             this.clearAutosaveTimer(state);
           }
           this.starting.delete(runId);
-          this.active.delete(runId);
+          this.dropActive(runId);
           void this.pump();
         });
       }
     } finally {
       this.pumping = false;
     }
+  }
+
+  /** Remove a run from the live registries — keeps `waiting ⊆ active`. */
+  private dropActive(runId: string): void {
+    this.waiting.delete(runId);
+    this.active.delete(runId);
   }
 
   cancel(runId: string): boolean {
@@ -225,6 +255,7 @@ export class RunManager {
     const delivered = state.session.sendMessage(content);
     if (delivered) {
       this.clearIdleTimer(state);
+      this.waiting.delete(runId); // resumed — the run counts against slots again
       this.store.updateRun(runId, { status: 'running' });
       if (state.currentStepId) {
         this.store.updateStep(runId, state.currentStepId, { status: 'running' });
@@ -283,7 +314,7 @@ export class RunManager {
           error: `continue crashed: ${message}`,
           finishedAt: new Date().toISOString(),
         });
-        this.active.delete(runId);
+        this.dropActive(runId);
         void this.pump();
       },
     );
@@ -324,10 +355,17 @@ export class RunManager {
     this.store.appendEvent(runId, { type: 'user-message', stepId, text: prompt, imageCount: 0 });
 
     let stepCost = 0;
+    let turnText = '';
     const onEvent = (event: AgentEvent) => {
       if (event.type === 'image') {
         const saved = this.persistImage(runId, state, event.mediaType, event.data);
         if (saved) this.store.appendEvent(runId, { type: 'image', stepId, ...saved });
+        return;
+      }
+      if (event.type === 'text') {
+        turnText += event.text;
+        const text = stripDoneMarker(event.text);
+        if (text) this.store.appendEvent(runId, { type: 'text', text, stepId });
         return;
       }
       this.store.appendEvent(runId, { ...event, stepId });
@@ -342,13 +380,24 @@ export class RunManager {
         this.store.updateStep(runId, stepId, { costUsd: stepCost });
       }
       if (event.type === 'turn-end') {
-        const waiting = !state.cancelled && state.session?.open;
-        if (waiting) {
+        const sessionOpen = !state.cancelled && state.session?.open;
+        const done = sessionOpen && DONE_MARKER_RE.test(turnText.trimEnd());
+        turnText = '';
+        if (done) {
+          // Goal achieved (agent contract, #347) — same as in runAgentStep.
+          this.store.appendEvent(runId, { type: 'lifecycle', message: 'goal achieved — session closed' });
+          appendHandoffHeartbeat(this.dataDir, runId, 'turn complete — goal achieved, session closed');
+          state.session?.end();
+          return;
+        }
+        if (sessionOpen) {
           this.store.updateRun(runId, { status: 'waiting' });
           this.store.updateStep(runId, stepId, { status: 'waiting' });
+          this.waiting.add(runId);
           this.armIdleTimer(runId, state);
+          void this.pump();
         }
-        appendHandoffHeartbeat(this.dataDir, runId, `turn complete — status=${waiting ? 'waiting' : 'running'}`);
+        appendHandoffHeartbeat(this.dataDir, runId, `turn complete — status=${sessionOpen ? 'waiting' : 'running'}`);
       }
     };
 
@@ -400,7 +449,7 @@ export class RunManager {
       this.clearIdleTimer(state);
       this.clearAutosaveTimer(state);
       if (state.cwd !== this.repoRoot) await autosaveCommit(state.cwd);
-      this.active.delete(runId);
+      this.dropActive(runId);
       void this.pump();
     }
   }
@@ -578,7 +627,7 @@ export class RunManager {
       await this.settleSuccess(runId);
     }
     this.clearIdleTimer(state);
-    this.active.delete(runId);
+    this.dropActive(runId);
     void this.pump();
   }
 
@@ -641,10 +690,17 @@ export class RunManager {
     const stepRecord = this.store.getRun(runId)?.steps.find((s) => s.id === step.id);
     const startTokens = stepRecord?.tokensUsed ?? 0;
     let stepCost = stepRecord?.costUsd ?? 0;
+    let turnText = '';
     const onEvent = (event: AgentEvent) => {
       if (event.type === 'image') {
         const saved = this.persistImage(runId, state, event.mediaType, event.data);
         if (saved) emit({ type: 'image', stepId: step.id, ...saved });
+        return;
+      }
+      if (event.type === 'text') {
+        turnText += event.text;
+        const text = stripDoneMarker(event.text);
+        if (text) emit({ type: 'text', text, stepId: step.id });
         return;
       }
       emit({ ...event, stepId: step.id });
@@ -660,12 +716,25 @@ export class RunManager {
         this.store.updateStep(runId, step.id, { costUsd: stepCost });
       }
       if (event.type === 'turn-end') {
-        const waiting = interactive && !state.cancelled && state.session?.open;
+        const sessionOpen = !state.cancelled && state.session?.open;
+        const done = interactive && sessionOpen && DONE_MARKER_RE.test(turnText.trimEnd());
+        turnText = '';
+        if (done) {
+          // Goal achieved (agent contract, #347): close the session instead
+          // of parking at `waiting` — the run completes and frees its slot.
+          emit({ type: 'lifecycle', message: 'goal achieved — session closed' });
+          appendHandoffHeartbeat(this.dataDir, runId, 'turn complete — goal achieved, session closed');
+          state.session?.end();
+          return;
+        }
+        const waiting = interactive && sessionOpen;
         if (waiting) {
           // Turn over, session open: the ball is in the user's court.
           this.store.updateRun(runId, { status: 'waiting' });
           this.store.updateStep(runId, step.id, { status: 'waiting' });
+          this.waiting.add(runId);
           this.armIdleTimer(runId, state);
+          void this.pump(); // the freed slot can start a queued run right away
         }
         // Cez's own heartbeat — the handoff stays current even when the
         // agent forgets to write (spec 007).
