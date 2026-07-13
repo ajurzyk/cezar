@@ -63,4 +63,4 @@ Add the `.gitignore` entries for local skill installs and per-run pipeline state
 
 ### Phase 2: Ignore local skill installs
 
-- [ ] 2.1 Add `.agents/`, `skills-lock.json`, `.ai/tmp/`, and QA artifact entries to `.gitignore`
+- [x] 2.1 Add `.agents/`, `skills-lock.json`, `.ai/tmp/`, and QA artifact entries to `.gitignore` — bbe7a69
