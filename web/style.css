@@ -254,6 +254,9 @@ summary::-webkit-details-marker { display: none; }
   white-space: nowrap;
   max-width: 130px;
 }
+/* the chip links to the repo on its forge when origin is browsable (#366) */
+#repo-chip a { color: inherit; text-decoration: none; }
+#repo-chip a:hover { color: var(--text); text-decoration: underline; }
 
 /* new task composer */
 #new-task-wrap { padding: 0 14px 14px; }
@@ -692,6 +695,9 @@ summary::-webkit-details-marker { display: none; }
 }
 .env-chip .led { width: 5px; height: 5px; border-radius: 50%; background: var(--green); flex: none; }
 .env-chip.bad .led { background: var(--red); }
+/* update available (#368): amber pulse until the user restarts on @latest */
+.env-chip.upd { color: var(--amber); }
+.env-chip.upd .led { background: var(--amber); animation: cz-pulse 1.5s ease-in-out infinite; }
 #theme-toggle {
   margin-left: auto;
   align-self: flex-end;

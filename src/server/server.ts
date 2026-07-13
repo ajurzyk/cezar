@@ -40,6 +40,9 @@ export interface ServerDeps {
   store: RunStore;
   manager: RunManager;
   version: string;
+  /** Mutable holder for the async npm-registry update check (#368) —
+   *  `latest` appears once the registry answers with a newer version. */
+  update?: { latest?: string };
 }
 
 // A run starts from a named workflow OR an inline chain of steps (spec 008 —
@@ -130,7 +133,7 @@ const messageSchema = z
   });
 
 export function createApp(deps: ServerDeps): Hono {
-  const { repoRoot, store, manager, version } = deps;
+  const { repoRoot, store, manager, version, update } = deps;
   const dataDir = join(repoRoot, '.ai/cezar');
   startTodosWatch(dataDir); // inbox live updates (spec 007)
   const launchKey = ensureLaunchKey(dataDir); // bookmarklet auto-start secret (spec 011)
@@ -172,7 +175,14 @@ export function createApp(deps: ServerDeps): Hono {
       getRepoInfo(repoRoot),
       loadConfig(repoRoot),
     ]);
-    return c.json({ version, repoRoot, repo, checks, defaultRunner: config.defaultRunner });
+    return c.json({
+      version,
+      latestVersion: update?.latest,
+      repoRoot,
+      repo,
+      checks,
+      defaultRunner: config.defaultRunner,
+    });
   });
 
   // The bookmarklet generator bakes this key into the `javascript:` URLs —

@@ -579,19 +579,47 @@ function closePillMenus() {
   }
 }
 
+// `git@github.com:org/repo.git` / `https://github.com/org/repo.git` → the
+// repo's web URL; null for anything that isn't an http-browsable remote.
+function remoteWebUrl(remote) {
+  if (!remote) return null;
+  const ssh = remote.match(/^(?:ssh:\/\/)?git@([^:/]+)[:/](.+?)(?:\.git)?\/?$/);
+  if (ssh) return `https://${ssh[1]}/${ssh[2]}`;
+  if (/^https?:\/\//.test(remote)) return remote.replace(/\.git$/, '');
+  return null;
+}
+
 function renderChrome(health) {
   const repoChip = $('#repo-chip');
   repoChip.hidden = false;
-  repoChip.textContent = health.repo
+  const repoLabel = health.repo
     ? `${health.repo.root.split('/').pop()} / ${health.repo.branch}`
     : 'no git — tasks run in place';
-  repoChip.title = health.repo ? `${health.repo.root} · ${health.repo.branch}` : 'not a git repo — tasks run in place, one at a time';
-  $('#env-chips').innerHTML = health.checks
-    .map(
-      (c) =>
-        `<span class="env-chip ${c.available ? 'ok' : 'bad'}" title="${esc(c.hint ?? c.version ?? '')}"><span class="led"></span>${esc(c.name)}</span>`,
-    )
-    .join('');
+  // The chip links to the repo on its forge when the origin remote is
+  // browsable (#366); otherwise it stays plain text.
+  const webUrl = remoteWebUrl(health.repo?.remote);
+  repoChip.innerHTML = webUrl
+    ? `<a href="${esc(webUrl)}" target="_blank" rel="noopener">${esc(repoLabel)}</a>`
+    : esc(repoLabel);
+  repoChip.title = health.repo
+    ? `${health.repo.root} · ${health.repo.branch}${webUrl ? `\n${webUrl}` : ''}`
+    : 'not a git repo — tasks run in place, one at a time';
+  // Version chip first — amber when the npm registry knows a newer release
+  // (#368) — then the backend/tool checks.
+  const upd = health.latestVersion;
+  const versionChip = `<span class="env-chip ${upd ? 'upd' : 'ok'}" title="${esc(
+    upd
+      ? `cezar ${upd} is available (running ${health.version}) — restart with: npx @pat-lewczuk/cezar@latest`
+      : `cezar ${health.version}`,
+  )}"><span class="led"></span>v${esc(health.version)}${upd ? ` ⬆ ${esc(upd)}` : ''}</span>`;
+  $('#env-chips').innerHTML =
+    versionChip +
+    health.checks
+      .map(
+        (c) =>
+          `<span class="env-chip ${c.available ? 'ok' : 'bad'}" title="${esc(c.hint ?? c.version ?? '')}"><span class="led"></span>${esc(c.name)}</span>`,
+      )
+      .join('');
 
   // Which agent backends are installed → which runners the pill offers.
   const available = RUNNERS.map((r) => r.id).filter((id) =>

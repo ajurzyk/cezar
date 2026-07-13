@@ -12,6 +12,7 @@ import { RunStore } from './runs/store.js';
 import { RunManager } from './workflows/run.js';
 import { loadWorkflows } from './workflows/load.js';
 import { startServer } from './server/server.js';
+import { checkForUpdate } from './update-check.js';
 
 const HELP = `cezar — local cockpit for AI agent tasks in your repo
 
@@ -101,8 +102,18 @@ async function serveCommand(repoRoot: string, preferredPort: number, openBrowser
   await manager.recover();
   if (recovered > 0) console.log(`  recovered ${recovered} run(s) from the previous session`);
 
+  // Update discovery (#368) — fire-and-forget; the banner prints whenever the
+  // registry answers and /api/health picks it up for the GUI chip.
+  const pkgName = readOwnName();
+  const update: { latest?: string } = {};
+  void checkForUpdate(pkgName, version).then((latest) => {
+    if (!latest) return;
+    update.latest = latest;
+    console.log(`\n  ⬆ cezar ${latest} is available (running ${version}) — restart with: npx ${pkgName}@latest\n`);
+  });
+
   const port = await pickPort(preferredPort);
-  startServer({ repoRoot, store, manager, version }, port);
+  startServer({ repoRoot, store, manager, version, update }, port);
   const url = `http://localhost:${port}`;
 
   console.log(`\n  cezar v${version} — ${repoRoot}`);
@@ -307,6 +318,17 @@ function ensureDataGitignore(repoRoot: string): void {
     }
   } catch {
     // non-fatal
+  }
+}
+
+/** Own package name — for the npm-registry update check (#368). */
+function readOwnName(): string {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const pkg = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf8')) as { name?: string };
+    return pkg.name ?? '@pat-lewczuk/cezar';
+  } catch {
+    return '@pat-lewczuk/cezar';
   }
 }
 
