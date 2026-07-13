@@ -742,6 +742,34 @@ main { flex: 1; min-width: 0; display: flex; min-height: 0; background: var(--bg
 #detail { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
 #detail .empty { margin: auto; color: var(--text3); font-size: 13.5px; }
 
+/* queued placeholder in the log pane (#351) */
+.queued-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 64px 20px;
+  text-align: center;
+  color: var(--text3);
+}
+.queued-state .q-dots { display: flex; gap: 7px; }
+.queued-state .q-dots span {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: cz-qbounce 1.25s ease-in-out infinite;
+}
+.queued-state .q-dots span:nth-child(2) { animation-delay: 0.15s; }
+.queued-state .q-dots span:nth-child(3) { animation-delay: 0.3s; }
+.queued-state .q-head { font-size: 14px; font-weight: 600; color: var(--text2); }
+.queued-state .q-sub { font-size: 12px; }
+@keyframes cz-qbounce {
+  0%, 80%, 100% { opacity: 0.25; transform: scale(0.8); }
+  40% { opacity: 1; transform: scale(1); }
+}
+
 .detail-head { flex: none; padding: 26px 40px 0; max-width: 860px; width: 100%; margin: 0 auto; }
 .detail-head .meta-line {
   display: flex;
@@ -836,6 +864,20 @@ main { flex: 1; min-width: 0; display: flex; min-height: 0; background: var(--bg
 .md pre code { background: transparent; padding: 0; word-break: normal; font-size: 11.5px; line-height: 1.6; }
 .md hr { border: none; border-top: 1px solid var(--line); margin: 14px 0; }
 .md strong { font-weight: 600; }
+.md del { color: var(--text3); }
+.md h5, .md h6 { font-family: var(--serif); font-weight: 600; font-size: 12.5px; margin: 14px 0 4px; }
+.md ul ul, .md ul ol, .md ol ul, .md ol ol { margin: 2px 0; }
+/* GFM tables (#346) — wide ones scroll inside the transcript, never the page */
+.md table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: 12.5px;
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+.md th, .md td { border: 1px solid var(--line); padding: 4px 9px; text-align: left; }
+.md th { font-weight: 600; background: color-mix(in oklab, var(--text3) 7%, transparent); }
 .md blockquote {
   margin: 8px 0;
   padding: 3px 14px;

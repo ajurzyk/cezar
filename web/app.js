@@ -185,100 +185,199 @@ function renderDiff(text) {
   return out.join('');
 }
 
-/* Tiny markdown renderer for the handoff notes — headings, bold, inline code,
-   fenced code, lists, links, hr. Escape-first, line-based, ZERO libs. Not a
-   full parser; handoff files are simple and anything unrecognized falls
-   through as a plain paragraph. */
+/* Markdown renderer (#346) for transcripts, handoff notes and GitHub bodies:
+   headings h1–h6, soft-wrap-joined paragraphs, em/strong/del, inline and
+   fenced code (with a language-* class hook), nested ul/ol with task
+   checkboxes, GFM pipe tables with alignment, blockquotes holding block
+   content, hr, links and autolinks. Two hard invariants: escape-first (the
+   input is attacker-influenced — esc() runs before any tag is inserted, raw
+   HTML never passes through) and ZERO libs (web/ is framework- and
+   build-free). Not a full CommonMark parser; unrecognized text falls through
+   as a plain paragraph. */
 function renderMarkdown(src) {
-  const lines = String(src ?? '').replace(/\r\n?/g, '\n').split('\n');
+  return mdBlocks(String(src ?? '').replace(/\r\n?/g, '\n').split('\n'));
+}
+
+const MD_LIST_ITEM = /^(\s*)(?:([-*+])|(\d+)[.)])\s+(.*)$/;
+const MD_TABLE_SEP = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
+
+function mdBlocks(lines) {
   const out = [];
-  let list = null; // 'ul' | 'ol'
-  let code = null; // collected fenced-code lines
-  let quote = false; // inside a > blockquote
-  const closeList = () => {
-    if (list) {
-      out.push(`</${list}>`);
-      list = null;
+  const para = [];
+  const flushPara = () => {
+    if (para.length) {
+      out.push(`<p>${mdInline(para.join(' '))}</p>`);
+      para.length = 0;
     }
   };
-  const closeQuote = () => {
-    if (quote) {
-      out.push('</blockquote>');
-      quote = false;
-    }
-  };
-  const inline = (s) => {
-    let h = esc(s);
-    h = h.replace(/`([^`]+)`/g, '<code>$1</code>');
-    h = h.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-    h = h.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
-    h = h.replace(/(^|\s)(https?:\/\/[^\s<]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
-    return h;
-  };
-  for (const line of lines) {
-    if (code) {
-      if (/^```/.test(line)) {
-        out.push(`<pre><code>${esc(code.join('\n'))}</code></pre>`);
-        code = null;
-      } else {
-        code.push(line);
-      }
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const fence = /^\s*```\s*(\S*)/.exec(line);
+    if (fence) {
+      flushPara();
+      const buf = [];
+      i++;
+      while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) buf.push(lines[i++]);
+      i++; // closing fence (or EOF — an unclosed fence still renders)
+      const lang = /^[\w+-]+$/.test(fence[1]) ? fence[1] : '';
+      out.push(`<pre><code${lang ? ` class="language-${lang}"` : ''}>${esc(buf.join('\n'))}</code></pre>`);
       continue;
     }
-    if (/^```/.test(line)) {
-      closeList();
-      closeQuote();
-      code = [];
+    if (/^\s*>/.test(line)) {
+      // Blockquote — recurse so quoted lists/fences/tables parse too.
+      flushPara();
+      const buf = [];
+      while (i < lines.length && /^\s*>/.test(lines[i])) buf.push(lines[i++].replace(/^\s*>\s?/, ''));
+      out.push(`<blockquote>${mdBlocks(buf)}</blockquote>`);
       continue;
     }
-    const bq = /^>\s?(.*)$/.exec(line);
-    if (bq) {
-      if (!quote) {
-        closeList();
-        out.push('<blockquote>');
-        quote = true;
-      }
-      if (bq[1].trim()) out.push(`<p>${inline(bq[1])}</p>`);
-      continue;
-    }
-    closeQuote();
-    const heading = /^(#{1,4})\s+(.*)$/.exec(line);
+    const heading = /^(#{1,6})\s+(.*)$/.exec(line);
     if (heading) {
-      closeList();
+      flushPara();
       const level = heading[1].length;
-      out.push(`<h${level}>${inline(heading[2])}</h${level}>`);
+      out.push(`<h${level}>${mdInline(heading[2])}</h${level}>`);
+      i++;
       continue;
     }
-    if (/^\s*(---+|\*\*\*+)\s*$/.test(line)) {
-      closeList();
+    if (/^\s*(---+|\*\*\*+|___+)\s*$/.test(line)) {
+      flushPara();
       out.push('<hr>');
+      i++;
       continue;
     }
-    const ul = /^\s*[-*]\s+(.*)$/.exec(line);
-    const ol = /^\s*\d+[.)]\s+(.*)$/.exec(line);
-    if (ul || ol) {
-      const kind = ul ? 'ul' : 'ol';
-      if (list !== kind) {
-        closeList();
-        out.push(`<${kind}>`);
-        list = kind;
-      }
-      const content = (ul ?? ol)[1];
-      const task = /^\[( |x|X)\]\s+(.*)$/.exec(content);
-      out.push(
-        task
-          ? `<li class="task"><span class="cb">${task[1].trim() ? '☑' : '☐'}</span>${inline(task[2])}</li>`
-          : `<li>${inline(content)}</li>`,
-      );
+    if (MD_LIST_ITEM.test(line)) {
+      flushPara();
+      i = mdList(lines, i, out);
       continue;
     }
-    closeList();
-    if (line.trim()) out.push(`<p>${inline(line)}</p>`);
+    if (
+      line.includes('|') &&
+      i + 1 < lines.length &&
+      lines[i + 1].includes('|') &&
+      MD_TABLE_SEP.test(lines[i + 1])
+    ) {
+      flushPara();
+      i = mdTable(lines, i, out);
+      continue;
+    }
+    if (!line.trim()) {
+      flushPara();
+      i++;
+      continue;
+    }
+    para.push(line.trim()); // soft-wrapped prose joins into one <p>
+    i++;
   }
-  if (code) out.push(`<pre><code>${esc(code.join('\n'))}</code></pre>`); // unclosed fence
-  closeList();
-  closeQuote();
+  flushPara();
   return out.join('\n');
+}
+
+/* Consecutive list items → nested <ul>/<ol> via an indent stack (2-space
+   steps, tabs count as 2). Each list's last <li> stays open until the next
+   item decides whether it nests, ends, or is a sibling. */
+function mdList(lines, i, out) {
+  const buf = [];
+  const stack = []; // { kind: 'ul' | 'ol', indent }
+  while (i < lines.length) {
+    const m = MD_LIST_ITEM.exec(lines[i]);
+    if (!m) break;
+    const indent = m[1].replace(/\t/g, '  ').length;
+    const kind = m[2] !== undefined ? 'ul' : 'ol';
+    const openTag = kind === 'ol' && Number(m[3]) > 1 ? `<ol start="${Number(m[3])}">` : `<${kind}>`;
+    if (!stack.length || indent > stack[stack.length - 1].indent + 1) {
+      stack.push({ kind, indent });
+      buf.push(openTag); // nests inside the still-open parent <li>
+    } else {
+      while (stack.length > 1 && indent < stack[stack.length - 1].indent - 1) {
+        buf.push('</li>', `</${stack.pop().kind}>`);
+      }
+      buf.push('</li>');
+      if (stack[stack.length - 1].kind !== kind) {
+        buf.push(`</${stack.pop().kind}>`);
+        stack.push({ kind, indent });
+        buf.push(openTag);
+      }
+    }
+    const task = /^\[( |x|X)\]\s+(.*)$/.exec(m[4]);
+    buf.push(
+      task
+        ? `<li class="task"><span class="cb">${task[1].trim() ? '☑' : '☐'}</span>${mdInline(task[2])}`
+        : `<li>${mdInline(m[4])}`,
+    );
+    i++;
+  }
+  while (stack.length) buf.push('</li>', `</${stack.pop().kind}>`);
+  out.push(buf.join(''));
+  return i;
+}
+
+/* GFM pipe table: header row + |---| separator, then body rows. Cell
+   alignment from the separator (:--- / :---: / ---:) lands as an inline
+   text-align — the value is renderer-generated, never user input. */
+function mdTable(lines, i, out) {
+  const splitRow = (row) => {
+    let r = row.trim();
+    if (r.startsWith('|')) r = r.slice(1);
+    if (r.endsWith('|')) r = r.slice(0, -1);
+    return r.split('|').map((c) => c.trim());
+  };
+  const header = splitRow(lines[i]);
+  const aligns = splitRow(lines[i + 1]).map((c) =>
+    /^:-+:$/.test(c) ? 'center' : /^-+:$/.test(c) ? 'right' : /^:-+$/.test(c) ? 'left' : null,
+  );
+  const cell = (tag, text, col) =>
+    `<${tag}${aligns[col] ? ` style="text-align:${aligns[col]}"` : ''}>${mdInline(text)}</${tag}>`;
+  const rows = [];
+  i += 2;
+  while (i < lines.length && lines[i].trim() && lines[i].includes('|')) {
+    rows.push(splitRow(lines[i]));
+    i++;
+  }
+  out.push(
+    `<table><thead><tr>${header.map((h, c) => cell('th', h, c)).join('')}</tr></thead>` +
+      (rows.length
+        ? `<tbody>${rows
+            .map((r) => `<tr>${header.map((_, c) => cell('td', r[c] ?? '', c)).join('')}</tr>`)
+            .join('')}</tbody>`
+        : '') +
+      '</table>',
+  );
+  return i;
+}
+
+/* Inline pass. Escape first, then stash code spans / links / autolinks as
+   opaque tokens so the emphasis regexes can't touch their insides (URLs are
+   full of underscores), run emphasis, and restore the tokens. */
+function mdInline(s) {
+  const tokens = [];
+  const stash = (html) => `\x00${tokens.push(html) - 1}\x00`;
+  let h = esc(s);
+  h = h.replace(/\\([\\`*_~[\]()#+\-.!>|])/g, (_, ch) => stash(ch)); // backslash escapes stay literal
+  h = h.replace(/`([^`]+)`/g, (_, code) => stash(`<code>${code}</code>`));
+  h = h.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, (_, text, url) =>
+    stash(`<a href="${url}" target="_blank" rel="noopener">${mdEmphasis(text)}</a>`),
+  );
+  h = h.replace(/(^|\s)(https?:\/\/[^\s<]+)/g, (_, pre, url) =>
+    `${pre}${stash(`<a href="${url}" target="_blank" rel="noopener">${url}</a>`)}`,
+  );
+  h = mdEmphasis(h);
+  // Tokens can reference earlier tokens (a link holding a code span) —
+  // resolve until none remain; references only ever point backwards.
+  while (/\x00\d+\x00/.test(h)) h = h.replace(/\x00(\d+)\x00/g, (_, n) => tokens[n] ?? '');
+  return h;
+}
+
+/* Emphasis on already-escaped text. Single * and _ require word boundaries
+   so `snake_case` and `2*3` stay literal. */
+function mdEmphasis(h) {
+  h = h.replace(/\*\*\*([^*]+)\*\*\*/g, '<strong><em>$1</em></strong>');
+  h = h.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  h = h.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+  h = h.replace(/(^|[^\w*])\*([^*\s](?:[^*]*[^*\s])?)\*(?![\w*])/g, '$1<em>$2</em>');
+  h = h.replace(/(^|[^\w_])_([^_\s](?:[^_]*[^_\s])?)_(?![\w_])/g, '$1<em>$2</em>');
+  h = h.replace(/~~([^~]+)~~/g, '<del>$1</del>');
+  return h;
 }
 
 // ---- boot ------------------------------------------------------------------
@@ -717,7 +816,13 @@ function connectGlobal() {
     const run = JSON.parse(e.data);
     state.runs.set(run.id, run);
     renderRunList();
-    if (run.id === state.selectedId) updateDetail(run);
+    if (run.id === state.selectedId) {
+      updateDetail(run);
+    } else if (state.selectedId) {
+      // Another run moved — the selected queued run's position may have too.
+      const sel = state.runs.get(state.selectedId);
+      if (sel?.status === 'queued') renderQueuedState(sel);
+    }
   });
   es.addEventListener('run-deleted', (e) => {
     const { id } = JSON.parse(e.data);
@@ -1819,6 +1924,36 @@ function updateDetail(run) {
       : 'Session closed — Continue to reopen.';
     $('#waiting-note').hidden = run.status !== 'waiting';
   }
+
+  renderQueuedState(run);
+}
+
+/* Queued placeholder (#351): a queued run has emitted no transcript events,
+   so the central log pane would be blank — show a prominent animated state
+   with the live queue position instead. Removed by the first real event
+   (appendLog) or as soon as the status moves on. */
+function renderQueuedState(run) {
+  const inner = $('#log-inner');
+  if (!inner) return;
+  const existing = inner.querySelector('.queued-state');
+  const hasEvents = [...inner.children].some((el) => el !== existing);
+  if (run.status !== 'queued' || hasEvents) {
+    existing?.remove();
+    return;
+  }
+  const pos = queuePosition(run);
+  const html = `
+    <div class="q-dots"><span></span><span></span><span></span></div>
+    <div class="q-head">Waiting for a free agent slot${pos ? ` — #${esc(String(pos))} in queue` : ''}</div>
+    <div class="q-sub">${esc(run.workflow)} · starts automatically when a slot frees up</div>`;
+  if (existing) {
+    existing.innerHTML = html;
+  } else {
+    const el = document.createElement('div');
+    el.className = 'queued-state';
+    el.innerHTML = html;
+    inner.appendChild(el);
+  }
 }
 
 /* Review gate panel (spec 009): the full diff on top, then a notes field with
@@ -2045,6 +2180,7 @@ function appendLog(evt) {
   const inner = $('#log-inner');
   const log = $('#log');
   if (!inner || !log) return;
+  inner.querySelector('.queued-state')?.remove(); // first real event replaces the placeholder (#351)
   const el = document.createElement('div');
 
   switch (evt.type) {
