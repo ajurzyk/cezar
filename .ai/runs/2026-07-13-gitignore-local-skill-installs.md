@@ -53,6 +53,8 @@ Add the `.gitignore` entries for local skill installs and per-run pipeline state
 
 ## Progress
 
+PR: #343
+
 > Convention: `- [ ]` pending, `- [x]` done. Append ` — <commit sha>` when a step lands. Do not rename step titles.
 
 ### Phase 1: Bootstrap agent pipeline
