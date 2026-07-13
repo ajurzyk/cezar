@@ -18,6 +18,7 @@ import { materializeSkillDir } from '../skills-remote.js';
 import { loadConfig } from '../config.js';
 import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff } from '../git-worktree.js';
 import { getRepoInfo } from '../server/git.js';
+import { loadWorkflows } from './load.js';
 import type { RunRecord, RunStore } from '../runs/store.js';
 import { DEFAULT_ALLOWED_TOOLS, stepKind, type WorkflowDef, type WorkflowStepDef } from './types.js';
 
@@ -135,6 +136,9 @@ export class RunManager {
       variant: group?.variant,
       steps: workflow.steps.map((s) => ({ id: s.id, name: s.name ?? s.id, kind: stepKind(s) })),
     });
+    // Persist the full definition so a queued run survives a restart (#367) —
+    // ad-hoc "(planned)" chains exist nowhere else to re-resolve from.
+    this.store.updateRun(run.id, { workflowDef: workflow as unknown as Record<string, unknown> });
     this.pendingJobs.set(run.id, { workflow, input });
     this.queue.push(run.id);
     void this.pump();
@@ -201,6 +205,96 @@ export class RunManager {
     } finally {
       this.pumping = false;
     }
+  }
+
+  /**
+   * Startup recovery (#367) — re-adopt runs that were live when the previous
+   * cezar process exited (requires the store opened with `keepLive`):
+   *  - `queued`  → back into the queue (FIFO by createdAt), from the persisted
+   *    workflowDef (or the catalog by name for older records);
+   *  - `waiting` → the turn was over and the ball was in the user's court —
+   *    settle exactly like a closed session (review/done, Continue still works);
+   *  - `running` → mark interrupted, then immediately resume the last agent
+   *    session via the Continue path, pointing the agent at its handoff file.
+   * Call once, before the server starts taking requests.
+   */
+  async recover(): Promise<void> {
+    const live = this.store
+      .listRuns()
+      .filter((r) => ['queued', 'waiting', 'running'].includes(r.status))
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    for (const run of live) {
+      if (run.status === 'queued') {
+        const workflow = await this.reviveWorkflow(run);
+        if (workflow) {
+          this.pendingJobs.set(run.id, {
+            workflow,
+            input: { task: run.task, model: run.model, runner: run.runner },
+          });
+          this.queue.push(run.id);
+          this.store.appendEvent(run.id, { type: 'lifecycle', message: 'cezar restarted — task re-queued' });
+        } else {
+          this.store.updateRun(run.id, {
+            status: 'failed',
+            error: 'interrupted — workflow definition not recoverable after a restart',
+            finishedAt: new Date().toISOString(),
+          });
+          this.store.appendEvent(run.id, {
+            type: 'lifecycle',
+            message: 'cezar restarted — workflow definition not recoverable, task failed',
+          });
+        }
+        continue;
+      }
+      if (run.status === 'waiting') {
+        for (const step of run.steps) {
+          if (step.status === 'waiting' || step.status === 'running') {
+            this.store.updateStep(run.id, step.id, { status: 'done', finishedAt: new Date().toISOString() });
+          }
+        }
+        this.store.appendEvent(run.id, {
+          type: 'lifecycle',
+          message: 'cezar restarted — the open session was settled',
+        });
+        await this.settleSuccess(run.id);
+        continue;
+      }
+      // `running`: the process died mid-turn. Mark it interrupted (the state
+      // continueRun expects), then pick the work back up from the last session.
+      const finishedAt = new Date().toISOString();
+      for (const step of run.steps) {
+        if (step.status === 'running' || step.status === 'waiting') {
+          this.store.updateStep(run.id, step.id, { status: 'failed', finishedAt });
+        }
+      }
+      this.store.updateRun(run.id, {
+        status: 'failed',
+        error: 'interrupted — cezar process exited during the run',
+        finishedAt,
+        currentStepId: undefined,
+      });
+      const resumed = this.continueRun(
+        run.id,
+        'The cezar process restarted while you were working on this task. Read the handoff file (CEZ_HANDOFF_FILE) to recover context, then continue the task from where you left off.',
+      );
+      this.store.appendEvent(run.id, {
+        type: 'lifecycle',
+        message: resumed.ok
+          ? 'cezar restarted — resuming the interrupted task from its last session'
+          : `cezar restarted — could not resume the interrupted task (${resumed.error ?? 'unknown'})`,
+      });
+    }
+    void this.pump();
+  }
+
+  /** The persisted definition when it looks sane, else the catalog by name. */
+  private async reviveWorkflow(run: RunRecord): Promise<WorkflowDef | null> {
+    const def = run.workflowDef;
+    if (def && Array.isArray((def as { steps?: unknown }).steps)) {
+      return def as unknown as WorkflowDef;
+    }
+    const { workflows } = await loadWorkflows(this.repoRoot);
+    return workflows.find((w) => w.name === run.workflow) ?? null;
   }
 
   /** Remove a run from the live registries — keeps `waiting ⊆ active`. */

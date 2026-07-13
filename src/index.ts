@@ -76,7 +76,9 @@ async function main(): Promise<void> {
 // ---- serve -----------------------------------------------------------------
 
 async function serveCommand(repoRoot: string, preferredPort: number, openBrowser: boolean): Promise<void> {
-  const store = openStore(repoRoot);
+  // keepLive + recover() (#367): runs that were queued/running/waiting when
+  // the previous process exited are re-queued or resumed instead of failed.
+  const store = openStore(repoRoot, { keepLive: true });
   const manager = new RunManager(store, repoRoot);
   const version = readOwnVersion();
 
@@ -92,6 +94,12 @@ async function serveCommand(repoRoot: string, preferredPort: number, openBrowser
       console.log(`  cleaned ${orphans.length} orphaned worktree(s): ${orphans.map((id) => id.slice(0, 8)).join(', ')}`);
     }
   }
+
+  const recovered = store
+    .listRuns()
+    .filter((r) => ['queued', 'waiting', 'running'].includes(r.status)).length;
+  await manager.recover();
+  if (recovered > 0) console.log(`  recovered ${recovered} run(s) from the previous session`);
 
   const port = await pickPort(preferredPort);
   startServer({ repoRoot, store, manager, version }, port);
@@ -277,9 +285,9 @@ description: House rules the agent should follow in this repo.
 
 // ---- helpers -----------------------------------------------------------------
 
-function openStore(repoRoot: string): RunStore {
+function openStore(repoRoot: string, opts?: { keepLive?: boolean }): RunStore {
   const dataDir = join(repoRoot, '.ai/cezar');
-  const store = RunStore.open(dataDir);
+  const store = RunStore.open(dataDir, opts);
   ensureDataGitignore(repoRoot);
   return store;
 }

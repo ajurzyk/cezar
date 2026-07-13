@@ -62,6 +62,11 @@ const runRecordSchema = z.object({
   currentStepId: z.string().optional(),
   error: z.string().optional(),
   steps: z.array(stepStateSchema),
+  /** Full workflow definition, persisted so a `queued` run can be re-enqueued
+   *  after a restart (#367) — including ad-hoc "(planned)" chains that exist
+   *  nowhere else. Kept loose here to avoid an upward import; the run manager
+   *  validates the shape before reviving it. */
+  workflowDef: z.record(z.string(), z.unknown()).optional(),
 });
 
 export type StepState = z.infer<typeof stepStateSchema>;
@@ -96,7 +101,13 @@ export class RunStore extends EventEmitter {
     this.setMaxListeners(100);
   }
 
-  static open(dataDir: string): RunStore {
+  /**
+   * `keepLive` (#367): leave `queued`/`running`/`waiting` statuses untouched
+   * so the caller can recover them (RunManager.recover re-queues queued runs,
+   * resumes interrupted ones). Without it — one-shot CLI paths that never
+   * recover — live-looking runs are marked failed so no ghost stays behind.
+   */
+  static open(dataDir: string, opts?: { keepLive?: boolean }): RunStore {
     mkdirSync(join(dataDir, 'runs'), { recursive: true });
     const store = new RunStore(dataDir);
     const indexPath = join(dataDir, 'runs.json');
@@ -112,9 +123,10 @@ export class RunStore extends EventEmitter {
             // (worktree + branch + record) with no live process, so the diff
             // panel, Send back (resume) and Draft PR all still work.
             if (
-              run.status === 'running' ||
-              run.status === 'queued' ||
-              run.status === 'waiting'
+              !opts?.keepLive &&
+              (run.status === 'running' ||
+                run.status === 'queued' ||
+                run.status === 'waiting')
             ) {
               run.status = 'failed';
               run.error = 'interrupted — cezar process exited during the run';
