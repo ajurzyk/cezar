@@ -2,13 +2,15 @@
 
 # cezar ⚡
 
-**A local cockpit for running and tracking AI coding-agent tasks in your repo.**
+**Parallel coding agents orchestrator** — a local cockpit for running and
+tracking AI coding-agent tasks in your repo.
 
-Type a task, pick a workflow, watch the agent work live — steps, tool calls,
-tokens, diffs — in a browser cockpit that runs entirely on your machine.
-Your `claude` login, your `gh`, your files. No accounts, no database, no cloud.
+Type a task, pick a workflow and an agent — **Claude Code, Codex or OpenCode,
+or a mix of them per step** — and watch it work live: steps, tool calls,
+tokens, diffs, in a browser cockpit that runs entirely on your machine.
+Your CLI logins, your `gh`, your files. No accounts, no database, no cloud.
 
-[A look inside](#a-look-inside) · [What it solves](#what-it-solves) · [Who it's for](#who-its-for) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Core concepts](#core-concepts) · [Cockpit tour](#cockpit-tour)
+[A look inside](#a-look-inside) · [What it solves](#what-it-solves) · [Who it's for](#who-its-for) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Core concepts](#core-concepts) · [Cockpit tour](#cockpit-tour) · [Agent backends](#coding-agent-backends)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](#license)
 ![Node 20+](https://img.shields.io/badge/Node-20%2B-339933)
@@ -63,6 +65,10 @@ locally under *your* subscription, and a cockpit shows you exactly what it's doi
 - **Losing a session when it fails.** Every run records its `claude` session id.
   Take it over interactively in one click (`claude --resume <id>`), or continue it
   in-process from the cockpit.
+- **Locked into one agent vendor.** Most tools wed you to a single CLI. cezar
+  drives **Claude Code, Codex and OpenCode** through one runner seam — set a
+  default, pick a backend per task, or mix them inside one workflow (implement
+  with one agent, review with another). See [Agent backends](#coding-agent-backends).
 - **Setup tax.** No wizard, no env vars, no schema. Skills are Markdown, workflows
   are short YAML, and everything degrades: no `gh` → works without PRs, no network
   → local skills still load, no `.ai/skills` → the bare prompt still runs.
@@ -85,8 +91,10 @@ locally under *your* subscription, and a cockpit shows you exactly what it's doi
 
 ## Quick start
 
-**Prerequisites:** Node 20+, the [`claude` CLI](https://github.com/anthropics/claude-code)
-logged in (Pro/Max subscription), and — optionally — `git` and the `gh` CLI.
+**Prerequisites:** Node 20+, at least one logged-in agent CLI — the
+[`claude` CLI](https://github.com/anthropics/claude-code) (Pro/Max subscription),
+the [`codex` CLI](https://github.com/openai/codex), or
+[OpenCode](https://opencode.ai) — and, optionally, `git` and the `gh` CLI.
 
 ```bash
 cd your-repo
@@ -103,8 +111,8 @@ npx cezar-cli init                                            # scaffold .ai/cez
 ```
 
 Both the `cezar` and `cez` commands are installed, so once it's on your PATH you
-can run either. No API key is ever used — cezar shells out to your logged-in
-`claude` CLI.
+can run either. No API key is ever used — cezar shells out to whichever agent
+CLIs you are already logged into, `claude` by default.
 
 > **Just kicking the tires?** Set `CEZ_DRY_RUN=1` to run against a bundled mock
 > instead of the real CLI — the whole cockpit works with no `claude` login, so
@@ -115,8 +123,9 @@ can run either. No API key is ever used — cezar shells out to your logged-in
 ## How it works
 
 You describe a task. cezar runs it as a **workflow** — an ordered list of agent
-steps and shell checks — shelling out to your `claude` CLI in headless
-stream-json mode. Each task gets its own git worktree; the cockpit streams every
+steps and shell checks — shelling out to your locally installed agent CLI
+(Claude Code by default; Codex and OpenCode are drop-in alternatives, per task
+or per step). Each task gets its own git worktree; the cockpit streams every
 event live and parks the run at a review gate when there's a diff to inspect.
 
 ```
@@ -129,9 +138,9 @@ event live and parks the run at a review gate when there's a diff to inspect.
         │
         ▼
    ┌──────────────────────────────┐     ┌───────────────────────────────┐
-   │  git worktree per task       │     │  claude CLI  (your login)     │
-   │  (isolated branch, parallel) │◄───►│  stream-json · default-deny   │
-   └──────────────────────────────┘     │  tools · acceptEdits in-repo  │
+   │  git worktree per task       │     │  agent CLI  (your login)      │
+   │  (isolated branch, parallel) │◄───►│  claude · codex · opencode    │
+   └──────────────────────────────┘     │  default-deny · acceptEdits   │
         │                                 └───────────────────────────────┘
         │  agent text · tool calls · tool results · tokens · cost
         ▼
@@ -213,6 +222,7 @@ steps:
     prompt: "{{task}}"
     skill: project-conventions   # optional — from .ai/skills or .ai/cezar/skills
     # model: opus                # optional per-step model override
+    # runner: codex              # optional per-step backend: claude · codex · opencode
     # allowedTools: [Read, Edit, Write, Grep, Glob, Bash]
   - id: verify
     name: Verify
@@ -238,11 +248,13 @@ skills: [reproduce, root-cause, implement, self-review]
 
 ## How it runs agents
 
-cezar shells out to your locally installed, logged-in `claude` CLI in headless
-`stream-json` mode — **your subscription, no API key**. Tool access is
-default-deny via `--allowedTools`, and edits are auto-accepted
-(`--permission-mode acceptEdits`) inside the task's worktree. Nothing runs on a
-server you don't own.
+cezar shells out to your locally installed, logged-in agent CLI —
+**your subscription, no API key**. With the default Claude Code backend that
+means headless `stream-json` mode, tool access default-deny via
+`--allowedTools`, and edits auto-accepted (`--permission-mode acceptEdits`)
+inside the task's worktree. Codex and OpenCode are driven through their own
+native protocols — see [Coding agent backends](#coding-agent-backends).
+Nothing runs on a server you don't own.
 
 Useful environment variables:
 
@@ -250,7 +262,59 @@ Useful environment variables:
 |---|---|
 | `CEZ_DRY_RUN=1` | Use the bundled mock instead of the real `claude` CLI — the entire cockpit works offline, for demos and development. |
 | `CEZ_CLAUDE_BIN=/path/to/claude` | Override which `claude` binary is used. |
+| `CEZ_CODEX_BIN=/path/to/codex` | Override which `codex` binary is used. |
+| `CEZ_OPENCODE_BIN=/path/to/opencode` | Override which `opencode` binary is used. |
 | `GITHUB_TOKEN` | Fallback for GitHub reads/PRs when `gh` isn't authenticated. |
+
+---
+
+## Coding agent backends
+
+cezar is not married to one vendor. Every agent step runs through a single
+`AgentRunner` seam with three built-in backends:
+
+| Backend | CLI | How cezar drives it |
+|---|---|---|
+| **Claude Code** (default) | [`claude`](https://github.com/anthropics/claude-code) | Headless `stream-json` mode. |
+| **Codex** | [`codex`](https://github.com/openai/codex) | `codex app-server` — JSON-RPC over stdio, the same transport the Codex IDE extensions use. |
+| **OpenCode** | [`opencode`](https://opencode.ai) | `opencode serve` — a local HTTP server with an SSE event stream. |
+
+On startup cezar probes which CLIs are installed and the cockpit only offers
+the backends it found — install any one of the three and you're operational.
+
+**Pick a backend at three levels** (most specific wins):
+
+1. **Config default** — `"defaultRunner": "codex"` in `.ai/cezar/config.json`.
+2. **Per task** — the backend picker next to the task box in the cockpit.
+3. **Per workflow step** — `runner:` on any step in the YAML.
+
+Per-step overrides are what make **mixed-agent strategies** a one-liner:
+implement with one agent, review with another, and let a shell check referee:
+
+```yaml
+name: implement-and-cross-review
+steps:
+  - id: implement
+    name: Implement
+    prompt: "{{task}}"
+    runner: codex                # one vendor writes the code…
+  - id: review
+    name: Cross-review
+    prompt: "Review the diff produced for: {{task}}. Fix real issues only."
+    runner: claude               # …another one reviews it
+  - id: verify
+    name: Verify
+    command: "npm test"
+    onFail: { retry: implement, max: 2 }
+```
+
+Parallel variants (×2/×3) of one task share that task's backend — mixing
+happens per task and per step, not inside a variant group.
+
+The seam is deliberately small: a backend is one class implementing the
+`AgentRunner` interface (`src/core/agent-runner.ts`) that turns a prompt into
+a stream of normalized events. Other CLIs — pi, aider, whatever ships next —
+can slot in the same way.
 
 ---
 
@@ -264,6 +328,7 @@ never blocks startup):
 {
   "skillsRepos": [{ "repo": "open-mercato/skills", "ref": "main" }], // team skills; [] disables
   "maxParallel": 2,          // how many tasks may run at once (non-git dirs always run 1)
+  "defaultRunner": "claude", // agent backend: "claude" (default) · "codex" · "opencode"
   "plannerModel": "sonnet",  // model the Plan button uses to draft chains
   "baseBranch": "develop"    // branch worktrees fork from + PRs target (also settable in the Repo tab)
 }
