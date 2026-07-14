@@ -1,6 +1,6 @@
 # Paseo (github.com/getpaseo/paseo) — UI/UX research for cezar
 
-Researched 2026-07-14 from a shallow clone of `getpaseo/paseo` @ main (v0.1.107, AGPL-3.0). All file paths below are repo-relative. Local clone kept at `/tmp/claude-1000/-home-pkarw-Projects-cezar/4866af8d-803f-4946-a3fe-9a1201e47948/scratchpad/paseo-src` for follow-up reading.
+Researched 2026-07-14 from a shallow clone of `getpaseo/paseo` @ main (v0.1.107, AGPL-3.0). All file paths below are repo-relative. (Clone was made in a temporary session directory; re-clone the repo to follow up.)
 
 ---
 

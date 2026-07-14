@@ -1,6 +1,6 @@
 # Agent Event Protocols — How Coding-Agent Backends Stream Status & Metadata to GUIs
 
-Research date: 2026-07-14. Sources: docs.claude.com / code.claude.com (Agent SDK + headless stream-json), agentclientprotocol.com (ACP by Zed), developers.openai.com + github.com/openai/codex (app-server), opencode.ai docs + sst/opencode SDK generated types. Cross-referenced against cezar's current normalization in `/home/pkarw/Projects/cezar/src/core/agent-runner.ts`, `claude-cli-runner.ts`, `codex-app-server-runner.ts`, `opencode-server-runner.ts`.
+Research date: 2026-07-14. Sources: docs.claude.com / code.claude.com (Agent SDK + headless stream-json), agentclientprotocol.com (ACP by Zed), developers.openai.com + github.com/openai/codex (app-server), opencode.ai docs + sst/opencode SDK generated types. Cross-referenced against cezar's current normalization in `src/core/agent-runner.ts`, `claude-cli-runner.ts`, `codex-app-server-runner.ts`, `opencode-server-runner.ts`.
 
 ---
 

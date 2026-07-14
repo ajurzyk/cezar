@@ -1,7 +1,6 @@
 # Mercato Sandboxes — Visual Language Research (for cezar redesign)
 
-**Source:** `open-mercato/mercato-sandboxes` (private repo, accessed via authenticated `gh`; shallow clone at
-`/tmp/claude-1000/-home-pkarw-Projects-cezar/4866af8d-803f-4946-a3fe-9a1201e47948/scratchpad/research/mercato-sandboxes`).
+**Source:** `open-mercato/mercato-sandboxes` (private repo, accessed via authenticated `gh`; researched from a temporary shallow clone).
 The web UI lives in `apps/portal-web` — Next.js 15 + **Tailwind v4** (CSS-first `@theme inline`, no tailwind.config)
 + **shadcn/ui "new-york" style** (neutral base, CSS variables) + Radix primitives + lucide-react icons.
 Tokens are documented in-source as a 1:1 mapping of the Figma file **"Mercato Sandboxes — UI/UX"** (Open Mercato design system).

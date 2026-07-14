@@ -17,7 +17,7 @@ Rebuild cezar's cockpit (`web/`) as a React + Vite + Tailwind + shadcn/ui app wi
 
 ## Problem Statement
 
-The current cockpit is a single 3.8k-line vanilla-JS file with hand-rolled markdown, dropdowns, diff rendering and 1.9k lines of bespoke CSS. It works, but it has hit its ceiling — ten open issues are all UI/UX symptoms of the same root causes:
+The current cockpit is a single 3.8k-line vanilla-JS file with hand-rolled markdown, dropdowns, diff rendering and 1.9k lines of bespoke CSS. It works, but it has hit its ceiling — a dozen open issues (#354, #377–#390) are all UI/UX symptoms of the same root causes:
 
 - **Composer welded into a 318px sidebar** (#386) — the richest surface in the app (task, attachments, workflow/skill picker, runner, model, plan) is the most cramped.
 - **Tool calls and results render as flat text chips** (#381); TODO/plan lists from agents are invisible (#382); plan mode has no selected state (#383). The internal event model (`tool-call`/`tool-result`, 2 states, no plan/reasoning/diff events) can't express what Codex/Claude/OpenCode GUIs show.
@@ -106,7 +106,7 @@ type UiItem =
 - Emitted by the runners (`src/core/*-runner.ts`) alongside v1 events; the RunManager persists v2 to the same NDJSON stream (new `type` values — the current GUI already renders unknown types as dim notes, so mixed files are safe).
 - **Key mappings**: Claude `TodoWrite` / Codex `todoList` / OpenCode `todowrite` → `plan.updated` (full-replacement, identical semantics); Claude `thinking` blocks / Codex `reasoning` items / OpenCode `reasoning` parts → reasoning items; Codex `item/commandExecution/outputDelta` → `item.delta{field:'output'}` (live command output); Claude `Edit` input & Codex `fileChange.changes` & OpenCode `patch` parts → structured `FileDiff`s; Claude `parent_tool_use_id` / OpenCode `subtask` → `parentItemId` (sub-agent nesting); OpenCode turn-end switches to `session.idle`.
 - The **tool display model** (title/verb/icon per tool name + `toolKind`) lives in `web/src/protocol/` next to the types — computed once, used by thread, activity groups and notifications (paseo's pattern).
-- **System prompt**: `SessionOptions` already carries `systemPrompt` per backend (`--append-system-prompt` for claude; prepended first message for codex; opencode message option). v2 adds it end-to-end: `POST /api/runs` accepts `systemPrompt?`, a Settings-level default (`config.json: systemPrompt?`) is merged, and the composer's advanced row exposes it. Works with every backend because it rides the existing seam — coding-agent-agnostic by construction.
+- **System prompt**: `AgentRunSpec` already carries `systemPrompt` per backend (`--append-system-prompt` for claude; codex and opencode prepend it to the first user message). v2 adds it end-to-end: `POST /api/runs` accepts `systemPrompt?`, a Settings-level default (`config.json: systemPrompt?`) is merged, and the composer's advanced row exposes it. Works with every backend because it rides the existing seam — coding-agent-agnostic by construction.
 
 ### Testing strategy (mandatory — every step ships unit tests)
 
@@ -302,7 +302,7 @@ Each phase is independently shippable; issues in parentheses close in that phase
 Steps are sized for autonomous runs (om-auto-create-pr / -loop, one PR per phase, `Source doc:` = this spec). Every step leaves the app working and passes `npm run typecheck && npm run build` (+ `npm run build:web` once it exists).
 
 ### Phase R1 — Platform + shell
-1. Scaffold `web/` Vite+React+TS+Tailwind v4+shadcn (new-york); tokens from the design system section; self-hosted fonts; `npm run dev:web`/`build:web`; Hono serves `web/dist` with legacy fallback + `?legacy=1`.
+1. Scaffold `web/` Vite+React+TS+Tailwind v4+shadcn (new-york); tokens from the design system section; self-hosted fonts; `npm run dev:web`/`build:web`; **vitest setup (server + web projects) with `npm test` added to `validation.commands`**; Hono serves `web/dist` with legacy fallback + `?legacy=1`.
 2. App shell: react-router with the deep-link route map (server catch-all → index.html), sidebar (brand, New task button, nav, footer), theme system (pre-paint script, light/dark/system), mobile drawer + `100dvh` grid + safe areas.
 3. API client + SSE hooks (global stream, reconcile doctrine) + task quick-list (groups, variant collapse, status dots) + runs table shell.
 4. ⌘K palette; env chips popover; CenteredState template; design-guardian test scaffold.
