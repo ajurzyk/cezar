@@ -89,9 +89,9 @@ active), and give the table header its own Active/Archived filter tabs.
 
 ### Phase 1: Runs nav opens the table
 
-- [ ] 1.1 Runs nav click always shows the table view
-- [ ] 1.2 Remove the #list-tabs grid-icon toggle
-- [ ] 1.3 Verify programmatic showRunsView/selectRun flows land on detail
+- [x] 1.1 Runs nav click always shows the table view — 10baaa3
+- [x] 1.2 Remove the #list-tabs grid-icon toggle — 10baaa3
+- [x] 1.3 Verify programmatic showRunsView/selectRun flows land on detail — 10baaa3
 
 ### Phase 2: Table-header Active/Archived tabs
 
