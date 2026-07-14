@@ -892,6 +892,9 @@ function bindUi() {
     for (const view of document.querySelectorAll('.view')) view.hidden = true;
     const view = $(`#view-${btn.dataset.view}`);
     view.hidden = false;
+    // Runs is a link to the table overview (#348): every click lands on the
+    // full-width table — selecting a run is what drops into the detail pane.
+    if (btn.dataset.view === 'runs') setRunsView('table');
     if (btn.dataset.view === 'repo') loadRepo();
     if (btn.dataset.view === 'skills') loadSkills();
     if (btn.dataset.view === 'inbox') renderInbox();
@@ -1178,12 +1181,6 @@ function bindUi() {
     if (btn.dataset.list === 'archive-finished') {
       await fetch('/api/runs/archive-finished', { method: 'POST' });
       return; // SSE run updates re-render the list
-    }
-    if (btn.dataset.list === 'toggle-view') {
-      // List/table switch (#348) — the table lives in the Runs main view.
-      showRunsView();
-      setRunsView(state.runsView === 'table' ? 'list' : 'table');
-      return;
     }
     state.listView = btn.dataset.list;
     renderRunList();
@@ -1748,12 +1745,7 @@ function renderRunList() {
     <button data-list="archived" class="${state.listView === 'archived' ? 'active' : ''}">
       Archived${archivedCount ? ` ${archivedCount}` : ''}
     </button>
-    ${state.listView === 'active' && finishedCount ? `<button data-list="archive-finished" title="Archive all finished runs"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1.5px;margin-right:4px"><path d="M4 5h16v4H4zM6 9v10h12V9M9 13h6"/></svg>${finishedCount}</button>` : ''}
-    <button data-list="toggle-view" class="view-toggle ${state.runsView === 'table' ? 'active' : ''}" title="${state.runsView === 'table' ? 'Back to the run detail view' : 'Table view — every run with live CPU / memory'}">
-      ${state.runsView === 'table'
-        ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M4 5h7v14H4zM14 5h6M14 9h6M14 13h6M14 17h6"/></svg>'
-        : '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M4 5h16v14H4zM4 10h16M9 10v9"/></svg>'}
-    </button>`;
+    ${state.listView === 'active' && finishedCount ? `<button data-list="archive-finished" title="Archive all finished runs"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1.5px;margin-right:4px"><path d="M4 5h16v4H4zM6 9v10h12V9M9 13h6"/></svg>${finishedCount}</button>` : ''}`;
 
   // Variant groups (spec 010): runs sharing a groupId collapse into one
   // group tile at the position of their best-ranked member; click expands.
@@ -1841,7 +1833,6 @@ function setRunsView(mode, persist = true) {
   state.runsView = mode;
   applyRunsView();
   if (changed) {
-    renderRunList(); // the toggle button in #list-tabs reflects the mode
     if (persist) {
       void fetch('/api/ui-state', {
         method: 'PUT',

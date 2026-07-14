@@ -1848,10 +1848,6 @@ a.bm:hover { border-color: var(--accent-line); color: var(--accent); text-decora
 #runs-table td.rt-time { color: var(--text2); }
 #runs-table .rt-dur { color: var(--text3); }
 
-/* list/table switch — sits at the right edge of the sidebar's list tabs */
-#list-tabs .view-toggle { margin-left: auto; display: inline-flex; align-items: center; }
-#list-tabs .view-toggle svg { display: block; }
-
 /* narrow screens: sidebar shrinks, splits stack */
 @media (max-width: 900px) {
   #sidebar { width: 258px; min-width: 258px; }
