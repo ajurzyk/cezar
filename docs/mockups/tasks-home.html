@@ -32,11 +32,36 @@
     background: color-mix(in srgb, var(--violet) 16%, transparent); color: var(--violet);
   }
 
-  .side-foot { flex-wrap: wrap; row-gap: 6px; }
-  .env-led { display: inline-flex; align-items: center; gap: 4px; font: 500 10.5px var(--mono); color: var(--muted-foreground); }
-  .env-led i { width: 5px; height: 5px; border-radius: 999px; background: var(--success); }
+  .side-foot { position: relative; flex-wrap: wrap; row-gap: 6px; }
+  .tools-chip .dot { width: 7px; height: 7px; border-radius: 999px; flex: none; }
   .ver-chip { font: 500 10px var(--mono); color: var(--soft-foreground); border: 1px solid var(--border); border-radius: 999px; padding: 1px 6px; }
   .theme-btn { margin-left: auto; }
+
+  /* tools dropdown (shown open in this mockup) */
+  .tools-menu {
+    position: absolute; left: 10px; bottom: calc(100% + 8px); width: 230px;
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius-lg); box-shadow: var(--shadow-modal);
+    padding: 6px; z-index: 30;
+  }
+  .tools-menu .menu-label {
+    font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+    color: var(--soft-foreground); padding: 6px 8px 4px;
+  }
+  .tool-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: var(--radius-sm); }
+  .tool-row:hover { background: var(--muted); }
+  .tool-row .dot { width: 7px; height: 7px; border-radius: 999px; flex: none; }
+  .tool-row .name { font: 500 12.5px var(--mono); }
+  .tool-row .ver { margin-left: auto; font: 500 11.5px var(--mono); color: var(--muted-foreground); font-variant-numeric: tabular-nums; }
+  .tool-row .miss { font-size: 11.5px; color: var(--muted-foreground); }
+  .tool-row .setup { margin-left: auto; font-size: 11.5px; font-weight: 600; color: var(--violet); }
+  .tools-menu .divider { margin: 5px 2px; }
+  .tools-settings {
+    display: flex; align-items: center; gap: 8px; width: 100%;
+    padding: 6px 8px; border-radius: var(--radius-sm);
+    font-size: 12.5px; color: var(--muted-foreground);
+  }
+  .tools-settings:hover { background: var(--muted); color: var(--foreground); }
 
   /* ---------- main ---------- */
   .page-head {
@@ -119,6 +144,7 @@
 
   @media (max-width: 767px) {
     .page-head, .table-wrap { display: none; }
+    .tools-menu { display: none; } /* sidebar is hidden on mobile */
     .content { padding: 12px 12px calc(90px + env(safe-area-inset-bottom)); }
 
     .cards-list { display: flex; flex-direction: column; gap: 10px; }
@@ -257,10 +283,49 @@
     </div>
 
     <div class="side-foot">
-      <span class="env-led"><i></i>claude</span>
-      <span class="env-led"><i></i>codex</span>
-      <span class="env-led"><i></i>gh</span>
-      <span class="env-led"><i></i>git</span>
+      <div class="tools-menu">
+        <div class="menu-label">Installed tools</div>
+        <div class="tool-row">
+          <span class="dot dot-success"></span>
+          <span class="name">claude</span>
+          <span class="ver">2.0.44</span>
+        </div>
+        <div class="tool-row">
+          <span class="dot dot-success"></span>
+          <span class="name">codex</span>
+          <span class="ver">0.48.0</span>
+        </div>
+        <div class="tool-row">
+          <span class="dot dot-success"></span>
+          <span class="name">opencode</span>
+          <span class="ver">1.17.3</span>
+        </div>
+        <div class="tool-row">
+          <span class="dot dot-success"></span>
+          <span class="name">gh</span>
+          <span class="ver">2.62.0</span>
+        </div>
+        <div class="tool-row">
+          <span class="dot dot-success"></span>
+          <span class="name">git</span>
+          <span class="ver">2.43.0</span>
+        </div>
+        <div class="tool-row">
+          <span class="dot dot-danger"></span>
+          <span class="name">mcp</span>
+          <span class="miss">not configured</span>
+          <a class="setup" href="#">Set up →</a>
+        </div>
+        <hr class="divider">
+        <a class="tools-settings" href="#">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.9 2.9l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.2a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.9-2.9l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.2a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.9-2.9l.1.1a1.7 1.7 0 0 0 1.9.3h.1a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.2a1.7 1.7 0 0 0 1 1.5h.1a1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.9 2.9l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.5 1h.2a2 2 0 1 1 0 4h-.2a1.7 1.7 0 0 0-1.5 1z"/></svg>
+          Tool settings
+        </a>
+      </div>
+      <button class="chip tools-chip" title="claude 2.0.44 · codex 0.48.0 · gh 2.62 · git 2.43">
+        <span class="dot dot-success"></span>Tools
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+      </button>
       <span class="ver-chip">v0.1.3</span>
       <button class="btn btn-ghost btn-icon btn-sm theme-btn" aria-label="Toggle theme">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z"/></svg>
@@ -289,14 +354,6 @@
       <div class="seg">
         <button class="active">Active<span class="count">12</span></button>
         <button>Archived</button>
-      </div>
-      <div class="seg">
-        <button aria-label="List view">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
-        </button>
-        <button class="active" aria-label="Table view">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/></svg>
-        </button>
       </div>
       <div class="head-spacer"></div>
       <button class="btn btn-ghost btn-sm">

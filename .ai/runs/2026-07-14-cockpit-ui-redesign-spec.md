@@ -1,14 +1,14 @@
-# Run: Codex-desktop-parity UI redesign — specification + mockups
+# Run: Cockpit UI redesign — specification + mockups
 
 - Date: 2026-07-14
 - Branch: `feat/codex-ui-redesign-spec`
 - Base: `main`
 - Type: docs/spec (no product code changes)
-- Source brief: redesign the whole cezar cockpit UI/UX to Codex-desktop parity using React + Vite + Tailwind + shadcn/ui, keeping 100% of current functionality. Deliverable of THIS run is the specification (`.ai/specs/2026-07-14-codex-ui-redesign.md`) plus HTML mockups built with shadcn styling on real cezar data, with screenshots attached to the PR — so the spec can be approved visually and then implemented autonomously.
+- Source brief: redesign the whole cezar cockpit UI/UX to leading-desktop-app parity using React + Vite + Tailwind + shadcn/ui, keeping 100% of current functionality. Deliverable of THIS run is the specification (`.ai/specs/2026-07-14-cockpit-ui-redesign.md`) plus HTML mockups built with shadcn styling on real cezar data, with screenshots attached to the PR — so the spec can be approved visually and then implemented autonomously.
 
 ## Goal
 
-Produce an implementation-ready, phased specification for the full UI redesign, grounded in research (Codex desktop, Claude Code, opencode web, paseo, mercato-sandboxes visual language, agent event protocols incl. ACP), with high-fidelity HTML mockups and screenshots that prove the design direction.
+Produce an implementation-ready, phased specification for the full UI redesign, grounded in research (leading agent desktop apps, opencode web, paseo, mercato-sandboxes visual language, agent event protocols incl. ACP), with high-fidelity HTML mockups and screenshots that prove the design direction.
 
 ## Decisions locked with the user (2026-07-14)
 
@@ -27,7 +27,7 @@ Folded into the spec as requirements: #390 (git integration look), #389 (task li
 
 ## Risks
 
-- Research sources (Codex desktop, external repos) are external; findings recorded to `.ai/analysis/` so the spec stays reviewable offline.
+- Research sources (vendor desktop apps, external repos) are external; findings recorded to `.ai/analysis/` so the spec stays reviewable offline.
 - Mockups are static HTML approximations of the future React app — close enough for visual approval, not pixel-contracts.
 - The local checkout was behind origin/main, which hid PR #343's existing pipeline bootstrap; the run initially regenerated the process docs and later restored the origin/main versions (commit history keeps both). Validation gate = `npm run typecheck` + `npm run build` (docs-only run: gate proves the repo stays healthy).
 
@@ -39,12 +39,12 @@ PR: #393
 
 ### Phase 1: Research
 
-- [x] 1.1 Parallel research: cezar code map, Codex desktop UX, agent event protocols (Claude/Codex/OpenCode/ACP), opencode web UI, paseo, mercato-sandboxes visuals, diff/highlighting tech — 4b804d3
+- [x] 1.1 Parallel research: cezar code map, agent-desktop-apps UX, agent event protocols (Claude/Codex/OpenCode/ACP), opencode web UI, paseo, mercato-sandboxes visuals, diff/highlighting tech — 4b804d3
 - [x] 1.2 Commit distilled research notes to .ai/analysis/ — 06fcf59
 
 ### Phase 2: Specification
 
-- [x] 2.1 Spec skeleton with resolved decisions (.ai/specs/2026-07-14-codex-ui-redesign.md) — 4b804d3
+- [x] 2.1 Spec skeleton with resolved decisions (.ai/specs/2026-07-14-cockpit-ui-redesign.md) — 4b804d3
 - [x] 2.2 Full spec: architecture, normalized event protocol, view-by-view UX, git GUI + forge drivers, settings, mobile-first rules, edge cases, risks — 5f913fa
 - [x] 2.3 Phased implementation plan (each step shippable, app always working) — 5f913fa
 

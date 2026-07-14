@@ -1,13 +1,13 @@
-# Codex-desktop-parity UI redesign (React + shadcn/ui)
+# Cockpit UI redesign (React + shadcn/ui)
 
 Status: proposed
-Run plan: `.ai/runs/2026-07-14-codex-ui-redesign-spec.md`
-Research: `.ai/analysis/codex-ui-redesign/` (7 studies: cezar code map, Codex desktop UX, agent event protocols, opencode web UI, paseo, mercato-sandboxes visuals, diff/highlighting tech)
+Run plan: `.ai/runs/2026-07-14-cockpit-ui-redesign-spec.md`
+Research: `.ai/analysis/cockpit-ui-redesign/` (7 studies: cezar code map, agent-desktop-apps UX, agent event protocols, opencode web UI, paseo, mercato-sandboxes visuals, diff/highlighting tech)
 Mockups: `docs/mockups/` (HTML, shadcn-styled, real cezar data) — screenshots in `docs/mockups/screenshots/`
 
 ## TLDR
 
-Rebuild cezar's cockpit (`web/`) as a React + Vite + Tailwind + shadcn/ui app with the look, feel and interaction quality of OpenAI's Codex desktop app — while keeping **every** feature cezar has today (runs, variants, review gate, plan overlay, workflows builder, multi-agent backends, skills, GitHub tab, inbox, repo view, bookmarklets). The redesign is powered by a **normalized agent-event protocol v2** (ACP-aligned; mapped from Claude Code stream-json, Codex app-server, and OpenCode SSE) so tool calls, todo/plan checklists, statuses, diffs and token usage render first-class regardless of backend. It adds a per-session **git view** (Changes/Files tabs, superb diffs and syntax highlighting, commit/push/branch, View PR) behind a **forge-driver seam** (GitHub now, GitLab-ready), a **Settings** tab (skills now; MCP and more later — coding-agent-agnostic), a full-screen **new-task** experience, handoff actions (terminal, VS Code), a dictation-labeled mic in the composer, and per-task system-prompt support. Mobile-first: great on an iPhone. Simplicity stays the product's core value: one command, zero config, everything degrades gracefully.
+Rebuild cezar's cockpit (`web/`) as a React + Vite + Tailwind + shadcn/ui app with the look, feel and interaction quality of today's leading coding-agent desktop apps — while keeping **every** feature cezar has today (runs, variants, review gate, plan overlay, workflows builder, multi-agent backends, skills, GitHub tab, inbox, repo view, bookmarklets). The redesign is powered by a **normalized agent-event protocol v2** (ACP-aligned; mapped from Claude Code stream-json, Codex app-server, and OpenCode SSE) so tool calls, todo/plan checklists, statuses, diffs and token usage render first-class regardless of backend. It adds a per-session **git view** (Changes/Files tabs, superb diffs and syntax highlighting, commit/push/branch, View PR) behind a **forge-driver seam** (GitHub now, GitLab-ready), a **Settings** tab (skills now; MCP and more later — coding-agent-agnostic), a full-screen **new-task** experience, handoff actions (terminal, VS Code), a dictation-labeled mic in the composer, and per-task system-prompt support. Mobile-first: great on an iPhone. Simplicity stays the product's core value: one command, zero config, everything degrades gracefully.
 
 ## Decisions (resolved with the user, 2026-07-14)
 
@@ -20,16 +20,16 @@ Rebuild cezar's cockpit (`web/`) as a React + Vite + Tailwind + shadcn/ui app wi
 The current cockpit is a single 3.8k-line vanilla-JS file with hand-rolled markdown, dropdowns, diff rendering and 1.9k lines of bespoke CSS. It works, but it has hit its ceiling — a dozen open issues (#354, #377–#390) are all UI/UX symptoms of the same root causes:
 
 - **Composer welded into a 318px sidebar** (#386) — the richest surface in the app (task, attachments, workflow/skill picker, runner, model, plan) is the most cramped.
-- **Tool calls and results render as flat text chips** (#381); TODO/plan lists from agents are invisible (#382); plan mode has no selected state (#383). The internal event model (`tool-call`/`tool-result`, 2 states, no plan/reasoning/diff events) can't express what Codex/Claude/OpenCode GUIs show.
+- **Tool calls and results render as flat text chips** (#381); TODO/plan lists from agents are invisible (#382); plan mode has no selected state (#383). The internal event model (`tool-call`/`tool-result`, 2 states, no plan/reasoning/diff events) can't express what the agent vendors' own GUIs show.
 - **Git integration looks like a log dump** (#390): `<pre>` diffs, no file tree, no commit/push/branch actions, no PR affordance beyond a link.
 - **Full-innerHTML re-renders** lose scroll and selection (#384), lists can't express ordering/emphasis (#377), chip-walls don't scale (#385), no autocomplete anywhere (#380), footer clips the theme toggle (#378), task titles aren't editable and carry no git stats (#389).
 - **No real mobile layout** (#354) — one narrow-screen breakpoint.
 
 Fixing these piecemeal inside string-template rendering means re-implementing React badly. The framework move and the visual redesign are one project.
 
-## Research (condensed — full notes in `.ai/analysis/codex-ui-redesign/`)
+## Research (condensed — full notes in `.ai/analysis/cockpit-ui-redesign/`)
 
-- **Codex desktop** (`codex-desktop-ux.md`): three-region layout (sidebar → thread → tabbed workbench: Files / Review / Terminal / Browser / side chat). Turns render as **collapsed activity groups** ("Edited 3 files, ran 2 commands") with edited files and commands visible, output/searches collapsed. Live plan checklist (pending/in_progress/completed). Review pane with git-state tabs, file tree, animated ±stats, hunk actions, open-in-editor. Home = **centered full-screen composer** with project/model/permission pickers. Sans-only typography (serif is marketing-only), pill controls, sparse accent, shimmer + smooth expand/collapse motion. Their stack: React + Radix + Shiki + cmdk + Framer Motion — validating ours.
+- **Agent desktop apps** (`agent-desktop-apps-ux.md`): the leading desktop cockpits use a three-region layout (sidebar → thread → tabbed workbench: Files / Review / Terminal / Browser / side chat). Turns render as **collapsed activity groups** ("Edited 3 files, ran 2 commands") with edited files and commands visible, output/searches collapsed. Live plan checklist (pending/in_progress/completed). Review pane with git-state tabs, file tree, animated ±stats, hunk actions, open-in-editor. Home = **centered full-screen composer** with project/model/permission pickers. Sans-only typography (serif is marketing-only), pill controls, sparse accent, shimmer + smooth expand/collapse motion. Their stack: React + Radix + Shiki + cmdk + Framer Motion — validating ours.
 - **Agent event protocols** (`agent-event-protocols.md`): Claude stream-json, Codex app-server (thread→turn→item), OpenCode SSE (message→part) and ACP have all converged on: an **item with explicit lifecycle** as the atomic UI unit, a small tool-status enum, **full-replacement plan checklists**, and blocking permission asks. ACP is the industry-neutral articulation; cezar's v2 schema below is ACP-aligned. cezar's current normalization drops thinking, plans, structured diffs, tool lifecycle and sub-agent attribution — all recoverable without changing backends.
 - **opencode web** (`opencode-web-ui.md`): the single most copyable pattern is a **CSS-variable Shiki theme** (highlight once, retheme instantly); also: tool cards with `{icon,title,subtitle,args}` trigger + shimmer while running, context-grouping of consecutive read/search calls, **todo dock above the composer** (todos hidden from thread), streaming markdown with stable-block caching, virtualized timeline with per-session measurement cache, `@pierre/diffs`.
 - **paseo** (`paseo-ui.md`): panel-registry architecture; tool-call display model computed in a shared protocol layer (not components); **dictation UX** (mic next to send, tooltip "Dictation", overlay with meter/partial transcript, cancel / insert / insert-and-send); git action **policy object** (state → primary/secondary/menu with self-explaining disabled reasons); attention model (permission > error > running > attention) driving status dots; "timeline sync doctrine" (streams for immediacy, fetch is authoritative). Anti-lesson: don't adopt React Native for a web-first product; don't hand-roll primitives.
@@ -42,7 +42,7 @@ One product, four moves:
 
 1. **Replatform** `web/` to React 19 + Vite + Tailwind v4 + shadcn/ui, served exactly as today (static files from the Hono server; `web/dist` built at publish time, so `npx cezar-cli` stays zero-config and offline-capable).
 2. **Normalize the wire** with an event protocol v2 (`item.*`, `plan.updated`, `turn.*`, `usage.updated`, reserved `permission.*`) computed in the runner layer, so the UI renders Claude/Codex/OpenCode identically and a future ACP backend is a transcription. v1 events remain derivable — the NDJSON files and existing GUI keep working during migration.
-3. **Redesign every view** to Codex-desktop interaction quality with the Mercato visual language (details per view below), closing all ten issues by design rather than by patch.
+3. **Redesign every view** to desktop-app interaction quality with the Mercato visual language (details per view below), closing all ten issues by design rather than by patch.
 4. **Extend capability where the redesign demands it**: session git view + forge drivers, Settings tab, system-prompt support, dictation, handoff actions, editable auto-summary titles.
 
 Alternatives considered: (a) restyle the vanilla app with shadcn-like tokens — rejected: cannot deliver tool cards, virtualized threads, plan docks, or the git view without rebuilding React primitives by hand; (b) SolidJS like opencode — rejected: shadcn/Radix/AI-Elements ecosystem is React, team familiarity favors React; (c) adopt ACP as the internal wire verbatim — rejected: cezar needs run/step/check/variant semantics ACP lacks; we align vocabulary instead.
@@ -77,7 +77,7 @@ web/
 
 ### Normalized agent-event protocol v2
 
-Full schema and per-backend mapping tables: `.ai/analysis/codex-ui-redesign/agent-event-protocols.md` §7 (authoritative). Summary:
+Full schema and per-backend mapping tables: `.ai/analysis/cockpit-ui-redesign/agent-event-protocols.md` §7 (authoritative). Summary:
 
 ```ts
 type ToolStatus = 'pending' | 'running' | 'completed' | 'failed' | 'declined';
@@ -188,7 +188,7 @@ New nav tab, registry-driven so sections grow without layout changes:
 
 - **Tokens**: Mercato sheet verbatim (`mercato-visuals.md` §1) — neutral ramp, lime `#a8f372` primary (near-black ink on it), violet `#8f86e8` secondary, `--danger #ef4444`, emerald/amber status colors (amber never as text), radius `8/10/12/16`, shadow-xs/sm/md/modal, dark `#0d0d0d` canvas with `#171717` cards and invisible borders (elevation via surface steps), light = white cards + `#ebebeb` borders. shadcn variables mapped, not duplicated.
 - **Brand**: gradient tile logo (lime→yellow→violet, dark glyph — cezar's ⚡ glyph in the Mercato construction); grain + twinkle canvas textures **only** on hero/empty/lifecycle surfaces (new-task screen, empty states, review-accepted moment) — data-dense screens stay flat; the `CenteredState` template (72px tinted icon tile + title + subtitle + actions) for every empty/loading/error state.
-- **Typography**: Inter only for UI (400/500/600; hierarchy by weight and color, not size — paseo's rule), JetBrains Mono for code/commands/paths/branches/diff-stats, `tabular-nums` for numbers. The current Source Serif 4 h1s are retired (Codex research: serif is marketing-only). Self-hosted woff2.
+- **Typography**: Inter only for UI (400/500/600; hierarchy by weight and color, not size — paseo's rule), JetBrains Mono for code/commands/paths/branches/diff-stats, `tabular-nums` for numbers. The current Source Serif 4 h1s are retired (per the desktop-apps research: serif belongs to marketing surfaces only). Self-hosted woff2.
 - **Status grammar**: one canonical `deriveAttention(run)` function (permission > error > waiting/review > running > unseen) driving a single 7px dot per row — pulsing while transitioning; pills = `bg-muted` neutral or 12% tinted fills. Same function feeds future notifications.
 - **Motion**: `transition-colors` as the workhorse; card hover-lift (150ms translate + shadow); `animate-pulse` skeletons/dots; text shimmer on running tool titles; spring height on tool-card expand (350ms, no bounce); animated ± diff-stat counters; `prefers-reduced-motion` renders static everywhere.
 - **Copy rules** (paseo constitution): sentence case, imperative buttons, states described not editorialized, one accent CTA per surface, destructive red only inside confirm dialogs. Terminology fixed: **Task** (a run), **Session** (the agent conversation), **Workflow**, **Skill**, **Changes** (the diff).
@@ -220,7 +220,7 @@ Selected run, active tab, review-gate state — all restorable from the URL; sha
 
 ### New task (full-screen, #386)
 
-- Route `/new` (also the `/new?skill=…` bookmarklet target, unchanged contract). **Centered composer** on a grain+twinkle hero surface, Codex-home style: big textarea ("Describe a task for the agent…"), then a pill row: **Workflow/Skill picker** (cmdk searchable dropdown — project skills first and bold, global after, #377/#385 pattern), **Runner** (hidden unless >1 installed), **Model**, **Variants ×1/×2/×3** (control returns — server path never left), **Base branch**, and an **advanced disclosure**: system prompt textarea.
+- Route `/new` (also the `/new?skill=…` bookmarklet target, unchanged contract). **Centered composer** on a grain+twinkle hero surface, agent-desktop home style: big textarea ("Describe a task for the agent…"), then a pill row: **Workflow/Skill picker** (cmdk searchable dropdown — project skills first and bold, global after, #377/#385 pattern), **Runner** (hidden unless >1 installed), **Model**, **Variants ×1/×2/×3** (control returns — server path never left), **Base branch**, and an **advanced disclosure**: system prompt textarea.
 - **Plan mode is a toggle, not a button** (#383): segmented `Start | Plan first` control with a clearly selected state; in plan mode, submit produces the plan review (below) instead of running.
 - Attachments: paperclip + paste, thumbnail row with remove; drag-drop anywhere on the surface.
 - Composer intelligence (shared component with thread composer): `/` opens skill autocomplete (#380) inserting `/skill-name` refs; `@` mentions files (worktree-aware, fuzzy); **mic button labeled "Dictation"** (tooltip + aria) using the Web Speech API when available — recording state swaps the footer for an overlay with timer + partial transcript + cancel / insert / insert-and-send (paseo's exact pattern); hidden with a "not supported in this browser" hint otherwise.
@@ -228,7 +228,7 @@ Selected run, active tab, review-gate state — all restorable from the URL; sha
 
 ### Task thread (the chat view)
 
-- **Turn grouping**: user message (right-aligned bubble) starts a turn; the agent's work renders as a stream of items. Consecutive read/search/list tool items collapse into **context groups** ("Explored 4 files · 2 searches", expandable); edits and commands stay visible as individual cards (Codex's post-#19891 consensus).
+- **Turn grouping**: user message (right-aligned bubble) starts a turn; the agent's work renders as a stream of items. Consecutive read/search/list tool items collapse into **context groups** ("Explored 4 files · 2 searches", expandable); edits and commands stay visible as individual cards (the desktop-apps research consensus: edits and commands visible, output collapsed).
 - **Tool cards** (#381): shadcn Collapsible with the `{icon, title, subtitle, args}` trigger — `Bash` → "Ran `npm test`" with live-streaming output (v2 `item.delta{output}`) and exit-code badge; `Edit/Write` → file path + inline `<Diff>` (word-level, expandable context); `WebFetch/Search` → labeled query/url; MCP/unknown tools → generic card with heuristic label. Title shimmers while `running`; card locked until it has detail; failed = danger tint with unwrapped error message. Older streaks fold ("▸ N earlier tool calls").
 - **Reasoning**: collapsed "Thinking…" line streaming the summary, expandable, dimmed — visible while active, folded when done.
 - **Plan/todo dock (#382)**: `plan.updated` renders a **dock pinned above the composer** (not in-thread; TodoWrite tool cards are hidden): collapsed = "3/7" odometer + current item with animated label; expanded = checkbox list (pending ○ / in_progress pulsing ◐ / completed ✓ with strikethrough animation). Also mirrored as a compact progress line in the run header.
