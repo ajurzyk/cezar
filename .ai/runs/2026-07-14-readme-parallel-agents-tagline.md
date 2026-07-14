@@ -81,8 +81,8 @@ None (`--skill-url` not provided).
 
 ### Phase 1: README edits
 
-- [ ] 1.1 Add tagline and update header/intro phrasing
-- [ ] 1.2 Add multi-backend section and update examples/tables
+- [x] 1.1 Add tagline and update header/intro phrasing
+- [x] 1.2 Add multi-backend section and update examples/tables
 
 ### Phase 2: Validation and PR
 
