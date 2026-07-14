@@ -54,7 +54,7 @@ Alternatives considered: (a) restyle the vanilla app with shadcn-like tokens —
 ```
 web/
   src/
-    main.tsx, app.tsx            # router (hash or memory — server has no per-view routes)
+    main.tsx, app.tsx            # react-router with REAL URLs (deep-linkable, see Routing)
     protocol/                    # UiEvent v2 types + per-backend display model (tool titles, icons, verbs)
     api/                         # typed client for /api/*, SSE hooks (global + per-run), TanStack Query
     stores/                      # small zustand stores: ui prefs, composer drafts, panel state
@@ -167,6 +167,22 @@ New nav tab, registry-driven so sections grow without layout changes:
 
 ## UI/UX — view by view
 
+### Routing — every surface is a URL
+
+Deep-linkable, pasteable, refresh-safe navigation (react-router; the Hono server serves `index.html` for every non-`/api` GET so any URL cold-loads):
+
+```
+/                      → tasks (list or table per saved pref)
+/new                   → new task (existing ?skill=&ref=&auto=&key= bookmarklet params unchanged)
+/tasks/:id             → thread   /tasks/:id/changes  /tasks/:id/files   (tab in the path)
+/compare/:groupId      → variants compare
+/git                   /github    /github/issues/:n   /github/prs/:n
+/inbox                 /workflows /workflows/:name
+/settings              /settings/skills  /settings/appearance  /settings/agents
+```
+
+Selected run, active tab, review-gate state — all restorable from the URL; sharing a `/tasks/:id/changes` link drops a teammate (same machine/tailnet, or hosted mode) exactly where you are. Unknown routes → CenteredState 404 with a "Back to tasks" action. The legacy `/new` contract and launch-key auto-start keep working verbatim.
+
 ### App shell & navigation
 
 - **Desktop**: shadcn sidebar (icon-collapsible) — brand lockup + repo/branch chip (live-updating via SSE health refresh, fixes #369), **"New task" primary button** (replaces the embedded composer, #386), nav (Tasks, Inbox·badge, Git, GitHub·hidden-when-no-forge, Skills, Workflows, Settings), then the task quick-list (grouped: Needs you / Working / Recent / Archived; variant groups collapse with per-variant dots; `⌘K` palette for everything). Footer: env chips (compact LED row with popover detail) + version chip + theme toggle as a proper icon button (fixes #378).
@@ -276,7 +292,7 @@ Steps are sized for autonomous runs (om-auto-create-pr / -loop, one PR per phase
 
 ### Phase R1 — Platform + shell
 1. Scaffold `web/` Vite+React+TS+Tailwind v4+shadcn (new-york); tokens from the design system section; self-hosted fonts; `npm run dev:web`/`build:web`; Hono serves `web/dist` with legacy fallback + `?legacy=1`.
-2. App shell: sidebar (brand, New task button, nav, footer), theme system (pre-paint script, light/dark/system), mobile drawer + `100dvh` grid + safe areas.
+2. App shell: react-router with the deep-link route map (server catch-all → index.html), sidebar (brand, New task button, nav, footer), theme system (pre-paint script, light/dark/system), mobile drawer + `100dvh` grid + safe areas.
 3. API client + SSE hooks (global stream, reconcile doctrine) + task quick-list (groups, variant collapse, status dots) + runs table shell.
 4. ⌘K palette; env chips popover; CenteredState template; design-guardian test scaffold.
 
