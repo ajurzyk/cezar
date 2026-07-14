@@ -108,6 +108,17 @@ type UiItem =
 - The **tool display model** (title/verb/icon per tool name + `toolKind`) lives in `web/src/protocol/` next to the types — computed once, used by thread, activity groups and notifications (paseo's pattern).
 - **System prompt**: `SessionOptions` already carries `systemPrompt` per backend (`--append-system-prompt` for claude; prepended first message for codex; opencode message option). v2 adds it end-to-end: `POST /api/runs` accepts `systemPrompt?`, a Settings-level default (`config.json: systemPrompt?`) is merged, and the composer's advanced row exposes it. Works with every backend because it rides the existing seam — coding-agent-agnostic by construction.
 
+### Testing strategy (mandatory — every step ships unit tests)
+
+The repo has no test runner today; R1 step 1 introduces **vitest** (server: node environment; web: happy-dom + React Testing Library) and adds `npm test` to `validation.commands` in `.ai/agentic.config.json`. From then on, **no implementation step of this spec merges without unit tests for what it built**:
+
+- **Protocol v2** (the highest-value target): golden-fixture tests — recorded real NDJSON/JSON-RPC/SSE transcripts per backend (claude, codex, opencode) replayed through each runner's mapper, asserting the exact `UiEvent` sequence (tool lifecycle, plan.updated replacement semantics, parentItemId nesting, stop reasons, usage). Fixtures live in `src/core/__fixtures__/`.
+- **Server**: every new endpoint (changes/files/git-commit/push/branch/PATCH title/open-in-editor) gets request/response tests via Hono's `app.request()` — zod rejection cases, degradation 409s (no git / no remote / hosted mode), path-traversal guards.
+- **Pure logic**: git action policy object, `deriveAttention`, title summarizer, diffStat parser, forge driver detection — table-driven unit tests (these are pure functions by design so they're trivially testable).
+- **Web components**: RTL tests for behavior-bearing components (tool card status rendering, plan dock state math, composer autocomplete triggering, route ↔ tab mapping, capability/forge gating hides the right buttons); no snapshot-only tests.
+- **Design guardian**: the mercato static-scan vitest (no raw hex outside tokens, no amber text, no native `confirm()`) runs in the same `npm test`.
+- E2E (Playwright, `om-integration-tests`) stays the QA layer per phase; unit tests are the merge gate.
+
 ### Forge-driver seam (GitHub now, GitLab later)
 
 ```
