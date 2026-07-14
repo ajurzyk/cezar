@@ -13,3 +13,6 @@ skills-lock.json
 .ai/tmp/
 .ai/qa/artifacts_*/
 .ai/qa/test-env.json
+
+# local symlink into .agents/skills
+.claude/skills
