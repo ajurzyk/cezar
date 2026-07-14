@@ -254,6 +254,9 @@ summary::-webkit-details-marker { display: none; }
   white-space: nowrap;
   max-width: 130px;
 }
+/* the chip links to the repo on its forge when origin is browsable (#366) */
+#repo-chip a { color: inherit; text-decoration: none; }
+#repo-chip a:hover { color: var(--text); text-decoration: underline; }
 
 /* new task composer */
 #new-task-wrap { padding: 0 14px 14px; }
@@ -692,6 +695,9 @@ summary::-webkit-details-marker { display: none; }
 }
 .env-chip .led { width: 5px; height: 5px; border-radius: 50%; background: var(--green); flex: none; }
 .env-chip.bad .led { background: var(--red); }
+/* update available (#368): amber pulse until the user restarts on @latest */
+.env-chip.upd { color: var(--amber); }
+.env-chip.upd .led { background: var(--amber); animation: cz-pulse 1.5s ease-in-out infinite; }
 #theme-toggle {
   margin-left: auto;
   align-self: flex-end;
@@ -735,6 +741,34 @@ main { flex: 1; min-width: 0; display: flex; min-height: 0; background: var(--bg
 
 #detail { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
 #detail .empty { margin: auto; color: var(--text3); font-size: 13.5px; }
+
+/* queued placeholder in the log pane (#351) */
+.queued-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 64px 20px;
+  text-align: center;
+  color: var(--text3);
+}
+.queued-state .q-dots { display: flex; gap: 7px; }
+.queued-state .q-dots span {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: cz-qbounce 1.25s ease-in-out infinite;
+}
+.queued-state .q-dots span:nth-child(2) { animation-delay: 0.15s; }
+.queued-state .q-dots span:nth-child(3) { animation-delay: 0.3s; }
+.queued-state .q-head { font-size: 14px; font-weight: 600; color: var(--text2); }
+.queued-state .q-sub { font-size: 12px; }
+@keyframes cz-qbounce {
+  0%, 80%, 100% { opacity: 0.25; transform: scale(0.8); }
+  40% { opacity: 1; transform: scale(1); }
+}
 
 .detail-head { flex: none; padding: 26px 40px 0; max-width: 860px; width: 100%; margin: 0 auto; }
 .detail-head .meta-line {
@@ -830,6 +864,20 @@ main { flex: 1; min-width: 0; display: flex; min-height: 0; background: var(--bg
 .md pre code { background: transparent; padding: 0; word-break: normal; font-size: 11.5px; line-height: 1.6; }
 .md hr { border: none; border-top: 1px solid var(--line); margin: 14px 0; }
 .md strong { font-weight: 600; }
+.md del { color: var(--text3); }
+.md h5, .md h6 { font-family: var(--serif); font-weight: 600; font-size: 12.5px; margin: 14px 0 4px; }
+.md ul ul, .md ul ol, .md ol ul, .md ol ol { margin: 2px 0; }
+/* GFM tables (#346) — wide ones scroll inside the transcript, never the page */
+.md table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: 12.5px;
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+.md th, .md td { border: 1px solid var(--line); padding: 4px 9px; text-align: left; }
+.md th { font-weight: 600; background: color-mix(in oklab, var(--text3) 7%, transparent); }
 .md blockquote {
   margin: 8px 0;
   padding: 3px 14px;
@@ -1756,6 +1804,53 @@ a.bm:hover { border-color: var(--accent-line); color: var(--accent); text-decora
 }
 .wb-note { display: flex; align-items: flex-start; gap: 7px; margin-top: 10px; font-size: 11px; color: var(--text3); line-height: 1.5; }
 .wb-note svg { flex: none; margin-top: 1px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+
+/* ---- runs table view (#348) — the "task manager" central pane ---- */
+
+#runs-table { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+/* explicit display beats the UA [hidden] rule — pin both panes' hidden state */
+#runs-table[hidden], #detail[hidden] { display: none; }
+#runs-table .rt-head { display: flex; align-items: baseline; gap: 10px; padding: 20px 24px 10px; }
+#runs-table .rt-head h1 { margin: 0; font-family: var(--serif); font-size: 21px; font-weight: 500; }
+#runs-table .rt-head .dim { font-size: 12px; }
+#runs-table .rt-scroll { flex: 1; min-height: 0; overflow: auto; padding: 0 24px 24px; }
+#runs-table .empty { padding: 40px 0; font-size: 13px; }
+#runs-table table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+#runs-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg);
+  text-align: left;
+  padding: 8px 10px 6px;
+  border-bottom: 1px solid var(--line2);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text3);
+  white-space: nowrap;
+}
+#runs-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+  vertical-align: middle;
+}
+#runs-table th.num, #runs-table td.num { text-align: right; }
+#runs-table td.mono { font-family: var(--mono); font-size: 11.5px; }
+#runs-table tbody tr { cursor: pointer; }
+#runs-table tbody tr:hover td { background: color-mix(in oklab, var(--text) 4%, transparent); }
+#runs-table tbody tr.selected td { background: var(--panel2); }
+#runs-table td.rt-title { max-width: 340px; overflow: hidden; text-overflow: ellipsis; }
+#runs-table td.rt-flow { max-width: 150px; overflow: hidden; text-overflow: ellipsis; color: var(--text2); }
+#runs-table td.rt-peak { color: var(--text3); }
+#runs-table td.rt-time { color: var(--text2); }
+#runs-table .rt-dur { color: var(--text3); }
+
+/* list/table switch — sits at the right edge of the sidebar's list tabs */
+#list-tabs .view-toggle { margin-left: auto; display: inline-flex; align-items: center; }
+#list-tabs .view-toggle svg { display: block; }
 
 /* narrow screens: sidebar shrinks, splits stack */
 @media (max-width: 900px) {

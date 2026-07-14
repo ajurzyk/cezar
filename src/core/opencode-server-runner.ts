@@ -180,6 +180,10 @@ class OpencodeSession implements AgentSession {
     return this.serverOpen;
   }
 
+  get pid(): number | undefined {
+    return this.child.pid;
+  }
+
   sendMessage(content: ContentBlock[]): boolean {
     if (!this.serverOpen) return false;
     if (this.autoEndTimer) {

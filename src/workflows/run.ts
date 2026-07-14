@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { type AgentSession } from '../core/claude-cli-runner.js';
+import { registerRunProcess, unregisterRunProcess } from '../core/process-usage.js';
 import { createRunner } from '../core/runner-factory.js';
 import type { RunnerId } from '../core/agent-runner.js';
 import {
@@ -18,12 +19,27 @@ import { materializeSkillDir } from '../skills-remote.js';
 import { loadConfig } from '../config.js';
 import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff } from '../git-worktree.js';
 import { getRepoInfo } from '../server/git.js';
+import { loadWorkflows } from './load.js';
 import type { RunRecord, RunStore } from '../runs/store.js';
 import { DEFAULT_ALLOWED_TOOLS, stepKind, type WorkflowDef, type WorkflowStepDef } from './types.js';
 
 const CHECK_OUTPUT_CAP = 20_000;
 /** An interactive session that hears nothing from the user closes itself. */
 export const IDLE_TIMEOUT_MS = 15 * 60_000;
+/**
+ * Task-completion marker from the agent contract (HANDOFF_INSTRUCTIONS): a
+ * turn whose text ends with `CEZ:DONE` means "goal achieved, nothing to ask" —
+ * the session is closed right away instead of parking at `waiting` (#347).
+ * Detection runs on the accumulated turn text so delta-streaming backends
+ * (codex, opencode) can't split the marker across text events.
+ */
+const DONE_MARKER_RE = /CEZ:DONE\s*$/;
+/** Strip a trailing marker from one text event so transcripts stay free of
+ *  protocol noise. Delta backends may split the marker across events — then
+ *  it stays visible; detection above is unaffected. */
+function stripDoneMarker(text: string): string {
+  return text.replace(/\s*CEZ:DONE\s*$/, '');
+}
 /** Periodic "cezar autosave" commit in the task worktree (spec 006). */
 export const AUTOSAVE_INTERVAL_MS = 90_000;
 
@@ -77,6 +93,12 @@ export class RunManager {
   // registering in `active`, so parallel-slot counting is never racy.
   private readonly queue: string[] = [];
   private readonly starting = new Set<string>();
+  // Runs parked at `waiting` (open session, ball in the user's court). They
+  // don't consume a `maxParallel` slot (#347) — an idle claude process costs
+  // memory but no tokens, queued work progressing matters more, and the idle
+  // timeout already bounds how long a session can sit open. Invariant:
+  // `waiting ⊆ active` — always cleared together via dropActive().
+  private readonly waiting = new Set<string>();
   private readonly pendingJobs = new Map<string, { workflow: WorkflowDef; input: StartRunInput }>();
   private pumping = false;
 
@@ -115,6 +137,9 @@ export class RunManager {
       variant: group?.variant,
       steps: workflow.steps.map((s) => ({ id: s.id, name: s.name ?? s.id, kind: stepKind(s) })),
     });
+    // Persist the full definition so a queued run survives a restart (#367) —
+    // ad-hoc "(planned)" chains exist nowhere else to re-resolve from.
+    this.store.updateRun(run.id, { workflowDef: workflow as unknown as Record<string, unknown> });
     this.pendingJobs.set(run.id, { workflow, input });
     this.queue.push(run.id);
     void this.pump();
@@ -150,7 +175,11 @@ export class RunManager {
     try {
       const repo = await getRepoInfo(this.repoRoot);
       const maxParallel = repo ? (await loadConfig(this.repoRoot)).maxParallel : 1;
-      while (this.queue.length > 0 && this.active.size + this.starting.size < maxParallel) {
+      // `waiting` runs don't hold a slot (#347). A message into a waiting run
+      // resumes it even when that momentarily exceeds maxParallel — resumed
+      // conversations must never be blocked by the queue.
+      const busy = () => this.active.size + this.starting.size - this.waiting.size;
+      while (this.queue.length > 0 && busy() < maxParallel) {
         const runId = this.queue.shift();
         if (!runId) break;
         const job = this.pendingJobs.get(runId);
@@ -170,13 +199,109 @@ export class RunManager {
             this.clearAutosaveTimer(state);
           }
           this.starting.delete(runId);
-          this.active.delete(runId);
+          this.dropActive(runId);
           void this.pump();
         });
       }
     } finally {
       this.pumping = false;
     }
+  }
+
+  /**
+   * Startup recovery (#367) — re-adopt runs that were live when the previous
+   * cezar process exited (requires the store opened with `keepLive`):
+   *  - `queued`  → back into the queue (FIFO by createdAt), from the persisted
+   *    workflowDef (or the catalog by name for older records);
+   *  - `waiting` → the turn was over and the ball was in the user's court —
+   *    settle exactly like a closed session (review/done, Continue still works);
+   *  - `running` → mark interrupted, then immediately resume the last agent
+   *    session via the Continue path, pointing the agent at its handoff file.
+   * Call once, before the server starts taking requests.
+   */
+  async recover(): Promise<void> {
+    const live = this.store
+      .listRuns()
+      .filter((r) => ['queued', 'waiting', 'running'].includes(r.status))
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    for (const run of live) {
+      if (run.status === 'queued') {
+        const workflow = await this.reviveWorkflow(run);
+        if (workflow) {
+          this.pendingJobs.set(run.id, {
+            workflow,
+            input: { task: run.task, model: run.model, runner: run.runner },
+          });
+          this.queue.push(run.id);
+          this.store.appendEvent(run.id, { type: 'lifecycle', message: 'cezar restarted — task re-queued' });
+        } else {
+          this.store.updateRun(run.id, {
+            status: 'failed',
+            error: 'interrupted — workflow definition not recoverable after a restart',
+            finishedAt: new Date().toISOString(),
+          });
+          this.store.appendEvent(run.id, {
+            type: 'lifecycle',
+            message: 'cezar restarted — workflow definition not recoverable, task failed',
+          });
+        }
+        continue;
+      }
+      if (run.status === 'waiting') {
+        for (const step of run.steps) {
+          if (step.status === 'waiting' || step.status === 'running') {
+            this.store.updateStep(run.id, step.id, { status: 'done', finishedAt: new Date().toISOString() });
+          }
+        }
+        this.store.appendEvent(run.id, {
+          type: 'lifecycle',
+          message: 'cezar restarted — the open session was settled',
+        });
+        await this.settleSuccess(run.id);
+        continue;
+      }
+      // `running`: the process died mid-turn. Mark it interrupted (the state
+      // continueRun expects), then pick the work back up from the last session.
+      const finishedAt = new Date().toISOString();
+      for (const step of run.steps) {
+        if (step.status === 'running' || step.status === 'waiting') {
+          this.store.updateStep(run.id, step.id, { status: 'failed', finishedAt });
+        }
+      }
+      this.store.updateRun(run.id, {
+        status: 'failed',
+        error: 'interrupted — cezar process exited during the run',
+        finishedAt,
+        currentStepId: undefined,
+      });
+      const resumed = this.continueRun(
+        run.id,
+        'The cezar process restarted while you were working on this task. Read the handoff file (CEZ_HANDOFF_FILE) to recover context, then continue the task from where you left off.',
+      );
+      this.store.appendEvent(run.id, {
+        type: 'lifecycle',
+        message: resumed.ok
+          ? 'cezar restarted — resuming the interrupted task from its last session'
+          : `cezar restarted — could not resume the interrupted task (${resumed.error ?? 'unknown'})`,
+      });
+    }
+    void this.pump();
+  }
+
+  /** The persisted definition when it looks sane, else the catalog by name. */
+  private async reviveWorkflow(run: RunRecord): Promise<WorkflowDef | null> {
+    const def = run.workflowDef;
+    if (def && Array.isArray((def as { steps?: unknown }).steps)) {
+      return def as unknown as WorkflowDef;
+    }
+    const { workflows } = await loadWorkflows(this.repoRoot);
+    return workflows.find((w) => w.name === run.workflow) ?? null;
+  }
+
+  /** Remove a run from the live registries — keeps `waiting ⊆ active`. */
+  private dropActive(runId: string): void {
+    this.waiting.delete(runId);
+    this.active.delete(runId);
   }
 
   cancel(runId: string): boolean {
@@ -225,6 +350,7 @@ export class RunManager {
     const delivered = state.session.sendMessage(content);
     if (delivered) {
       this.clearIdleTimer(state);
+      this.waiting.delete(runId); // resumed — the run counts against slots again
       this.store.updateRun(runId, { status: 'running' });
       if (state.currentStepId) {
         this.store.updateStep(runId, state.currentStepId, { status: 'running' });
@@ -283,7 +409,7 @@ export class RunManager {
           error: `continue crashed: ${message}`,
           finishedAt: new Date().toISOString(),
         });
-        this.active.delete(runId);
+        this.dropActive(runId);
         void this.pump();
       },
     );
@@ -324,10 +450,17 @@ export class RunManager {
     this.store.appendEvent(runId, { type: 'user-message', stepId, text: prompt, imageCount: 0 });
 
     let stepCost = 0;
+    let turnText = '';
     const onEvent = (event: AgentEvent) => {
       if (event.type === 'image') {
         const saved = this.persistImage(runId, state, event.mediaType, event.data);
         if (saved) this.store.appendEvent(runId, { type: 'image', stepId, ...saved });
+        return;
+      }
+      if (event.type === 'text') {
+        turnText += event.text;
+        const text = stripDoneMarker(event.text);
+        if (text) this.store.appendEvent(runId, { type: 'text', text, stepId });
         return;
       }
       this.store.appendEvent(runId, { ...event, stepId });
@@ -342,13 +475,24 @@ export class RunManager {
         this.store.updateStep(runId, stepId, { costUsd: stepCost });
       }
       if (event.type === 'turn-end') {
-        const waiting = !state.cancelled && state.session?.open;
-        if (waiting) {
+        const sessionOpen = !state.cancelled && state.session?.open;
+        const done = sessionOpen && DONE_MARKER_RE.test(turnText.trimEnd());
+        turnText = '';
+        if (done) {
+          // Goal achieved (agent contract, #347) — same as in runAgentStep.
+          this.store.appendEvent(runId, { type: 'lifecycle', message: 'goal achieved — session closed' });
+          appendHandoffHeartbeat(this.dataDir, runId, 'turn complete — goal achieved, session closed');
+          state.session?.end();
+          return;
+        }
+        if (sessionOpen) {
           this.store.updateRun(runId, { status: 'waiting' });
           this.store.updateStep(runId, stepId, { status: 'waiting' });
+          this.waiting.add(runId);
           this.armIdleTimer(runId, state);
+          void this.pump();
         }
-        appendHandoffHeartbeat(this.dataDir, runId, `turn complete — status=${waiting ? 'waiting' : 'running'}`);
+        appendHandoffHeartbeat(this.dataDir, runId, `turn complete — status=${sessionOpen ? 'waiting' : 'running'}`);
       }
     };
 
@@ -370,6 +514,7 @@ export class RunManager {
     state.session = session;
     state.currentStepId = stepId;
     state.interrupt = () => session.interrupt();
+    if (session.pid !== undefined) registerRunProcess(runId, session.pid);
 
     const finishedAt = () => new Date().toISOString();
     try {
@@ -397,10 +542,11 @@ export class RunManager {
       });
       this.store.appendEvent(runId, { type: 'lifecycle', message: `continue failed — ${message}` });
     } finally {
+      this.recordUsagePeaks(runId);
       this.clearIdleTimer(state);
       this.clearAutosaveTimer(state);
       if (state.cwd !== this.repoRoot) await autosaveCommit(state.cwd);
-      this.active.delete(runId);
+      this.dropActive(runId);
       void this.pump();
     }
   }
@@ -578,7 +724,7 @@ export class RunManager {
       await this.settleSuccess(runId);
     }
     this.clearIdleTimer(state);
-    this.active.delete(runId);
+    this.dropActive(runId);
     void this.pump();
   }
 
@@ -641,10 +787,17 @@ export class RunManager {
     const stepRecord = this.store.getRun(runId)?.steps.find((s) => s.id === step.id);
     const startTokens = stepRecord?.tokensUsed ?? 0;
     let stepCost = stepRecord?.costUsd ?? 0;
+    let turnText = '';
     const onEvent = (event: AgentEvent) => {
       if (event.type === 'image') {
         const saved = this.persistImage(runId, state, event.mediaType, event.data);
         if (saved) emit({ type: 'image', stepId: step.id, ...saved });
+        return;
+      }
+      if (event.type === 'text') {
+        turnText += event.text;
+        const text = stripDoneMarker(event.text);
+        if (text) emit({ type: 'text', text, stepId: step.id });
         return;
       }
       emit({ ...event, stepId: step.id });
@@ -660,12 +813,25 @@ export class RunManager {
         this.store.updateStep(runId, step.id, { costUsd: stepCost });
       }
       if (event.type === 'turn-end') {
-        const waiting = interactive && !state.cancelled && state.session?.open;
+        const sessionOpen = !state.cancelled && state.session?.open;
+        const done = interactive && sessionOpen && DONE_MARKER_RE.test(turnText.trimEnd());
+        turnText = '';
+        if (done) {
+          // Goal achieved (agent contract, #347): close the session instead
+          // of parking at `waiting` — the run completes and frees its slot.
+          emit({ type: 'lifecycle', message: 'goal achieved — session closed' });
+          appendHandoffHeartbeat(this.dataDir, runId, 'turn complete — goal achieved, session closed');
+          state.session?.end();
+          return;
+        }
+        const waiting = interactive && sessionOpen;
         if (waiting) {
           // Turn over, session open: the ball is in the user's court.
           this.store.updateRun(runId, { status: 'waiting' });
           this.store.updateStep(runId, step.id, { status: 'waiting' });
+          this.waiting.add(runId);
           this.armIdleTimer(runId, state);
+          void this.pump(); // the freed slot can start a queued run right away
         }
         // Cez's own heartbeat — the handoff stays current even when the
         // agent forgets to write (spec 007).
@@ -704,6 +870,7 @@ export class RunManager {
     state.session = session;
     state.currentStepId = step.id;
     state.interrupt = () => session.interrupt();
+    if (session.pid !== undefined) registerRunProcess(runId, session.pid);
 
     try {
       const result = await session.result;
@@ -712,11 +879,28 @@ export class RunManager {
     } catch (err) {
       return err instanceof Error ? err.message : String(err);
     } finally {
+      this.recordUsagePeaks(runId);
       this.clearIdleTimer(state);
       state.session = undefined;
       state.currentStepId = undefined;
       state.interrupt = () => undefined;
     }
+  }
+
+  /**
+   * End-of-session telemetry (#348): stop sampling the run's process tree and
+   * fold the session's peaks into the run record. `max` with existing values —
+   * a run can hold several sessions (multiple agent steps, Continue) and the
+   * record keeps the highest water mark across all of them.
+   */
+  private recordUsagePeaks(runId: string): void {
+    const peaks = unregisterRunProcess(runId);
+    if (!peaks) return;
+    const run = this.store.getRun(runId);
+    this.store.updateRun(runId, {
+      peakRssBytes: Math.max(run?.peakRssBytes ?? 0, peaks.peakRssBytes),
+      peakProcCount: Math.max(run?.peakProcCount ?? 0, peaks.peakProcCount),
+    });
   }
 
   /**

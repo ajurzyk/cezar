@@ -256,6 +256,7 @@ export class ClaudeCliRunner implements AgentRunner {
       sendMessage,
       end,
       interrupt,
+      pid: child.pid,
       get open() {
         return stdinOpen;
       },

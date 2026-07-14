@@ -66,6 +66,47 @@ function writeHandoffAndTodo() {
 async function respond(userText, imageCount) {
   turn += 1;
   await sleep(250);
+  // `mock:done` anywhere in the message → the reply ends with the CEZ:DONE
+  // completion marker (#347), so the auto-close path is testable dry.
+  const doneMarker = userText.includes('mock:done') ? '\n\nCEZ:DONE' : '';
+
+  // `mock:slow` → hold the turn for ~25 s so queue states are observable.
+  if (userText.includes('mock:slow')) await sleep(25_000);
+
+  // `mock:md` → answer with a markdown-rich reply (#346 QA: tables, nested
+  // lists, emphasis, fences, quotes) instead of the scripted turn.
+  if (userText.includes('mock:md')) {
+    const md = [
+      '## Markdown fixture',
+      'This paragraph is soft-wrapped\nacross two source lines.',
+      '',
+      '| Column | Align | Result |',
+      '|:-------|:-----:|-------:|',
+      '| left `code` | *center* | **42** |',
+      '| ~~old~~ new | mid | $1.50 |',
+      '',
+      '- top item with *emphasis*',
+      '  - nested child with `code`',
+      '    - [x] deep done task',
+      '  - [ ] nested todo',
+      '- second top',
+      '',
+      '> quoted intro',
+      '> - quoted list item',
+      '',
+      '```ts',
+      'const answer: number = 42;',
+      '```',
+      'Literal guards: snake_case_name, 2*3 and <script>alert(1)</script>.',
+    ].join('\n');
+    emit({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'text', text: md }], usage: { input_tokens: 100, output_tokens: 200 } },
+    });
+    await sleep(100);
+    emit({ type: 'result', subtype: 'success', result: md, usage: { input_tokens: 100, output_tokens: 200 }, total_cost_usd: 0.001 });
+    return;
+  }
 
   // Spec 008: a planning call (marked `[cez-planner]` in the user prompt)
   // gets a canned chain plan. The `code-review` skill is deliberately made up:
@@ -167,7 +208,7 @@ async function respond(userText, imageCount) {
       type: 'assistant',
       message: {
         role: 'assistant',
-        content: [{ type: 'text', text: 'Done with the first pass — opened a draft PR: https://github.com/open-mercato/demo/pull/123. Anything to adjust? (dry-run mock)' }],
+        content: [{ type: 'text', text: `Done with the first pass — opened a draft PR: https://github.com/open-mercato/demo/pull/123. Anything to adjust? (dry-run mock)${doneMarker}` }],
         usage: { input_tokens: 300, output_tokens: 90 },
       },
     });
@@ -187,7 +228,7 @@ async function respond(userText, imageCount) {
     type: 'assistant',
     message: {
       role: 'assistant',
-      content: [{ type: 'text', text: `Follow-up #${turn - 1} received: "${userText.slice(0, 100)}".${imgNote} Applied (dry run).` }],
+      content: [{ type: 'text', text: `Follow-up #${turn - 1} received: "${userText.slice(0, 100)}".${imgNote} Applied (dry run).${doneMarker}` }],
       usage: { input_tokens: 200, output_tokens: 60 },
     },
   });

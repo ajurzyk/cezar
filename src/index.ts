@@ -12,6 +12,7 @@ import { RunStore } from './runs/store.js';
 import { RunManager } from './workflows/run.js';
 import { loadWorkflows } from './workflows/load.js';
 import { startServer } from './server/server.js';
+import { checkForUpdate } from './update-check.js';
 
 const HELP = `cezar — local cockpit for AI agent tasks in your repo
 
@@ -76,7 +77,9 @@ async function main(): Promise<void> {
 // ---- serve -----------------------------------------------------------------
 
 async function serveCommand(repoRoot: string, preferredPort: number, openBrowser: boolean): Promise<void> {
-  const store = openStore(repoRoot);
+  // keepLive + recover() (#367): runs that were queued/running/waiting when
+  // the previous process exited are re-queued or resumed instead of failed.
+  const store = openStore(repoRoot, { keepLive: true });
   const manager = new RunManager(store, repoRoot);
   const version = readOwnVersion();
 
@@ -93,8 +96,24 @@ async function serveCommand(repoRoot: string, preferredPort: number, openBrowser
     }
   }
 
+  const recovered = store
+    .listRuns()
+    .filter((r) => ['queued', 'waiting', 'running'].includes(r.status)).length;
+  await manager.recover();
+  if (recovered > 0) console.log(`  recovered ${recovered} run(s) from the previous session`);
+
+  // Update discovery (#368) — fire-and-forget; the banner prints whenever the
+  // registry answers and /api/health picks it up for the GUI chip.
+  const pkgName = readOwnName();
+  const update: { latest?: string } = {};
+  void checkForUpdate(pkgName, version).then((latest) => {
+    if (!latest) return;
+    update.latest = latest;
+    console.log(`\n  ⬆ cezar ${latest} is available (running ${version}) — restart with: npx ${pkgName}@latest\n`);
+  });
+
   const port = await pickPort(preferredPort);
-  startServer({ repoRoot, store, manager, version }, port);
+  startServer({ repoRoot, store, manager, version, update }, port);
   const url = `http://localhost:${port}`;
 
   console.log(`\n  cezar v${version} — ${repoRoot}`);
@@ -277,9 +296,9 @@ description: House rules the agent should follow in this repo.
 
 // ---- helpers -----------------------------------------------------------------
 
-function openStore(repoRoot: string): RunStore {
+function openStore(repoRoot: string, opts?: { keepLive?: boolean }): RunStore {
   const dataDir = join(repoRoot, '.ai/cezar');
-  const store = RunStore.open(dataDir);
+  const store = RunStore.open(dataDir, opts);
   ensureDataGitignore(repoRoot);
   return store;
 }
@@ -299,6 +318,17 @@ function ensureDataGitignore(repoRoot: string): void {
     }
   } catch {
     // non-fatal
+  }
+}
+
+/** Own package name — for the npm-registry update check (#368). */
+function readOwnName(): string {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const pkg = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf8')) as { name?: string };
+    return pkg.name ?? '@pat-lewczuk/cezar';
+  } catch {
+    return '@pat-lewczuk/cezar';
   }
 }
 

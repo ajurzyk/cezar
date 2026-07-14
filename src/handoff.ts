@@ -123,6 +123,8 @@ CEZ_HANDOFF_FILE (env) is the absolute path to this task's rolling handoff file.
 2. After every meaningful milestone (passing tests, a commit, a PR, a scope decision), append one terse timestamped line under "## Progress log", newest at the top.
 3. Before finishing or pausing, update "## Resume notes" with what's done, what's next and any blockers. Leave it empty only when the task is truly complete.
 
+Task completion marker: when the task's goal is fully achieved and you have no question for the user, end your final message with a line containing exactly CEZ:DONE — cez then closes the session and marks the task finished. If you are waiting on the user (a question, a decision, missing input), just end your message normally; the session stays open for their reply. Never emit CEZ:DONE while anything is unfinished or unverified.
+
 CEZ_TODOS_FILE (env) is the absolute path to the user's follow-up inbox — a JSON array. When you finish the task and a concrete follow-up remains for the user or a next agent, read the file (treat a missing file as []), append ONE object and write the whole array back:
 { "ts": "<ISO 8601>", "taskId": "<value of CEZ_TASK_ID>", "summary": "<one sentence: what was done / what's next>", "action": "<imperative user action, optional>", "prUrl": "<optional>", "suggestedSkill": "<optional skill name for the follow-up>", "suggestedArgs": "<optional>", "suggestedPrompt": "<optional freeform prompt for the follow-up task>" }
 Never modify or remove existing entries — append only.`;
