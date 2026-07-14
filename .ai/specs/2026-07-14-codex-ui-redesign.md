@@ -206,7 +206,7 @@ Selected run, active tab, review-gate state — all restorable from the URL; sha
 - **Plan mode is a toggle, not a button** (#383): segmented `Start | Plan first` control with a clearly selected state; in plan mode, submit produces the plan review (below) instead of running.
 - Attachments: paperclip + paste, thumbnail row with remove; drag-drop anywhere on the surface.
 - Composer intelligence (shared component with thread composer): `/` opens skill autocomplete (#380) inserting `/skill-name` refs; `@` mentions files (worktree-aware, fuzzy); **mic button labeled "Dictation"** (tooltip + aria) using the Web Speech API when available — recording state swaps the footer for an overlay with timer + partial transcript + cancel / insert / insert-and-send (paseo's exact pattern); hidden with a "not supported in this browser" hint otherwise.
-- ⌘N from anywhere; ⌘↵ submits; queued form state survives navigation (draft store).
+- ⌘N from anywhere; **⌘↵ and Ctrl+↵ both submit — in every prompting surface** (new-task composer, thread reply, review notes, plan-mode refinement): one shared `useSubmitShortcut` hook, macOS and Windows/Linux modifiers always registered together, kbd hints render the platform's symbol. Queued form state survives navigation (draft store).
 
 ### Task thread (the chat view)
 
