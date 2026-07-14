@@ -9,6 +9,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
 import { detectEnvironment } from '../core/backend-detect.js';
 import type { ContentBlock } from '../core/agent-runner.js';
+import { currentUsage, onUsage } from '../core/process-usage.js';
 import { WORKFLOWS_DIR, loadWorkflows } from '../workflows/load.js';
 import {
   QUICK_TASK_WORKFLOW,
@@ -111,6 +112,9 @@ const uiStateSchema = z
     lastTask: z
       .object({ source: z.enum(['workflow', 'skill']), ref: z.string().min(1).max(200) })
       .optional(),
+    // Runs area presentation (#348): the sidebar-list + detail pane, or the
+    // full-width table ("task manager") view.
+    runsView: z.enum(['list', 'table']).optional(),
   })
   .passthrough();
 
@@ -326,7 +330,16 @@ export function createApp(deps: ServerDeps): Hono {
   });
 
   // ---- runs ----------------------------------------------------------------
-  app.get('/api/runs', (c) => c.json(store.listRuns()));
+
+  // Additive `usage` field (#348): the latest CPU/RSS/proc-count sample of the
+  // run's live process tree — absent for finished runs and when `ps` yields
+  // nothing. The stored record itself is never touched.
+  const withUsage = (run: RunRecord): RunRecord & { usage?: ReturnType<typeof currentUsage> } => {
+    const usage = currentUsage(run.id);
+    return usage ? { ...run, usage } : run;
+  };
+
+  app.get('/api/runs', (c) => c.json(store.listRuns().map(withUsage)));
 
   // Registered before the `/:id/...` routes so "archive-finished" never
   // matches as a run id.
@@ -459,7 +472,7 @@ export function createApp(deps: ServerDeps): Hono {
 
   app.get('/api/runs/:id', (c) => {
     const run = store.getRun(c.req.param('id'));
-    return run ? c.json(run) : c.json({ error: 'not found' }, 404);
+    return run ? c.json(withUsage(run)) : c.json({ error: 'not found' }, 404);
   });
 
   app.post('/api/runs/:id/cancel', (c) => {
@@ -720,12 +733,20 @@ export function createApp(deps: ServerDeps): Hono {
         await stream.writeSSE({ event: 'todos', data: JSON.stringify(items) });
       };
       const offTodos = onTodosChanged(() => void sendTodos());
+      // Live resource telemetry (#348): the sampler ticks ~every 2 s only
+      // while some run has a registered process; each tick is relayed as one
+      // `usage` message (runId → {cpuPct, rssBytes, procCount}). Never
+      // persisted — the NDJSON transcripts stay usage-free.
+      const offUsage = onUsage(
+        (usage) => void stream.writeSSE({ event: 'usage', data: JSON.stringify(usage) }),
+      );
       store.on('run', onRun);
       store.on('deleted', onDeleted);
       stream.onAbort(() => {
         store.off('run', onRun);
         store.off('deleted', onDeleted);
         offTodos();
+        offUsage();
       });
       while (!stream.aborted) {
         await stream.writeSSE({ event: 'ping', data: '' });

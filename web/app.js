@@ -24,6 +24,8 @@ const state = {
   pendingImages: [],      // [{mediaType, data, preview}] queued for the next message
   taskImages: [],         // screenshots pasted into the new-task form
   listView: 'active',     // 'active' | 'archived'
+  runsView: 'list',       // 'list' (sidebar + detail) | 'table' — #348, persisted in ui-state
+  usage: {},              // runId -> {cpuPct, rssBytes, procCount} — live telemetry (#348)
   todos: [],              // global inbox entries (spec 007)
   plan: null,             // {task, steps, rationale, fallback} — proposed chain (spec 008)
   planDragIdx: null,      // index of the plan step being dragged
@@ -95,6 +97,22 @@ function fmtTokens(n) {
 function fmtCost(usd) {
   if (!usd) return '';
   return `$${usd >= 10 ? usd.toFixed(0) : usd.toFixed(2)}`;
+}
+
+/* Humanized RSS for the table view (#348) — ps gives KB, we store bytes. */
+function fmtBytes(n) {
+  if (!n) return '';
+  if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)} GB`;
+  if (n >= 1024 ** 2) return `${Math.round(n / 1024 ** 2)} MB`;
+  return `${Math.round(n / 1024)} kB`;
+}
+
+/* "42s" / "3m" / "1.2h" — how long a finished run took. */
+function fmtDuration(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.round(s / 60)}m`;
+  return `${(s / 3600).toFixed(1)}h`;
 }
 
 /* Queue position among queued runs (FIFO = createdAt order) — spec 006. */
@@ -410,10 +428,15 @@ async function init() {
   state.taskRef = pick.ref;
   setWorkflowOptions(workflowsRes.workflows);
   for (const run of runs) state.runs.set(run.id, run);
+  mergeUsage(runs);
+  // Runs presentation (#348): restore the persisted list/table choice before
+  // anything renders or auto-selects.
+  state.runsView = uiState.runsView === 'table' ? 'table' : 'list';
   renderRunList();
+  applyRunsView();
   connectGlobal();
   const deepLinked = await handleDeepLink();
-  if (!deepLinked) {
+  if (!deepLinked && state.runsView !== 'table') {
     const latest = sortedRuns()[0];
     if (latest) selectRun(latest.id);
   }
@@ -792,6 +815,7 @@ async function resyncRuns() {
     const fresh = new Set(runs.map((r) => r.id));
     for (const id of [...state.runs.keys()]) if (!fresh.has(id)) state.runs.delete(id);
     for (const run of runs) state.runs.set(run.id, run);
+    mergeUsage(runs);
     renderRunList();
     const sel = state.selectedId ? state.runs.get(state.selectedId) : null;
     if (sel) {
@@ -803,6 +827,13 @@ async function resyncRuns() {
   } catch {
     // offline — the next reconnect/visibility flip retries
   }
+}
+
+/* GET /api/runs carries an additive per-run `usage` sample (#348) — rebuild
+   the live map from it so a resync also clears entries for finished runs. */
+function mergeUsage(runs) {
+  state.usage = {};
+  for (const run of runs) if (run.usage) state.usage[run.id] = run.usage;
 }
 
 function connectGlobal() {
@@ -837,6 +868,13 @@ function connectGlobal() {
     state.todos = JSON.parse(e.data);
     renderInboxBadge();
     if (!$('#view-inbox').hidden) renderInbox();
+  });
+  // Live resource telemetry (#348): a fresh runId → {cpuPct, rssBytes,
+  // procCount} map ~every 2 s while any run is executing. Table rows re-render
+  // from it; absent messages (older server, idle cockpit) simply mean no data.
+  es.addEventListener('usage', (e) => {
+    state.usage = JSON.parse(e.data);
+    if (state.runsView === 'table') renderRunsTable();
   });
 }
 
@@ -1141,8 +1179,22 @@ function bindUi() {
       await fetch('/api/runs/archive-finished', { method: 'POST' });
       return; // SSE run updates re-render the list
     }
+    if (btn.dataset.list === 'toggle-view') {
+      // List/table switch (#348) — the table lives in the Runs main view.
+      showRunsView();
+      setRunsView(state.runsView === 'table' ? 'list' : 'table');
+      return;
+    }
     state.listView = btn.dataset.list;
     renderRunList();
+  });
+
+  // Table rows select the run like a sidebar click (#348) — links keep
+  // navigating (the PR column).
+  $('#runs-table').addEventListener('click', (e) => {
+    if (e.target.closest('a')) return;
+    const row = e.target.closest('tr[data-id]');
+    if (row) selectRun(row.dataset.id);
   });
 
   $('#detail').addEventListener('click', async (e) => {
@@ -1696,7 +1748,12 @@ function renderRunList() {
     <button data-list="archived" class="${state.listView === 'archived' ? 'active' : ''}">
       Archived${archivedCount ? ` ${archivedCount}` : ''}
     </button>
-    ${state.listView === 'active' && finishedCount ? `<button data-list="archive-finished" title="Archive all finished runs"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1.5px;margin-right:4px"><path d="M4 5h16v4H4zM6 9v10h12V9M9 13h6"/></svg>${finishedCount}</button>` : ''}`;
+    ${state.listView === 'active' && finishedCount ? `<button data-list="archive-finished" title="Archive all finished runs"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1.5px;margin-right:4px"><path d="M4 5h16v4H4zM6 9v10h12V9M9 13h6"/></svg>${finishedCount}</button>` : ''}
+    <button data-list="toggle-view" class="view-toggle ${state.runsView === 'table' ? 'active' : ''}" title="${state.runsView === 'table' ? 'Back to the run detail view' : 'Table view — every run with live CPU / memory'}">
+      ${state.runsView === 'table'
+        ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M4 5h7v14H4zM14 5h6M14 9h6M14 13h6M14 17h6"/></svg>'
+        : '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M4 5h16v14H4zM4 10h16M9 10v9"/></svg>'}
+    </button>`;
 
   // Variant groups (spec 010): runs sharing a groupId collapse into one
   // group tile at the position of their best-ranked member; click expands.
@@ -1731,6 +1788,10 @@ function renderRunList() {
     `<div class="dim" style="padding:14px 12px;font-size:12px">${
       state.listView === 'archived' ? 'Nothing archived yet.' : 'No runs yet — describe a task above.'
     }</div>`;
+
+  // The table mirrors the sidebar (#348): every path that re-renders the list
+  // (SSE run updates, tab switches, deletions) refreshes it in one place.
+  if (state.runsView === 'table') renderRunsTable();
 }
 
 function runItemHtml(r, variantRow = false) {
@@ -1762,11 +1823,113 @@ function groupTileHtml(groupId, members) {
       ${expanded ? members.map((m) => runItemHtml(m, true)).join('') : ''}`;
 }
 
+// ---- runs table view (#348) --------------------------------------------------
+
+/* The "task manager" presentation: every run as one row in the central pane,
+   with live CPU / memory / process-count columns fed by the `usage` SSE
+   stream while a run executes, and the persisted peaks (dimmed) after it
+   finished. Same filter (Active/Archived) and status-first sort as the
+   sidebar; a row click drops back into the detail pane. */
+
+/* Statuses whose usage sample is current — a session is registered while
+   running AND while parked at `waiting` (the CLI process stays alive). */
+const USAGE_LIVE_STATUSES = new Set(['running', 'waiting']);
+
+/* Show/hide the table vs the detail pane and persist the choice (#348). */
+function setRunsView(mode, persist = true) {
+  const changed = state.runsView !== mode;
+  state.runsView = mode;
+  applyRunsView();
+  if (changed) {
+    renderRunList(); // the toggle button in #list-tabs reflects the mode
+    if (persist) {
+      void fetch('/api/ui-state', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ runsView: mode }),
+      }).catch(() => {});
+    }
+  }
+}
+
+function applyRunsView() {
+  const table = state.runsView === 'table';
+  $('#detail').hidden = table;
+  $('#runs-table').hidden = !table;
+  if (table) renderRunsTable();
+}
+
+/* The column reads better as the actual skill for ad-hoc runs: '(planned)'
+   chains and one-skill runs carry their meaning in the first agent step. */
+function workflowLabel(run) {
+  if (run.workflow === '(planned)' || run.workflow === '(inbox)') {
+    const agent = (run.steps ?? []).find((s) => s.kind === 'agent');
+    if (agent?.name) return agent.name;
+  }
+  return run.workflow;
+}
+
+function renderRunsTable() {
+  const box = $('#runs-table');
+  if (!box || state.runsView !== 'table') return;
+  const runs = sortedRuns();
+  box.innerHTML = `
+    <div class="rt-head">
+      <h1>Runs</h1>
+      <span class="dim">${runs.length} ${state.listView === 'archived' ? 'archived' : 'active'}</span>
+    </div>
+    <div class="rt-scroll">${
+      runs.length
+        ? `<table>
+        <thead><tr>
+          <th>Status</th><th>Task</th><th>Skill / workflow</th><th>PR</th>
+          <th class="num">Tokens</th><th class="num">Cost</th>
+          <th class="num">CPU</th><th class="num">Mem</th><th class="num">Procs</th>
+          <th class="num">Started</th>
+        </tr></thead>
+        <tbody>${runs.map(runRowHtml).join('')}</tbody>
+      </table>`
+        : `<div class="empty dim">${
+            state.listView === 'archived' ? 'Nothing archived yet.' : 'No runs yet — describe a task in the sidebar.'
+          }</div>`
+    }</div>`;
+}
+
+function runRowHtml(r) {
+  const live = USAGE_LIVE_STATUSES.has(r.status) ? state.usage[r.id] : null;
+  const cpu = live ? `${live.cpuPct.toFixed(0)}%` : '';
+  const mem = live ? fmtBytes(live.rssBytes) : fmtBytes(r.peakRssBytes);
+  const procs = live ? String(live.procCount) : r.peakProcCount ? String(r.peakProcCount) : '';
+  // No live sample → the mem/procs cells show the run's persisted peaks, dimmed.
+  const peak = !live && Boolean(r.peakRssBytes || r.peakProcCount);
+  const started = r.startedAt ?? r.createdAt;
+  const dur =
+    r.finishedAt && r.startedAt
+      ? fmtDuration(new Date(r.finishedAt).getTime() - new Date(r.startedAt).getTime())
+      : '';
+  return `
+    <tr data-id="${esc(r.id)}" class="${r.id === state.selectedId ? 'selected' : ''}">
+      <td>${statusPill(r)}</td>
+      <td class="rt-title" title="${esc(r.task)}">${esc(r.title)}</td>
+      <td class="rt-flow" title="${esc(r.workflow)}">${esc(workflowLabel(r))}</td>
+      <td>${prLink(r)}</td>
+      <td class="num mono">${esc(fmtTokens(r.tokensUsed))}</td>
+      <td class="num mono">${esc(fmtCost(r.costUsd))}</td>
+      <td class="num mono">${esc(cpu)}</td>
+      <td class="num mono${peak ? ' rt-peak' : ''}"${peak ? ' title="peak — run finished"' : ''}>${esc(mem)}</td>
+      <td class="num mono${peak ? ' rt-peak' : ''}"${peak ? ' title="peak — run finished"' : ''}>${esc(procs)}</td>
+      <td class="num mono rt-time">${esc(timeAgo(started))}${dur ? ` <span class="rt-dur">· ${esc(dur)}</span>` : ''}</td>
+    </tr>`;
+}
+
 // ---- run detail ------------------------------------------------------------
 
 function selectRun(id) {
   const run = state.runs.get(id);
   if (!run) return;
+  // Selecting a run always lands on its detail pane — a table-mode row click
+  // (or sidebar click) switches back to the list presentation (#348).
+  if (state.runsView === 'table') setRunsView('list');
   state.selectedId = id;
   state.selectedGroupId = null;
   state.lastSeq = 0;

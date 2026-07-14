@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { type AgentSession } from '../core/claude-cli-runner.js';
+import { registerRunProcess, unregisterRunProcess } from '../core/process-usage.js';
 import { createRunner } from '../core/runner-factory.js';
 import type { RunnerId } from '../core/agent-runner.js';
 import {
@@ -513,6 +514,7 @@ export class RunManager {
     state.session = session;
     state.currentStepId = stepId;
     state.interrupt = () => session.interrupt();
+    if (session.pid !== undefined) registerRunProcess(runId, session.pid);
 
     const finishedAt = () => new Date().toISOString();
     try {
@@ -540,6 +542,7 @@ export class RunManager {
       });
       this.store.appendEvent(runId, { type: 'lifecycle', message: `continue failed — ${message}` });
     } finally {
+      this.recordUsagePeaks(runId);
       this.clearIdleTimer(state);
       this.clearAutosaveTimer(state);
       if (state.cwd !== this.repoRoot) await autosaveCommit(state.cwd);
@@ -867,6 +870,7 @@ export class RunManager {
     state.session = session;
     state.currentStepId = step.id;
     state.interrupt = () => session.interrupt();
+    if (session.pid !== undefined) registerRunProcess(runId, session.pid);
 
     try {
       const result = await session.result;
@@ -875,11 +879,28 @@ export class RunManager {
     } catch (err) {
       return err instanceof Error ? err.message : String(err);
     } finally {
+      this.recordUsagePeaks(runId);
       this.clearIdleTimer(state);
       state.session = undefined;
       state.currentStepId = undefined;
       state.interrupt = () => undefined;
     }
+  }
+
+  /**
+   * End-of-session telemetry (#348): stop sampling the run's process tree and
+   * fold the session's peaks into the run record. `max` with existing values —
+   * a run can hold several sessions (multiple agent steps, Continue) and the
+   * record keeps the highest water mark across all of them.
+   */
+  private recordUsagePeaks(runId: string): void {
+    const peaks = unregisterRunProcess(runId);
+    if (!peaks) return;
+    const run = this.store.getRun(runId);
+    this.store.updateRun(runId, {
+      peakRssBytes: Math.max(run?.peakRssBytes ?? 0, peaks.peakRssBytes),
+      peakProcCount: Math.max(run?.peakProcCount ?? 0, peaks.peakProcCount),
+    });
   }
 
   /**
