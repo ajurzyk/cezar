@@ -1,63 +1,30 @@
 # Code review rules
 
-How to review a diff in this repository. Applies to humans and to the `om-code-review` skill alike. The validation gate (`npm run typecheck` && `npm run build`) must be green before a review verdict is meaningful — there is no test suite, so the review itself is the main correctness gate.
+Review checklist for this repository, applied by human reviewers and by the `om-code-review` skill (which picks this file up automatically). Severity discipline and the label state machine are defined in `SDLC.md`.
 
-## Review priorities (in order)
+## Review priorities, in order
 
-1. **Correctness of the run lifecycle** — runs, steps, worktrees, sessions. A bug here loses user work.
-2. **Graceful degradation** — the README's core promise: no `gh` → works without PRs, no network → local skills still load, no git repo → tasks run in place, `CEZ_DRY_RUN=1` → everything works offline. A diff that turns a degradation path into an error is a blocker.
-3. **State-file compatibility** — `.ai/cezar/` files outlive the process and the version that wrote them (see `BACKWARD_COMPATIBILITY.md`).
-4. **Security of the local server** — it binds to `127.0.0.1`, but it executes agents with file access; treat every request body as hostile.
-5. **Simplicity** — "every module is meant to be read in one sitting." Push back on new dependencies, frameworks, or abstractions the change doesn't need.
+1. **Correctness** — the change does what the PR says, handles the empty/error paths, and does not regress an existing flow.
+2. **Contracts** — nothing in `BACKWARD_COMPATIBILITY.md` is broken silently: CLI flags, `/api/*` routes and shapes, on-disk state formats, workflow YAML schema, the published npm package surface.
+3. **Security** — see repo-specific checks below; cezar spawns child processes and serves HTTP on localhost, so the interesting risks are command construction and what the server exposes.
+4. **Scope** — the diff matches the plan/issue; no unrelated churn, no drive-by refactors.
 
-## Checklist
+## Repo-specific checks
 
-### TypeScript strictness
-
-- `tsconfig.json` has `strict`, `noUncheckedIndexedAccess`, `noImplicitOverride` — the diff must compile without weakening them.
-- No `any`, no non-null assertions to silence the checker; prefer narrowing, `unknown` + zod, or explicit optional handling. Indexed access is checked — `arr[0]` is `T | undefined`, handle it.
-- ESM with NodeNext resolution: relative imports carry the `.js` extension even in `.ts` files. `node:`-prefixed builtins.
-
-### Zod at every boundary
-
-- Every mutating API route parses its body with `schema.safeParse(await c.req.json().catch(() => null))` and returns `{ error: issues.join('; ') }` with 400 on failure — the established pattern in `src/server/server.ts`. New routes must follow it; a route that trusts `c.req.json()` raw is a blocker.
-- External process output crossing into the app (`gh … --json` in `src/server/github.ts`, agent CLI streams) is zod-validated at the boundary, extras stripped.
-- Persisted files read back in (`runs.json`, `config.json`, workflow YAML) go through their schema; parse failure degrades to a sane default, never a crash.
-- Schemas carry the limits (`.max()` on strings/arrays, image size caps, `variants` 1–3, steps ≤ 8). New inputs need explicit bounds — unbounded user input into a file write or a spawned process is a blocker.
-
-### Graceful degradation
-
-- Missing `gh` / no remote / offline: GitHub reads return `{ available: false, reason }`, PR creation returns `{ ok: false, error }` — never a throw, never a 500 for an expected absence.
-- Missing or malformed `.ai/cezar/config.json` behaves exactly like the defaults and never blocks startup (`src/config.ts`).
-- git helpers in `src/git-worktree.ts` never throw (except `createWorktree`); check the diff keeps that contract.
-- `CEZ_DRY_RUN=1` paths must still work after the change — that is the offline demo and the de-facto integration test.
-
-### Security
-
-- No secrets in state files: nothing under `.ai/cezar/` (runs.json, NDJSON events, handoff.md, ui-state.json, config.json) may contain tokens or credentials. `GITHUB_TOKEN` stays in the environment; the launch key stays in the gitignored `launch-key` file and is only served same-origin.
-- Server stays on `127.0.0.1`; CORS is for `/api/health` only (bookmarklet discovery, spec 011). Widening either is a blocker.
-- Path handling on user-supplied names: file-serving routes must sanitize (`basename()` as in `/api/runs/:id/images/:file`); workflow names are slugified before becoming filenames. Any user string that reaches a path or a shell needs the same treatment.
-- Spawned processes use `execFile`/`spawn` with argument arrays — never string-interpolated shell commands. Tool access for agents is default-deny (`allowedTools`).
-- Writes that must not clobber use `wx` or tmp+rename; check new file writes follow one of those.
-
-### State-file and API compatibility
-
-- New fields on `RunRecord`/`StepState` are optional (or defaulted) so old `runs.json` files still parse — the existing comments ("old runs.json files … have neither") show the convention.
-- NDJSON event logs are append-only; readers skip unparseable lines. Never rewrite or reorder an existing event file.
-- Renaming/removing an API route, an event `type`, or a persisted field is a breaking change — route it through `BACKWARD_COMPATIBILITY.md`.
-
-### Code quality
-
-- Comments cite the spec or issue that motivated the code (`spec 006`, `#348`); non-obvious behavior in the diff should too.
-- No new runtime dependencies without strong justification — the dependency budget is hono, @hono/node-server, yaml, zod.
-- Web UI changes stay framework-free and build-step-free; no npm packages, no bundler, theme toggle keeps working.
-- User-facing errors are one human-readable line (the `createDraftPr` pattern), not stack traces.
+- **TypeScript / ESM**: `npm run typecheck` and `npm run build` must pass; the project is `"type": "module"` on Node 20+ — no CommonJS `require`, no default-import of JSON.
+- **API handlers** (`src/server/server.ts`): request bodies validated with `zod` before use; errors return JSON with a sensible status, never a stack trace. Any new/changed route is exercised by `web/app.js` in the same PR.
+- **Child processes** (`src/core/*-runner.ts`, `src/server/open-in-terminal.ts`, git helpers): arguments passed as arrays, never interpolated into a shell string; user-supplied text (task briefs, branch names, file paths) must not reach a shell unquoted.
+- **Filesystem state** (`src/runs/store.ts`, `src/handoff.ts`, `src/todos.ts`): writes stay inside `.ai/cezar/` (or the run's worktree); reads tolerate missing/corrupt files (the README promises hand-editable state); no secrets written world-readable — follow the `launch-key` pattern (mode 0600).
+- **Launch key** (`src/server/launch-key.ts`): never logged, never embedded in pages beyond the documented bookmarklet flow, never required reading for any code path outside the server.
+- **Worktrees** (`src/git-worktree.ts`): operations target the run's worktree, never the primary checkout; failure paths clean up what they created.
+- **Graceful degradation**: no `gh` → cockpit works without PR features; no network → local skills still load. A change that turns a degradation path into a hard failure is a bug.
+- **Web UI** (`web/`): stays framework-free and build-free; no external CDN resources.
+- **Dependencies**: this package ships via `npx` — every new runtime dependency is startup cost for users; justify it in the PR.
 
 ## Severity guidance
 
-- **Blocker** (request changes): data loss or corruption in `.ai/cezar/`; a degradation path turned into a hard failure; unvalidated request body on a mutating route; secret written to disk; server exposed beyond localhost or CORS widened; path traversal; breaking a surface in `BACKWARD_COMPATIBILITY.md` without the required path; typecheck/build red.
-- **Major** (request changes unless trivially fixed in-review): incorrect run/step state transitions; SSE replay duplication or event loss; unbounded input reaching files or processes; a schema field added as required when old files carry it as absent.
-- **Minor** (approve with comments): missing spec citation on non-obvious code; inconsistent error shape; naming/style drift; missed `wx`/tmp+rename on a low-stakes write.
-- **Nit**: wording, formatting, comment polish. Never blocks.
+- **Blocker** — breaks a protected contract without the documented path, security regression (shell injection, launch-key exposure, server listening beyond localhost), data-destroying bug in run state or worktree handling, validation gate red.
+- **Major** — correctness bug in a main flow, missing zod validation on a new route, degradation path removed, API/UI drift (route changed, `web/app.js` not updated).
+- **Minor** — naming, structure, missed edge case with low blast radius, docs drift.
 
-Verdict: approve when there are no blockers or majors; otherwise request changes with each finding tagged by severity and file/line.
+Request changes on any Blocker or Major; Minors alone can be approved with comments.
