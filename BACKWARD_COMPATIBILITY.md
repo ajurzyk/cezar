@@ -39,6 +39,16 @@ Package name, `bin` names (`cezar`, `cez`), published `files` (`dist`, `web`, `s
 - **Breaking**: renaming binaries, dropping published files other tooling references, raising the Node floor.
 - **Required path**: semver — a major (or clearly announced minor pre-1.0) bump plus release notes.
 
+## Cockpit UI redesign waiver (spec `.ai/specs/2026-07-14-cockpit-ui-redesign.md`)
+
+The UI redesign is a deliberate generational change (approved 2026-07-14): while its phases R1–R7 land, backward compatibility MUST NOT constrain the redesign's outcome. During the program, on top of the "Not protected" list below:
+
+- **Waived**: the `web/` asset layout and everything the browser consumes (markup, CSS, JS, fonts), the npm tarball's `web/` layout (moves to built `web/dist`), `/api` **response shapes gaining fields** (always allowed) and **internal-only endpoints whose sole consumer is the bundled UI** — these may be reshaped or replaced in the same PR that updates the UI, with a line in the release notes. New NDJSON event types (protocol v2) are additive by design.
+- **Still protected — the redesign works around these, never through them**: CLI commands/flags (§1); *readability* of existing on-disk state (§2 — a new version must still open old `runs.json`/NDJSON transcripts; v1 event types stay parseable even after v2 ships); the `/new` bookmarklet query contract and `/api/launch-key` (§3, spec 011); workflow YAML and skills formats (§4); config file keys (§5 additive-only).
+- **Required path for each waived break**: called out in the phase PR body under "Breaking changes", release-notes entry, minor version bump (pre-1.0). No deprecation window required.
+
+The waiver expires when phase R7 merges; afterwards this document returns to full force with the then-current surfaces.
+
 ## Not protected
 
 - Internal module structure under `src/` (imports between modules may change freely).
