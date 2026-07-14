@@ -33,7 +33,7 @@ Folded into the spec as requirements: #390 (git integration look), #389 (task li
 
 ## Progress
 
-PR: #393
+PR: #395 (supersedes #393 — closed by the de-branding branch rename; review trail lives on #393)
 
 > Convention: `- [ ]` pending, `- [x]` done. Append ` — <commit sha>` when a step lands. Do not rename step titles.
 
@@ -58,6 +58,6 @@ PR: #393
 ### Phase 4: Ship
 
 - [x] 4.1 Validation gate (npm run typecheck, npm run build) + self-review (om-code-review lens) — 587a806
-- [x] 4.2 Open PR with screenshots embedded, labels normalized — PR #393
+- [x] 4.2 Open PR with screenshots embedded, labels normalized — PR #393 → #395
 - [x] 4.3 om-auto-review-pr autofix loop until clean — 587a806
 - [x] 4.4 Summary comment + cleanup — PR #393 summary posted
