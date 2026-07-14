@@ -64,6 +64,16 @@ Breaking: requiring frontmatter, dropping a discovery directory, or inverting pr
 
 Breaking: dropping a bin alias, raising `engines.node`, removing `web/` or `scripts/` from `files`, renaming the package. Required path: raise `engines` only in a version bump flagged as breaking; keep old aliases through a deprecation release.
 
+## Cockpit UI redesign waiver (spec `.ai/specs/2026-07-14-cockpit-ui-redesign.md`)
+
+The UI redesign is a deliberate generational change (approved 2026-07-14): while its phases R1–R7 land, backward compatibility MUST NOT constrain the redesign's outcome. For the duration of the program:
+
+- **Waived**: the `web/` asset layout and everything the browser consumes (markup, CSS, JS, fonts); the npm tarball's `web/` layout (moves to built `web/dist` — `resolveWebDir` is updated in the same PR); `/api` **response shapes gaining fields** (always allowed) and **internal-only endpoints whose sole consumer is the bundled UI** — these may be reshaped or replaced in the same PR that updates the UI, with a line in the release notes. New NDJSON event types (protocol v2) are additive by design.
+- **Still protected — the redesign works around these, never through them**: CLI commands, flags and exit codes; *readability* of existing `.ai/cezar/` state (a new version must still open old `runs.json`/NDJSON transcripts; v1 event types stay parseable after v2 ships); the `/new` bookmarklet query contract and `/api/launch-key`; workflow YAML and skills Markdown formats and discovery; `config.json` keys (additive only); the npm bin entries and package name.
+- **Required path for each waived break**: called out in the phase PR body under "Breaking changes", release-notes entry, minor version bump (pre-1.0). No deprecation window required.
+
+The waiver expires when phase R7 merges; afterwards this document returns to full force with the then-current surfaces.
+
 ## When in doubt
 
 If a change might break any surface above, say so in the PR description, label the PR `risk-high`, and route it through the review + QA gates in `SDLC.md`. A silent break found in review is a blocker per `CODE_REVIEW.md`.
