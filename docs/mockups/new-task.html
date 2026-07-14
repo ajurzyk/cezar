@@ -130,19 +130,6 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px; }
   .menu-item .mi-check { color: var(--primary); flex: none; }
 
-  /* ---------- advanced disclosure ---------- */
-  .advanced { margin-top: 18px; }
-  .adv-toggle { display: inline-flex; align-items: center; gap: 6px;
-    font-size: 12.5px; font-weight: 600; color: var(--muted-foreground); padding: 4px 2px; }
-  .adv-toggle:hover { color: var(--foreground); }
-  .adv-panel { margin-top: 10px; }
-  .adv-label { display: block; font-size: 12px; font-weight: 500; color: var(--muted-foreground); margin-bottom: 6px; }
-  .sysprompt {
-    width: 100%; background: var(--card-2); border: 1px solid var(--border);
-    border-radius: var(--radius); padding: 10px 12px; resize: none; outline: none;
-    font: 400 13px/1.5 var(--sans); color: var(--muted-foreground);
-  }
-
   /* ---------- suggestions ---------- */
   .suggest-row { display: flex; justify-content: center; gap: 8px; flex-wrap: wrap; margin-top: 28px; }
   .suggest {
@@ -425,18 +412,6 @@
                 </button>
               </span>
             </div>
-          </div>
-        </div>
-
-        <!-- advanced disclosure (open) -->
-        <div class="advanced">
-          <button class="adv-toggle" aria-expanded="true">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
-            Advanced
-          </button>
-          <div class="adv-panel">
-            <label class="adv-label" for="sysprompt">System prompt</label>
-            <textarea class="sysprompt" id="sysprompt" rows="2">Always follow the repo's AGENTS.md. Prefer minimal diffs.</textarea>
           </div>
         </div>
 

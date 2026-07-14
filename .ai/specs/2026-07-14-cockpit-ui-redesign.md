@@ -106,7 +106,7 @@ type UiItem =
 - Emitted by the runners (`src/core/*-runner.ts`) alongside v1 events; the RunManager persists v2 to the same NDJSON stream (new `type` values — the current GUI already renders unknown types as dim notes, so mixed files are safe).
 - **Key mappings**: Claude `TodoWrite` / Codex `todoList` / OpenCode `todowrite` → `plan.updated` (full-replacement, identical semantics); Claude `thinking` blocks / Codex `reasoning` items / OpenCode `reasoning` parts → reasoning items; Codex `item/commandExecution/outputDelta` → `item.delta{field:'output'}` (live command output); Claude `Edit` input & Codex `fileChange.changes` & OpenCode `patch` parts → structured `FileDiff`s; Claude `parent_tool_use_id` / OpenCode `subtask` → `parentItemId` (sub-agent nesting); OpenCode turn-end switches to `session.idle`.
 - The **tool display model** (title/verb/icon per tool name + `toolKind`) lives in `web/src/protocol/` next to the types — computed once, used by thread, activity groups and notifications (paseo's pattern).
-- **System prompt**: `AgentRunSpec` already carries `systemPrompt` per backend (`--append-system-prompt` for claude; codex and opencode prepend it to the first user message). v2 adds it end-to-end: `POST /api/runs` accepts `systemPrompt?`, a Settings-level default (`config.json: systemPrompt?`) is merged, and the composer's advanced row exposes it. Works with every backend because it rides the existing seam — coding-agent-agnostic by construction.
+- **System prompt**: `AgentRunSpec` already carries `systemPrompt` per backend (`--append-system-prompt` for claude; codex and opencode prepend it to the first user message). v2 adds it end-to-end: the system prompt is configured in **Settings → Agents** (`config.json: systemPrompt?`) and applied to every run; `POST /api/runs` keeps an optional `systemPrompt?` override for programmatic callers (bookmarklets, scripts) — it is deliberately NOT part of the new-task composer UI. Works with every backend because it rides the existing seam — coding-agent-agnostic by construction.
 
 ### Backend parity requirement (hard rule)
 
@@ -181,7 +181,7 @@ New nav tab, registry-driven so sections grow without layout changes:
 
 - **Skills** (now): the current skills catalog + refresh + bookmarklet panel move here, with project-first ordering (#377).
 - **Appearance** (now): theme light/dark/system, accent choice (lime default), UI density. Persisted in `ui-state.json` (additive keys).
-- **Agents** (now): default runner, per-runner model presets, default system prompt, base branch — today's scattered `PUT /api/config` knobs in one place. Coding-agent-agnostic: sections describe capabilities (`runner`, `model`, `system prompt`), never vendor-specific config formats.
+- **Agents** (now): default runner, per-runner model presets, **the system prompt** (the single place it is edited), base branch — today's scattered `PUT /api/config` knobs in one place. Coding-agent-agnostic: sections describe capabilities (`runner`, `model`, `system prompt`), never vendor-specific config formats.
 - **MCP, notifications, keyboard** (later): placeholder sections listed in the registry but hidden until implemented.
 
 ## Design system
@@ -220,7 +220,7 @@ Selected run, active tab, review-gate state — all restorable from the URL; sha
 
 ### New task (full-screen, #386)
 
-- Route `/new` (also the `/new?skill=…` bookmarklet target, unchanged contract). **Centered composer** on a grain+twinkle hero surface, agent-desktop home style: big textarea ("Describe a task for the agent…"), then a pill row: **Workflow/Skill picker** (cmdk searchable dropdown — project skills first and bold, global after, #377/#385 pattern), **Runner** (hidden unless >1 installed), **Model**, **Variants ×1/×2/×3** (control returns — server path never left), **Base branch**, and an **advanced disclosure**: system prompt textarea.
+- Route `/new` (also the `/new?skill=…` bookmarklet target, unchanged contract). **Centered composer** on a grain+twinkle hero surface, agent-desktop home style: big textarea ("Describe a task for the agent…"), then a pill row: **Workflow/Skill picker** (cmdk searchable dropdown — project skills first and bold, global after, #377/#385 pattern), **Runner** (hidden unless >1 installed), **Model**, **Variants ×1/×2/×3** (control returns — server path never left), **Base branch**. (The system prompt is a Settings → Agents concern, not a per-task composer control.)
 - **Plan mode is a toggle, not a button** (#383): segmented `Start | Plan first` control with a clearly selected state; in plan mode, submit produces the plan review (below) instead of running.
 - Attachments: paperclip + paste, thumbnail row with remove; drag-drop anywhere on the surface.
 - Composer intelligence (shared component with thread composer): `/` opens skill autocomplete (#380) inserting `/skill-name` refs; `@` mentions files (worktree-aware, fuzzy); **mic button labeled "Dictation"** (tooltip + aria) using the Web Speech API when available — recording state swaps the footer for an overlay with timer + partial transcript + cancel / insert / insert-and-send (paseo's exact pattern); hidden with a "not supported in this browser" hint otherwise.
@@ -311,7 +311,7 @@ Each phase is independently shippable; issues in parentheses close in that phase
 - **R1 — Platform + shell**: Vite/React/Tailwind/shadcn scaffold, tokens, fonts, Hono static serving + dev proxy, app shell (sidebar, nav, theme system, env chips, ⌘K), task quick-list on live SSE. (#378, #369, #354 groundwork)
 - **R2 — Protocol v2**: runner emitters + RunManager persistence + `web/src/protocol` display model; auto-summary titles + diffStat on RunRecord; system-prompt end-to-end. (#389-data, system prompt)
 - **R3 — Thread**: full task detail — turns, tool cards, context groups, reasoning, plan dock, step rail, Streamdown+Shiki, virtua, composer (skills `/`, `@` files, dictation, attachments), review gate, variants compare. (#381, #382, #379, #380, dictation)
-- **R4 — New task + list**: full-screen composer with plan-mode toggle + variants + system prompt; task list/table upgrades with editable titles + ± stats. (#386, #383, #389)
+- **R4 — New task + list**: full-screen composer with plan-mode toggle + variants; task list/table upgrades with editable titles + ± stats. (#386, #383, #389)
 - **R5 — Git view + forge seam**: structured changes/files endpoints, git actions (commit/push/branch), forge driver extraction, Changes/Files tabs, repo view rebuild, Create/View PR, open-in-editor/VS Code handoff. (#390, #385-adjacent forge gating)
 - **R6 — Remaining views + Settings**: GitHub tab (searchable dropdowns), Skills→Settings, Workflows builder, Inbox, Settings (skills/appearance/agents), notifications. (#385, #377, #384)
 - **R7 — Retirement + polish**: delete legacy `web/app.js`/`style.css`, packaging flip to `web/dist`, design-guardian in gate, iOS pass on every view, docs/screenshots refresh.
@@ -339,7 +339,7 @@ Steps are sized for autonomous runs (om-auto-create-pr / -loop, one PR per phase
 12. Review gate + variants compare on new surfaces; virtua virtualization + scroll caches; iOS pass for the thread.
 
 ### Phase R4 — New task + list
-13. `/new` full-screen composer (pickers, plan-mode toggle, variants, system prompt, bookmarklet params, drafts).
+13. `/new` full-screen composer (pickers, plan-mode toggle, variants, bookmarklet params, drafts).
 14. Plan review overlay (drag-reorder, save-as-chain) on the new surface.
 15. Task list/table: editable titles, ± stats, PR chips; header meta with context gauge.
 
