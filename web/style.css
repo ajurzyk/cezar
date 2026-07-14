@@ -1812,7 +1812,21 @@ a.bm:hover { border-color: var(--accent-line); color: var(--accent); text-decora
 #runs-table[hidden], #detail[hidden] { display: none; }
 #runs-table .rt-head { display: flex; align-items: baseline; gap: 10px; padding: 20px 24px 10px; }
 #runs-table .rt-head h1 { margin: 0; font-family: var(--serif); font-size: 21px; font-weight: 500; }
-#runs-table .rt-head .dim { font-size: 12px; }
+#runs-table .rt-tabs { display: flex; gap: 4px; }
+#runs-table .rt-tabs button {
+  background: none;
+  border: none;
+  color: var(--text3);
+  padding: 3px 8px;
+  border-radius: 99px;
+  cursor: pointer;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+#runs-table .rt-tabs button:hover { color: var(--text2); }
+#runs-table .rt-tabs button.active { color: var(--text); background: var(--panel2); }
 #runs-table .rt-scroll { flex: 1; min-height: 0; overflow: auto; padding: 0 24px 24px; }
 #runs-table .empty { padding: 40px 0; font-size: 13px; }
 #runs-table table { width: 100%; border-collapse: collapse; font-size: 12.5px; }

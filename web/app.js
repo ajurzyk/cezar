@@ -1189,6 +1189,12 @@ function bindUi() {
   // Table rows select the run like a sidebar click (#348) — links keep
   // navigating (the PR column).
   $('#runs-table').addEventListener('click', (e) => {
+    const tab = e.target.closest('button[data-rt-list]');
+    if (tab) {
+      state.listView = tab.dataset.rtList;
+      renderRunList(); // cascades into renderRunsTable() while in table mode
+      return;
+    }
     if (e.target.closest('a')) return;
     const row = e.target.closest('tr[data-id]');
     if (row) selectRun(row.dataset.id);
@@ -1864,10 +1870,23 @@ function renderRunsTable() {
   const box = $('#runs-table');
   if (!box || state.runsView !== 'table') return;
   const runs = sortedRuns();
+  // Filter tabs live on the table header (#348): Runs nav links straight to
+  // the table, so the Active/Archived selection belongs here. Same
+  // state.listView as the sidebar tabs — changing either re-renders both.
+  const all = [...state.runs.values()];
+  const archivedCount = all.filter((r) => r.archived).length;
+  const activeCount = all.length - archivedCount;
   box.innerHTML = `
     <div class="rt-head">
       <h1>Runs</h1>
-      <span class="dim">${runs.length} ${state.listView === 'archived' ? 'archived' : 'active'}</span>
+      <div class="rt-tabs">
+        <button data-rt-list="active" class="${state.listView === 'active' ? 'active' : ''}">
+          Active${activeCount ? ` ${activeCount}` : ''}
+        </button>
+        <button data-rt-list="archived" class="${state.listView === 'archived' ? 'active' : ''}">
+          Archived${archivedCount ? ` ${archivedCount}` : ''}
+        </button>
+      </div>
     </div>
     <div class="rt-scroll">${
       runs.length
