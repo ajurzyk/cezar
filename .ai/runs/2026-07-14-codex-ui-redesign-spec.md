@@ -37,14 +37,14 @@ Folded into the spec as requirements: #390 (git integration look), #389 (task li
 
 ### Phase 1: Research
 
-- [ ] 1.1 Parallel research: cezar code map, Codex desktop UX, agent event protocols (Claude/Codex/OpenCode/ACP), opencode web UI, paseo, mercato-sandboxes visuals, diff/highlighting tech
-- [ ] 1.2 Commit distilled research notes to .ai/analysis/
+- [x] 1.1 Parallel research: cezar code map, Codex desktop UX, agent event protocols (Claude/Codex/OpenCode/ACP), opencode web UI, paseo, mercato-sandboxes visuals, diff/highlighting tech — 4b804d3
+- [x] 1.2 Commit distilled research notes to .ai/analysis/ — 06fcf59
 
 ### Phase 2: Specification
 
-- [ ] 2.1 Spec skeleton with resolved decisions (.ai/specs/2026-07-14-codex-ui-redesign.md)
-- [ ] 2.2 Full spec: architecture, normalized event protocol, view-by-view UX, git GUI + forge drivers, settings, mobile-first rules, edge cases, risks
-- [ ] 2.3 Phased implementation plan (each step shippable, app always working)
+- [x] 2.1 Spec skeleton with resolved decisions (.ai/specs/2026-07-14-codex-ui-redesign.md) — 4b804d3
+- [x] 2.2 Full spec: architecture, normalized event protocol, view-by-view UX, git GUI + forge drivers, settings, mobile-first rules, edge cases, risks — 5f913fa
+- [x] 2.3 Phased implementation plan (each step shippable, app always working) — 5f913fa
 
 ### Phase 3: Mockups
 
