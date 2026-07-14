@@ -1,7 +1,7 @@
 # Run: Cockpit UI redesign — specification + mockups
 
 - Date: 2026-07-14
-- Branch: `feat/codex-ui-redesign-spec`
+- Branch: `feat/cockpit-ui-redesign-spec`
 - Base: `main`
 - Type: docs/spec (no product code changes)
 - Source brief: redesign the whole cezar cockpit UI/UX to leading-desktop-app parity using React + Vite + Tailwind + shadcn/ui, keeping 100% of current functionality. Deliverable of THIS run is the specification (`.ai/specs/2026-07-14-cockpit-ui-redesign.md`) plus HTML mockups built with shadcn styling on real cezar data, with screenshots attached to the PR — so the spec can be approved visually and then implemented autonomously.
