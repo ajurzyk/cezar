@@ -117,7 +117,7 @@ src/server/forge/
   index.ts     # resolveForge(repoInfo): remote host → driver | null
 ```
 
-- `GET /api/health` gains `forge: {kind:'github', available:boolean, reason?} | null`. The UI shows forge features (GitHub tab, Create/View PR, PR links, checks badges) only when `forge.available`; plain-git features (diffs, commit, push, branches) need only git. This formalizes today's behavior (#372) and is the extension point for GitLab — one new driver file, no UI changes.
+- `GET /api/health` gains `forge: {kind:'github', available:boolean, reason?} | null` and `capabilities: {localHandoff: boolean}`. The UI shows forge features (GitHub tab, Create/View PR, PR links, checks badges) only when `forge.available`; plain-git features (diffs, commit, push, branches) need only git. This formalizes today's behavior (#372) and is the extension point for GitLab — one new driver file, no UI changes.
 - Existing `/api/github` response shape is kept (BACKWARD_COMPATIBILITY) and marked as the GitHub driver's serialization.
 
 ### Git/session API additions
@@ -136,6 +136,15 @@ New endpoints (all zod-validated, all degrade with 409 + human reason, never HTM
 
 - **Auto-summary titles** (#389): after the first agent turn, the RunManager derives a title (first assistant sentence, capped; planner model summarization only when configured) and sets `RunRecord.titleSummary`; `title` stays the raw task. UI shows `titleSummary ?? title`, editable inline (PATCH).
 - **Diff stats in lists** (#389): RunManager computes `diffStat {adds,dels,files}` on turn-end (cheap `git diff --shortstat`) and stores it additively on RunRecord.
+
+### Deployment modes — local vs hosted
+
+cezar's default stays exactly `npx cezar-cli` in a repo: zero config, zero flags, cockpit on localhost. But the same server can run on a VPS/remote box, where "open a terminal on my machine" makes no sense. This becomes explicit:
+
+- **`CEZ_REMOTE=1`** (env flag; auto-implied when the server binds a non-loopback host) switches the server to hosted mode: `capabilities.localHandoff:false` in `/api/health`.
+- When `localHandoff` is false the UI **completely hides** (not disables) every local-machine affordance: the Terminal button, `Open in VS Code` / open-in-editor, "Open in Finder"-style actions, and the copy-resume-command hints switch to plain "resume with: `claude --resume <id>`" text (still copyable — the user runs it wherever they have the checkout).
+- Everything else (thread, git view, commit/push, PR, settings, dictation) is location-independent and stays.
+- Server-side, the `open-in-cli`/`open-in-editor` endpoints return 409 with a reason in hosted mode — defense in depth, the UI never shows them anyway.
 
 ### Settings
 
@@ -233,6 +242,7 @@ The degradation table is the product (README promise: everything degrades):
 | Backend CLI missing | Runner pill hides it; model pill collapses to auto (unchanged) |
 | `web/dist` missing (dev) | Server serves a plain page: "run `npm run dev:web` or `npm run build:web`" |
 | Web Speech unavailable (Firefox, some WebViews) | Mic hidden; tooltip in composer overflow explains |
+| Hosted mode (`CEZ_REMOTE=1` or non-loopback bind) | Terminal / VS Code / open-in-editor hidden entirely; resume hints render as copyable commands; endpoints 409 |
 | SSE drops / phone sleeps | Reconnect → authoritative refetch + seq-dedup reconcile; thread restores scroll + open cards |
 | Huge diffs / files | >500 KB files use the virtualized diff path; >400 KB raw endpoints stay capped; "Load full diff" gate beyond caps |
 | Unknown v2 event type / unknown tool | Generic tool card with heuristic label; never raw JSON, never a crash |
@@ -288,7 +298,7 @@ Steps are sized for autonomous runs (om-auto-create-pr / -loop, one PR per phase
 15. Task list/table: editable titles, ± stats, PR chips; header meta with context gauge.
 
 ### Phase R5 — Git view + forge
-16. Server: `/changes`, `/files`, `git/commit|push`, `/api/repo/changes`, `/api/repo/branch`; forge driver extraction + health `forge`; tests.
+16. Server: `/changes`, `/files`, `git/commit|push`, `/api/repo/changes`, `/api/repo/branch`; forge driver extraction + health `forge` + `capabilities.localHandoff` (`CEZ_REMOTE`/non-loopback detection); tests.
 17. `<Diff>` facade on `@pierre/diffs` (fallback impl behind same props); Changes tab (tree, viewer, action policy bar); Files tab.
 18. Repo view rebuild; Create PR→View PR flow; open-in-editor endpoint + buttons; mobile diff mode.
 
