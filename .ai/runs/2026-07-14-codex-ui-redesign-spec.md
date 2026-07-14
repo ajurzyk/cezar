@@ -60,4 +60,4 @@ PR: #393
 - [x] 4.1 Validation gate (npm run typecheck, npm run build) + self-review (om-code-review lens) — 587a806
 - [x] 4.2 Open PR with screenshots embedded, labels normalized — PR #393
 - [x] 4.3 om-auto-review-pr autofix loop until clean — 587a806
-- [ ] 4.4 Summary comment + cleanup
+- [x] 4.4 Summary comment + cleanup — PR #393 summary posted
