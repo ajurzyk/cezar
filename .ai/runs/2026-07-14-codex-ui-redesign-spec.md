@@ -18,7 +18,7 @@ Produce an implementation-ready, phased specification for the full UI redesign, 
 
 ## Scope
 
-- In: research notes (`.ai/analysis/`), the spec, HTML mockups (under `docs/mockups/`), screenshots (committed + attached to PR), pipeline bootstrap files (`.ai/agentic.config.json`, tracker descriptor, SDLC.md, AGENTS.md, CODE_REVIEW.md, BACKWARD_COMPATIBILITY.md — generated this run because the repo had no pipeline config).
+- In: research notes (`.ai/analysis/`), the spec, HTML mockups (under `docs/mockups/`), screenshots (committed + attached to PR), no pipeline-file changes vs origin/main (the setup step regenerated them before discovering PR #343 had already bootstrapped the pipeline on origin/main; the branch restores the origin versions verbatim).
 - Non-goals: NO changes to product code (`src/`, `web/`) in this run; no dependency changes; implementation happens in follow-up runs driven by the spec's Implementation Plan.
 
 ## Related issues
@@ -29,7 +29,7 @@ Folded into the spec as requirements: #390 (git integration look), #389 (task li
 
 - Research sources (Codex desktop, external repos) are external; findings recorded to `.ai/analysis/` so the spec stays reviewable offline.
 - Mockups are static HTML approximations of the future React app — close enough for visual approval, not pixel-contracts.
-- The repo had no `.ai/agentic.config.json`; it was bootstrapped with `om-setup-agent-pipeline --defaults` and ships in this PR. Validation gate = `npm run typecheck` + `npm run build` (docs-only run: gate proves the repo stays healthy).
+- The local checkout was behind origin/main, which hid PR #343's existing pipeline bootstrap; the run initially regenerated the process docs and later restored the origin/main versions (commit history keeps both). Validation gate = `npm run typecheck` + `npm run build` (docs-only run: gate proves the repo stays healthy).
 
 ## Progress
 
