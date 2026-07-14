@@ -87,4 +87,4 @@ None (`--skill-url` not provided).
 ### Phase 2: Validation and PR
 
 - [x] 2.1 Docs-only validation gate (typecheck + build green)
-- [ ] 2.2 Self-review, PR, labels, review loop, summary comment
+- [x] 2.2 Self-review, PR #388 (draft), labels `documentation·review·risk-low·skip-qa`; review loop on demand via `/om-auto-review-pr 388`
