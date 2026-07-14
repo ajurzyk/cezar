@@ -81,10 +81,10 @@ None (`--skill-url` not provided).
 
 ### Phase 1: README edits
 
-- [x] 1.1 Add tagline and update header/intro phrasing
-- [x] 1.2 Add multi-backend section and update examples/tables
+- [x] 1.1 Add tagline and update header/intro phrasing — 4e9b178
+- [x] 1.2 Add multi-backend section and update examples/tables — 4e9b178
 
 ### Phase 2: Validation and PR
 
-- [ ] 2.1 Docs-only validation gate
+- [x] 2.1 Docs-only validation gate (typecheck + build green)
 - [ ] 2.2 Self-review, PR, labels, review loop, summary comment
