@@ -48,10 +48,10 @@ Folded into the spec as requirements: #390 (git integration look), #389 (task li
 
 ### Phase 3: Mockups
 
-- [ ] 3.1 Mockup scaffold: shared shadcn-style tokens/CSS + real cezar data extracted from the live app
-- [ ] 3.2 Mockups: chat/run thread (tool calls, todo/plan, review gate), new-task full-screen composer
-- [ ] 3.3 Mockups: git/changes/files view, session task list, settings (skills), mobile variants
-- [ ] 3.4 Screenshots (desktop + iPhone viewport) committed under docs/mockups/screenshots/
+- [x] 3.1 Mockup scaffold: shared shadcn-style tokens/CSS + real cezar data extracted from the live app — f1091f3
+- [x] 3.2 Mockups: chat/run thread (tool calls, todo/plan, review gate), new-task full-screen composer — f1091f3
+- [x] 3.3 Mockups: git/changes/files view, session task list, settings (skills), mobile variants — f1091f3
+- [x] 3.4 Screenshots (desktop + iPhone viewport) committed under docs/mockups/screenshots/ — f1091f3
 
 ### Phase 4: Ship
 
