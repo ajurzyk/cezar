@@ -108,6 +108,24 @@ type UiItem =
 - The **tool display model** (title/verb/icon per tool name + `toolKind`) lives in `web/src/protocol/` next to the types — computed once, used by thread, activity groups and notifications (paseo's pattern).
 - **System prompt**: `AgentRunSpec` already carries `systemPrompt` per backend (`--append-system-prompt` for claude; codex and opencode prepend it to the first user message). v2 adds it end-to-end: `POST /api/runs` accepts `systemPrompt?`, a Settings-level default (`config.json: systemPrompt?`) is merged, and the composer's advanced row exposes it. Works with every backend because it rides the existing seam — coding-agent-agnostic by construction.
 
+### Backend parity requirement (hard rule)
+
+Every UI capability in this spec MUST work with **all coding agents cezar supports — claude, codex, and opencode — from day one of the feature**, and with any backend added later through the same seam. No view may be built against one backend's quirks: the UI consumes only protocol-v2 events, and each runner owes the full mapping. Parity matrix (source events per backend):
+
+| UI capability | claude | codex | opencode |
+|---|---|---|---|
+| Plan/todo dock (#382) | `TodoWrite` input | `todoList`/`plan` items | `todowrite` tool |
+| Tool cards + statuses (#381) | `tool_use`/`tool_result` | typed items + status | tool parts + state |
+| Reasoning line | `thinking` blocks | `reasoning` items/deltas | `reasoning` parts |
+| Live command output | — (result only; card fills on completion) | `outputDelta` | running-state `metadata` |
+| Structured diffs in edit cards | `Edit`/`Write` input | `fileChange.changes` | `patch` parts |
+| Sub-agent nesting | `parent_tool_use_id` | review-mode items | `subtask` parts |
+| Usage/context gauge | `usage` + `total_cost_usd` | `tokenUsage` (no USD) | `tokens` + `cost` |
+| System prompt | `--append-system-prompt` | prepended first message | prepended first message |
+| Plan mode / turn end / stop reasons | `result` | `turn/completed|failed` | `session.idle` |
+
+Where a backend genuinely lacks a signal (e.g. claude has no live command output), the UI degrades per-capability (the card fills when the result arrives) — never per-backend (no "works best with X" features). **Acceptance per implementation step: the golden-fixture suite passes for all three backends**, and the phase's QA pass exercises each backend at least once (CEZ_DRY_RUN mock counts for claude in CI).
+
 ### Testing strategy (mandatory — every step ships unit tests)
 
 The repo has no test runner today; R1 step 1 introduces **vitest** (server: node environment; web: happy-dom + React Testing Library) and adds `npm test` to `validation.commands` in `.ai/agentic.config.json`. From then on, **no implementation step of this spec merges without unit tests for what it built**:
