@@ -183,7 +183,7 @@ New nav tab, registry-driven so sections grow without layout changes:
 Deep-linkable, pasteable, refresh-safe navigation (react-router; the Hono server serves `index.html` for every non-`/api` GET so any URL cold-loads):
 
 ```
-/                      → tasks (list or table per saved pref)
+/                      → tasks overview — the full-width table (PR #392 behavior)
 /new                   → new task (existing ?skill=&ref=&auto=&key= bookmarklet params unchanged)
 /tasks/:id             → thread   /tasks/:id/changes  /tasks/:id/files   (tab in the path)
 /compare/:groupId      → variants compare
@@ -196,7 +196,7 @@ Selected run, active tab, review-gate state — all restorable from the URL; sha
 
 ### App shell & navigation
 
-- **Desktop**: shadcn sidebar (icon-collapsible) — brand lockup + repo/branch chip (live-updating via SSE health refresh, fixes #369), **"New task" primary button** (replaces the embedded composer, #386), nav (Tasks, Inbox·badge, Git, GitHub·hidden-when-no-forge, Skills, Workflows, Settings), then the task quick-list (grouped: Needs you / Working / Recent / Archived; variant groups collapse with per-variant dots; `⌘K` palette for everything). Footer: env chips (compact LED row with popover detail) + version chip + theme toggle as a proper icon button (fixes #378).
+- **Desktop**: shadcn sidebar (icon-collapsible) — brand lockup + repo/branch chip (live-updating via SSE health refresh, fixes #369), **"New task" primary button** (replaces the embedded composer, #386), nav (Tasks, Inbox·badge, Git, GitHub·hidden-when-no-forge, Skills, Workflows, Settings), then the task quick-list (grouped: Needs you / Working / Recent / Archived; variant groups collapse with per-variant dots; `⌘K` palette for everything). Footer: **Tools dropdown** replacing the env-chip row — one compact trigger (aggregate status dot + "Tools"; hover tooltip shows the cezar version and any tool needing attention) opening a menu that lists every installed/configured tool (claude, codex, opencode, gh, git, …) with its status dot and **version number**, a per-tool setup link when unavailable (the hint from `/api/health` checks, e.g. "install gh and run `gh auth login`"), and a footer row with a **cog icon → Settings → Agents**. Plus the cezar version chip (update pulse, #368) and the theme toggle as a proper icon button (fixes #378).
 - **Mobile (<md)**: bottom-sheet-first. Sidebar becomes an overlay drawer (one-position state machine, backdrop, swipe); a slim top bar (menu, title, status dot, kebab); the composer is a docked bottom bar with safe-area padding. Layout is a `100dvh` grid (`auto 1fr auto`), only the thread scrolls, visualViewport keyboard variable lifts the composer, all inputs ≥16px, touch targets ≥44pt.
 - Every list keeps scroll/selection across updates (React keyed rendering fixes #384 by construction).
 
@@ -232,7 +232,8 @@ Tabs sit in the run detail next to the thread: **Session | Changes | Files** (mo
 
 ### Task list & table (#389)
 
-- List rows: status dot, editable auto-summary title, `± stat` chip, PR chip, age/queue position. Table view keeps live CPU/Mem/Procs columns and gains Title (editable), ±, and branch columns; row click → detail; view toggle persisted.
+- The **full-width table is the Tasks overview and home** (`/`): the Tasks nav item always lands here — also when already active ("back to overview") — per PR #392, which removed the list/table toggle. **Active/Archived filter tabs live in the table header** and share state with the sidebar quick-list tabs. Columns keep live CPU/Mem/Procs and gain editable Title (auto-summary), ±, and branch; clicking a row (or a sidebar quick-list item) opens `/tasks/:id` with Tasks still active.
+- Sidebar quick-list rows: status dot, editable auto-summary title, `± stat` chip, PR chip, age/queue position.
 
 ### GitHub tab (forge tab)
 
