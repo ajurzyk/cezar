@@ -95,11 +95,11 @@ active), and give the table header its own Active/Archived filter tabs.
 
 ### Phase 2: Table-header Active/Archived tabs
 
-- [ ] 2.1 Render Active/Archived tabs in the table header
-- [ ] 2.2 Handle table-header tab clicks and sync with sidebar
-- [ ] 2.3 Style the table-header tabs
+- [x] 2.1 Render Active/Archived tabs in the table header — 938057d
+- [x] 2.2 Handle table-header tab clicks and sync with sidebar — 938057d
+- [x] 2.3 Style the table-header tabs — 938057d
 
 ### Phase 3: Validation
 
-- [ ] 3.1 Full validation gate (typecheck, build, node --check)
-- [ ] 3.2 Manual CEZ_DRY_RUN smoke pass
+- [x] 3.1 Full validation gate (typecheck, build, node --check) — green
+- [x] 3.2 Manual CEZ_DRY_RUN smoke pass — server boots, serves new app.js (3× data-rt-list, 0× toggle-view)
