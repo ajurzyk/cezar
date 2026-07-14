@@ -33,6 +33,8 @@ Folded into the spec as requirements: #390 (git integration look), #389 (task li
 
 ## Progress
 
+PR: #393
+
 > Convention: `- [ ]` pending, `- [x]` done. Append ` — <commit sha>` when a step lands. Do not rename step titles.
 
 ### Phase 1: Research
@@ -55,7 +57,7 @@ Folded into the spec as requirements: #390 (git integration look), #389 (task li
 
 ### Phase 4: Ship
 
-- [ ] 4.1 Validation gate (npm run typecheck, npm run build) + self-review (om-code-review lens)
-- [ ] 4.2 Open PR with screenshots embedded, labels normalized
-- [ ] 4.3 om-auto-review-pr autofix loop until clean
+- [x] 4.1 Validation gate (npm run typecheck, npm run build) + self-review (om-code-review lens) — 587a806
+- [x] 4.2 Open PR with screenshots embedded, labels normalized — PR #393
+- [x] 4.3 om-auto-review-pr autofix loop until clean — 587a806
 - [ ] 4.4 Summary comment + cleanup
