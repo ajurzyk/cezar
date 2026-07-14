@@ -107,6 +107,10 @@ export interface SessionOptions {
 export interface AgentSession {
   /** Resolves when the backend process exits — the session is fully over. */
   result: Promise<AgentRunResult>;
+  /** OS pid of the spawned backend process — the root of the run's process
+   *  tree (agents spawn Bash children under it). Absent when the spawn
+   *  failed before a pid existed. Feeds live resource telemetry (#348). */
+  readonly pid?: number;
   /** Write a user message into the live session. False when it is closed. */
   sendMessage(content: ContentBlock[]): boolean;
   /** Graceful close: end input, then a SIGTERM→SIGKILL watchdog. */

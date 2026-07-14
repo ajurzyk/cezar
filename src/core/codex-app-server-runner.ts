@@ -201,6 +201,10 @@ class CodexSession implements AgentSession {
     return this.stdinOpen;
   }
 
+  get pid(): number | undefined {
+    return this.child.pid;
+  }
+
   sendMessage(content: ContentBlock[]): boolean {
     if (!this.stdinOpen) return false;
     if (this.autoEndTimer) {

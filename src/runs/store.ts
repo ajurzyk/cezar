@@ -57,6 +57,11 @@ const runRecordSchema = z.object({
   groupId: z.string().optional(),
   /** Variant letter within the group — 'A' | 'B' | 'C' (kept as a string). */
   variant: z.string().optional(),
+  /** Peak resident memory (bytes) / process count observed across the run's
+   *  agent process trees (#348) — written when a session's telemetry ends.
+   *  Optional: old runs.json files and `ps`-less platforms have neither. */
+  peakRssBytes: z.number().optional(),
+  peakProcCount: z.number().optional(),
   archived: z.boolean().default(false),
   archivedAt: z.string().optional(),
   currentStepId: z.string().optional(),
