@@ -4,3 +4,12 @@ dist/
 
 # cezar runtime state in this repo (runs, worktrees, launch-key)
 .ai/cezar/
+
+# locally installed agent skills (per-machine installs, not repo content)
+.agents/
+skills-lock.json
+
+# agent-pipeline scratch state (worktrees, per-run QA artifacts)
+.ai/tmp/
+.ai/qa/artifacts_*/
+.ai/qa/test-env.json
