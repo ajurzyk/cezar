@@ -344,8 +344,11 @@ git-ignored automatically; your workflows and skills stay committable.
 ```bash
 npm install
 npm run dev          # tsx src/index.ts — the cockpit, live-reloaded
-npm run build        # tsc → dist/
 npm run typecheck    # tsc --noEmit
+npm run test:unit    # fast core-module tests
+npm run build        # tsc → dist/
+npm run test:e2e     # pack/install and exercise the built CLI
+npm test             # unit tests + build + E2E
 ```
 
 The stack is deliberately small: **TypeScript** (strict, ESM), **Hono** + SSE for

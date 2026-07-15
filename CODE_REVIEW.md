@@ -1,6 +1,6 @@
 # Code review rules
 
-How to review a diff in this repository. Applies to humans and to the `om-code-review` skill alike. The validation gate (`npm run typecheck` && `npm run build`) must be green before a review verdict is meaningful — there is no test suite, so the review itself is the main correctness gate.
+How to review a diff in this repository. Applies to humans and to the `om-code-review` skill alike. The full validation gate in `.ai/agentic.config.json` must be green before a review verdict is meaningful: typecheck, unit tests, build, packaged CLI E2E, and a release-tarball dry run.
 
 ## Review priorities (in order)
 
