@@ -1,0 +1,151 @@
+import { describe, expect, it } from 'vitest'
+
+import type { RunRecord, RunStatus, StepState } from '@/api/types'
+
+import { finishTitle, isRunActive, lastSessionId, queuePosition, resumeCommand, resumeHint, runActionFlags } from './run-actions'
+
+const step = (extra: Partial<StepState> = {}): StepState => ({
+  id: 'task',
+  name: 'Do the task',
+  kind: 'agent',
+  status: 'done',
+  iterations: 1,
+  tokensUsed: 0,
+  ...extra,
+})
+
+const run = (status: RunStatus, extra: Partial<RunRecord> = {}): RunRecord => ({
+  id: 'r1',
+  title: 'Do the thing',
+  workflow: 'quick-task',
+  task: 'Do the thing',
+  status,
+  createdAt: '2026-07-14T12:00:00.000Z',
+  tokensUsed: 0,
+  archived: false,
+  steps: [step({ sessionId: 'sess-1' })],
+  ...extra,
+})
+
+describe('runActionFlags — the visibility matrix, all 7 statuses × archived', () => {
+  // The legacy header's rules verbatim (web/app.js `updateDetail`):
+  //   active(running|queued|waiting) → cancel, no delete/archive/continue/terminal;
+  //   finish only at the waiting/review gates; continue+terminal need a closed run WITH a
+  //   session; notes always. `archived` flips nothing here — it only relabels Archive.
+  const matrix: Array<{ status: RunStatus; expected: Omit<ReturnType<typeof runActionFlags>, 'notes'> }> = [
+    { status: 'queued', expected: { finish: false, continueRun: false, terminal: false, archive: false, cancel: true, deleteRun: false } },
+    { status: 'running', expected: { finish: false, continueRun: false, terminal: false, archive: false, cancel: true, deleteRun: false } },
+    { status: 'waiting', expected: { finish: true, continueRun: false, terminal: false, archive: false, cancel: true, deleteRun: false } },
+    { status: 'review', expected: { finish: true, continueRun: true, terminal: true, archive: true, cancel: false, deleteRun: true } },
+    { status: 'done', expected: { finish: false, continueRun: true, terminal: true, archive: true, cancel: false, deleteRun: true } },
+    { status: 'failed', expected: { finish: false, continueRun: true, terminal: true, archive: true, cancel: false, deleteRun: true } },
+    { status: 'cancelled', expected: { finish: false, continueRun: true, terminal: true, archive: true, cancel: false, deleteRun: true } },
+  ]
+
+  it.each(matrix)('$status (live)', ({ status, expected }) => {
+    expect(runActionFlags(run(status))).toEqual({ ...expected, notes: true })
+  })
+
+  it.each(matrix)('$status (archived — same flags, only the Archive label flips)', ({ status, expected }) => {
+    expect(runActionFlags(run(status, { archived: true }))).toEqual({ ...expected, notes: true })
+  })
+
+  it('cancel and delete are mutually exclusive in every cell', () => {
+    for (const { status } of matrix) {
+      for (const archived of [false, true]) {
+        const flags = runActionFlags(run(status, { archived }))
+        expect(flags.cancel && flags.deleteRun).toBe(false)
+      }
+    }
+  })
+
+  it('continue/terminal need a session — a closed run without one offers neither', () => {
+    const flags = runActionFlags(run('failed', { steps: [step()] }))
+    expect(flags.continueRun).toBe(false)
+    expect(flags.terminal).toBe(false)
+    expect(flags.deleteRun).toBe(true)
+  })
+})
+
+describe('isRunActive', () => {
+  it.each([
+    ['queued', true],
+    ['running', true],
+    ['waiting', true],
+    ['review', false],
+    ['done', false],
+    ['failed', false],
+    ['cancelled', false],
+  ] as Array<[RunStatus, boolean]>)('%s → %s', (status, expected) => {
+    expect(isRunActive(status)).toBe(expected)
+  })
+})
+
+describe('lastSessionId', () => {
+  it('takes the LATEST step that carries a session, not the first', () => {
+    const record = run('done', {
+      steps: [step({ id: 'a', sessionId: 'old' }), step({ id: 'b' }), step({ id: 'c', sessionId: 'new' })],
+    })
+    expect(lastSessionId(record)).toBe('new')
+  })
+
+  it('is undefined when no step ever opened a session', () => {
+    expect(lastSessionId(run('done', { steps: [step()] }))).toBeUndefined()
+  })
+})
+
+describe('resumeCommand — per backend, mirroring the server', () => {
+  it.each([
+    ['claude', 'claude --resume s1'],
+    [undefined, 'claude --resume s1'], // legacy records predate the runner choice
+    ['codex', 'codex resume s1'],
+    ['opencode', 'opencode --session s1'],
+  ] as Array<[RunRecord['runner'], string]>)('%s → %s', (runner, expected) => {
+    expect(resumeCommand(runner, 's1')).toBe(expected)
+  })
+})
+
+describe('resumeHint', () => {
+  it('cd-prefixes into the worktree when the run has one', () => {
+    expect(resumeHint(run('failed', { worktreePath: '/tmp/wt', runner: 'codex' }))).toBe(
+      'cd /tmp/wt && codex resume sess-1',
+    )
+  })
+
+  it('is just the resume command for a run without a worktree', () => {
+    expect(resumeHint(run('done'))).toBe('claude --resume sess-1')
+  })
+
+  it('is absent while the engine still owns the run, and absent without a session', () => {
+    expect(resumeHint(run('waiting'))).toBeUndefined()
+    expect(resumeHint(run('done', { steps: [step()] }))).toBeUndefined()
+  })
+})
+
+describe('finishTitle', () => {
+  it('review reads as accepting, everything else as closing the session', () => {
+    expect(finishTitle('review')).toBe('Accept the changes without a PR')
+    expect(finishTitle('waiting')).toBe('Close the session')
+  })
+})
+
+describe('queuePosition — the legacy FIFO math (web/app.js), 1-based among queued unarchived runs', () => {
+  const queued = (id: string, createdAt: string, extra: Partial<RunRecord> = {}) =>
+    run('queued', { id, createdAt, ...extra })
+
+  it('orders by createdAt, skipping non-queued and archived runs', () => {
+    const runs = [
+      run('running', { id: 'busy' }),
+      queued('second', '2026-07-14T12:05:00.000Z'),
+      queued('first', '2026-07-14T12:01:00.000Z'),
+      queued('parked', '2026-07-14T12:00:00.000Z', { archived: true }),
+    ]
+    expect(queuePosition(runs, 'first')).toBe(1)
+    expect(queuePosition(runs, 'second')).toBe(2)
+  })
+
+  it('is undefined for a run the queue does not hold (not queued, or list not loaded yet)', () => {
+    expect(queuePosition([run('running', { id: 'busy' })], 'busy')).toBeUndefined()
+    expect(queuePosition([], 'anything')).toBeUndefined()
+  })
+})

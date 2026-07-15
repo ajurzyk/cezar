@@ -16,6 +16,14 @@ import type {
 export type { AgentSession, SessionOptions } from './agent-runner.js';
 import { costWeightedTokens, type RawUsage } from './usage.js';
 import { readNdjson } from './ndjson.js';
+import {
+  claudeTurnStarted,
+  createClaudeUiState,
+  mapClaudeMessage,
+  stringifyToolResultContent,
+  toolResultImageBlocks,
+  type ClaudeUiMapping,
+} from './claude-ui-mapper.js';
 
 /** Default wall-clock cap for a single run before SIGTERM → SIGKILL.
  *  Interactive sessions pass `timeoutMs: 0` to disable it entirely. */
@@ -91,6 +99,23 @@ export class ClaudeCliRunner implements AgentRunner {
     let eofTermTimer: NodeJS.Timeout | undefined;
     let eofKillTimer: NodeJS.Timeout | undefined;
 
+    // Protocol v2 emission — additive alongside v1 (`onEvent` keeps flowing
+    // byte-identical); the channel is `opts.onUiEvent` (RunManager wiring
+    // lands in R2 step 2.1). The mapper never throws, but a defect in it
+    // must still never disturb the v1 stream — hence the belt-and-braces try.
+    let uiState = createClaudeUiState({ fallbackSessionId: spec.sessionId });
+    const emitUi = (map: (state: typeof uiState) => ClaudeUiMapping): void => {
+      try {
+        const mapped = map(uiState);
+        uiState = mapped.state;
+        if (opts.onUiEvent) {
+          for (const event of mapped.events) opts.onUiEvent(event);
+        }
+      } catch {
+        // v2 mapping is best-effort; v1 consumers stay unaffected.
+      }
+    };
+
     const sendMessage = (content: ContentBlock[]): boolean => {
       if (!stdinOpen) return false;
       // A follow-up inside the reopen window cancels the scheduled close.
@@ -105,6 +130,8 @@ export class ClaudeCliRunner implements AgentRunner {
       });
       try {
         child.stdin.write(`${line}\n`);
+        // Each user message written to stdin begins a turn (§7.1).
+        emitUi(claudeTurnStarted);
         return true;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -183,6 +210,8 @@ export class ClaudeCliRunner implements AgentRunner {
             onEvent?.({ type: 'note', message: `claude: skipped unparseable stream line: ${truncate(line)}` });
             continue;
           }
+
+          emitUi((state) => mapClaudeMessage(msg, state));
 
           let delta = 0;
           try {
@@ -271,7 +300,7 @@ export class ClaudeCliRunner implements AgentRunner {
  * from stdin; `--output-format stream-json --verbose` gives per-event NDJSON;
  * `--permission-mode acceptEdits` lets edits through without a TTY prompt.
  */
-function buildClaudeArgs(spec: AgentRunSpec): string[] {
+export function buildClaudeArgs(spec: AgentRunSpec): string[] {
   const args: string[] = [
     '--input-format',
     'stream-json',
@@ -384,12 +413,12 @@ function handleClaudeMessage(
         ctx.onEvent?.({
           type: 'tool-result',
           toolCallId: b.tool_use_id,
-          result: stringifyContent(b.content),
+          result: stringifyToolResultContent(b.content),
           isError: b.is_error === true,
         });
         // Screenshots and other images inside the result get their own
         // events — the text path above renders them as a placeholder.
-        for (const img of imageBlocks(b.content)) {
+        for (const img of toolResultImageBlocks(b.content)) {
           ctx.onEvent?.({ type: 'image', mediaType: img.media_type, data: img.data });
         }
       }
@@ -417,41 +446,7 @@ function handleClaudeMessage(
   return 0;
 }
 
-function stringifyContent(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((c) => {
-        const b = c as { type?: string; text?: string };
-        if (b.type === 'text' && typeof b.text === 'string') return b.text;
-        if (b.type === 'image') return '[screenshot]'; // emitted as its own image event
-        try {
-          return JSON.stringify(b);
-        } catch {
-          return String(b);
-        }
-      })
-      .join('\n');
-  }
-  try {
-    return JSON.stringify(content);
-  } catch {
-    return String(content);
-  }
-}
-
-/** base64 image blocks inside a tool_result's content, if any. */
-function imageBlocks(content: unknown): Array<{ media_type: string; data: string }> {
-  if (!Array.isArray(content)) return [];
-  const out: Array<{ media_type: string; data: string }> = [];
-  for (const c of content) {
-    const b = c as { type?: string; source?: { type?: string; media_type?: string; data?: string } };
-    if (b.type === 'image' && b.source?.type === 'base64' && b.source.media_type && b.source.data) {
-      out.push({ media_type: b.source.media_type, data: b.source.data });
-    }
-  }
-  return out;
-}
+// stringify/image helpers moved to claude-ui-mapper.ts (shared by v1 and v2).
 
 // ---- subprocess plumbing --------------------------------------------------
 

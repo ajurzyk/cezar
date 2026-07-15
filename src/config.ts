@@ -25,6 +25,13 @@ const configSchema = z.object({
   /** How many tasks may run at once (spec 006). Non-git dirs always run 1. */
   maxParallel: z.number().int().min(1).max(16).default(2),
   /**
+   * Per-task memory ceiling in MiB (whole process tree). When a running task's
+   * RSS crosses this the engine pauses it with a warning and lets the queue
+   * advance (#memory-guard). 0 / unset = no limit. `.catch(undefined)` keeps
+   * the key additive-safe: a bad value degrades to "no limit".
+   */
+  memoryLimitMb: z.number().int().min(0).max(1_048_576).optional().catch(undefined),
+  /**
    * Which agent backend a task uses unless overridden per task (GUI) or per
    * step (workflow). The GUI only offers runners actually installed; this is
    * the preselected default. Also the runner the chain planner uses.
@@ -37,6 +44,30 @@ const configSchema = z.object({
    * Unset = the branch currently checked out. Settable from the Repo tab.
    */
   baseBranch: z.string().trim().min(1).optional(),
+  /**
+   * Default extra system prompt applied to every run's agent steps (claude:
+   * `--append-system-prompt`; codex/opencode: prepended to the opening user
+   * message — the AgentRunSpec seam handles the per-backend delivery).
+   * Settings is the single edit place; `POST /api/runs` can override it per
+   * run (`systemPrompt`). `.catch(undefined)` keeps the key additive-safe: a
+   * bad value degrades to unset without discarding the rest of the config.
+   */
+  systemPrompt: z.string().trim().min(1).max(20_000).optional().catch(undefined),
+  /**
+   * Per-runner default model preset (Settings → Agents, redesign R6 1.5): the
+   * model id the composer preselects for that runner. Missing = auto (the
+   * runner decides). A capability (`model`), never a vendor config format.
+   * `.catch(undefined)` keeps the key additive-safe like `systemPrompt`: a
+   * bad value degrades to unset without discarding the rest of the config.
+   */
+  defaultModels: z
+    .object({
+      claude: z.string().trim().min(1).max(200).optional(),
+      codex: z.string().trim().min(1).max(200).optional(),
+      opencode: z.string().trim().min(1).max(200).optional(),
+    })
+    .optional()
+    .catch(undefined),
 });
 
 export type CezConfig = z.infer<typeof configSchema>;

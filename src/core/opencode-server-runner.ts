@@ -8,7 +8,16 @@ import type {
   ContentBlock,
 } from './agent-runner.js';
 import type { AgentSession, SessionOptions } from './agent-runner.js';
+import { prependSystemPrompt } from './agent-runner.js';
 import { AUTO_END_DELAY_MS, DEFAULT_RUN_TIMEOUT_MS } from './claude-cli-runner.js';
+import {
+  createOpencodeUiState,
+  mapOpencodeEvent,
+  opencodeSessionStarted,
+  opencodeTurnStarted,
+  type OpencodeUiMapperState,
+  type OpencodeUiMapping,
+} from './opencode-ui-mapper.js';
 
 export interface OpencodeRunnerOptions {
   /** Override the binary name/path; defaults to `opencode` on PATH. */
@@ -85,6 +94,11 @@ class OpencodeSession implements AgentSession {
   private tokensUsed = 0;
   private lastCost = 0;
   private turnInFlight = false;
+  /** Protocol v2 emission — additive alongside v1 (`onEvent` keeps flowing
+   *  byte-identical); the channel is `opts.onUiEvent` (RunManager wiring
+   *  lands in R2 step 2.1). Unlike v1's HTTP-response-synthesized turn-end,
+   *  v2 takes its `turn.completed` from the wire `session.idle`. */
+  private uiState: OpencodeUiMapperState = createOpencodeUiState();
   private autoEndTimer: NodeJS.Timeout | undefined;
   private spawnFailed: Error | null = null;
   private timedOut = false;
@@ -259,18 +273,24 @@ class OpencodeSession implements AgentSession {
     this.sessionId = stringField(created, 'id');
     if (!this.sessionId) throw new Error('opencode did not return a session id');
     this.emit({ type: 'session', sessionId: this.sessionId });
+    const sessionId = this.sessionId;
+    this.emitUi((state) => opencodeSessionStarted(sessionId, state));
 
-    void this.consumeEvents();
+    // The SSE subscription must be LIVE before the first prompt posts —
+    // events the server emits while the POST is in flight would otherwise be
+    // lost (a race this await closes; the bundled mock made it visible).
+    await this.consumeEvents();
 
-    const first = this.spec.systemPrompt
-      ? `${this.spec.systemPrompt}\n\n---\n\n${this.spec.userPrompt}`
-      : this.spec.userPrompt;
+    const first = prependSystemPrompt(this.spec.systemPrompt, this.spec.userPrompt);
     await this.prompt(first);
   }
 
   private async prompt(text: string): Promise<void> {
     if (!this.sessionId) return;
     this.turnInFlight = true;
+    // v2 turn boundary — the prompt POST is the turn start (§7.1); the end
+    // comes from the SSE `session.idle`, never from the HTTP response below.
+    this.emitUi(opencodeTurnStarted);
     const body: Record<string, unknown> = { parts: [{ type: 'text', text }] };
     const model = parseModel(this.spec.model);
     if (model) body.model = model;
@@ -289,6 +309,9 @@ class OpencodeSession implements AgentSession {
 
   // ---- SSE stream ---------------------------------------------------------
 
+  /** Resolves once the SSE stream is CONNECTED (headers in) — the frames are
+   *  then drained in the background. Callers await the connection so no
+   *  event emitted after this resolves can be missed. */
   private async consumeEvents(): Promise<void> {
     if (!this.baseUrl) return;
     let res: Response;
@@ -301,7 +324,10 @@ class OpencodeSession implements AgentSession {
       return; // aborted or server gone — the turn response still carries results
     }
     if (!res.body) return;
-    const reader = res.body.getReader();
+    void this.readEvents(res.body.getReader());
+  }
+
+  private async readEvents(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
     const decoder = new TextDecoder();
     let buffer = '';
     try {
@@ -333,6 +359,7 @@ class OpencodeSession implements AgentSession {
     } catch {
       return;
     }
+    this.emitUi((state) => mapOpencodeEvent(evt, state));
     this.handleEvent(evt);
   }
 
@@ -437,6 +464,20 @@ class OpencodeSession implements AgentSession {
 
   private emit(event: AgentEvent): void {
     this.onEvent?.(event);
+  }
+
+  /** The mapper never throws, but a defect in it must still never disturb
+   *  the v1 stream — hence the belt-and-braces try. */
+  private emitUi(map: (state: OpencodeUiMapperState) => OpencodeUiMapping): void {
+    try {
+      const mapped = map(this.uiState);
+      this.uiState = mapped.state;
+      if (this.opts.onUiEvent) {
+        for (const event of mapped.events) this.opts.onUiEvent(event);
+      }
+    } catch {
+      // v2 mapping is best-effort; v1 consumers stay unaffected.
+    }
   }
 }
 

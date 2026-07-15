@@ -180,7 +180,8 @@ cezar's default stays exactly `npx cezar-cli` in a repo: zero config, zero flags
 
 New nav tab, registry-driven so sections grow without layout changes:
 
-- **Skills** (now): the current skills catalog + refresh + bookmarklet panel move here, with project-first ordering (#377).
+- **Skills** (now): the current skills catalog + refresh move here, with project-first ordering (#377).
+- **Bookmarklets** (now): the generic launcher and the available per-skill bookmarklets get a dedicated, discoverable Settings subpage; the former Skills deep link remains compatible.
 - **Appearance** (now): theme light/dark/system, accent choice (lime default), UI density. Persisted in `ui-state.json` (additive keys).
 - **Agents** (now): default runner, per-runner model presets, **the system prompt** (the single place it is edited), base branch — today's scattered `PUT /api/config` knobs in one place. Coding-agent-agnostic: sections describe capabilities (`runner`, `model`, `system prompt`), never vendor-specific config formats.
 - **MCP, notifications, keyboard** (later): placeholder sections listed in the registry but hidden until implemented.
@@ -208,7 +209,7 @@ Deep-linkable, pasteable, refresh-safe navigation (react-router; the Hono server
 /compare/:groupId      → variants compare
 /git                   /github    /github/issues/:n   /github/prs/:n
 /inbox                 /workflows /workflows/:name
-/settings              /settings/skills  /settings/appearance  /settings/agents
+/settings              /settings/skills  /settings/bookmarklets  /settings/appearance  /settings/agents
 ```
 
 Selected run, active tab, review-gate state — all restorable from the URL; sharing a `/tasks/:id/changes` link drops a teammate (same machine/tailnet, or hosted mode) exactly where you are. Unknown routes → CenteredState 404 with a "Back to tasks" action. The legacy `/new` contract and launch-key auto-start keep working verbatim.
@@ -260,7 +261,7 @@ Tabs sit in the run detail next to the thread: **Session | Changes | Files** (mo
 
 ### Skills, Workflows, Inbox
 
-- **Skills** moves under Settings (catalog + detail + refresh + bookmarklets) — project skills first and bold (#377), stable scroll/selection (#384). A read-only skills browser remains reachable from pickers ("View skill" preview in the dropdown).
+- **Skills** moves under Settings (catalog + detail + refresh) — project skills first and bold (#377), stable scroll/selection (#384). Bookmarklets have their own Settings subpage while the former Skills deep link stays compatible. A read-only skills browser remains reachable from pickers ("View skill" preview in the dropdown).
 - **Workflows builder**: same capabilities (canvas, drag from palette, YAML import/export/preview, 8-step limit), rebuilt on dnd-kit + shadcn — visual language only, no behavior change.
 - **Inbox**: card list restyled (CenteredState empty state, status dots, Run/Dismiss buttons); badge logic unchanged.
 
@@ -314,7 +315,7 @@ Each phase is independently shippable; issues in parentheses close in that phase
 - **R3 — Thread**: full task detail — turns, tool cards, context groups, reasoning, plan dock, step rail, Streamdown+Shiki, virtua, composer (skills `/`, `@` files, dictation, attachments), review gate, variants compare. (#381, #382, #379, #380, dictation)
 - **R4 — New task + list**: full-screen composer with plan-mode toggle + variants; task list/table upgrades with editable titles + ± stats. (#386, #383, #389)
 - **R5 — Git view + forge seam**: structured changes/files endpoints, git actions (commit/push/branch), forge driver extraction, Changes/Files tabs, repo view rebuild, Create/View PR, open-in-editor/VS Code handoff. (#390, #385-adjacent forge gating)
-- **R6 — Remaining views + Settings**: GitHub tab (searchable dropdowns), Skills→Settings, Workflows builder, Inbox, Settings (skills/appearance/agents), notifications. (#385, #377, #384)
+- **R6 — Remaining views + Settings**: GitHub tab (searchable dropdowns), Skills→Settings, Workflows builder, Inbox, Settings (skills/bookmarklets/appearance/agents), notifications. (#385, #377, #384)
 - **R7 — Retirement + polish**: delete legacy `web/app.js`/`style.css`, packaging flip to `web/dist`, design-guardian in gate, iOS pass on every view, docs/screenshots refresh.
 
 ## Implementation Plan
@@ -351,7 +352,8 @@ Steps are sized for autonomous runs (om-auto-create-pr / -loop, one PR per phase
 
 ### Phase R6 — Views + Settings
 19. GitHub tab (cmdk dropdowns, forge gating); Inbox restyle.
-20. Workflows builder on dnd-kit; Skills under Settings (+ ordering, bookmarklets); Settings shell (registry: skills/appearance/agents) + notifications toggle.
+20. Workflows builder on dnd-kit; Skills under Settings (+ ordering); dedicated Bookmarklets subpage; Settings shell (registry: skills/bookmarklets/appearance/agents) + notifications toggle.
 
 ### Phase R7 — Retirement
-21. Delete legacy web app; packaging flip (`files: web/dist`, prepublish build); design-guardian + bundle check in validation gate; docs + README screenshots refresh; full iOS + degradation-matrix QA sweep.
+21. Delete legacy web app; packaging flip (`files: web/dist`, prepublish build); design-guardian + bundle check in validation gate; full iOS + degradation-matrix QA sweep.
+22. **Refresh every screenshot in the main `README.md`** — the "A look inside" gallery (`docs/screenshots/live-run.png`, `review-gate.png`, `variants-compare.png`, `plan-chain.png`, `workflow-builder.png`, `github-issues.png`) still shows the pre-redesign cockpit. Recapture each against the new UI through the configured browser provider (agent-browser), at the same framing, and update any README prose that describes the old chrome. This is the last step of the program — the README is the product's shop window and must never show a UI that no longer exists.

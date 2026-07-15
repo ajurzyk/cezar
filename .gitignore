@@ -9,10 +9,13 @@ dist/
 .agents/
 skills-lock.json
 
-# agent-pipeline scratch state (worktrees, per-run QA artifacts)
+# agent-pipeline scratch state (worktrees, per-run QA artifacts, test-env working files)
 .ai/tmp/
 .ai/qa/artifacts_*/
 .ai/qa/test-env.json
+.ai/qa/test-env.lock/
+.ai/qa/test-env-*.log
+.ai/qa/.build-cache
 
 # local symlink into .agents/skills
 .claude/skills

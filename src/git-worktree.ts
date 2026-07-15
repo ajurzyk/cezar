@@ -110,17 +110,32 @@ export async function autosaveCommit(dir: string): Promise<boolean> {
   const status = await git(dir, ['status', '--porcelain']);
   if (!status.ok || !status.stdout.trim()) return false;
   await git(dir, ['add', '-A']);
+  // Commit as the CURRENT git user, so the branch's commits (and any PR opened from it) are
+  // attributed to the real author and pass CLA / attribution checks. The old hardcoded
+  // `cezar <cezar@local>` identity made every autosave look like a non-GitHub user. Fall back to
+  // that identity ONLY when the machine has no git identity configured — otherwise `git commit`
+  // would fail and the autosave (the run's recovery point) would be lost.
+  const identityArgs = (await gitHasIdentity(dir))
+    ? []
+    : ['-c', 'user.name=cezar', '-c', 'user.email=cezar@local'];
   const commit = await git(dir, [
-    '-c',
-    'user.name=cezar',
-    '-c',
-    'user.email=cezar@local',
+    ...identityArgs,
     'commit',
     '--no-verify',
     '-m',
     'cezar autosave',
   ]);
   return commit.ok;
+}
+
+/** Does this repo/worktree resolve a git author identity (name + email)? Ambient config wins so
+ *  autosave commits carry the user's own identity — see autosaveCommit. */
+async function gitHasIdentity(dir: string): Promise<boolean> {
+  const [name, email] = await Promise.all([
+    git(dir, ['config', 'user.name']),
+    git(dir, ['config', 'user.email']),
+  ]);
+  return name.ok && name.stdout.trim() !== '' && email.ok && email.stdout.trim() !== '';
 }
 
 /**
@@ -155,6 +170,48 @@ export async function worktreeDiffStat(
   const base = mergeBase.ok && mergeBase.stdout.trim() ? mergeBase.stdout.trim() : baseBranch;
   const res = await git(worktreePath, ['diff', '--stat', base]);
   return res.ok ? res.stdout.trim() : '';
+}
+
+/** Aggregate diff numbers (#389) — the shape stored on `RunRecord.diffStat`. */
+export interface DiffStat {
+  adds: number;
+  dels: number;
+  files: number;
+}
+
+/**
+ * Parse `git diff --shortstat` output — " 3 files changed, 10 insertions(+),
+ * 2 deletions(-)". Every part is optional: insertions-only and deletions-only
+ * diffs omit the other counter, and an empty diff prints nothing at all
+ * (→ all zeros). The wording is stable porcelain English — git does not
+ * localize `--shortstat` — so matching the words is safe.
+ */
+export function parseShortstat(s: string): DiffStat {
+  const files = /(\d+) files? changed/.exec(s);
+  const adds = /(\d+) insertions?\(\+\)/.exec(s);
+  const dels = /(\d+) deletions?\(-\)/.exec(s);
+  return {
+    files: files ? Number(files[1]) : 0,
+    adds: adds ? Number(adds[1]) : 0,
+    dels: dels ? Number(dels[1]) : 0,
+  };
+}
+
+/**
+ * `git diff --shortstat` of the worktree vs its base (#389) — same
+ * merge-base anchoring and intent-to-add as `worktreeDiff`, parsed into
+ * numbers. Null on git failure (the caller notes it, never fails the run);
+ * an empty diff is a valid all-zero stat.
+ */
+export async function worktreeShortstat(
+  worktreePath: string,
+  baseBranch: string,
+): Promise<DiffStat | null> {
+  await git(worktreePath, ['add', '-N', '.']); // intent-to-add: untracked files show up
+  const mergeBase = await git(worktreePath, ['merge-base', baseBranch, 'HEAD']);
+  const base = mergeBase.ok && mergeBase.stdout.trim() ? mergeBase.stdout.trim() : baseBranch;
+  const res = await git(worktreePath, ['diff', '--shortstat', base]);
+  return res.ok ? parseShortstat(res.stdout) : null;
 }
 
 /**

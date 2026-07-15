@@ -1,0 +1,110 @@
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+
+import { AgentBrowser, readTestEnv } from './agent-browser'
+
+/**
+ * The inbox (R6 Step 1.2) end-to-end against the shared dry-run environment.
+ *
+ * Reachability: the inbox is `todos.json`-driven and the server watches the file — so this
+ * suite seeds real entries exactly like smoke.e2e.ts's SSE-badge test does (same data-dir
+ * resolution, same save/restore discipline) and asserts real cards render LIVE over the
+ * stream, no reload. Dismiss is honestly reachable (DELETE only rewrites todos.json, which
+ * this suite restores) and is exercised below. Run is NOT: `POST /api/todos/:id/start`
+ * starts a real run — the shared env's run list must not grow side effects (the github
+ * suite's read-only rule), so the Run flow stays unit-pinned in routes/inbox.test.tsx.
+ */
+
+const artifactsDir = resolve(import.meta.dirname, '../../../.ai/qa/artifacts_e2e')
+const sessionId = `e2e-inbox-${process.pid}`
+
+const DESKTOP = { width: 1440, height: 900 }
+
+// Where `src/index.ts` puts the data dir, for the server booted from this worktree.
+const dataDir = resolve(import.meta.dirname, '../../../.ai/cezar')
+const todosFile = resolve(dataDir, 'todos.json')
+
+const CARD = '[data-slot="todo-card"]'
+
+let browser: AgentBrowser
+let baseUrl: string
+let previousTodos: string | null = null
+
+beforeAll(() => {
+  baseUrl = readTestEnv().baseUrl
+  previousTodos = existsSync(todosFile) ? readFileSync(todosFile, 'utf8') : null
+  browser = AgentBrowser.open(sessionId)
+  browser.setViewport(DESKTOP.width, DESKTOP.height)
+})
+
+afterAll(() => {
+  // Never leave a developer's inbox holding this test's entries.
+  if (previousTodos === null) rmSync(todosFile, { force: true })
+  else writeFileSync(todosFile, previousTodos, 'utf8')
+  browser?.close()
+})
+
+function writeTodos(items: Array<Record<string, string>>): void {
+  mkdirSync(dataDir, { recursive: true })
+  writeFileSync(todosFile, JSON.stringify(items, null, 2), 'utf8')
+}
+
+describe('the inbox against the live dry-run server', () => {
+  it('an empty inbox renders the shared CenteredState template', () => {
+    writeTodos([])
+    browser.goto(`${baseUrl}/inbox`)
+    browser.waitForFunction(
+      `document.querySelector('[data-route="inbox"] [data-slot="centered-state"]') !== null`,
+    )
+
+    expect(browser.text('[data-slot="centered-state"]')).toContain('Inbox empty')
+    expect(browser.count(CARD)).toBe(0)
+  })
+
+  it('real cards render LIVE from a server-side todos.json write — no reload', () => {
+    // An agent files two follow-ups while the page just sits there on /inbox.
+    writeTodos([
+      {
+        id: 'e2e-inbox-1',
+        ts: new Date().toISOString(),
+        summary: 'Open a follow-up PR for the flaky retry test',
+        action: 'follow-up',
+        suggestedSkill: 'om-fix',
+        taskId: 'e2e-no-such-run',
+      },
+      { id: 'e2e-inbox-2', summary: 'Rerun the failed checks' },
+    ])
+
+    // No goto: file watch → SSE → todos query → cards. Debounced ~300ms server-side.
+    browser.waitForFunction(`document.querySelectorAll('${CARD}').length === 2`)
+
+    expect(browser.text(`${CARD}[data-id="e2e-inbox-1"]`)).toContain(
+      'Open a follow-up PR for the flaky retry test',
+    )
+    // The attention dot: the "needs you" rung of the shared grammar, amber.
+    expect(
+      browser.count(`${CARD} [data-slot="status-dot"][data-tone="pending"]`),
+    ).toBe(2)
+    // The meta row is honest about a source task the server no longer has.
+    expect(browser.text(`${CARD}[data-id="e2e-inbox-1"]`)).toContain('source task deleted')
+    expect(browser.text(`${CARD}[data-id="e2e-inbox-1"]`)).toContain('skill: om-fix')
+    // Both actions are on every card.
+    expect(browser.count(`${CARD} [data-action="todo-run"]`)).toBe(2)
+    expect(browser.count(`${CARD} [data-action="todo-dismiss"]`)).toBe(2)
+
+    browser.screenshot(`${artifactsDir}/inbox-cards.png`)
+  })
+
+  it('Dismiss checks the entry off — card gone, server inbox down to one', async () => {
+    browser.click(`${CARD}[data-id="e2e-inbox-1"] [data-action="todo-dismiss"]`)
+
+    browser.waitForFunction(`document.querySelectorAll('${CARD}').length === 1`)
+    expect(browser.count(`${CARD}[data-id="e2e-inbox-2"]`)).toBe(1)
+
+    // The server agreed: the DELETE landed in todos.json, not just in the query cache.
+    const res = await fetch(`${baseUrl}/api/todos`)
+    const items = (await res.json()) as Array<{ id: string }>
+    expect(items.map((item) => item.id)).toEqual(['e2e-inbox-2'])
+  })
+})

@@ -1,0 +1,169 @@
+import { resolve } from 'node:path'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+
+import { AgentBrowser, readTestEnv } from './agent-browser'
+
+/**
+ * The GitHub tab (R6 Step 1.1) end-to-end against the shared dry-run environment.
+ *
+ * Reachability: under `CEZ_DRY_RUN=1` the forge driver reports AVAILABLE and `/api/github`
+ * serves the bundled mock issues/PRs — so the lists, the detail pane and the cmdk dropdowns
+ * are honestly reachable here and are covered below. The forge-OFF branch (nav item hidden,
+ * unavailable explainer) is NOT reachable in this env; it is asserted structurally in the
+ * unit suites (nav-items/app-shell/command-palette tests, github.test.tsx), and the gating
+ * spec below asserts whichever branch the LIVE health payload actually reports rather than
+ * assuming one. Strictly read-only: no run is started (`POST /api/runs` is unit-pinned) —
+ * the shared env's run list must not grow side effects.
+ */
+
+const artifactsDir = resolve(import.meta.dirname, '../../../.ai/qa/artifacts_e2e')
+const sessionId = `e2e-github-${process.pid}`
+
+const DESKTOP = { width: 1440, height: 900 }
+const IPHONE = { width: 390, height: 844 }
+
+let browser: AgentBrowser
+let baseUrl: string
+
+async function api<T>(path: string): Promise<T> {
+  const res = await fetch(`${baseUrl}${path}`)
+  if (!res.ok) throw new Error(`cezar e2e: GET ${path} answered ${res.status}`)
+  return (await res.json()) as T
+}
+
+interface HealthPayload {
+  forge: { kind: string; available: boolean } | null
+}
+
+interface GithubPayload {
+  available: boolean
+  repo?: string
+  issues: Array<{ number: number; title: string; labels: string[] }>
+  prs: Array<{ number: number; title: string; checks?: string | null }>
+}
+
+let forgeAvailable = false
+
+beforeAll(async () => {
+  baseUrl = readTestEnv().baseUrl
+  forgeAvailable = (await api<HealthPayload>('/api/health')).forge?.available === true
+  browser = AgentBrowser.open(sessionId)
+  browser.setViewport(DESKTOP.width, DESKTOP.height)
+})
+
+afterAll(() => {
+  browser?.close()
+})
+
+describe('the GitHub tab against the live dry-run server', () => {
+  it('the nav gates on the live forge payload — item present iff the driver is available', () => {
+    browser.goto(`${baseUrl}/`)
+    browser.waitForFunction(`document.querySelector('[data-slot="sidebar"] nav') !== null`)
+    if (forgeAvailable) {
+      // The item waits on the health answer — poll rather than sample.
+      browser.waitForFunction(`document.querySelector('nav a[href="/github"]') !== null`)
+    } else {
+      // Health has answered (other chips render from it) and still no GitHub item.
+      browser.waitForFunction(`document.querySelector('[data-slot="version-chip"]') !== null`)
+      expect(browser.count('nav a[href="/github"]')).toBe(0)
+    }
+  })
+
+  it('/github lists the real issues and PRs with honest counts', async () => {
+    if (!forgeAvailable) return // covered by the gating spec + unit suites
+    const gh = await api<GithubPayload>('/api/github')
+    expect(gh.available).toBe(true)
+
+    browser.goto(`${baseUrl}/github`)
+    browser.waitForFunction(`document.querySelector('[data-slot="gh-header"]') !== null`)
+    browser.waitForFunction(
+      `document.querySelectorAll('[data-slot="gh-row"]').length === ${gh.issues.length}`,
+    )
+
+    expect(browser.text('[data-slot="gh-tabs"]')).toContain(`Issues · ${gh.issues.length}`)
+    expect(browser.text('[data-slot="gh-tabs"]')).toContain(`Pull requests · ${gh.prs.length}`)
+    if (gh.repo) expect(browser.text('[data-slot="gh-repo"]')).toBe(gh.repo)
+
+    // The PR tab is a URL of its own.
+    browser.click('[data-slot="gh-tabs"] a[href="/github/prs"]')
+    browser.waitForFunction(
+      `document.querySelectorAll('[data-slot="gh-row"]').length === ${gh.prs.length}`,
+    )
+    expect(browser.url()).toBe(`${baseUrl}/github/prs`)
+
+    // Health answers after the github payload on this box — settle the forge-gated nav item
+    // (an assertion of the gate on the tab's own page, and an honest screenshot).
+    browser.waitForFunction(`document.querySelector('nav a[href="/github"]') !== null`)
+    browser.screenshot(`${artifactsDir}/github-desktop.png`)
+  })
+
+  it('opens an issue’s detail: meta, labels, markdown body, hand-to-agent dropdowns', async () => {
+    if (!forgeAvailable) return
+    const gh = await api<GithubPayload>('/api/github')
+    const first = gh.issues[0]
+    expect(first).toBeDefined()
+    if (!first) return
+
+    browser.goto(`${baseUrl}/github`)
+    browser.waitForFunction(`document.querySelector('[data-slot="gh-row"]') !== null`)
+    browser.click(`[data-slot="gh-row"][data-number="${first.number}"]`)
+
+    browser.waitForFunction(`document.querySelector('[data-slot="gh-detail-inner"]') !== null`)
+    expect(browser.url()).toBe(`${baseUrl}/github/issues/${first.number}`)
+    expect(browser.text('[data-slot="gh-meta"]')).toContain(`#${first.number}`)
+    expect(browser.text('[data-slot="gh-detail-inner"] h2')).toBe(first.title)
+    expect(browser.count('[data-slot="gh-label"]')).toBe(first.labels.length)
+    // The body rendered through the markdown pipeline — non-empty prose, not raw JSON.
+    browser.waitForFunction(
+      `(document.querySelector('[data-slot="gh-body"]')?.textContent ?? '').length > 0`,
+    )
+
+    // The #385 dropdowns: the workflow cmdk menu opens and filters (read-only — nothing run).
+    const workflows = await api<{ workflows: Array<{ name: string }> }>('/api/workflows')
+    browser.click('[data-slot="gh-workflow-trigger"]')
+    browser.waitForFunction(
+      `document.querySelectorAll('[data-slot="gh-workflow-option"]').length === ${workflows.workflows.length}`,
+    )
+    browser.fill('[data-slot="command-input"]', 'quick')
+    browser.waitForFunction(
+      `document.querySelectorAll('[data-slot="gh-workflow-option"]').length === 1`,
+    )
+
+    // Same settle rule as above: the screenshot must show the whole truth, nav item included.
+    browser.waitForFunction(`document.querySelector('nav a[href="/github"]') !== null`)
+    browser.screenshot(`${artifactsDir}/github-detail.png`)
+    browser.press('Escape')
+  })
+
+  it('below md the list is the page, and a detail URL swaps to the detail with a way back', async () => {
+    if (!forgeAvailable) return
+    const gh = await api<GithubPayload>('/api/github')
+    const first = gh.issues[0]
+    if (!first) return
+
+    browser.setViewport(IPHONE.width, IPHONE.height)
+    try {
+      browser.goto(`${baseUrl}/github`)
+      browser.waitForFunction(`document.querySelector('[data-slot="gh-row"]') !== null`)
+      // List visible, detail pane hidden below md.
+      browser.waitForFunction(
+        `(() => { const el = document.querySelector('[data-slot="gh-detail"]'); return el !== null && el.offsetParent === null })()`,
+      )
+      expect(browser.evaluate(`document.documentElement.scrollWidth <= window.innerWidth`)).toBe(true)
+
+      browser.goto(`${baseUrl}/github/issues/${first.number}`)
+      browser.waitForFunction(`document.querySelector('[data-slot="gh-detail-inner"]') !== null`)
+      // Now the detail is the page and the list yields; the back affordance is a link.
+      browser.waitForFunction(
+        `(() => { const el = document.querySelector('[data-slot="gh-list"]'); return el === null || el.offsetParent === null })()`,
+      )
+      expect(
+        browser.evaluate(`document.querySelector('[data-slot="gh-back"]').getAttribute('href')`),
+      ).toBe('/github')
+
+      browser.screenshot(`${artifactsDir}/github-iphone.png`)
+    } finally {
+      browser.setViewport(DESKTOP.width, DESKTOP.height)
+    }
+  })
+})

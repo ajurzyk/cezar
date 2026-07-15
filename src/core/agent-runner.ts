@@ -11,6 +11,8 @@
  *  - `opencode` — `opencode serve`, HTTP + SSE.
  */
 
+import type { UiEvent } from './ui-events.js';
+
 /** `claude-cli` is the legacy id kept so old run records still parse. */
 export type AgentBackend = 'claude' | 'codex' | 'opencode' | 'claude-cli';
 
@@ -49,6 +51,16 @@ export interface AgentRunSpec {
    * picks up the on-disk conversation (used by "Continue" after a run ends).
    */
   resume?: boolean;
+}
+
+/**
+ * Backends without a dedicated system-prompt channel (codex app-server,
+ * opencode serve) deliver `spec.systemPrompt` as a leading block of the
+ * opening user message — the documented per-backend mapping (spec §protocol
+ * v2: claude = `--append-system-prompt`, codex/opencode = prepended here).
+ */
+export function prependSystemPrompt(systemPrompt: string | undefined, userPrompt: string): string {
+  return systemPrompt ? `${systemPrompt}\n\n---\n\n${userPrompt}` : userPrompt;
 }
 
 /** One content block of a user message — mirrors the Anthropic wire format
@@ -96,6 +108,10 @@ export interface SessionOptions {
    *  behavior, used for non-interactive workflow steps). Interactive
    *  sessions omit this and control `end()` themselves. */
   autoEndAfterFirstTurn?: boolean;
+  /** Protocol-v2 channel: receives the normalized `UiEvent` stream emitted
+   *  ALONGSIDE the v1 `AgentEvent`s (additive — v1 keeps flowing unchanged).
+   *  RunManager consumption lands in R2 step 2.1. */
+  onUiEvent?: (event: UiEvent) => void;
 }
 
 /**

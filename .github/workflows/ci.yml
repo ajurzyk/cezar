@@ -41,11 +41,14 @@ jobs:
       - name: Run unit tests
         run: npm run test:unit
 
+      - name: Run server and cockpit unit suites
+        run: npm test
+
       - name: Build application
         run: npm run build
 
       - name: Run packaged CLI E2E tests
-        run: npm run test:e2e
+        run: npm run test:package
 
       - name: Verify release package
         run: npm pack --dry-run --ignore-scripts

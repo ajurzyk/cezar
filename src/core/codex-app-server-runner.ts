@@ -9,6 +9,7 @@ import type {
   ContentBlock,
   SessionOptions,
 } from './agent-runner.js';
+import { prependSystemPrompt } from './agent-runner.js';
 import {
   AUTO_END_DELAY_MS,
   DEFAULT_RUN_TIMEOUT_MS,
@@ -17,6 +18,13 @@ import {
   KILL_GRACE_MS,
 } from './claude-cli-runner.js';
 import { readNdjson } from './ndjson.js';
+import {
+  codexSessionStarted,
+  createCodexUiState,
+  mapCodexNotification,
+  type CodexUiMapping,
+  type CodexUiMapperState,
+} from './codex-ui-mapper.js';
 
 export interface CodexRunnerOptions {
   /** Override the binary name/path; defaults to `codex` on PATH. */
@@ -95,6 +103,10 @@ class CodexSession implements AgentSession {
   private eofKillTimer: NodeJS.Timeout | undefined;
   private spawnFailed: Error | null = null;
   private timedOut = false;
+  /** Protocol v2 emission — additive alongside v1 (`onEvent` keeps flowing
+   *  byte-identical); the channel is `opts.onUiEvent` (RunManager wiring
+   *  lands in R2 step 2.1). */
+  private uiState: CodexUiMapperState = createCodexUiState();
 
   constructor(
     private readonly bin: string,
@@ -104,7 +116,16 @@ class CodexSession implements AgentSession {
     private readonly opts: SessionOptions,
   ) {
     try {
-      this.child = nodeSpawn(bin, ['app-server'], {
+      // Give the workspace-write sandbox network access so agent tools that need the network
+      // (gh, npm, git over https) work — otherwise `gh` fails with "error connecting to
+      // api.github.com" under codex while the same tool works under claude (#codex-network).
+      // `-c` is codex's documented config override (dotted key, TOML value); opt out with
+      // CEZ_CODEX_NETWORK=0.
+      const args = ['app-server'];
+      if (process.env.CEZ_CODEX_NETWORK !== '0') {
+        args.push('-c', 'sandbox_workspace_write.network_access=true');
+      }
+      this.child = nodeSpawn(bin, args, {
         cwd: spec.cwd,
         env: { ...process.env, ...spec.env },
       });
@@ -150,6 +171,7 @@ class CodexSession implements AgentSession {
           } catch {
             continue; // not JSON-RPC — skip
           }
+          this.emitUi((state) => mapCodexNotification(msg, state));
           this.dispatch(msg);
         }
       } catch (err) {
@@ -274,14 +296,18 @@ class CodexSession implements AgentSession {
       const res = await this.request('thread/start', clean(overrides));
       this.threadId = threadIdOf(res) ?? this.spec.sessionId;
     }
-    if (this.threadId) this.emit({ type: 'session', sessionId: this.threadId });
+    if (this.threadId) {
+      this.emit({ type: 'session', sessionId: this.threadId });
+      // The result path (thread/start response, or thread/resume which sends
+      // no thread/started notification) — deduplicated inside the mapper.
+      const threadId = this.threadId;
+      this.emitUi((state) => codexSessionStarted(threadId, state));
+    }
 
     // Seed the first turn. The system prompt (skill body + handoff contract)
     // has no dedicated app-server field, so it rides along as a leading block
     // of the opening message.
-    const first = this.spec.systemPrompt
-      ? `${this.spec.systemPrompt}\n\n---\n\n${this.spec.userPrompt}`
-      : this.spec.userPrompt;
+    const first = prependSystemPrompt(this.spec.systemPrompt, this.spec.userPrompt);
     await this.startOrSteerTurn(first);
   }
 
@@ -408,6 +434,20 @@ class CodexSession implements AgentSession {
 
   private emit(event: AgentEvent): void {
     this.onEvent?.(event);
+  }
+
+  /** The mapper never throws, but a defect in it must still never disturb
+   *  the v1 stream — hence the belt-and-braces try. */
+  private emitUi(map: (state: CodexUiMapperState) => CodexUiMapping): void {
+    try {
+      const mapped = map(this.uiState);
+      this.uiState = mapped.state;
+      if (this.opts.onUiEvent) {
+        for (const event of mapped.events) this.opts.onUiEvent(event);
+      }
+    } catch {
+      // v2 mapping is best-effort; v1 consumers stay unaffected.
+    }
   }
 }
 

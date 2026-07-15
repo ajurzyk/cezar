@@ -34,11 +34,29 @@ const stepStateSchema = z.object({
 const runRecordSchema = z.object({
   id: z.string(),
   title: z.string(),
+  /** Display title (#389): the auto-derived summary of the first agent turn,
+   *  or the user's inline edit (`PATCH /api/runs/:id` sets it together with
+   *  `title` so edits always win). The UI shows `titleSummary ?? title`. */
+  titleSummary: z.string().optional(),
+  /** `git diff --shortstat` of the worktree vs its base, refreshed on every
+   *  turn-end (#389) — what the quick list / table shows without a git call. */
+  diffStat: z
+    .object({ adds: z.number(), dels: z.number(), files: z.number() })
+    .optional(),
   workflow: z.string(),
   task: z.string(),
+  /** URLs of images attached to the initial task prompt, for the thread's first bubble
+   *  (#image-display) — persisted like agent screenshots, served from `/images/`. */
+  taskImages: z.array(z.string()).optional(),
   model: z.string().optional(),
   /** Agent backend this run used — drives "open in CLI" resume command. */
   runner: z.enum(['claude', 'codex', 'opencode']).optional(),
+  /** Echo of the extra system prompt this run actually used (R2): the
+   *  `POST /api/runs` override, or the `config.json` default it fell back to.
+   *  Deliberately NOT the full composed prompt — skill bodies and the handoff
+   *  contract are derivable from the persisted workflow and would bloat the
+   *  index. Resolved at execute time (a queued run picks up config edits). */
+  systemPrompt: z.string().optional(),
   status: z.enum(['queued', 'running', 'waiting', 'review', 'done', 'failed', 'cancelled']),
   createdAt: z.string(),
   startedAt: z.string().optional(),
@@ -90,6 +108,11 @@ const MAX_RUNS_KEPT = 300;
 const MAX_ARCHIVED_KEPT = 500;
 
 const PR_URL_RE = /https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+/;
+// The transcript auto-link is convenience only (the cockpit's own `gh pr create` path sets the
+// URL authoritatively). Adopt a PR URL ONLY when the agent actually CREATED one — a task that
+// reviews or merely references an existing PR must not get mislabeled with its number (#fake-pr).
+const CREATED_PR_RE =
+  /\b(?:gh\s+pr\s+create|pull\s*request\s+created|created\s+(?:a\s+)?(?:draft\s+)?(?:pr|pull\s*request)|opened\s+(?:a\s+)?(?:draft\s+)?pull\s*request)\b/i;
 
 /**
  * File-backed run store: `runs.json` index (atomic tmp+rename writes, the
@@ -261,8 +284,22 @@ export class RunStore extends EventEmitter {
         .filter((s): s is string => typeof s === 'string')
         .join(' ');
       const match = PR_URL_RE.exec(haystack);
-      if (match) this.updateRun(runId, { pullRequestUrl: match[0] });
+      if (match && CREATED_PR_RE.test(haystack)) this.updateRun(runId, { pullRequestUrl: match[0] });
     }
+    return full;
+  }
+
+  /**
+   * Fan an event out to live subscribers WITHOUT writing it to the NDJSON
+   * file — the channel for coalesced `item.delta` flushes (protocol-v2
+   * performance guardrail: raw deltas never hit disk; replay = the persisted
+   * snapshots). Stamped with `seq`/`ts` like persisted lines so the live
+   * wire keeps one ordering axis; the seq simply never appears in a replay
+   * (gaps are fine — dedup compares with `>`).
+   */
+  emitEphemeral(runId: string, event: { type: string; stepId?: string; [key: string]: unknown }): RunEvent {
+    const full: RunEvent = { ...event, seq: this.nextSeq(runId), ts: new Date().toISOString() };
+    this.emit('event', { runId, event: full });
     return full;
   }
 

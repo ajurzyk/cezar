@@ -11,6 +11,17 @@ import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const emit = (obj) => process.stdout.write(`${JSON.stringify(obj)}\n`);
 
+// Testability hook: CEZ_MOCK_ARGS_FILE=<path> appends the argv this mock was
+// spawned with (one JSON array per line), so tests and dry-run proofs can
+// assert exactly what reached the CLI (e.g. `--append-system-prompt …`).
+if (process.env.CEZ_MOCK_ARGS_FILE) {
+  try {
+    appendFileSync(process.env.CEZ_MOCK_ARGS_FILE, `${JSON.stringify(process.argv.slice(2))}\n`);
+  } catch {
+    // best effort — never break the mock over the hook
+  }
+}
+
 emit({ type: 'system', subtype: 'init' });
 
 let turn = 0;

@@ -1,0 +1,135 @@
+import { describe, expect, it } from 'vitest'
+
+import type { Skill, WorkflowDef } from '@/api/types'
+
+import {
+  filterSkills,
+  fuzzyMatch,
+  isProjectSkill,
+  orderSkills,
+  orderSkillsByRecency,
+  skillUsedBy,
+} from './skills'
+
+const skill = (over: Partial<Skill> & Pick<Skill, 'name' | 'source'>): Skill => ({
+  body: '',
+  path: `/skills/${over.name}.md`,
+  ...over,
+})
+
+describe('isProjectSkill / orderSkills (#377)', () => {
+  it('classifies every server source value', () => {
+    expect(isProjectSkill(skill({ name: 'a', source: 'ai' }))).toBe(true)
+    expect(isProjectSkill(skill({ name: 'b', source: 'cezar' }))).toBe(true)
+    expect(isProjectSkill(skill({ name: 'c', source: 'agents' }))).toBe(true)
+    expect(isProjectSkill(skill({ name: 'd', source: 'global' }))).toBe(false)
+    expect(isProjectSkill(skill({ name: 'e', source: 'team' }))).toBe(false)
+  })
+
+  it('orders project before global/team, stably within each half', () => {
+    const ordered = orderSkills([
+      skill({ name: 'g1', source: 'global' }),
+      skill({ name: 'p1', source: 'agents' }),
+      skill({ name: 'g2', source: 'team' }),
+      skill({ name: 'p2', source: 'ai' }),
+    ])
+    expect(ordered.map((s) => s.name)).toEqual(['p1', 'p2', 'g1', 'g2'])
+  })
+})
+
+describe('orderSkillsByRecency', () => {
+  const skills = [
+    skill({ name: 'g1', source: 'global' }),
+    skill({ name: 'p1', source: 'agents' }),
+    skill({ name: 'g2', source: 'global' }),
+    skill({ name: 'p2', source: 'ai' }),
+  ]
+
+  it('keeps locality first, then sorts most-recent within each half', () => {
+    // Recent = [g2, p2] newest first → g2 leads globals, p2 leads projects.
+    const ordered = orderSkillsByRecency(skills, ['g2', 'p2'])
+    expect(ordered.map((s) => s.name)).toEqual(['p2', 'p1', 'g2', 'g1'])
+  })
+
+  it('never-run skills keep server order after the recent ones', () => {
+    const ordered = orderSkillsByRecency(skills, ['g2'])
+    expect(ordered.map((s) => s.name)).toEqual(['p1', 'p2', 'g2', 'g1'])
+  })
+
+  it('falls back to plain locality order with no recency', () => {
+    expect(orderSkillsByRecency(skills, []).map((s) => s.name)).toEqual(['p1', 'p2', 'g1', 'g2'])
+  })
+})
+
+describe('fuzzyMatch', () => {
+  const table: Array<{ candidate: string; query: string; hit: boolean }> = [
+    { candidate: 'om-fix-issue', query: '', hit: true },
+    { candidate: 'om-fix-issue', query: 'fix', hit: true },
+    { candidate: 'om-fix-issue', query: 'omfx', hit: true }, // subsequence
+    { candidate: 'om-fix-issue', query: 'OMFX', hit: true }, // case-insensitive
+    { candidate: 'om-fix-issue', query: 'xz', hit: false },
+    { candidate: 'om-fix-issue', query: 'issuefix', hit: false }, // order matters
+    { candidate: 'src/server/server.ts', query: 'srvts', hit: true },
+  ]
+  for (const { candidate, query, hit } of table) {
+    it(`"${query}" ${hit ? 'finds' : 'does not find'} "${candidate}"`, () => {
+      expect(fuzzyMatch(candidate, query)).toBe(hit)
+    })
+  }
+})
+
+describe('filterSkills (#380: filter without re-sorting — project-first survives any query)', () => {
+  const skills = [
+    skill({ name: 'global-deploy', source: 'global', description: 'Deploy from anywhere' }),
+    skill({ name: 'project-deploy', source: 'ai' }),
+    skill({ name: 'project-review', source: 'cezar', description: 'Review the diff' }),
+  ]
+
+  it('empty query keeps everything, project skills first', () => {
+    expect(filterSkills(skills, '').map((s) => s.name)).toEqual([
+      'project-deploy',
+      'project-review',
+      'global-deploy',
+    ])
+  })
+
+  it('a query narrows but never reorders across the project/global split', () => {
+    expect(filterSkills(skills, 'deploy').map((s) => s.name)).toEqual([
+      'project-deploy',
+      'global-deploy',
+    ])
+  })
+
+  it('matches on the description as a fallback', () => {
+    expect(filterSkills(skills, 'anywhere').map((s) => s.name)).toEqual(['global-deploy'])
+  })
+
+  it('no match → empty, never a throw', () => {
+    expect(filterSkills(skills, 'zzz')).toEqual([])
+  })
+})
+
+describe('skillUsedBy (the detail pane’s "Used by" breadcrumbs)', () => {
+  const workflows: WorkflowDef[] = [
+    {
+      name: 'fix-and-verify',
+      source: 'file',
+      steps: [
+        { id: 'fix', name: 'Fix', skill: 'om-fix' },
+        { id: 'verify', skill: 'om-fix' }, // unnamed step → the id stands in
+        { id: 'check', command: 'npm test' },
+      ],
+    },
+    { name: 'ship-it', source: 'file', steps: [{ id: 'review', name: 'Review', skill: 'om-review' }] },
+    { name: 'quick-task', source: 'built-in', steps: [] },
+  ]
+
+  it('lists every referencing step as "workflow › step", ids standing in for names', () => {
+    expect(skillUsedBy(workflows, 'om-fix')).toEqual(['fix-and-verify › Fix', 'fix-and-verify › verify'])
+    expect(skillUsedBy(workflows, 'om-review')).toEqual(['ship-it › Review'])
+  })
+
+  it('an unreferenced skill answers an empty list', () => {
+    expect(skillUsedBy(workflows, 'om-unused')).toEqual([])
+  })
+})

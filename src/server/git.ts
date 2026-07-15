@@ -35,7 +35,17 @@ export async function getRepoInfo(dir: string): Promise<RepoInfo | null> {
     try {
       remote = (await git(root, ['remote', 'get-url', 'origin'])).trim() || undefined;
     } catch {
-      // no origin — local-only repo
+      // No remote named `origin` — fall back to the first configured remote,
+      // so repos whose only remote is named e.g. `github` or `upstream` still
+      // get forge detection. Truly remote-less repos land in the inner catch.
+      try {
+        const names = (await git(root, ['remote'])).split('\n').map((n) => n.trim()).filter(Boolean);
+        if (names[0]) {
+          remote = (await git(root, ['remote', 'get-url', names[0]])).trim() || undefined;
+        }
+      } catch {
+        // no remotes at all — local-only repo
+      }
     }
     return { root, branch, remote };
   } catch {

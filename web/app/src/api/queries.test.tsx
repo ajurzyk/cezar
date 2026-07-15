@@ -1,0 +1,189 @@
+import { QueryClientProvider } from '@tanstack/react-query'
+import { cleanup, renderHook, waitFor } from '@testing-library/react'
+import type { ReactNode } from 'react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+import { ApiError } from './client'
+import { createQueryClient } from './query-client'
+import { queryKeys, useHealth, usePatchRun, useRun, useRuns } from './queries'
+
+const fetchMock = vi.fn<typeof fetch>()
+
+beforeEach(() => {
+  vi.stubGlobal('fetch', fetchMock)
+})
+
+afterEach(() => {
+  cleanup()
+  fetchMock.mockReset()
+  vi.unstubAllGlobals()
+})
+
+function json(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })
+}
+
+/** A client per test: a shared cache would let one test's data satisfy the next test's query,
+ *  and "loading → data" would pass without a fetch ever happening. */
+function wrapper() {
+  const client = createQueryClient()
+  return function Wrapper({ children }: { children: ReactNode }) {
+    return <QueryClientProvider client={client}>{children}</QueryClientProvider>
+  }
+}
+
+const HEALTH = {
+  version: '0.1.3',
+  repoRoot: '/home/me/cezar',
+  repo: { root: '/home/me/cezar', branch: 'main' },
+  checks: [],
+  defaultRunner: 'claude',
+}
+
+describe('queryKeys', () => {
+  // Step 3.2 invalidates by these. Keeping them stable and hierarchical is the whole contract:
+  // `['runs']` has to be a prefix of both the list and every detail key, or one invalidate call
+  // cannot reach them.
+  it('nests every run key under the list root', () => {
+    expect(queryKeys.runs.all).toEqual(['runs'])
+    expect(queryKeys.runs.list()).toEqual(['runs', 'list'])
+    expect(queryKeys.runs.detail('a')).toEqual(['runs', 'detail', 'a'])
+    expect(queryKeys.runs.diff('a')).toEqual(['runs', 'diff', 'a'])
+    for (const key of [queryKeys.runs.list(), queryKeys.runs.detail('a'), queryKeys.runs.diff('a')]) {
+      expect(key[0]).toBe(queryKeys.runs.all[0])
+    }
+  })
+
+  it('keys github by limit so two page sizes are two caches', () => {
+    expect(queryKeys.github()).toEqual(['github', null])
+    expect(queryKeys.github({ limit: 5 })).not.toEqual(queryKeys.github({ limit: 50 }))
+  })
+
+  it('is stable across calls — an unstable key refetches forever', () => {
+    expect(queryKeys.runs.detail('a')).toEqual(queryKeys.runs.detail('a'))
+  })
+})
+
+describe('useHealth', () => {
+  it('goes loading → data', async () => {
+    fetchMock.mockResolvedValue(json(HEALTH))
+    const { result } = renderHook(() => useHealth(), { wrapper: wrapper() })
+
+    expect(result.current.isPending).toBe(true)
+    expect(result.current.data).toBeUndefined()
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    expect(result.current.data?.version).toBe('0.1.3')
+    expect(result.current.data?.repo?.branch).toBe('main')
+    expect(fetchMock.mock.calls.at(-1)?.[0]).toBe('/api/health')
+  })
+
+  it('surfaces an ApiError rather than pretending it has data', async () => {
+    // A fresh Response per call: a 5xx is retried once, and a Response body can only be read
+    // once — a single shared instance would fail the retry with a Body-is-unusable TypeError.
+    fetchMock.mockImplementation(async () =>
+      new Response(JSON.stringify({ error: 'boom' }), { status: 500, statusText: 'Internal Server Error' }),
+    )
+    const { result } = renderHook(() => useHealth(), { wrapper: wrapper() })
+
+    await waitFor(() => expect(result.current.isError).toBe(true), { timeout: 5000 })
+    expect(result.current.data).toBeUndefined()
+    expect(result.current.error).toBeInstanceOf(ApiError)
+    expect((result.current.error as ApiError).message).toBe('boom')
+  })
+})
+
+describe('useRuns', () => {
+  it('goes loading → data', async () => {
+    fetchMock.mockResolvedValue(json([{ id: 'run-1', title: 'Fix it', status: 'running' }]))
+    const { result } = renderHook(() => useRuns(), { wrapper: wrapper() })
+
+    expect(result.current.isPending).toBe(true)
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    expect(result.current.data).toHaveLength(1)
+    expect(result.current.data?.[0]?.title).toBe('Fix it')
+    expect(fetchMock.mock.calls.at(-1)?.[0]).toBe('/api/runs')
+  })
+})
+
+describe('useRun', () => {
+  it('does not fetch until it has an id', async () => {
+    fetchMock.mockResolvedValue(json({ id: 'run-1' }))
+    const { result, rerender } = renderHook(({ id }: { id?: string }) => useRun(id), {
+      wrapper: wrapper(),
+      initialProps: {},
+    })
+
+    // A route param that has not resolved yet must not become `GET /api/runs/undefined`.
+    expect(result.current.fetchStatus).toBe('idle')
+    expect(fetchMock).not.toHaveBeenCalled()
+
+    rerender({ id: 'run-1' })
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    expect(fetchMock.mock.calls.at(-1)?.[0]).toBe('/api/runs/run-1')
+  })
+})
+
+describe('usePatchRun', () => {
+  it('PATCHes the title and invalidates every runs query on success', async () => {
+    fetchMock.mockResolvedValue(json({ id: 'run-1', title: 'New name', titleSummary: 'New name' }))
+    const client = createQueryClient()
+    const invalidate = vi.spyOn(client, 'invalidateQueries')
+    const { result } = renderHook(() => usePatchRun('run-1'), {
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      ),
+    })
+
+    result.current.mutate({ title: 'New name' })
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    const [path, init] = fetchMock.mock.calls.at(-1) as [string, RequestInit]
+    expect(path).toBe('/api/runs/run-1')
+    expect(init.method).toBe('PATCH')
+    expect(JSON.parse(init.body as string)).toEqual({ title: 'New name' })
+    // `runs.all` is a prefix of the list, detail and diff keys — one call reaches them all.
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.runs.all })
+  })
+
+  it('does not invalidate anything on failure', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ error: 'not found' }), { status: 404, statusText: 'Not Found' }),
+    )
+    const client = createQueryClient()
+    const invalidate = vi.spyOn(client, 'invalidateQueries')
+    const { result } = renderHook(() => usePatchRun('nope'), {
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      ),
+    })
+
+    result.current.mutate({ title: 'x' })
+    await waitFor(() => expect(result.current.isError).toBe(true))
+    expect(result.current.error).toBeInstanceOf(ApiError)
+    expect(invalidate).not.toHaveBeenCalled()
+  })
+})
+
+describe('query defaults', () => {
+  it('never retries a 4xx — it is the server\'s considered answer', async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ error: 'not found' }), { status: 404, statusText: 'Not Found' }),
+    )
+    const { result } = renderHook(() => useRun('nope'), { wrapper: wrapper() })
+
+    await waitFor(() => expect(result.current.isError).toBe(true))
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not poll — SSE drives freshness', () => {
+    const client = createQueryClient()
+    const defaults = client.getDefaultOptions().queries
+    expect(defaults?.refetchInterval).toBe(false)
+    expect(defaults?.refetchOnWindowFocus).toBe(false)
+    expect(defaults?.staleTime).toBeGreaterThanOrEqual(60_000)
+  })
+})

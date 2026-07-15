@@ -16,17 +16,19 @@ Breaking: renaming/removing a command, flag, alias or env var; changing a defaul
 
 ## 2. HTTP API of the cockpit server (`src/server/server.ts`)
 
-Consumed by `web/app.js` (shipped in lockstep — low risk) but also by the **bookmarklets users have already saved in their browsers** (spec 011) and by anyone scripting `localhost:4321`. Routes:
+Consumed by the bundled React cockpit (`web/dist`, shipped in lockstep — low risk) but also by the **bookmarklets users have already saved in their browsers** (spec 011) and by anyone scripting `localhost:4321`. Routes:
 
-- Static/GUI: `GET /`, `/new` (bookmarklet deep-link, query `?skill=&ref=&auto=&key=`), `/app.js`, `/style.css`, `/open-mercato.svg`
+- Static/GUI: `GET /` and every SPA shell route, `/new` (bookmarklet deep-link, query `?skill=&ref=&auto=&key=`), `/assets/:file`, `/open-mercato.svg`
 - Meta: `GET /api/health` (the **only** CORS-open route — bookmarklets probe it cross-origin; its shape `{version, latestVersion, repoRoot, repo, checks, defaultRunner}` is the most externally-depended-on JSON in the app), `GET /api/launch-key`
 - Skills: `GET /api/skills`, `POST /api/skills/refresh`
 - Workflows: `GET/POST /api/workflows`, `DELETE /api/workflows/:name`, `POST /api/workflows/parse`, `POST /api/plan`
-- Runs: `GET/POST /api/runs`, `GET /api/runs/:id`, `POST /api/runs/:id/{cancel,messages,finish,continue,open-in-cli,pr,archive,remove-worktree}`, `POST /api/runs/archive-finished`, `DELETE /api/runs/:id`, `GET /api/runs/:id/{handoff,diff,events}`, `GET /api/runs/:id/images/:file`
+- Runs: `GET/POST /api/runs`, `GET /api/runs/:id`, `PATCH /api/runs/:id`, `POST /api/runs/:id/{cancel,messages,finish,continue,open-in-cli,open-in,pr,archive,remove-worktree,git/commit,git/push}`, `POST /api/runs/archive-finished`, `DELETE /api/runs/:id`, `GET /api/runs/:id/{handoff,diff,changes,files,commits,events}`, `GET /api/runs/:id/commit/:sha`, `GET /api/runs/:id/images/:file`
+- Open-in: `GET /api/open-targets`
 - Variants: `GET /api/groups/:groupId`, `POST /api/groups/:groupId/pick`
 - Inbox: `GET /api/todos`, `DELETE /api/todos/:id`, `POST /api/todos/:id/start`
 - SSE: `GET /api/events` (global), `GET /api/runs/:id/events` (replay + live, dedup by `seq`)
-- Repo/GitHub: `GET /api/github`, `GET /api/repo`, `GET /api/repo/diff`, `GET /api/repo/commit/:sha`, `PUT /api/config`, `GET/PUT /api/ui-state`
+- Repo/GitHub: `GET /api/github`, `GET /api/repo`, `GET /api/repo/{diff,changes}`, `GET /api/repo/commit/:sha`, `POST /api/repo/branch`, `GET/PUT /api/config`, `GET/PUT /api/ui-state`
+- SSE event names: `run-event` (v1), `ui-event` (v2 dotted types)
 
 Breaking: removing/renaming a route; making a previously optional body field required; removing a response field; changing an SSE event name (`run`, `run-event`, `run-deleted`, `todos`, `usage`, `ping`) or the `seq` dedup contract; narrowing `/api/health` CORS or its fields; changing `/new` query parameters (breaks saved bookmarklets). Required path: additive first; if removal is unavoidable, keep the old route/field answering for one minor release and note it in the CHANGELOG. `/api/health` and `/new` deserve extra caution — they live in users' browsers, not in this repo.
 
@@ -58,21 +60,24 @@ Breaking: requiring frontmatter, dropping a discovery directory, or inverting pr
 
 ## 6. npm package surface (`package.json`)
 
-- Name `@pat-lewczuk/cezar` (plus the `cezar-cli` npx alias documented in the README); `bin` entries `cezar` + `cez`; published `files`: `dist`, `web`, `scripts`, `README.md`; `engines.node >= 20`; `"type": "module"`.
+- Name `@pat-lewczuk/cezar` (plus the `cezar-cli` npx alias documented in the README); `bin` entries `cezar` + `cez`; published `files`: `dist`, `web/dist`, `web/open-mercato.svg`, `scripts`, `README.md`; `engines.node >= 20`; `"type": "module"`.
 - There is **no** `exports`/library API — the package is CLI-only. Keep it that way deliberately: adding one creates a new compatibility surface; if it happens, this document gains a section first.
-- `dist/index.js` must remain the bin entry, and `web/` must stay resolvable relative to `dist/server` (`resolveWebDir` walks `../../web`).
+- `dist/index.js` must remain the bin entry, and `web/` must stay resolvable relative to `dist/server` (`resolveWebDir` walks `../../web`; the built cockpit lives at `web/dist`).
+- The tarball MUST contain the built UI (`web/dist/index.html` + hashed `web/dist/assets/*`) — `npm run check:pack` (`scripts/check-pack.mjs`, run as the last leg of `npm run build`, hence by `prepublishOnly`) enforces this; do not remove it from the build chain.
 
-Breaking: dropping a bin alias, raising `engines.node`, removing `web/` or `scripts/` from `files`, renaming the package. Required path: raise `engines` only in a version bump flagged as breaking; keep old aliases through a deprecation release.
+Breaking: dropping a bin alias, raising `engines.node`, removing `web/dist/` or `scripts/` from `files`, renaming the package. Required path: raise `engines` only in a version bump flagged as breaking; keep old aliases through a deprecation release.
 
-## Cockpit UI redesign waiver (spec `.ai/specs/2026-07-14-cockpit-ui-redesign.md`)
+## Cockpit UI redesign waiver (spec `.ai/specs/2026-07-14-cockpit-ui-redesign.md`) — EXPIRED at R7
 
-The UI redesign is a deliberate generational change (approved 2026-07-14): while its phases R1–R7 land, backward compatibility MUST NOT constrain the redesign's outcome. For the duration of the program:
+**Status: expired as of phase R7 (2026-07-15).** The waiver below covered the redesign program R1–R7 and, per the spec's compatibility policy, expires at R7. It is kept for the historical record only — the surfaces it waived (the `web/` asset layout, the npm tarball layout, internal-only `/api` shapes whose sole consumer is the bundled UI) are back under this document's normal rules, as restated in sections 1–6 above with their post-redesign shapes (built `web/dist`, no legacy `web/app.js`).
+
+The UI redesign was a deliberate generational change (approved 2026-07-14): while its phases R1–R7 landed, backward compatibility MUST NOT constrain the redesign's outcome. For the duration of the program:
 
 - **Waived**: the `web/` asset layout and everything the browser consumes (markup, CSS, JS, fonts); the npm tarball's `web/` layout (moves to built `web/dist` — `resolveWebDir` is updated in the same PR); `/api` **response shapes gaining fields** (always allowed) and **internal-only endpoints whose sole consumer is the bundled UI** — these may be reshaped or replaced in the same PR that updates the UI, with a line in the release notes. New NDJSON event types (protocol v2) are additive by design.
 - **Still protected — the redesign works around these, never through them**: CLI commands, flags and exit codes; *readability* of existing `.ai/cezar/` state (a new version must still open old `runs.json`/NDJSON transcripts; v1 event types stay parseable after v2 ships); the `/new` bookmarklet query contract and `/api/launch-key`; workflow YAML and skills Markdown formats and discovery; `config.json` keys (additive only); the npm bin entries and package name.
 - **Required path for each waived break**: called out in the phase PR body under "Breaking changes", release-notes entry, minor version bump (pre-1.0). No deprecation window required.
 
-The waiver expires when phase R7 merges; afterwards this document returns to full force with the then-current surfaces.
+The waiver expired when phase R7 landed; this document is back in full force with the then-current surfaces described above.
 
 ## When in doubt
 

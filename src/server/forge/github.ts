@@ -1,0 +1,443 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { z } from 'zod';
+import { autosaveCommit } from '../../git-worktree.js';
+import type {
+  DraftPrInput,
+  DraftPrOutcome,
+  ForgeAvailability,
+  ForgeDriver,
+  ForgeItem,
+  ForgePrStatus,
+  ForgeRefKind,
+} from './types.js';
+
+/**
+ * The GitHub forge driver — all `gh`-CLI logic in one place, moved here from
+ * `src/server/github.ts` (tab listing) and `src/server/pr.ts` (draft PRs)
+ * behind the `ForgeDriver` seam. Those modules remain as thin delegates.
+ * `/api/github`'s response shape is this driver's serialization and is
+ * protected by BACKWARD_COMPATIBILITY.md — additive changes only.
+ */
+
+const exec = promisify(execFile);
+
+/** One GitHub issue or pull request, flattened for the cockpit's GitHub tab. */
+export type GithubItem = ForgeItem;
+
+export interface GithubData {
+  available: boolean;
+  /** Human-readable hint when unavailable (`gh` missing, no remote, offline…). */
+  reason?: string;
+  /** owner/name, when known. */
+  repo?: string;
+  syncedAt?: string;
+  issues: GithubItem[];
+  prs: GithubItem[];
+  /** Repo-wide map of label name → 6-hex color (no `#`), so the UI can tint chips like GitHub
+   *  does. Additive (BACKWARD_COMPATIBILITY): absent on old payloads, chips fall back to neutral. */
+  labelColors?: Record<string, string>;
+}
+
+// `gh … --json` output — validated at the boundary, extras stripped.
+const ghAuthor = z.object({ login: z.string() }).nullish();
+// `color` is the 6-hex GitHub label color (no `#`), '' when gh omits it.
+const ghLabel = z.object({ name: z.string(), color: z.string().default('') });
+const ghIssueSchema = z.object({
+  number: z.number(),
+  title: z.string(),
+  author: ghAuthor,
+  createdAt: z.string(),
+  labels: z.array(ghLabel).default([]),
+  body: z.string().nullish(),
+  url: z.string(),
+});
+const ghPrSchema = ghIssueSchema.extend({
+  isDraft: z.boolean().default(false),
+  additions: z.number().default(0),
+  deletions: z.number().default(0),
+  statusCheckRollup: z
+    .array(z.object({ state: z.string().nullish(), status: z.string().nullish(), conclusion: z.string().nullish() }))
+    .nullish(),
+});
+const ghPrViewSchema = z.object({
+  number: z.number(),
+  url: z.string(),
+  state: z.string().default('OPEN'),
+  isDraft: z.boolean().default(false),
+  statusCheckRollup: z
+    .array(z.object({ state: z.string().nullish(), status: z.string().nullish(), conclusion: z.string().nullish() }))
+    .nullish(),
+});
+
+function rollupToChecks(rollup: Array<{ state?: string | null; status?: string | null; conclusion?: string | null }> | null | undefined): GithubItem['checks'] {
+  if (!rollup || rollup.length === 0) return null;
+  const states = rollup.map((r) => (r.conclusion || r.state || r.status || '').toUpperCase());
+  if (states.some((s) => ['FAILURE', 'ERROR', 'TIMED_OUT', 'ACTION_REQUIRED'].includes(s))) return 'failing';
+  if (states.some((s) => ['PENDING', 'IN_PROGRESS', 'QUEUED', 'EXPECTED', ''].includes(s))) return 'pending';
+  return 'passing';
+}
+
+async function gh(repoRoot: string, args: string[], timeout = 15_000): Promise<string> {
+  const { stdout } = await exec('gh', args, {
+    cwd: repoRoot,
+    timeout,
+    maxBuffer: 50 * 1024 * 1024,
+  });
+  return stdout;
+}
+
+/* Reads degrade to `available: false` with a hint — never an error (plan rule
+   7): no `gh`, no remote, offline all land on the same quiet path. A short
+   cache keeps tab switches from hammering the GitHub API; a cached fetch with
+   a bigger limit than asked serves fine (it's a superset). */
+let cache: { at: number; limit: number; data: GithubData } | null = null;
+const CACHE_MS = 60_000;
+export const GH_MAX_LIMIT = 1000;
+
+export async function fetchGithub(repoRoot: string, refresh = false, limit = 30): Promise<GithubData> {
+  if (process.env.CEZ_DRY_RUN === '1') return mockGithub();
+  const capped = Math.min(Math.max(limit, 1), GH_MAX_LIMIT);
+  if (!refresh && cache && Date.now() - cache.at < CACHE_MS && cache.limit >= capped) {
+    return cache.data;
+  }
+  try {
+    // No `comments` field — `gh … --json comments` ships full comment bodies.
+    // Big fetches (the GUI's follow-up "give me everything" shot) get a
+    // longer wall clock — statusCheckRollup on hundreds of PRs is slow.
+    const timeout = capped > 100 ? 60_000 : 15_000;
+    const fields = 'number,title,author,createdAt,labels,body,url';
+    const [repoOut, issuesOut, prsOut] = await Promise.all([
+      gh(repoRoot, ['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner'], timeout),
+      gh(repoRoot, ['issue', 'list', '--limit', String(capped), '--json', fields], timeout),
+      gh(repoRoot, ['pr', 'list', '--limit', String(capped), '--json', `${fields},isDraft,additions,deletions,statusCheckRollup`], timeout),
+    ]);
+    // One repo-wide label→color map, filled as we flatten each item's labels.
+    const labelColors: Record<string, string> = {};
+    const recordColor = (l: { name: string; color: string }) => {
+      if (l.color && !labelColors[l.name]) labelColors[l.name] = l.color;
+    };
+    const issues = z.array(ghIssueSchema).parse(JSON.parse(issuesOut)).map(
+      (i): GithubItem => {
+        i.labels.forEach(recordColor);
+        return {
+          kind: 'issue',
+          number: i.number,
+          title: i.title,
+          author: i.author?.login ?? '?',
+          createdAt: i.createdAt,
+          labels: i.labels.map((l) => l.name),
+          body: (i.body ?? '').slice(0, 8_000),
+          url: i.url,
+          comments: 0,
+        };
+      },
+    );
+    const prs = z.array(ghPrSchema).parse(JSON.parse(prsOut)).map(
+      (p): GithubItem => {
+        p.labels.forEach(recordColor);
+        return {
+          kind: 'pr',
+          number: p.number,
+          title: p.title,
+          author: p.author?.login ?? '?',
+          createdAt: p.createdAt,
+          labels: [...p.labels.map((l) => l.name), ...(p.isDraft ? ['draft'] : [])],
+          body: (p.body ?? '').slice(0, 8_000),
+          url: p.url,
+          comments: 0,
+          isDraft: p.isDraft,
+          additions: p.additions,
+          deletions: p.deletions,
+          checks: rollupToChecks(p.statusCheckRollup),
+        };
+      },
+    );
+    const data: GithubData = {
+      available: true,
+      repo: repoOut.trim() || undefined,
+      syncedAt: new Date().toISOString(),
+      issues,
+      prs,
+      labelColors,
+    };
+    cache = { at: Date.now(), limit: capped, data };
+    return data;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const reason = /ENOENT/.test(message)
+      ? 'gh CLI not found — install it and run `gh auth login`'
+      : firstLine(message);
+    return { available: false, reason, issues: [], prs: [] };
+  }
+}
+
+function firstLine(s: string): string {
+  return s.split('\n').find((l) => l.trim().length > 0)?.trim() ?? 'gh failed';
+}
+
+/** CEZ_DRY_RUN=1 — a small fixed catalog so the GitHub tab is demoable offline. */
+function mockGithub(): GithubData {
+  const mk = (over: Partial<GithubItem> & Pick<GithubItem, 'kind' | 'number' | 'title' | 'body'>): GithubItem => ({
+    author: 'mock',
+    createdAt: new Date(Date.now() - over.number * 3_600_000).toISOString(),
+    labels: [],
+    url: `https://github.com/mock/repo/${over.kind === 'pr' ? 'pull' : 'issues'}/${over.number}`,
+    comments: 0,
+    ...over,
+  });
+  return {
+    available: true,
+    repo: 'mock/repo',
+    syncedAt: new Date().toISOString(),
+    issues: [
+      mk({ kind: 'issue', number: 142, title: 'Login form drops session on refresh', labels: ['bug', 'auth'], comments: 3, body: 'Repro: log in, hit reload — you land back on /login. The session cookie is set correctly, but the client store rehydrates before the cookie check resolves, so the auth guard redirects.' }),
+      mk({ kind: 'issue', number: 139, title: 'Add --json flag to cez CLI output', labels: ['enhancement', 'cli'], comments: 1, body: 'For scripting it would help if `cez list` and `cez status` could emit machine-readable JSON instead of the table view.' }),
+      mk({ kind: 'issue', number: 135, title: 'Flaky e2e: worktree cleanup race on cancel', labels: ['bug', 'flaky-test'], comments: 6, body: 'Cancelling a run while the agent holds a file lock leaves a dangling worktree. The next run on the same branch then fails with "worktree already exists".' }),
+    ],
+    prs: [
+      mk({ kind: 'pr', number: 128, title: 'Fix flaky auth test in CI', labels: ['tests'], checks: 'passing', additions: 6, deletions: 3, body: 'Loosens the timing assertion in refresh.test.ts to a realistic budget.' }),
+      mk({ kind: 'pr', number: 124, title: 'Rate limit /api/runs', labels: ['server', 'draft'], isDraft: true, checks: 'failing', additions: 118, deletions: 7, comments: 4, body: 'Draft: token-bucket middleware on the runs router. Still needs the config surface and README docs before review.' }),
+    ],
+    labelColors: {
+      bug: 'd73a4a',
+      auth: '5319e7',
+      enhancement: 'a2eeef',
+      cli: '0e8a16',
+      'flaky-test': 'fbca04',
+      tests: 'c5def5',
+      server: '1d76db',
+      draft: '6a737d',
+    },
+  };
+}
+
+// ---- draft-PR creation (review gate, spec 009) ------------------------------
+// Final autosave-commit → `git push -u origin cez/<id8>` → `gh pr create
+// --draft`, all executed in the task worktree (gh picks the repo up from the
+// worktree's remote). Every failure maps to a one-line human error — the GUI
+// shows it as a toast plus the manual `git merge <branch>` fallback. Never throws.
+
+const PR_URL_RE = /https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+/;
+const PUSH_TIMEOUT_MS = 60_000;
+const PROGRESS_LINES_MAX = 10;
+
+export async function createDraftPr(input: DraftPrInput): Promise<DraftPrOutcome> {
+  const { run } = input;
+  const worktree = run.worktreePath;
+  const branch = run.branch;
+  if (!worktree || !branch) {
+    return { ok: false, error: 'this task has no worktree/branch to publish' };
+  }
+
+  // Final autosave: the branch must hold everything before it leaves the box.
+  await autosaveCommit(worktree);
+
+  // DRY-RUN (CEZ_DRY_RUN=1): no push, no gh — simulate success with a fake PR
+  // URL so the whole review → PR flow is testable without GitHub.
+  if (process.env.CEZ_DRY_RUN === '1') {
+    return { ok: true, url: 'https://github.com/open-mercato/demo/pull/777', dryRun: true };
+  }
+
+  const remote = await execTool(['remote', 'get-url', 'origin'], worktree, 'git');
+  if (!remote.ok || !remote.stdout.trim()) {
+    return { ok: false, error: 'no git remote — add one (git remote add origin <url>) or merge the branch locally' };
+  }
+
+  const push = await execTool(['push', '-u', 'origin', branch], worktree, 'git', PUSH_TIMEOUT_MS);
+  if (!push.ok) {
+    return { ok: false, error: `git push failed — ${tail(push.stderr) || 'unknown error'}` };
+  }
+
+  const body = buildPrBody(input.handoffText, run.task);
+  // Target the branch the worktree forked from (config `baseBranch`) — without
+  // --base, gh aims at the repo default (main) even when work started on
+  // develop. `origin/x` normalizes to `x`; a raw sha (detached-HEAD fork
+  // point) can't be a PR base, so gh falls back to the default branch.
+  const prBase = run.baseBranch?.replace(/^origin\//, '');
+  const baseArgs = prBase && !/^[0-9a-f]{7,40}$/i.test(prBase) ? ['--base', prBase] : [];
+  const pr = await execTool(
+    ['pr', 'create', '--draft', '--head', branch, ...baseArgs, '--title', run.title, '--body', body],
+    worktree,
+    'gh',
+    PUSH_TIMEOUT_MS,
+  );
+  if (!pr.ok) {
+    if (pr.notFound) {
+      return { ok: false, error: 'gh not found — install the GitHub CLI and run `gh auth login`, or merge the branch locally' };
+    }
+    const hint = /auth|log ?in|credential/i.test(pr.stderr) ? ' (try `gh auth login`)' : '';
+    return { ok: false, error: `gh pr create failed — ${tail(pr.stderr) || 'unknown error'}${hint}` };
+  }
+
+  // gh prints the PR URL on stdout; some versions echo it to stderr instead.
+  const match = PR_URL_RE.exec(`${pr.stdout}\n${pr.stderr}`);
+  if (!match) {
+    return { ok: false, error: 'gh pr create returned no PR URL — check `gh pr list` manually' };
+  }
+  return { ok: true, url: match[0], dryRun: false };
+}
+
+/**
+ * PR body from the handoff journal: the "## Goal" section (task text as
+ * fallback) + the first ~10 lines of "## Progress log" (newest first) +
+ * the cezar footer.
+ */
+export function buildPrBody(handoffText: string, task: string): string {
+  const goal = section(handoffText, '## Goal') || task.trim();
+  const progress = section(handoffText, '## Progress log')
+    .split('\n')
+    .filter((l) => l.trim())
+    .slice(0, PROGRESS_LINES_MAX)
+    .join('\n');
+  const parts = ['## Goal', '', goal];
+  if (progress) parts.push('', '## Progress log', '', progress);
+  parts.push('', '---', '', '🤖 made with cezar');
+  return parts.join('\n');
+}
+
+/** Text of one `## Header` section, up to the next `## ` header. */
+function section(text: string, header: string): string {
+  const start = text.indexOf(`${header}\n`);
+  if (start < 0) return '';
+  const rest = text.slice(start + header.length + 1);
+  const next = rest.indexOf('\n## ');
+  return (next >= 0 ? rest.slice(0, next) : rest).trim();
+}
+
+/** Last 3 stderr lines, pipe-joined — enough context, toast-sized. */
+function tail(stderr: string): string {
+  return stderr.trim().split('\n').slice(-3).join(' | ').slice(0, 300);
+}
+
+interface ExecResult {
+  ok: boolean;
+  stdout: string;
+  stderr: string;
+  /** True when the binary itself is missing (ENOENT). */
+  notFound: boolean;
+}
+
+function execTool(args: string[], cwd: string, bin: string, timeoutMs = 30_000): Promise<ExecResult> {
+  return new Promise((resolve) => {
+    execFile(
+      bin,
+      args,
+      { cwd, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024, encoding: 'utf8' },
+      (err, stdout, stderr) =>
+        resolve({
+          ok: !err,
+          stdout: stdout ?? '',
+          stderr: stderr ?? '',
+          notFound: err?.code === 'ENOENT',
+        }),
+    );
+  });
+}
+
+// ---- the driver -------------------------------------------------------------
+
+/** Cached availability probe so `GET /api/health` never pays a full listing. */
+let detectCache: { at: number; repoRoot: string; result: ForgeAvailability } | null = null;
+
+async function detectGithub(repoRoot: string): Promise<ForgeAvailability> {
+  if (process.env.CEZ_DRY_RUN === '1') return { available: true };
+  if (detectCache && detectCache.repoRoot === repoRoot && Date.now() - detectCache.at < CACHE_MS) {
+    return detectCache.result;
+  }
+  let result: ForgeAvailability;
+  try {
+    await gh(repoRoot, ['repo', 'view', '--json', 'nameWithOwner'], 5_000);
+    result = { available: true };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    result = {
+      available: false,
+      reason: /ENOENT/.test(message)
+        ? 'gh CLI not found — install it and run `gh auth login`'
+        : firstLine(message),
+    };
+  }
+  detectCache = { at: Date.now(), repoRoot, result };
+  return result;
+}
+
+/**
+ * Non-blocking availability for `GET /api/health` (#major-health-latency): returns the cached
+ * probe immediately, or `null` while kicking off a background probe to warm it. It NEVER shells
+ * out to `gh` on the request that reads it, so health stays under the bookmarklet's 800 ms port
+ * budget (a `gh repo view` round-trip is ~500–650 ms on its own). `null` is contract-safe — the
+ * whole `forge` field is additive, so "unknown until warm" is a valid answer.
+ */
+export function detectGithubCached(repoRoot: string): ForgeAvailability | null {
+  if (process.env.CEZ_DRY_RUN === '1') return { available: true };
+  if (detectCache && detectCache.repoRoot === repoRoot && Date.now() - detectCache.at < CACHE_MS) {
+    return detectCache.result;
+  }
+  void detectGithub(repoRoot).catch(() => {}); // warm the cache off the request path
+  return null;
+}
+
+/** owner/repo parsed out of the origin remote — feeds `viewUrl`. */
+export interface GithubRepoRef {
+  owner: string;
+  repo: string;
+}
+
+const GH_PR_STATES: Record<string, ForgePrStatus['state']> = {
+  MERGED: 'merged',
+  CLOSED: 'closed',
+};
+
+export function createGithubDriver(repoRoot: string, repoRef: GithubRepoRef | null): ForgeDriver {
+  return {
+    kind: 'github',
+
+    detect: () => detectGithub(repoRoot),
+    detectCached: () => detectGithubCached(repoRoot),
+
+    listIssues: async (opts) => (await fetchGithub(repoRoot, opts?.refresh, opts?.limit)).issues,
+
+    listPRs: async (opts) => (await fetchGithub(repoRoot, opts?.refresh, opts?.limit)).prs,
+
+    createPR: (input) => createDraftPr(input),
+
+    // Null covers everything from "no PR yet" to "gh missing" — the callers
+    // (Create PR → View PR flip) treat all of it as "nothing to link".
+    prStatus: async (branch) => {
+      if (process.env.CEZ_DRY_RUN === '1') return null;
+      try {
+        const out = await gh(repoRoot, ['pr', 'view', branch, '--json', 'number,url,state,isDraft,statusCheckRollup']);
+        const pr = ghPrViewSchema.parse(JSON.parse(out));
+        return {
+          number: pr.number,
+          url: pr.url,
+          state: GH_PR_STATES[pr.state.toUpperCase()] ?? 'open',
+          isDraft: pr.isDraft,
+          checks: rollupToChecks(pr.statusCheckRollup) ?? null,
+        };
+      } catch {
+        return null;
+      }
+    },
+
+    viewUrl: (kind: ForgeRefKind, ref: string | number): string | null => {
+      if (!repoRef) return null;
+      const base = `https://github.com/${repoRef.owner}/${repoRef.repo}`;
+      // Branch names may contain '/' — encode per segment, keep the slashes.
+      const path = String(ref).split('/').map(encodeURIComponent).join('/');
+      switch (kind) {
+        case 'repo':
+          return base;
+        case 'issue':
+          return `${base}/issues/${path}`;
+        case 'pr':
+          return `${base}/pull/${path}`;
+        case 'branch':
+          return `${base}/tree/${path}`;
+        case 'commit':
+          return `${base}/commit/${path}`;
+      }
+    },
+  };
+}

@@ -37,11 +37,11 @@ Click any thumbnail for the full-size screenshot.
 
 | Watch a run live | The review gate | Parallel variants |
 |:--:|:--:|:--:|
-| [![A running task streaming agent text, tool calls and screenshots live](docs/screenshots/live-run.png)](docs/screenshots/live-run.png) | [![A finished run parked at the review gate — read the diff, send notes back, or draft a PR](docs/screenshots/review-gate.png)](docs/screenshots/review-gate.png) | [![Two competing variants of the same task compared side by side — pick the winner](docs/screenshots/variants-compare.png)](docs/screenshots/variants-compare.png) |
+| [![A running task streaming agent text, tool calls and screenshots live](docs/screenshots/live-run.png)](docs/screenshots/live-run.png) | [![A finished run parked at the review gate — read the diff, send notes back, open the PR, or accept](docs/screenshots/review-gate.png)](docs/screenshots/review-gate.png) | [![Two competing variants of the same task compared side by side — pick the winner](docs/screenshots/variants-compare.png)](docs/screenshots/variants-compare.png) |
 | *Every step, tool call, token and screenshot — streamed as it happens.* | *Nothing auto-merges: inspect the diff, send notes into the same session, or push a draft PR.* | *Run a task ×2/×3 in isolated worktrees, compare the diffs, keep one.* |
-| **Plan before you run** | **Workflow builder** | **GitHub, one drag away** |
+| **Plan before you run** | **Workflow builder** | **GitHub, one click away** |
 | [![The Plan overlay — an AI-drafted chain of steps you approve before anything runs](docs/screenshots/plan-chain.png)](docs/screenshots/plan-chain.png) | [![The workflow builder — drag skills into an ordered chain of agent steps and shell checks](docs/screenshots/workflow-builder.png)](docs/screenshots/workflow-builder.png) | [![The GitHub tab — hand an open issue to the agent with a workflow and skills](docs/screenshots/github-issues.png)](docs/screenshots/github-issues.png) |
-| *Press **Plan** and review the proposed chain — trim, reorder, then start.* | *Stitch skills and shell checks into a reusable YAML chain, no code.* | *Open issues and PRs via your `gh` — run the agent straight on an issue.* |
+| *Press **Plan first** and review the proposed chain — trim, reorder, then start.* | *Stitch skills and shell checks into a reusable YAML chain, no code.* | *Open issues and PRs via your `gh` — run the agent straight on an issue.* |
 
 ---
 
@@ -146,7 +146,7 @@ event live and parks the run at a review gate when there's a diff to inspect.
         ▼
    ┌─────────────┐   SSE (replay + live)   ┌──────────────────────────┐
    │ .ai/cezar/  │ ──────────────────────► │  cockpit  localhost:4321 │
-   │ JSON·NDJSON │                         │  Runs · Repo · GitHub ·  │
+   │ JSON·NDJSON │                         │  Tasks · Git · GitHub ·  │
    │ ·Markdown   │                         │  Skills · Workflows      │
    └─────────────┘                         └──────────────────────────┘
                                                   │
@@ -176,8 +176,8 @@ Three words, no jargon — **task**, **skill**, **chain**:
   shape *how* the agent reasons without touching code.
 - **Chains (workflows)** stitch steps into a pipeline: agent steps plus shell
   checks, with bounded `onFail` retry loops. Write the YAML yourself, build one by
-  drag-ordering skills in the **Workflows** tab, or press **Plan** and let the AI
-  draft a chain for your task that you review, trim and start. The built-in
+  drag-ordering skills in the **Workflows** tab, or press **Plan first** and let the
+  AI draft a chain for your task that you review, trim and start. The built-in
   `quick-task` (one agent step) works with zero setup.
 
 Two moves that make the cockpit worth the browser tab:
@@ -193,19 +193,22 @@ Two moves that make the cockpit worth the browser tab:
 
 ## Cockpit tour
 
-Six tabs, one browser window, all live over Server-Sent Events:
+Seven views, one browser window, all live over Server-Sent Events:
 
-| Tab | What's in it |
+| View | What's in it |
 |---|---|
-| **Runs** | Every task with its status, live event stream (agent text · tool calls · tool results · pasted/generated screenshots), tokens and cost. Continue, cancel, open in terminal (`claude --resume`), review the diff, or push a draft PR. |
+| **Tasks** | Every task with its status, live event stream (agent text · tool calls · tool results · pasted/generated screenshots), tokens and cost. Continue, cancel, open in terminal (`claude --resume`), review the diff, or push a draft PR. |
 | **Inbox** | Follow-ups an agent left behind (`todos.json`) — one click turns a suggestion into the next task, pre-wired to its suggested skill. |
-| **Repo** | Branch, working-tree status, diff vs HEAD, recent commits (click one for its inline patch + GitHub link), and the configurable base branch that worktrees fork from and PRs target. |
-| **GitHub** | Open issues and PRs of the repo's origin, read through your logged-in `gh`. Drag an issue onto the task box to prefill the prompt. |
+| **Git** | Branch, working-tree status, diff vs HEAD, recent commits (click one for its inline patch + GitHub link), and the configurable base branch that worktrees fork from and PRs target. |
+| **GitHub** | Open issues and PRs of the repo's origin, read through your logged-in `gh`. Hand an issue straight to the agent — pick a workflow and skills, one click runs it. |
 | **Skills** | Local skills plus the team skills repo, with a rendered body + prompt preview. Refresh pulls the latest from the remote. |
 | **Workflows** | Build a chain by drag-ordering skills, save it as portable YAML, import/export, or delete. Built-ins always come back. |
+| **Settings** | Appearance (dark/light theme, accent, density), agent backends, notifications, and the skills catalog. |
 
-The whole GUI is dependency-free vanilla JS with no build step, a dark/light
-theme toggle, and bookmarklets that launch a task straight from a GitHub page.
+The cockpit is a React app served pre-built from the package — `npx cezar-cli`
+still means no build step and no dev server on your machine — with a dark/light
+theme, a ⌘K command palette, and bookmarklets that launch a task straight from
+a GitHub page.
 
 ---
 
@@ -329,8 +332,8 @@ never blocks startup):
   "skillsRepos": [{ "repo": "open-mercato/skills", "ref": "main" }], // team skills; [] disables
   "maxParallel": 2,          // how many tasks may run at once (non-git dirs always run 1)
   "defaultRunner": "claude", // agent backend: "claude" (default) · "codex" · "opencode"
-  "plannerModel": "sonnet",  // model the Plan button uses to draft chains
-  "baseBranch": "develop"    // branch worktrees fork from + PRs target (also settable in the Repo tab)
+  "plannerModel": "sonnet",  // model the "Plan first" button uses to draft chains
+  "baseBranch": "develop"    // branch worktrees fork from + PRs target (also settable in the Git tab)
 }
 ```
 
@@ -343,18 +346,22 @@ git-ignored automatically; your workflows and skills stay committable.
 
 ```bash
 npm install
-npm run dev          # tsx src/index.ts — the cockpit, live-reloaded
-npm run typecheck    # tsc --noEmit
-npm run test:unit    # fast core-module tests
-npm run build        # tsc → dist/
-npm run test:e2e     # pack/install and exercise the built CLI
-npm test             # unit tests + build + E2E
+npm run dev          # server (API :4321) + Vite dev server, opens the cockpit in the browser
+npm run dev:server   # tsx src/index.ts — the API server alone
+npm run dev:web      # Vite dev server alone (proxies /api to :4321)
+npm run build        # tsc → dist/, vite build → web/dist/, then the pack gate
+npm run typecheck    # server + web (tsc --noEmit)
+npm test             # vitest — server + cockpit unit suites
+npm run test:unit    # node:test — fast core-module tests
+npm run test:package # pack/install and exercise the built CLI
+npm run test:e2e     # real-browser cockpit suite (agent-browser)
 ```
 
 The stack is deliberately small: **TypeScript** (strict, ESM), **Hono** + SSE for
-the server, **Zod** at every boundary, **YAML** for workflows, and **vanilla JS**
-for the GUI (no framework, no bundler). Every module is meant to be read in one
-sitting.
+the server, **Zod** at every boundary, **YAML** for workflows, and a **React 19 +
+Vite + Tailwind v4 + shadcn/ui** cockpit shipped pre-built in `web/dist/` — the
+published package carries the built app, so `npx` users never run a bundler.
+Every module is meant to be read in one sitting.
 
 ---
 

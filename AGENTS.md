@@ -1,6 +1,6 @@
 # AGENTS.md — working in this repository
 
-cezar is a **parallel coding-agents orchestrator**: a local cockpit (CLI + browser GUI) for running and tracking AI coding-agent tasks in a repo. You type a task, pick a workflow and a backend — Claude Code, Codex or OpenCode, or a mix per step — and watch it work live: steps, tool calls, tokens, diffs. Each task runs in its own git worktree, ends at a review gate (never auto-merges), and can be pushed as a draft PR through `gh`. Everything is local: no accounts, no database, no cloud — state is plain JSON, NDJSON and Markdown under `.ai/cezar/`. The stack is deliberately small: strict TypeScript (ESM, Node 20+), Hono + SSE for the server, Zod at every boundary, YAML for workflows, and dependency-free vanilla JS for the GUI. Every module is meant to be read in one sitting.
+cezar is a **parallel coding-agents orchestrator**: a local cockpit (CLI + browser GUI) for running and tracking AI coding-agent tasks in a repo. You type a task, pick a workflow and a backend — Claude Code, Codex or OpenCode, or a mix per step — and watch it work live: steps, tool calls, tokens, diffs. Each task runs in its own git worktree, ends at a review gate (never auto-merges), and can be pushed as a draft PR through `gh`. Everything is local: no accounts, no database, no cloud — state is plain JSON, NDJSON and Markdown under `.ai/cezar/`. The server stack stays deliberately small: strict TypeScript (ESM, Node 20+), Hono + SSE, Zod at every boundary, and YAML workflows. The cockpit is React 19 + Vite + Tailwind v4 + shadcn/ui, compiled to static assets (the legacy vanilla UI was retired in R7). Every module is meant to be read in one sitting.
 
 ## Task routing
 
@@ -14,20 +14,40 @@ cezar is a **parallel coding-agents orchestrator**: a local cockpit (CLI + brows
 | Workflows (YAML chains, steps, retries) | `src/workflows/types.ts`, then `src/workflows/load.ts`, `src/workflows/run.ts` | A step is agent (`prompt`/`skill`) XOR check (`command`); a file has `steps` XOR the portable `skills` shorthand — both enforced by zod refinements. `onFail.retry` may only reference an *earlier* step (`stepsIssue`). `{{task}}` is the substitution token. `quick-task` is the built-in zero-config workflow; built-ins always come back after delete. |
 | Skills (Markdown playbooks, team repos) | `src/skills.ts`, `src/skills-remote.ts` | A skill is a `.md` file with optional YAML frontmatter (`name`, `description`); its body becomes the agent's extra system prompt. Discovery precedence is local-first: `.ai/cezar/skills` → `.ai/skills` → `.agents/skills` + agent mirrors → global → team repo. Missing dirs are fine; team-skill loading never blocks on the network (background cache in `~/.cache/cez/`). |
 | Runs store / state persistence | `src/runs/store.ts` | Plain files in `.ai/cezar/`, no DB: `runs.json` index (zod-validated, atomic tmp+rename, debounced save) plus one append-only NDJSON event file per run. New `RunRecord` fields must be optional so old files still parse; corrupt files degrade to fresh, never crash. The store is also the in-process event bus for SSE. |
-| Web UI (cockpit) | `web/app.js`, `web/index.html`, `web/style.css` | Vanilla JS, no framework, no bundler, no build step — files are served as-is and read per request in dev. One `state` object, fetch + EventSource, SSE events deduped by `seq`. Dark/light theme must keep working. Do not introduce a build tool or dependency. |
-| Feature specs / design history | `.ai/specs/` (000–012) | Numbered specs are the design record — code comments cite them (`spec 006`, `#348`). Read the relevant spec before changing a feature it covers; keep new work consistent with it or update the spec. |
+| Web UI (cockpit) | `web/app/src/app.tsx`, then `web/app/src/routes.tsx`, `web/app/src/api/`, and the affected component/route | React 19 + Vite + Tailwind v4 + shadcn/ui; source lives in `web/app/`, build output in ignored `web/dist/`. Keep one global SSE connection and patch the TanStack Query cache in place; authoritative refetch happens on reconnect/visibility. Preserve light/dark/system theming, mobile safe areas, keyboard access, and unit coverage. The legacy vanilla web app was deleted in R7; when `web/dist` is missing the server answers every shell route with a built-in "run `npm run build:web`" hint page (`src/server/static-ui.ts`). |
+| Feature specs / design history | `.ai/specs/` | Numbered and dated specs are the design record — code comments cite them (`spec 006`, `#348`). Read the relevant spec before changing a feature it covers; keep new work consistent with it or update the spec. |
 
 ## Validation
 
 Before any commit or PR, run in order:
 
 ```bash
-npm run typecheck                    # tsc --noEmit
-npm run test:unit                    # fast node:test coverage of core modules
-npm run build                        # tsc → dist/
-npm run test:e2e                     # pack/install and exercise the built CLI
-npm pack --dry-run --ignore-scripts  # verify the release tarball contents
+npm run typecheck   # tsc --noEmit (server + web)
+npm test            # vitest — server + cockpit unit suites
+npm run test:unit   # node:test — fast core-module coverage (test/unit/)
+npm run build       # tsc → dist/, vite → web/dist/, then the check:pack tarball gate
+npm run test:package # pack/install the release tarball and exercise the built CLI (test/e2e/)
 ```
+
+`npm test` and `npm run test:unit` are the fast unit gate: no server, no browser. They must stay that way. `npm run test:package` needs a completed `npm run build` (it packs the tarball).
+
+The UI smoke suite is a **separate** command — it boots the real app and drives it in a real
+Chrome through the `agent-browser` provider (`.ai/browsers/agent-browser.md`):
+
+```bash
+npm run test:e2e    # .ai/scripts/e2e.sh → test-env-up.sh + vitest (web/app/e2e/)
+```
+
+It boots the app on a free port with `CEZ_DRY_RUN=1` (agent CLIs mocked — no login, no
+network), reuses an already-healthy instance instead of double-booting, and writes
+`.ai/qa/test-env.json` so QA skills attach to the same instance. Stop it with
+`.ai/scripts/test-env-down.sh`. Exit contract:
+
+| Exit | Marker | Meaning |
+| --- | --- | --- |
+| 0 | `TEST_E2E_STATUS=passed` | every spec passed |
+| 0 | `TEST_E2E_STATUS=skipped` | agent-browser could not be provisioned (no network / unsupported platform); prints a loud banner — **not** a pass |
+| non-zero | `TEST_E2E_STATUS=failed` | a spec failed, or the env could not boot |
 
 `CEZ_DRY_RUN=1 npm run dev` still exercises the whole cockpit offline for manual verification.
 

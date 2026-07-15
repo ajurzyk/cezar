@@ -117,7 +117,7 @@ let sampling = false;
  *  the engine maxes them into the run record on unregister. */
 export function registerRunProcess(runId: string, pid: number): void {
   entries.set(runId, { pid, peakRssBytes: 0, peakProcCount: 0 });
-  if (!timer && process.platform !== 'win32') {
+  if (!timer) {
     timer = setInterval(() => void sample(), SAMPLE_INTERVAL_MS);
     timer.unref?.();
     void sample(); // first data point right away, not 2 s late
@@ -190,8 +190,24 @@ async function sample(): Promise<void> {
   }
 }
 
-/** One system-wide snapshot; null on any failure (no ps, weird exit). */
+/** One system-wide snapshot in the `pid ppid rssKb cpu` shape `parsePsOutput` expects; null on
+ *  any failure. Unix uses `ps`; Windows uses PowerShell's Win32_Process (WorkingSetSize → KB,
+ *  cpu reported as 0 — the memory guard only needs RSS). */
 function runPs(): Promise<string | null> {
+  if (process.platform === 'win32') {
+    return new Promise((resolve) => {
+      execFile(
+        'powershell',
+        [
+          '-NoProfile',
+          '-Command',
+          "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId) $([math]::Round($_.WorkingSetSize/1024)) 0\" }",
+        ],
+        { maxBuffer: 16 * 1024 * 1024, windowsHide: true },
+        (err, stdout) => resolve(err ? null : stdout),
+      );
+    });
+  }
   return new Promise((resolve) => {
     execFile(
       'ps',

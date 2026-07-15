@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { type AgentSession } from '../core/claude-cli-runner.js';
-import { registerRunProcess, unregisterRunProcess } from '../core/process-usage.js';
+import { onUsage, registerRunProcess, unregisterRunProcess, type ProcessUsage } from '../core/process-usage.js';
 import { createRunner } from '../core/runner-factory.js';
 import type { RunnerId } from '../core/agent-runner.js';
 import {
@@ -17,10 +17,12 @@ import type { AgentEvent, ContentBlock } from '../core/agent-runner.js';
 import { discoverSkills, type Skill } from '../skills.js';
 import { materializeSkillDir } from '../skills-remote.js';
 import { loadConfig } from '../config.js';
-import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff } from '../git-worktree.js';
+import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff, worktreeShortstat } from '../git-worktree.js';
 import { getRepoInfo } from '../server/git.js';
 import { loadWorkflows } from './load.js';
 import type { RunRecord, RunStore } from '../runs/store.js';
+import { deriveTitleSummary } from '../runs/title-summary.js';
+import { UiEventSink } from '../runs/ui-event-sink.js';
 import { DEFAULT_ALLOWED_TOOLS, stepKind, type WorkflowDef, type WorkflowStepDef } from './types.js';
 
 const CHECK_OUTPUT_CAP = 20_000;
@@ -55,7 +57,16 @@ interface ActiveRun {
   autosaveTimer?: NodeJS.Timeout;
   /** Running counter for persisted agent screenshots (`screenshot-<n>.png`). */
   imageSeq?: number;
+  /** Autonomous mode (#autonomous): never park at `waiting` — auto-nudge the agent to keep
+   *  going until it signals done or the safety cap is hit. */
+  autonomous?: boolean;
+  autoContinues?: number;
 }
+
+/** Safety cap on autonomous auto-continues per run — stops a stuck agent from nudging forever. */
+const MAX_AUTO_CONTINUES = 40;
+const AUTONOMOUS_NUDGE =
+  'Continue working autonomously until the task is fully complete. Do not ask me for confirmation or clarification — make reasonable assumptions and proceed. When everything is done, end the session with your done signal.';
 
 export interface StartRunInput {
   task: string;
@@ -65,6 +76,48 @@ export interface StartRunInput {
   /** Screenshots pasted into the new-task form — delivered once, with the
    *  first agent step's opening message. */
   images?: ContentBlock[];
+  /** Per-run system-prompt override (`POST /api/runs`, programmatic callers).
+   *  Replaces the `config.json` default for this run — see
+   *  `resolveExtraSystemPrompt` for the precedence contract. */
+  systemPrompt?: string;
+  /** Composer opt-out (#worktree-toggle): `false` runs the task in the repo
+   *  working tree instead of an isolated worktree — for read-only skills that
+   *  don't need a branch. Undefined/`true` keeps the default per-task worktree.
+   *  Ignored for variants (they always isolate). */
+  worktree?: boolean;
+  /** Autonomous mode (#autonomous): the run never parks at `waiting` for the
+   *  user — turn-ends auto-continue until the agent signals done or the safety
+   *  cap is hit. No "needs you" is ever raised. */
+  autonomous?: boolean;
+}
+
+/**
+ * The effective "extra" system prompt for a run (spec §protocol v2, R2 2.3):
+ * the per-run override (`POST /api/runs` `systemPrompt`) REPLACES the
+ * `config.json` default — they are the same knob at two scopes, so the more
+ * specific one wins outright; they never concatenate. Whichever wins is
+ * ADDITIVE to the skill body and the handoff contract, which always ride
+ * along (see `composeSystemPrompt`). Blank strings count as unset.
+ */
+export function resolveExtraSystemPrompt(
+  override: string | undefined,
+  configDefault: string | undefined,
+): string | undefined {
+  return override?.trim() || configDefault?.trim() || undefined;
+}
+
+/**
+ * Joins the parts of one agent step's system prompt in fixed order — skill
+ * body (most task-specific), then the run's extra prompt (user guidance, can
+ * amend the skill), then the handoff contract (always last, never optional in
+ * practice). Blank parts drop out; survivors join with the same `\n\n---\n\n`
+ * divider the skill+handoff composition has always used.
+ */
+export function composeSystemPrompt(...parts: Array<string | undefined>): string {
+  return parts
+    .map((p) => p?.trim())
+    .filter((p): p is string => Boolean(p))
+    .join('\n\n---\n\n');
 }
 
 /** Variant letters + the fixed diversification hints (spec 010). A runs the
@@ -105,11 +158,54 @@ export class RunManager {
   /** `.ai/cezar` — where the per-task handoff files and todos.json live. */
   private readonly dataDir: string;
 
+  /** Runs currently being paused by the memory guard — dedupes the ~2 s samples so one breach
+   *  triggers one pause, not a burst. Cleared in dropActive when the run leaves the registry. */
+  private readonly memoryPausing = new Set<string>();
+
   constructor(
     private readonly store: RunStore,
     private readonly repoRoot: string,
   ) {
     this.dataDir = join(repoRoot, '.ai/cezar');
+    // Memory guard (#memory-guard): the shared process-tree sampler already ticks ~every 2 s for
+    // the runs table; piggyback on it to enforce the per-task memory ceiling.
+    onUsage((snapshot) => void this.enforceMemoryLimit(snapshot));
+  }
+
+  /**
+   * Pause any active run whose whole process tree exceeds `config.memoryLimitMb`, freeing its
+   * slot so the queue advances (#memory-guard). "Pause" closes the session — freeing the tree's
+   * memory — and leaves the run resumable via Continue; a loud warning explains why. No-op when
+   * no limit is set or the sampler has no data (e.g. `ps`/PowerShell unavailable).
+   */
+  private async enforceMemoryLimit(snapshot: Record<string, ProcessUsage>): Promise<void> {
+    const runIds = Object.keys(snapshot);
+    if (runIds.length === 0) return;
+    const limitMb = (await loadConfig(this.repoRoot)).memoryLimitMb;
+    if (!limitMb || limitMb <= 0) return;
+    const limitBytes = limitMb * 1024 * 1024;
+    for (const runId of runIds) {
+      const usage = snapshot[runId];
+      if (!usage || usage.rssBytes <= limitBytes) continue;
+      if (this.memoryPausing.has(runId)) continue;
+      const state = this.active.get(runId);
+      if (!state?.session?.open || state.cancelled) continue;
+      this.memoryPausing.add(runId);
+      const usedMb = Math.round(usage.rssBytes / (1024 * 1024));
+      this.store.appendEvent(runId, {
+        type: 'note',
+        message: `⚠ memory limit exceeded — this task's process tree is using ${usedMb} MiB (limit ${limitMb} MiB). Pausing it and letting the next queued task run; resume it with Continue.`,
+      });
+      this.store.appendEvent(runId, {
+        type: 'lifecycle',
+        message: `paused — memory limit exceeded (${usedMb} MiB > ${limitMb} MiB)`,
+      });
+      // Closing the session frees the tree and lets the normal exit path settle the run and
+      // pump the queue. Suppress autonomous auto-continue so the pause actually holds.
+      state.autonomous = false;
+      this.clearIdleTimer(state);
+      state.session.end();
+    }
   }
 
   /** Env the spawned claude gets so the agent can find its handoff file and
@@ -302,6 +398,7 @@ export class RunManager {
   private dropActive(runId: string): void {
     this.waiting.delete(runId);
     this.active.delete(runId);
+    this.memoryPausing.delete(runId);
   }
 
   cancel(runId: string): boolean {
@@ -339,12 +436,19 @@ export class RunManager {
       .filter((b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text')
       .map((b) => b.text)
       .join('\n');
-    const imageCount = content.filter((b) => b.type === 'image').length;
+    // Persist the attached images so the thread can render them (not just count them) — the same
+    // on-disk store + `/images/` route the agent's own screenshots use.
+    const images = content
+      .filter((b): b is Extract<ContentBlock, { type: 'image' }> => b.type === 'image')
+      .map((b) => this.persistImage(runId, state, b.source.media_type, b.source.data))
+      .filter((saved): saved is { name: string; url: string } => saved !== null)
+      .map((saved) => saved.url);
     this.store.appendEvent(runId, {
       type: 'user-message',
       stepId: state.currentStepId,
       text,
-      imageCount,
+      imageCount: content.filter((b) => b.type === 'image').length,
+      images,
     });
 
     const delivered = state.session.sendMessage(content);
@@ -451,6 +555,7 @@ export class RunManager {
 
     let stepCost = 0;
     let turnText = '';
+    const sink = this.makeUiSink(runId, stepId);
     const onEvent = (event: AgentEvent) => {
       if (event.type === 'image') {
         const saved = this.persistImage(runId, state, event.mediaType, event.data);
@@ -475,6 +580,11 @@ export class RunManager {
         this.store.updateStep(runId, stepId, { costUsd: stepCost });
       }
       if (event.type === 'turn-end') {
+        // Belt-and-braces: v2 `turn.completed` already flushed the delta
+        // coalescers; the v1 turn boundary flushes again (idempotent) so no
+        // buffered delta can outlive its turn.
+        sink.flushAll();
+        void this.recordTurnEnd(runId, turnText); // titleSummary + diffStat (#389)
         const sessionOpen = !state.cancelled && state.session?.open;
         const done = sessionOpen && DONE_MARKER_RE.test(turnText.trimEnd());
         turnText = '';
@@ -486,11 +596,29 @@ export class RunManager {
           return;
         }
         if (sessionOpen) {
-          this.store.updateRun(runId, { status: 'waiting' });
-          this.store.updateStep(runId, stepId, { status: 'waiting' });
-          this.waiting.add(runId);
-          this.armIdleTimer(runId, state);
-          void this.pump();
+          // Autonomous (#autonomous): never hand the ball back to the user. Nudge the agent to
+          // keep going (bounded by MAX_AUTO_CONTINUES) instead of parking at `waiting`.
+          const autoContinued =
+            state.autonomous &&
+            (state.autoContinues ?? 0) < MAX_AUTO_CONTINUES &&
+            !state.cancelled &&
+            (() => {
+              const sent = state.session?.sendMessage([{ type: 'text', text: AUTONOMOUS_NUDGE }]);
+              if (!sent) return false;
+              state.autoContinues = (state.autoContinues ?? 0) + 1;
+              this.store.appendEvent(runId, {
+                type: 'note',
+                message: `autonomous — continuing without pausing (${state.autoContinues}/${MAX_AUTO_CONTINUES})`,
+              });
+              return true;
+            })();
+          if (!autoContinued) {
+            this.store.updateRun(runId, { status: 'waiting' });
+            this.store.updateStep(runId, stepId, { status: 'waiting' });
+            this.waiting.add(runId);
+            this.armIdleTimer(runId, state);
+            void this.pump();
+          }
         }
         appendHandoffHeartbeat(this.dataDir, runId, `turn complete — status=${sessionOpen ? 'waiting' : 'running'}`);
       }
@@ -499,7 +627,10 @@ export class RunManager {
     const runner = createRunner(record?.runner ?? 'claude');
     const session = runner.startSession(
       {
-        systemPrompt: HANDOFF_INSTRUCTIONS,
+        // The Continue step is a fresh agent session on the same run — the
+        // run's extra system prompt (already resolved at execute time and
+        // echoed on the record) rides along with the handoff contract.
+        systemPrompt: composeSystemPrompt(record?.systemPrompt, HANDOFF_INSTRUCTIONS),
         userPrompt: prompt,
         cwd: state.cwd,
         allowedTools: DEFAULT_ALLOWED_TOOLS,
@@ -510,6 +641,7 @@ export class RunManager {
         timeoutMs: 0,
       },
       onEvent,
+      { onUiEvent: (event) => sink.handle(event) },
     );
     state.session = session;
     state.currentStepId = stepId;
@@ -519,6 +651,7 @@ export class RunManager {
     const finishedAt = () => new Date().toISOString();
     try {
       await session.result;
+      sink.sessionEnded(state.cancelled ? 'cancelled' : 'end_turn');
       if (state.cancelled) {
         this.store.updateStep(runId, stepId, { status: 'cancelled', finishedAt: finishedAt() });
         this.store.updateRun(runId, { status: 'cancelled', finishedAt: finishedAt(), currentStepId: undefined });
@@ -532,6 +665,7 @@ export class RunManager {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      sink.sessionEnded('error', message);
       this.store.updateStep(runId, stepId, { status: 'failed', error: message, finishedAt: finishedAt() });
       appendHandoffHeartbeat(this.dataDir, runId, `step "${stepId}" complete — status=failed`);
       this.store.updateRun(runId, {
@@ -554,7 +688,13 @@ export class RunManager {
   // ---- execution -----------------------------------------------------------
 
   private async execute(runId: string, workflow: WorkflowDef, input: StartRunInput): Promise<void> {
-    const state: ActiveRun = { cancelled: false, interrupt: () => undefined, cwd: this.repoRoot };
+    const state: ActiveRun = {
+      cancelled: false,
+      interrupt: () => undefined,
+      cwd: this.repoRoot,
+      autonomous: input.autonomous === true,
+      autoContinues: 0,
+    };
     this.active.set(runId, state);
     this.starting.delete(runId);
     const emit = (event: { type: string; stepId?: string; [k: string]: unknown }) =>
@@ -562,11 +702,16 @@ export class RunManager {
 
     // Resolve the agent backend for this run: the task choice (GUI) wins over
     // the config default. Per-step `runner` can still override it below.
-    const taskBackend: RunnerId = input.runner ?? (await loadConfig(this.repoRoot)).defaultRunner;
+    const config = await loadConfig(this.repoRoot);
+    const taskBackend: RunnerId = input.runner ?? config.defaultRunner;
+    // Extra system prompt (R2 2.3): POST override > config default; echoed on
+    // the record so the UI/API can show what the run actually used.
+    const extraSystemPrompt = resolveExtraSystemPrompt(input.systemPrompt, config.systemPrompt);
     this.store.updateRun(runId, {
       status: 'running',
       startedAt: new Date().toISOString(),
       runner: taskBackend,
+      systemPrompt: extraSystemPrompt,
     });
     emit({ type: 'lifecycle', message: `run started — workflow "${workflow.name}" (runner: ${taskBackend})` });
 
@@ -574,12 +719,16 @@ export class RunManager {
     // `.ai/cezar/worktrees/<id>`, never in the user's working tree. Not a git
     // repo, or worktree creation failed → degrade to running in place.
     const repo = await getRepoInfo(this.repoRoot);
-    if (repo) {
+    if (repo && input.worktree === false) {
+      // Composer opt-out: run in the repo working tree, no branch/worktree
+      // (read-only skills — review, summarize — that never need isolation).
+      emit({ type: 'note', message: 'worktree off — running in the repo working tree' });
+    } else if (repo) {
       // Fork from the configured base branch (config.json `baseBranch`, e.g.
       // `develop`) — also the target of the eventual draft PR. Unresolvable
       // (typo, not fetched) → note + the currently checked-out branch.
       let base = repo.branch;
-      const configured = (await loadConfig(this.repoRoot)).baseBranch;
+      const configured = config.baseBranch;
       if (configured) {
         const resolved = await resolveBaseRef(this.repoRoot, configured);
         if (resolved) {
@@ -618,6 +767,16 @@ export class RunManager {
     const retriesUsed = new Map<string, number>();
     let checkFailure: string | null = null;
     let runError: string | null = null;
+    // Persist the task's attached images so the thread's initial bubble can render them
+    // (#image-display); they still ride the first agent step's opening message below.
+    if (input.images?.length) {
+      const urls = input.images
+        .filter((b): b is Extract<ContentBlock, { type: 'image' }> => b.type === 'image')
+        .map((b) => this.persistImage(runId, state, b.source.media_type, b.source.data))
+        .filter((saved): saved is { name: string; url: string } => saved !== null)
+        .map((saved) => saved.url);
+      if (urls.length) this.store.updateRun(runId, { taskImages: urls });
+    }
     // Task screenshots go with the FIRST agent step's opening message only —
     // later steps and retry loops run in fresh sessions without them.
     let startImages = input.images;
@@ -656,6 +815,7 @@ export class RunManager {
           emit,
           startImages,
           taskBackend,
+          extraSystemPrompt,
         );
         startImages = undefined;
         checkFailure = null;
@@ -740,6 +900,7 @@ export class RunManager {
     emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
     images: ContentBlock[] | undefined,
     taskBackend: RunnerId,
+    extraSystemPrompt: string | undefined,
   ): Promise<string | null> {
     let systemPrompt: string | undefined;
     if (step.skill) {
@@ -788,6 +949,7 @@ export class RunManager {
     const startTokens = stepRecord?.tokensUsed ?? 0;
     let stepCost = stepRecord?.costUsd ?? 0;
     let turnText = '';
+    const sink = this.makeUiSink(runId, step.id);
     const onEvent = (event: AgentEvent) => {
       if (event.type === 'image') {
         const saved = this.persistImage(runId, state, event.mediaType, event.data);
@@ -813,6 +975,10 @@ export class RunManager {
         this.store.updateStep(runId, step.id, { costUsd: stepCost });
       }
       if (event.type === 'turn-end') {
+        // v2 `turn.completed` already flushed the coalescers; the v1 turn
+        // boundary flushes again (idempotent) as a backstop.
+        sink.flushAll();
+        void this.recordTurnEnd(runId, turnText); // titleSummary + diffStat (#389)
         const sessionOpen = !state.cancelled && state.session?.open;
         const done = interactive && sessionOpen && DONE_MARKER_RE.test(turnText.trimEnd());
         turnText = '';
@@ -844,10 +1010,9 @@ export class RunManager {
     try {
       session = runner.startSession(
         {
-          // The handoff/todos contract rides along on every agent step.
-          systemPrompt: systemPrompt
-            ? `${systemPrompt}\n\n---\n\n${HANDOFF_INSTRUCTIONS}`
-            : HANDOFF_INSTRUCTIONS,
+          // Skill body, then the run's extra prompt (POST override or config
+          // default), then the handoff/todos contract — every agent step.
+          systemPrompt: composeSystemPrompt(systemPrompt, extraSystemPrompt, HANDOFF_INSTRUCTIONS),
           userPrompt,
           images,
           cwd: state.cwd,
@@ -862,7 +1027,7 @@ export class RunManager {
           timeoutMs: interactive ? 0 : undefined,
         },
         onEvent,
-        { autoEndAfterFirstTurn: !interactive },
+        { autoEndAfterFirstTurn: !interactive, onUiEvent: (event) => sink.handle(event) },
       );
     } catch (err) {
       return err instanceof Error ? err.message : String(err);
@@ -874,16 +1039,69 @@ export class RunManager {
 
     try {
       const result = await session.result;
+      // v2 counterpart of v1's `done` (spec: the mappers leave session-close
+      // events to the RunManager — only it knows how the session settled).
+      sink.sessionEnded(state.cancelled ? 'cancelled' : 'end_turn');
       this.store.updateStep(runId, step.id, { tokensUsed: startTokens + result.tokensUsed });
       return null;
     } catch (err) {
-      return err instanceof Error ? err.message : String(err);
+      const message = err instanceof Error ? err.message : String(err);
+      sink.sessionEnded('error', message); // alongside v1's fatal `error`
+      return message;
     } finally {
       this.recordUsagePeaks(runId);
       this.clearIdleTimer(state);
       state.session = undefined;
       state.currentStepId = undefined;
       state.interrupt = () => undefined;
+    }
+  }
+
+  /**
+   * Protocol-v2 sink for one agent session (R2 step 2.1): the runner's
+   * `onUiEvent` stream flows through here. Persisted snapshots ride the same
+   * NDJSON file as v1 (the store stamps `seq`/`ts`, `appendEvent` fans them
+   * out live too); coalesced `item.delta` flushes go out live-only via
+   * `emitEphemeral` — raw deltas never hit disk (spec §performance
+   * guardrails). One sink per session: cumulative usage dedup and the
+   * item-shape cache are session-scoped, like the mapper state feeding them.
+   */
+  private makeUiSink(runId: string, stepId: string): UiEventSink {
+    return new UiEventSink({
+      persist: (event) => this.store.appendEvent(runId, { ...event, stepId }),
+      emitLive: (event) => this.store.emitEphemeral(runId, { ...event, stepId }),
+    });
+  }
+
+  /**
+   * Turn-end bookkeeping (#389), shared by `runAgentStep` and
+   * `runContinuation` — called (fire-and-forget) from every `turn-end` event:
+   *
+   *  - `titleSummary`: derived from the turn's text, set ONCE — only while the
+   *    record has none. A user's inline edit also lands in `titleSummary`
+   *    (see `PATCH /api/runs/:id`), so an edit is never overwritten either.
+   *  - `diffStat`: cheap `git diff --shortstat` vs the base, refreshed every
+   *    turn. Async and best-effort — a git failure becomes at most a `note`
+   *    event, NEVER a run failure. `updateRun` fans the record out over SSE,
+   *    so the list views pick both up with no extra wiring.
+   *
+   * Not `private` so the integration tests can drive a turn-end directly —
+   * a real agent session is the only other way to reach this path.
+   */
+  async recordTurnEnd(runId: string, turnText: string): Promise<void> {
+    try {
+      const run = this.store.getRun(runId);
+      if (!run) return;
+      if (run.titleSummary === undefined) {
+        const summary = deriveTitleSummary(turnText, run.task);
+        if (summary) this.store.updateRun(runId, { titleSummary: summary });
+      }
+      if (!run.worktreePath || !existsSync(run.worktreePath)) return;
+      const stat = await worktreeShortstat(run.worktreePath, run.baseBranch ?? 'HEAD');
+      if (stat) this.store.updateRun(runId, { diffStat: stat });
+      else this.store.appendEvent(runId, { type: 'note', message: 'diff stat unavailable — git diff --shortstat failed in the worktree' });
+    } catch {
+      // Bookkeeping only — nothing here may disturb the run.
     }
   }
 

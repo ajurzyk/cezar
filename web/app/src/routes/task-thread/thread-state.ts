@@ -1,0 +1,493 @@
+import type { RunEvent, RunStatus } from '@/api/types'
+import type { PlanEntry, PlanStatus, StopReason, UiItem, UiToolItem } from '@/protocol/ui-events'
+import { toolDisplay } from '@/protocol/tool-display'
+
+/**
+ * The thread reducer: folds one run's ordered event list (`useRunEvents` — v1 lines and
+ * protocol-v2 events over one `seq` clock) into renderable turns. Pure and total: called with
+ * the full list on every render, it must never throw on a malformed line — one bad event costs
+ * one event.
+ *
+ * Protocol v2 (`item.*`, `turn.*`, `plan.updated`) is primary. v1 lines fill two roles:
+ *
+ *  - Lines with NO v2 counterpart always render: `user-message` (the engine writes user turns
+ *    as v1 only), `note`/`lifecycle` (dim lines), `error` (danger), `image` (persisted URL —
+ *    the v2 `image` twin carries raw base64 and never reaches the file), `check-output`
+ *    (check steps spawn no agent session, so v1 is all there is).
+ *  - Item-ish lines (`text`, `tool-call`, `tool-result`) are a FALLBACK for old runs recorded
+ *    before the v2 emitters existed. THE MIXED-FILE DEDUP RULE: within a turn, v2 wins — once
+ *    any `item.*` event has been seen in the current turn, v1 item-ish lines are skipped, and
+ *    any already-synthesized v1 items in that turn are dropped. This is grounded in the real
+ *    wire order: the RunManager persists the mapper's v2 events *before* the v1 twin of the
+ *    same content (observed in R2 dry-run transcripts: `item.completed` at seq N, its `text`
+ *    twin at seq N+1), so the drop path also covers live streams, and the buffer-then-drop
+ *    handles any interleaving the other way.
+ *
+ * v1-synthesized tool items are honest about what v1 knows: `running` on `tool-call`,
+ * `completed` on `tool-result` — v1 has no failure/declined signal, so none is invented.
+ */
+
+/** A dim/danger transcript line (v1 note/lifecycle/error, v2 non-fatal session.error). */
+export interface ThreadNote {
+  kind: 'note'
+  id: string
+  text: string
+  tone: 'dim' | 'danger'
+}
+
+/** An image the run persisted (v1 `image` line: served from `/api/runs/:id/images/…`). */
+export interface ThreadImage {
+  kind: 'image'
+  id: string
+  url: string
+  name?: string
+}
+
+export type ThreadEntry = UiItem | ThreadNote | ThreadImage
+
+export interface ThreadTurn {
+  /** Stable render key, assigned in arrival order (`turn-1`, `turn-2`, …). Not the protocol
+   *  turnId: a v1-opened turn gets its v2 id later, and a key that changes mid-stream would
+   *  remount everything under it. */
+  id: string
+  /** The protocol-v2 turnId, once known. */
+  turnId?: string
+  /** The v1 `user-message` that opened this turn. The FIRST turn usually has none — the initial
+   *  prompt is the run's `task`, which the view renders from the run record. */
+  userMessage?: { text: string; imageCount: number; images: string[] }
+  items: ThreadEntry[]
+  /** Latest `plan.updated` snapshot seen during this turn (full-replacement semantics). */
+  planEntries?: PlanEntry[]
+  completed?: { stopReason: StopReason; costUsd?: number }
+}
+
+export interface ThreadState {
+  turns: ThreadTurn[]
+  /** v2 `session.ended` — the last one wins (each step runs its own session). */
+  sessionEnded?: { reason: StopReason; message?: string }
+}
+
+/** What the strip under the thread says. Pure so the mapping is table-testable. */
+export type ThreadFooter =
+  | { state: 'waiting' }
+  | { state: 'closed'; label: string; tone: 'dim' | 'danger' }
+  | null
+
+/**
+ * The plan the dock shows: the LATEST snapshot across all turns (full-replacement semantics —
+ * every `plan.updated` supersedes everything before it, including one from an earlier turn).
+ * An empty latest snapshot is returned as-is: it replaced the plan with nothing, which is not
+ * the same as never having had one.
+ */
+export function latestPlanEntries(state: ThreadState): PlanEntry[] | undefined {
+  for (let i = state.turns.length - 1; i >= 0; i -= 1) {
+    const entries = state.turns[i]!.planEntries
+    if (entries !== undefined) return entries
+  }
+  return undefined
+}
+
+/**
+ * Every file path the run's tool items are known to have touched (edit diffs + read/edit
+ * locations), most recently touched first — TODAY'S source for the composer's `@` mentions.
+ * R5's `/files` API replaces this with a worktree-wide search through the same composer seam
+ * (`getMentionCandidates`); this stays as the offline-honest fallback.
+ */
+export function threadFilePaths(state: ThreadState): string[] {
+  const seen: string[] = []
+  for (const turn of state.turns) {
+    for (const item of turn.items) {
+      if (item.kind !== 'tool') continue
+      for (const location of item.locations ?? []) seen.push(location.path)
+      for (const diff of item.diffs ?? []) seen.push(diff.path)
+    }
+  }
+  // Later mention beats earlier: keep each path's LAST occurrence, then newest first.
+  const deduped: string[] = []
+  for (let i = seen.length - 1; i >= 0; i -= 1) {
+    if (!deduped.includes(seen[i]!)) deduped.push(seen[i]!)
+  }
+  return deduped
+}
+
+export function threadFooter(status: RunStatus, error?: string): ThreadFooter {
+  switch (status) {
+    case 'waiting':
+      return { state: 'waiting' }
+    case 'failed':
+      return { state: 'closed', tone: 'danger', label: error ? `Session failed — ${error}` : 'Session failed' }
+    case 'review':
+      return { state: 'closed', tone: 'dim', label: 'Session closed — waiting for your review' }
+    case 'done':
+    case 'cancelled':
+      return { state: 'closed', tone: 'dim', label: 'Session closed' }
+    default:
+      // queued/running: the stream itself is the status.
+      return null
+  }
+}
+
+// ---- internals ----------------------------------------------------------------------------
+
+/** `origin` is fold-internal: it is what lets the mixed-file rule drop exactly the v1-derived
+ *  items and nothing else when a turn turns out to be v2-covered. */
+interface DraftEntry {
+  origin: 'v1' | 'v2' | 'meta'
+  entry: ThreadEntry
+}
+
+interface DraftTurn {
+  id: string
+  turnId?: string
+  userMessage?: { text: string; imageCount: number; images: string[] }
+  entries: DraftEntry[]
+  planEntries?: PlanEntry[]
+  completed?: { stopReason: StopReason; costUsd?: number }
+  /** True once any v2 `item.*` event landed in this turn — the dedup latch. */
+  v2Items: boolean
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function str(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined
+}
+
+/** The engine's completion marker (`CEZ:DONE`). v1 `text` lines arrive pre-stripped by the
+ *  server; v2 message items carry the raw text, so display strips it here. */
+function stripDoneMarker(text: string): string {
+  return text.replace(/\s*CEZ:DONE\s*$/, '')
+}
+
+/** v1 tool results are strings today; anything else is rendered as JSON rather than dropped. */
+function resultText(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (value === undefined || value === null) return ''
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
+}
+
+const isUiItem = (entry: ThreadEntry): entry is UiItem =>
+  entry.kind === 'message' || entry.kind === 'reasoning' || entry.kind === 'tool'
+
+const PLAN_STATUSES: ReadonlySet<string> = new Set<PlanStatus>(['pending', 'in_progress', 'completed'])
+
+/**
+ * Pre-v2 transcripts carry the plan only as TodoWrite input (`{todos: [{content, status,
+ * activeForm}]}` — the documented Claude wire shape). Recovered so old runs get the dock too;
+ * v2-covered turns never need this (their mappers emit `plan.updated`). All-or-nothing: one
+ * malformed entry means the input is not the shape we claim to understand.
+ */
+function planFromTodos(input: unknown): PlanEntry[] | undefined {
+  if (!isRecord(input) || !Array.isArray(input.todos)) return undefined
+  const entries: PlanEntry[] = []
+  for (const todo of input.todos) {
+    if (!isRecord(todo) || typeof todo.content !== 'string') return undefined
+    entries.push({
+      content: todo.content,
+      status: PLAN_STATUSES.has(todo.status as string) ? (todo.status as PlanStatus) : 'pending',
+      ...(typeof todo.activeForm === 'string' ? { activeForm: todo.activeForm } : {}),
+    })
+  }
+  return entries
+}
+
+export function reduceThread(events: RunEvent[]): ThreadState {
+  const turns: DraftTurn[] = []
+  /** itemId → live item. Rebound on every `item.started`, so per-session id reuse (each step
+   *  restarts `item_1`) always resolves to the newest incarnation. */
+  const itemsById = new Map<string, { turn: DraftTurn; entry: DraftEntry }>()
+  let sessionEnded: ThreadState['sessionEnded']
+  let turnSeq = 0
+
+  const newTurn = (): DraftTurn => {
+    turnSeq += 1
+    const turn: DraftTurn = { id: `turn-${turnSeq}`, entries: [], v2Items: false }
+    turns.push(turn)
+    return turn
+  }
+  const currentTurn = (): DraftTurn => turns.at(-1) ?? newTurn()
+
+  const upsertV2 = (turn: DraftTurn, raw: UiItem) => {
+    // Clone: deltas append in place, and the event object off the wire must stay untouched.
+    const item = { ...raw }
+    if (!turn.v2Items) {
+      // The dedup latch flips: this turn is v2-covered, so every v1-synthesized item in it is
+      // a duplicate of something v2 already describes (or is about to).
+      turn.v2Items = true
+      for (const dropped of turn.entries) {
+        if (dropped.origin === 'v1' && isUiItem(dropped.entry)) itemsById.delete(dropped.entry.id)
+      }
+      turn.entries = turn.entries.filter((e) => !(e.origin === 'v1' && isUiItem(e.entry)))
+    }
+    const existing = itemsById.get(item.id)
+    if (existing && existing.turn === turn) {
+      existing.entry.entry = item
+      itemsById.set(item.id, existing)
+      return
+    }
+    const draft: DraftEntry = { origin: 'v2', entry: item }
+    turn.entries.push(draft)
+    itemsById.set(item.id, { turn, entry: draft })
+  }
+
+  for (const event of events) {
+    switch (event.type) {
+      // ---- turn boundaries ------------------------------------------------------------
+      case 'user-message': {
+        const turn = newTurn()
+        turn.userMessage = {
+          text: str(event.text) ?? '',
+          imageCount: typeof event.imageCount === 'number' ? event.imageCount : 0,
+          images: Array.isArray(event.images) ? event.images.filter((u): u is string => typeof u === 'string') : [],
+        }
+        break
+      }
+      case 'turn.started': {
+        const turnId = str(event.turnId)
+        const current = turns.at(-1)
+        // A v1 `user-message` line precedes the v2 turn.started for the same turn (observed
+        // wire order) — attach rather than opening a duplicate. A turn that already has a v2
+        // identity or v2 items is someone else's; open fresh.
+        if (current && current.turnId === undefined && !current.v2Items) {
+          current.turnId = turnId
+        } else {
+          newTurn().turnId = turnId
+        }
+        break
+      }
+      case 'turn.completed': {
+        const turnId = str(event.turnId)
+        // Newest match first (lib is ES2022, so no findLast): per-session turn ids repeat
+        // across steps, and a completion always belongs to the most recent turn wearing it.
+        let matched: DraftTurn | undefined
+        for (let i = turns.length - 1; i >= 0 && !matched; i -= 1) {
+          if (turns[i]!.turnId === turnId) matched = turns[i]
+        }
+        const turn = matched ?? turns.at(-1)
+        if (turn) {
+          turn.completed = {
+            stopReason: (str(event.stopReason) ?? 'end_turn') as StopReason,
+            ...(typeof event.costUsd === 'number' ? { costUsd: event.costUsd } : {}),
+          }
+        }
+        break
+      }
+
+      // ---- v2 items ---------------------------------------------------------------------
+      case 'item.started':
+      case 'item.updated':
+      case 'item.completed': {
+        // Validate the discriminant AND the id before trusting the cast: an unknown `kind` would
+        // render a blank row, and a missing `id` would key every such item to the same
+        // `${turn}:undefined` (duplicate React keys) — #minor-item-ingress-guard.
+        if (!isRecord(event.item)) break
+        const kind = event.item.kind
+        const id = event.item.id
+        if (
+          (kind !== 'message' && kind !== 'reasoning' && kind !== 'tool') ||
+          typeof id !== 'string' ||
+          id === ''
+        ) {
+          break
+        }
+        const item = event.item as unknown as UiItem
+        const located = itemsById.get(item.id)
+        upsertV2(located?.turn ?? currentTurn(), item)
+        break
+      }
+      case 'item.delta': {
+        const located = itemsById.get(str(event.itemId) ?? '')
+        const delta = str(event.delta) ?? ''
+        if (!located || delta === '' || !isUiItem(located.entry.entry)) break
+        const item = located.entry.entry
+        if (event.field === 'output' && item.kind === 'tool') {
+          item.output = (item.output ?? '') + delta
+        } else if (event.field !== 'output' && item.kind !== 'tool') {
+          item.text += delta
+        }
+        break
+      }
+
+      // ---- v1 fallback items (skipped once the turn is v2-covered) -----------------------
+      case 'text': {
+        const turn = currentTurn()
+        if (turn.v2Items) break
+        const text = str(event.text) ?? ''
+        if (text === '') break
+        turn.entries.push({
+          origin: 'v1',
+          entry: { kind: 'message', id: `v1:${event.seq}`, role: 'assistant', text },
+        })
+        break
+      }
+      case 'tool-call': {
+        const turn = currentTurn()
+        if (turn.v2Items) break
+        const name = str(event.tool) ?? 'Tool'
+        const display = toolDisplay(name, event.input)
+        if (display.toolKind === 'plan') {
+          // v1-only fallback: the dock's data lives in the TodoWrite input on old transcripts.
+          const plan = planFromTodos(event.input)
+          if (plan !== undefined) turn.planEntries = plan
+        }
+        const item: UiToolItem = {
+          kind: 'tool',
+          id: str(event.id) ?? `v1:${event.seq}`,
+          name,
+          toolKind: display.toolKind,
+          title: display.title,
+          status: 'running',
+          input: event.input,
+        }
+        const draft: DraftEntry = { origin: 'v1', entry: item }
+        turn.entries.push(draft)
+        itemsById.set(item.id, { turn, entry: draft })
+        break
+      }
+      case 'tool-result': {
+        const located = itemsById.get(str(event.toolCallId) ?? '')
+        if (!located || located.turn.v2Items || located.entry.origin !== 'v1') break
+        const item = located.entry.entry
+        if (item.kind !== 'tool') break
+        item.status = 'completed'
+        item.output = resultText(event.result)
+        break
+      }
+
+      // ---- lines that always render -------------------------------------------------------
+      case 'note':
+      case 'lifecycle': {
+        const text = str(event.message) ?? ''
+        if (text === '') break
+        currentTurn().entries.push({
+          origin: 'meta',
+          entry: { kind: 'note', id: `v1:${event.seq}`, text, tone: 'dim' },
+        })
+        break
+      }
+      case 'error': {
+        const text = str(event.message) ?? ''
+        if (text === '') break
+        currentTurn().entries.push({
+          origin: 'meta',
+          entry: { kind: 'note', id: `v1:${event.seq}`, text, tone: 'danger' },
+        })
+        break
+      }
+      case 'session.error': {
+        const text = str(event.message) ?? ''
+        if (text === '') break
+        currentTurn().entries.push({
+          origin: 'meta',
+          entry: { kind: 'note', id: `v2:${event.seq}`, text, tone: 'danger' },
+        })
+        break
+      }
+      case 'step-end': {
+        // Steps stay out of the thread (they are header material) except the one thing the
+        // transcript must not hide: a step that failed — mirroring the legacy renderer.
+        if (event.status !== 'failed') break
+        const suffix = str(event.error) ? ` — ${str(event.error)}` : ''
+        currentTurn().entries.push({
+          origin: 'meta',
+          entry: { kind: 'note', id: `v1:${event.seq}`, text: `step ${str(event.stepId) ?? '?'} failed${suffix}`, tone: 'danger' },
+        })
+        break
+      }
+      case 'check-output': {
+        // A check step's command run (`src/workflows/run.ts` — v1-only: check steps spawn no
+        // agent session, so no v2 twin exists). Rendered as an execute tool card so the
+        // pass/fail verdict rides the exit-code pill; origin `meta` because it is not an
+        // agent item and must survive the mixed-file dedup.
+        const command = str(event.command) ?? 'check'
+        const exitCode = typeof event.exitCode === 'number' ? event.exitCode : -1
+        const item: UiToolItem = {
+          kind: 'tool',
+          id: `v1:${event.seq}`,
+          name: 'check',
+          toolKind: 'execute',
+          title: `Ran ${command}`,
+          status: exitCode === 0 ? 'completed' : 'failed',
+          output: str(event.text) ?? '',
+          exitCode,
+        }
+        currentTurn().entries.push({ origin: 'meta', entry: item })
+        break
+      }
+      case 'image': {
+        // Only the v1 line carries a served URL; the v2 twin is raw base64 and is dropped by
+        // the sink before persistence anyway. No URL → nothing honest to render.
+        const url = str(event.url)
+        if (url === undefined) break
+        const entry: ThreadImage = { kind: 'image', id: `v1:${event.seq}`, url }
+        const name = str(event.name)
+        if (name !== undefined) entry.name = name
+        currentTurn().entries.push({ origin: 'meta', entry })
+        break
+      }
+
+      // ---- session-level --------------------------------------------------------------------
+      case 'plan.updated': {
+        if (Array.isArray(event.entries)) {
+          currentTurn().planEntries = event.entries as PlanEntry[]
+        }
+        break
+      }
+      case 'session.ended': {
+        sessionEnded = {
+          reason: (str(event.reason) ?? 'end_turn') as StopReason,
+          ...(str(event.message) !== undefined ? { message: str(event.message) } : {}),
+        }
+        break
+      }
+
+      // ---- THE v1 VOCABULARY SWEEP (cezar-code-map §3.2) — deliberate suppressions ---------
+      // Every persisted v1 type is either rendered above or named here with the surface that
+      // owns it instead, so an old transcript reads complete without transcript noise:
+      //  - `step-start` / non-failed `step-end`: the run header's step rail (step-rail.tsx)
+      //    is the steps surface, same as the legacy divider-free design choice for step ends.
+      //  - `token-usage` / `cost`: the header meta line renders the RECORD's running totals;
+      //    per-event ticks in the body would just repaint the same numbers.
+      //  - `turn-end` / `done`: pure engine control flow — completion already reads from the
+      //    run status footer (and `done` is always shadowed by a `lifecycle` line).
+      //  - `session`: the backend's session id, surfaced by the header's take-over hint via
+      //    the record's `sessionId` — an id line in the transcript helps no one.
+      case 'step-start':
+      case 'token-usage':
+      case 'cost':
+      case 'turn-end':
+      case 'done':
+      case 'session':
+        break
+
+      // session.started, usage.updated, permission.* and anything future: header/telemetry
+      // material or not yet rendered — never guessed at in the thread body. (Deliberate
+      // divergence from the legacy raw-JSON-note fallback: an unknown type renders as
+      // nothing rather than as debug output.)
+      default:
+        break
+    }
+  }
+
+  return {
+    turns: turns.map((draft) => ({
+      id: draft.id,
+      ...(draft.turnId !== undefined ? { turnId: draft.turnId } : {}),
+      ...(draft.userMessage !== undefined ? { userMessage: draft.userMessage } : {}),
+      ...(draft.planEntries !== undefined ? { planEntries: draft.planEntries } : {}),
+      ...(draft.completed !== undefined ? { completed: draft.completed } : {}),
+      items: draft.entries.map(({ entry }) =>
+        entry.kind === 'message' && entry.role === 'assistant'
+          ? { ...entry, text: stripDoneMarker(entry.text) }
+          : entry,
+      ),
+    })),
+    ...(sessionEnded !== undefined ? { sessionEnded } : {}),
+  }
+}

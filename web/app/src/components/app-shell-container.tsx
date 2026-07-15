@@ -1,0 +1,71 @@
+import type { ReactNode } from 'react'
+
+import { useHealth, useTodos } from '@/api/queries'
+import type { HealthResponse } from '@/api/types'
+import { AppShell, type RepoChip } from '@/components/app-shell'
+import { CommandPalette } from '@/components/command-palette'
+import { ListViewProvider } from '@/components/list-view'
+import { TaskQuickListContainer } from '@/components/task-quick-list'
+import { ToolsMenu } from '@/components/tools-menu'
+
+/**
+ * Derive the sidebar's repo chip from `/api/health`.
+ *
+ * Null — the chip renders nothing — whenever there is nothing true to say: health hasn't
+ * answered yet, or cezar is running outside a git repository (`repo: null`), which is a
+ * supported way to run it. An empty chip is honest; "loading…" or a guessed folder name is not.
+ *
+ * The name is the repo root's basename: `/home/me/Projects/cezar` → `cezar`. Both separators,
+ * because the server sends whatever path git gave it, and a trailing one is stripped first so
+ * `/repo/` doesn't chip as an empty string.
+ */
+export function repoChipOf(health: HealthResponse | undefined): RepoChip | null {
+  const repo = health?.repo
+  if (!repo) return null
+  const name = repo.root.replace(/[\\/]+$/, '').split(/[\\/]/).pop()
+  if (!name) return null
+  return { name, branch: repo.branch }
+}
+
+/**
+ * The app shell, wired to live data.
+ *
+ * AppShell itself stays presentational — it takes repo/version/inboxCount and renders them, or
+ * renders nothing. This is the seam where those become real: `useHealth()` for the repo and
+ * version chips, `useTodos()` for the inbox badge.
+ *
+ * Nothing here caches boot-time values (#369: the legacy UI read the branch once at startup and
+ * then showed a stale branch forever). The chips read whatever is currently in the health query,
+ * so making them live is Step 3.2's job of invalidating that query — not a change here.
+ */
+export function AppShellContainer({ children }: { children: ReactNode }) {
+  const health = useHealth()
+  const todos = useTodos()
+
+  return (
+    // The Active/Archived filter is shared by the quick-list below and the Tasks table (Step 3.4),
+    // which renders in `children`. The provider goes here because this is the lowest node that has
+    // both of them under it — the spec requires the two sets of tabs to be one filter.
+    <ListViewProvider>
+      <AppShell
+        repo={repoChipOf(health.data)}
+        version={health.data?.version ?? null}
+        latestVersion={health.data?.latestVersion ?? null}
+        // `?? null` rather than `?? 0`: no badge while the inbox is unknown, and no badge when it
+        // is known to be empty — AppShell renders neither for a falsy count.
+        inboxCount={todos.data?.length ?? null}
+        // Hidden until health confirms the forge driver (R6 Step 1.1) — same honesty rule as
+        // the chips: the nav must not claim a GitHub tab it cannot back. The Tools menu's
+        // forge note says why it is absent.
+        forgeAvailable={health.data?.forge?.available === true}
+        taskQuickList={<TaskQuickListContainer />}
+        toolsMenu={<ToolsMenu health={health.data} />}
+      >
+        {children}
+      </AppShell>
+      {/* Global chrome, not a route: ⌘K must work on every URL. Mounted here (not in AppShell)
+          because it needs the query client and router this container already assumes. */}
+      <CommandPalette />
+    </ListViewProvider>
+  )
+}
