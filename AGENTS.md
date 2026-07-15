@@ -22,11 +22,14 @@ cezar is a **parallel coding-agents orchestrator**: a local cockpit (CLI + brows
 Before any commit or PR, run in order:
 
 ```bash
-npm run typecheck   # tsc --noEmit
-npm run build       # tsc → dist/
+npm run typecheck                    # tsc --noEmit
+npm run test:unit                    # fast node:test coverage of core modules
+npm run build                        # tsc → dist/
+npm run test:e2e                     # pack/install and exercise the built CLI
+npm pack --dry-run --ignore-scripts  # verify the release tarball contents
 ```
 
-There is no test suite yet; `CEZ_DRY_RUN=1 npm run dev` exercises the whole cockpit offline for manual verification.
+`CEZ_DRY_RUN=1 npm run dev` still exercises the whole cockpit offline for manual verification.
 
 ## Related documents
 

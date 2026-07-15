@@ -3,7 +3,13 @@
   "baseBranch": "auto",
   "tracker": "github",
   "validation": {
-    "commands": ["npm run typecheck", "npm run build"]
+    "commands": [
+      "npm run typecheck",
+      "npm run test:unit",
+      "npm run build",
+      "npm run test:e2e",
+      "npm pack --dry-run --ignore-scripts"
+    ]
   },
   "labels": {
     "enabled": true,
