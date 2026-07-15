@@ -21,8 +21,8 @@
     "build": "tsc",
     "dev": "tsx src/index.ts",
     "test": "npm run test:unit && npm run build && npm run test:e2e",
-    "test:unit": "node --import tsx --test test/unit/**/*.test.ts",
-    "test:e2e": "node --import tsx --test test/e2e/**/*.test.ts",
+    "test:unit": "node --import tsx --test test/unit/*.test.ts",
+    "test:e2e": "node --import tsx --test test/e2e/*.test.ts",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run build"
   },
