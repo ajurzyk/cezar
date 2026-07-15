@@ -1,6 +1,7 @@
 node_modules/
 dist/
 *.tsbuildinfo
+.idea
 
 # cezar runtime state in this repo (runs, worktrees, launch-key)
 .ai/cezar/
