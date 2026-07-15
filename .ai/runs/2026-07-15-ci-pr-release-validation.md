@@ -48,6 +48,7 @@ Source docs: `.ai/specs/001-packaging-npx.md`, `.ai/specs/009-diff-review-gate.m
 
 - [x] 1.1 Add unit and packaged CLI end-to-end tests with npm scripts. — 8000f1f
 - [x] 1.2 Align the autonomous validation gate and contributor documentation with the new tests. — 7e5cd72
+- [x] Post-review fix: make test discovery compatible with Node 20. — 033e00b
 
 ### Phase 2: GitHub CI
 
