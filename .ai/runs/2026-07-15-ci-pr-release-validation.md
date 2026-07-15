@@ -46,8 +46,8 @@ Source docs: `.ai/specs/001-packaging-npx.md`, `.ai/specs/009-diff-review-gate.m
 
 ### Phase 1: Test foundations
 
-- [ ] 1.1 Add unit and packaged CLI end-to-end tests with npm scripts.
-- [ ] 1.2 Align the autonomous validation gate and contributor documentation with the new tests.
+- [x] 1.1 Add unit and packaged CLI end-to-end tests with npm scripts. — 8000f1f
+- [x] 1.2 Align the autonomous validation gate and contributor documentation with the new tests. — 7e5cd72
 
 ### Phase 2: GitHub CI
 
