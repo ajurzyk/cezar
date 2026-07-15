@@ -42,6 +42,8 @@ Source docs: `.ai/specs/001-packaging-npx.md`, `.ai/specs/009-diff-review-gate.m
 
 ## Progress
 
+PR: #398
+
 > Convention: `- [ ]` pending, `- [x]` done. Append ` — <commit sha>` when a step lands. Do not rename step titles.
 
 ### Phase 1: Test foundations
