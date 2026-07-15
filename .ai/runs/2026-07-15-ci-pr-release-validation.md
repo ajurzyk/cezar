@@ -51,5 +51,5 @@ Source docs: `.ai/specs/001-packaging-npx.md`, `.ai/specs/009-diff-review-gate.m
 
 ### Phase 2: GitHub CI
 
-- [ ] 2.1 Add a least-privilege GitHub Actions workflow for pull requests and `main` pushes.
-- [ ] 2.2 Execute the complete CI sequence locally and verify release-package contents.
+- [x] 2.1 Add a least-privilege GitHub Actions workflow for pull requests and `main` pushes. — de0c458
+- [x] 2.2 Execute the complete CI sequence locally and verify release-package contents. — de0c458
