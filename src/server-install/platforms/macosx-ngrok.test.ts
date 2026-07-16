@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { launchdPlist, macosxNgrok } from './macosx-ngrok.js';
+import { cezarLaunchdPlist, launchdPlist, macosxNgrok } from './macosx-ngrok.js';
 import { availablePlatformIds, getStrategy } from '../strategies.js';
 import { runInstall, runUninstall } from '../engine.js';
 import { loadServerState } from '../state.js';
@@ -38,6 +38,18 @@ describe('macosx-ngrok', () => {
     expect(p).toContain('<key>KeepAlive</key>');
   });
 
+  it('cezarLaunchdPlist embeds the argv, port, workdir and env', () => {
+    const p = cezarLaunchdPlist('/repo', 4321, ['/usr/local/bin/node', '/app/dist/index.js']);
+    expect(p).toContain('<string>/usr/local/bin/node</string>');
+    expect(p).toContain('<string>/app/dist/index.js</string>');
+    expect(p).toContain('<string>serve</string>');
+    expect(p).toContain('<string>--no-open</string>');
+    expect(p).toContain('<string>4321</string>');
+    expect(p).toContain('<string>/repo</string>');
+    expect(p).toContain('<key>CEZ_REMOTE</key>');
+    expect(p).toContain('<string>ai.cezar.cockpit</string>');
+  });
+
   it('dry-run install walks every step and server-uninstall reverses it', async () => {
     // Leave the reserved domain blank to exercise the ephemeral-URL path.
     const ui = { ...createAutoUi(), text: async (o: { message: string; placeholder?: string }) => (o.message.includes('Reserved') ? '' : o.placeholder ?? 'ops') };
@@ -54,11 +66,14 @@ describe('macosx-ngrok', () => {
     expect(res.status).toBe('complete');
     const state = loadServerState();
     expect(state.platform).toBe('macosx-ngrok');
+    expect(state.steps.autostart?.status).toBe('done');
     expect(state.steps.ngrok?.status).toBe('done');
     expect(state.ephemeral).toBe(true); // no domain given → ephemeral URL
-    const artifacts = state.steps.ngrok?.created?.artifacts ?? [];
-    expect(artifacts.find((a) => a.type === 'launchd')?.kind).toBe('owned');
-    expect(artifacts.find((a) => a.type === 'ngrok-config')?.kind).toBe('shared');
+    const ngrokArtifacts = state.steps.ngrok?.created?.artifacts ?? [];
+    expect(ngrokArtifacts.find((a) => a.type === 'launchd')?.kind).toBe('owned');
+    expect(ngrokArtifacts.find((a) => a.type === 'ngrok-config')?.kind).toBe('shared');
+    const autostartArtifacts = state.steps.autostart?.created?.artifacts ?? [];
+    expect(autostartArtifacts.find((a) => a.type === 'launchd')?.kind).toBe('owned');
 
     const undone = await runUninstall(macosxNgrok, run);
     expect(undone.status).toBe('complete');
