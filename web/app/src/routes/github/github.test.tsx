@@ -412,6 +412,24 @@ describe('the hand-to-agent pickers (#385)', () => {
       preview.querySelector('[data-slot="skill-preview-manage"]')?.getAttribute('href'),
     ).toBe('/skills?skill=om-fix')
   })
+
+  it('multi-keyword search: "fix project" narrows the skills list to matches (#411)', async () => {
+    stubFetch()
+    await openDetail()
+
+    fireEvent.click(document.querySelector('[data-slot="gh-skills-trigger"]')!)
+    await waitFor(() =>
+      expect(document.querySelectorAll('[data-slot="gh-skill-option"]')).toHaveLength(3),
+    )
+
+    // "fix project" should match om-fix (name splits "om","fix" + description "project fixer")
+    fireEvent.change(screen.getByPlaceholderText('search skills…'), { target: { value: 'fix project' } })
+    await waitFor(() => {
+      const visible = [...document.querySelectorAll('[data-slot="gh-skill-option"]')]
+      expect(visible).toHaveLength(1)
+      expect(visible[0]?.getAttribute('data-skill')).toBe('om-fix')
+    })
+  })
 })
 
 describe('the hand-to-agent run (legacy three-way body)', () => {

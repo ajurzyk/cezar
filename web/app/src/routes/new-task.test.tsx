@@ -347,6 +347,37 @@ describe('picker data flows', () => {
     const headings = [...document.querySelectorAll('[cmdk-group-heading]')].map((h) => h.textContent)
     expect(headings).toEqual(['Project skills', 'Workflows', 'Global'])
   })
+
+  it('multi-keyword search: "fix issue" matches om-fix via hyphen-split keywords (#411)', async () => {
+    serve()
+    renderNewTask()
+    await pillReady()
+    fireEvent.click(sourcePill())
+    const input = await screen.findByPlaceholderText('search skills & workflows…')
+
+    // "fix issue" should match "om-fix" because both "fix" and "issue" appear in the
+    // combined value+keywords text (name splits: "om","fix" + description "Fix an issue end to end").
+    fireEvent.change(input, { target: { value: 'fix issue' } })
+    await waitFor(() => {
+      const visible = [...document.querySelectorAll('[data-slot="source-option"]')]
+      expect(visible.some((o) => o.getAttribute('data-source-ref') === 'om-fix')).toBe(true)
+    })
+  })
+
+  it('multi-keyword search hides items that do not match all words (#411)', async () => {
+    serve()
+    renderNewTask()
+    await pillReady()
+    fireEvent.click(sourcePill())
+    const input = await screen.findByPlaceholderText('search skills & workflows…')
+
+    fireEvent.change(input, { target: { value: 'deploy fix' } })
+    await waitFor(() => {
+      // "deploy" does not have "fix" in its name/description, and "om-fix" does not have "deploy"
+      const visible = [...document.querySelectorAll('[data-slot="source-option"]')]
+      expect(visible).toHaveLength(0)
+    })
+  })
 })
 
 // ---- submit bodies (the wire contract) ---------------------------------------------------------
