@@ -47,6 +47,9 @@ export interface ClaudeUiMapperState {
   readonly itemSeq: number;
   /** `tool_use` items awaiting their `tool_result`, keyed by tool_use id. */
   readonly openTools: ReadonlyMap<string, UiToolItem>;
+  /** The running plan built incrementally by Claude's task tools, keyed by
+   *  the sequential task ids used by TaskUpdate. */
+  readonly tasks: ReadonlyMap<string, PlanEntry>;
 }
 
 export interface ClaudeUiMapping {
@@ -63,6 +66,7 @@ export function createClaudeUiState(opts: { fallbackSessionId?: string } = {}): 
     currentTurnId: null,
     itemSeq: 0,
     openTools: new Map(),
+    tasks: new Map(),
   };
 }
 
@@ -128,6 +132,7 @@ function mapAssistant(msg: Record<string, unknown>, state: ClaudeUiMapperState):
   const events: UiEvent[] = [];
   let itemSeq = state.itemSeq;
   let openTools: Map<string, UiToolItem> | null = null;
+  let tasks = state.tasks;
 
   for (const raw of content) {
     if (!isRecord(raw)) continue;
@@ -163,6 +168,12 @@ function mapAssistant(msg: Record<string, unknown>, state: ClaudeUiMapperState):
       if (raw.name === 'TodoWrite') {
         const entries = planEntries(raw.input);
         if (entries) events.push({ type: 'plan.updated', entries });
+      } else {
+        const nextTasks = applyTaskTool(raw.name, raw.input, tasks);
+        if (nextTasks) {
+          tasks = nextTasks;
+          events.push({ type: 'plan.updated', entries: [...tasks.values()] });
+        }
       }
       openTools ??= new Map(state.openTools);
       openTools.set(raw.id, item);
@@ -171,7 +182,7 @@ function mapAssistant(msg: Record<string, unknown>, state: ClaudeUiMapperState):
   }
 
   if (events.length === 0) return { events, state };
-  return { events, state: { ...state, itemSeq, openTools: openTools ?? state.openTools } };
+  return { events, state: { ...state, itemSeq, openTools: openTools ?? state.openTools, tasks } };
 }
 
 /** claude `Edit`/`Write` inputs carry the diff inline (§7.1). */
@@ -197,6 +208,46 @@ function editArtifacts(
 }
 
 const PLAN_STATUSES: readonly PlanStatus[] = ['pending', 'in_progress', 'completed'];
+
+/** TaskUpdate also uses `running` for an active task. */
+function normalizePlanStatus(value: unknown): PlanStatus | undefined {
+  if (value === 'running') return 'in_progress';
+  return PLAN_STATUSES.find((status) => status === value);
+}
+
+/** Fold one Claude task-tool call into the session's incremental plan. */
+function applyTaskTool(
+  name: string,
+  input: unknown,
+  tasks: ReadonlyMap<string, PlanEntry>,
+): Map<string, PlanEntry> | undefined {
+  const key = name.toLowerCase();
+  if (key === 'taskcreate') {
+    if (!isRecord(input) || typeof input.subject !== 'string' || input.subject.trim() === '') return undefined;
+    const next = new Map(tasks);
+    const entry: PlanEntry = { content: input.subject, status: 'pending' };
+    if (typeof input.activeForm === 'string') entry.activeForm = input.activeForm;
+    next.set(String(next.size + 1), entry);
+    return next;
+  }
+  if (key === 'taskupdate') {
+    if (!isRecord(input)) return undefined;
+    const id =
+      typeof input.taskId === 'string'
+        ? input.taskId
+        : typeof input.taskId === 'number'
+          ? String(input.taskId)
+          : undefined;
+    if (id === undefined) return undefined;
+    const existing = tasks.get(id);
+    const status = normalizePlanStatus(input.status);
+    if (existing === undefined || status === undefined || status === existing.status) return undefined;
+    const next = new Map(tasks);
+    next.set(id, { ...existing, status });
+    return next;
+  }
+  return undefined;
+}
 
 /** TodoWrite input `{todos:[{content,status,activeForm}]}` → plan entries
  *  (full-replacement semantics — an empty list is a valid plan). */

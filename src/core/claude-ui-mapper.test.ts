@@ -209,6 +209,71 @@ describe('mapClaudeMessage edge cases', () => {
     expect(bad.events.map((e) => e.type)).toEqual(['item.started']);
   });
 
+  it('builds a plan incrementally from TaskCreate and TaskUpdate calls', () => {
+    const taskUse = (id: string, name: string, input: unknown) => ({
+      type: 'assistant' as const,
+      message: { role: 'assistant', content: [{ type: 'tool_use', id, name, input }] },
+    });
+    let state = createClaudeUiState();
+
+    const first = mapClaudeMessage(
+      taskUse('toolu_c1', 'TaskCreate', { subject: 'Wire the dock', activeForm: 'Wiring the dock' }),
+      state,
+    );
+    state = first.state;
+    expect(first.events.at(-1)).toEqual({
+      type: 'plan.updated',
+      entries: [{ content: 'Wire the dock', status: 'pending', activeForm: 'Wiring the dock' }],
+    });
+
+    const second = mapClaudeMessage(taskUse('toolu_c2', 'TaskCreate', { subject: 'Add tests' }), state);
+    state = second.state;
+    expect(second.events.at(-1)).toEqual({
+      type: 'plan.updated',
+      entries: [
+        { content: 'Wire the dock', status: 'pending', activeForm: 'Wiring the dock' },
+        { content: 'Add tests', status: 'pending' },
+      ],
+    });
+
+    const update = mapClaudeMessage(taskUse('toolu_u1', 'TaskUpdate', { taskId: '1', status: 'running' }), state);
+    state = update.state;
+    expect(update.events.at(-1)).toEqual({
+      type: 'plan.updated',
+      entries: [
+        { content: 'Wire the dock', status: 'in_progress', activeForm: 'Wiring the dock' },
+        { content: 'Add tests', status: 'pending' },
+      ],
+    });
+
+    const unknown = mapClaudeMessage(
+      taskUse('toolu_u2', 'TaskUpdate', { taskId: '9', status: 'completed' }),
+      state,
+    );
+    expect(unknown.events.map((event) => event.type)).toEqual(['item.started']);
+    const unchanged = mapClaudeMessage(
+      taskUse('toolu_u3', 'TaskUpdate', { taskId: 2, status: 'pending' }),
+      state,
+    );
+    expect(unchanged.events.map((event) => event.type)).toEqual(['item.started']);
+  });
+
+  it('ignores TaskCreate without a usable subject', () => {
+    const mapped = mapClaudeMessage(
+      {
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'tool_use', id: 'toolu_c0', name: 'TaskCreate', input: { description: 'no subject' } },
+          ],
+        },
+      },
+      createClaudeUiState(),
+    );
+    expect(mapped.events.map((event) => event.type)).toEqual(['item.started']);
+  });
+
   it('init without session_id falls back to the state fallback (dry-run mock shape)', () => {
     const s = createClaudeUiState({ fallbackSessionId: 'spec-session' });
     const [event] = mapClaudeMessage({ type: 'system', subtype: 'init' }, s).events;
