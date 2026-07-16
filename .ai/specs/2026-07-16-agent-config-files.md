@@ -263,7 +263,7 @@ PUT /api/agent-config/:id   { content, version }
 
 - **`:id` is a catalog key, never a path.** Unknown id → 404. Path traversal is impossible by construction rather than by sanitizing — the only paths that exist are the ones the catalog computes.
 - **`version` is a sha256 of the file bytes.** mtime is coarse and lies across filesystems. `null` means "did not exist when I read it"; PUT with `null` onto a file that now exists → 409. This is the create path (Q4) and the stale-write guard in one rule.
-- **Reads work in every mode; every `PUT` 409s in hosted mode** (§"Why writes are a local-only capability"), matching the capability refusals at `server.ts:696-698, 724-726` — the house code for "the server won't, and here's why", reason in `error`. `GET /api/agent-config` reports `editable:false` so the UI renders read-only up front rather than only failing at save.
+- **Repo-file reads work in every mode; home-dir (`outside-repo`) reads AND every `PUT` 409 in hosted mode** (§"Why writes are a local-only capability"), matching the capability refusals at `server.ts:696-698, 724-726` — the house code for "the server won't, and here's why", reason in `error`. `GET /api/agent-config` reports `editable:false` so the UI renders read-only up front rather than only failing at save.
 - **`userMcp` is `null` in hosted mode** — its server list is derived from `~/.claude.json`, host state the hosted client is not trusted to see (the read gate the narrow Q2 draft omitted). Locally it is `{path, servers, readable}`.
 - Every mutating route zod-`safeParse`s its body and returns `{ error }`, per AGENTS.md's server rules.
 

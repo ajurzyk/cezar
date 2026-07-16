@@ -92,14 +92,17 @@ describe('the agent-config API', () => {
     expect(userScope.status).toBe(409);
   });
 
-  it('hosted mode: reads still work but userMcp is withheld', async () => {
+  it('hosted mode: repo-file reads work, home-dir file reads are withheld, userMcp is null', async () => {
     process.env.CEZ_REMOTE = '1';
     const res = await app.request('/api/agent-config');
     const body = (await res.json()) as { editable: boolean; userMcp: unknown; files: { writable: boolean }[] };
     expect(body.editable).toBe(false);
     expect(body.userMcp).toBeNull();
     expect(body.files.every((f) => f.writable === false)).toBe(true);
-    // a single-file read still works
+    // a repo-local file read still works (the cockpit already serves repo contents)
     expect((await app.request('/api/agent-config/claude.project.settings')).status).toBe(200);
+    // but an OUTSIDE-REPO ($HOME) file's contents are NOT served — they can hold secrets
+    expect((await app.request('/api/agent-config/claude.user.settings')).status).toBe(409);
+    expect((await app.request('/api/agent-config/codex.user.config')).status).toBe(409);
   });
 });

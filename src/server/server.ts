@@ -43,6 +43,7 @@ import {
 } from './git-changes.js';
 import { loadConfig, type CezConfig } from '../config.js';
 import { readConfigFile, writeConfigFile } from '../agent-config/files.js';
+import { findConfigFile } from '../agent-config/catalog.js';
 import { listAgentConfig } from '../agent-config/service.js';
 import { resolveCapabilities } from './capabilities.js';
 import { resolveForge } from './forge/index.js';
@@ -1216,7 +1217,22 @@ export function createApp(deps: ServerDeps): Hono {
   });
 
   app.get('/api/agent-config/:id', async (c) => {
-    const read = await readConfigFile(c.req.param('id'), repoRoot);
+    const id = c.req.param('id');
+    const def = findConfigFile(id);
+    if (!def) return c.json({ error: 'unknown config file' }, 404);
+    // Home-dir files (`~/.claude/settings.json`, `~/.codex/config.toml`, …) can
+    // hold secrets. In hosted mode the section is read-only AND these outside-
+    // repo files are not served at all — same trust boundary that withholds the
+    // ~/.claude.json MCP listing. Repo files stay readable (the cockpit already
+    // serves repo diffs/contents), so precedence stays legible; only $HOME leaks
+    // are closed. The listing (metadata only, no contents) is unaffected.
+    if (def.tracked === 'outside-repo' && !capabilities().localHandoff) {
+      return c.json(
+        { error: 'this file lives in your home directory and is not served in hosted mode (CEZ_REMOTE)' },
+        409,
+      );
+    }
+    const read = await readConfigFile(id, repoRoot);
     if (read === null) return c.json({ error: 'unknown config file' }, 404);
     if ('error' in read) return c.json({ error: read.error }, 500);
     return c.json(read);
