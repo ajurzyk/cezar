@@ -123,10 +123,31 @@ export interface Ui {
   spinner(): SpinnerHandle;
 }
 
+/** Result of running a command with captured output. */
+export interface CommandResult {
+  code: number;
+  stdout: string;
+  stderr: string;
+}
+
+/**
+ * Command execution seam. The engine supplies a real implementation; tests
+ * inject a fake so `sudoStep` / `verifyCommand` are exercised without touching
+ * the host. In `CEZ_DRY_RUN`, side-effecting runs are short-circuited by the
+ * step helpers, not the runner.
+ */
+export interface Runner {
+  /** Capture stdout/stderr; never throws on non-zero exit (returns the code). */
+  capture(program: string, args: string[]): Promise<CommandResult>;
+  /** Inherit stdio (streams live output). Resolves with the exit code. */
+  interactive(program: string, args: string[]): Promise<number>;
+}
+
 /** Live install/uninstall context, threaded through every step. */
 export interface InstallContext {
   state: ServerState;
   ui: Ui;
+  runner: Runner;
   /** Atomically persist `state` to `~/.cezar/server.json`. */
   save(): Promise<void>;
   /** CEZ_DRY_RUN — no real sudo, package installs, or network. */
