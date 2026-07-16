@@ -2,23 +2,43 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   ArchiveIcon,
   ArchiveRestoreIcon,
+  BotIcon,
+  BoxesIcon,
+  BracesIcon,
   CheckIcon,
   CircleStopIcon,
+  CodeIcon,
   CopyIcon,
+  CpuIcon,
+  DiamondIcon,
   EllipsisVerticalIcon,
   ExternalLinkIcon,
+  FeatherIcon,
   FileTextIcon,
+  FolderIcon,
+  GemIcon,
+  GlobeIcon,
+  HammerIcon,
+  HexagonIcon,
+  type LucideIcon,
+  MousePointer2Icon,
   PencilIcon,
   PlayIcon,
+  RocketIcon,
+  ShapesIcon,
+  SmartphoneIcon,
+  SparklesIcon,
   SquareTerminalIcon,
   Trash2Icon,
+  WavesIcon,
+  ZapIcon,
 } from 'lucide-react'
 import { Fragment, useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router'
 
 import { ApiError, archiveRun, cancelRun, continueRun, deleteRun, openRunIn, openRunInCli } from '@/api/client'
 import { queryKeys, useOpenTargets, usePatchRun, useRunHandoff, useRuns } from '@/api/queries'
-import type { ApiRun } from '@/api/types'
+import type { ApiRun, OpenTarget } from '@/api/types'
 import { DiffStatLabel } from '@/components/diff-stat'
 import { TitleEditInput, useTitleEditor } from '@/components/editable-title'
 import { Pill } from '@/components/pill'
@@ -192,6 +212,41 @@ export function RunHeader({
   )
 }
 
+/** Icon key (`OpenTarget.icon`, #361) → the Lucide icon that renders it in the menu. Distinct per
+ *  target so the "Open in…" list reads at a glance instead of as a wall of text — a few picks
+ *  lean on the target's own branding (RubyMine → gem, Android Studio → phone, CLion → cpu),
+ *  the rest just aim for visual variety. An icon key the client doesn't recognize (older server,
+ *  newer server) falls back to the menu's own ExternalLinkIcon rather than rendering nothing. */
+const OPEN_IN_ICONS: Record<string, LucideIcon> = {
+  folder: FolderIcon,
+  terminal: SquareTerminalIcon,
+  vscode: CodeIcon,
+  cursor: MousePointer2Icon,
+  zed: ZapIcon,
+  windsurf: WavesIcon,
+  sublime: FeatherIcon,
+  idea: DiamondIcon,
+  pycharm: HexagonIcon,
+  webstorm: GlobeIcon,
+  goland: ShapesIcon,
+  rubymine: GemIcon,
+  phpstorm: BracesIcon,
+  clion: CpuIcon,
+  rider: BoxesIcon,
+  'android-studio': SmartphoneIcon,
+  xcode: HammerIcon,
+  warp: RocketIcon,
+  claude: BotIcon,
+  codex: SparklesIcon,
+  opencode: BotIcon,
+}
+
+/** The icon component for a target — `target.icon` when it's one the UI knows, else the
+ *  same generic glyph the trigger button itself uses. */
+function openInIcon(target: OpenTarget): LucideIcon {
+  return (target.icon && OPEN_IN_ICONS[target.icon]) || ExternalLinkIcon
+}
+
 /**
  * "Open in…" session takeover (#open-in): resume the session in a real terminal, open the run's
  * worktree in a local editor / Finder / terminal / agent CLI, or copy its path. The old standalone
@@ -240,15 +295,19 @@ function OpenInMenu({
           </DropdownMenuItem>
         ) : null}
         {canResume && worktreeTargets.length > 0 ? <DropdownMenuSeparator /> : null}
-        {worktreeTargets.map((target) => (
-          <DropdownMenuItem
-            key={target.id}
-            data-target={target.id}
-            onSelect={() => open.mutate(target.id)}
-          >
-            {target.label}
-          </DropdownMenuItem>
-        ))}
+        {worktreeTargets.map((target) => {
+          const Icon = openInIcon(target)
+          return (
+            <DropdownMenuItem
+              key={target.id}
+              data-target={target.id}
+              onSelect={() => open.mutate(target.id)}
+            >
+              <Icon aria-hidden="true" />
+              {target.label}
+            </DropdownMenuItem>
+          )
+        })}
         {run.worktreePath ? (
           <>
             <DropdownMenuSeparator />

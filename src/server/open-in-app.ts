@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 import { openInTerminal } from './open-in-terminal.js';
+import { isWsl, translateToWindowsPath } from './wsl.js';
 
 /**
  * "Open in…" session takeover (#open-in): detect the editors / file managers / terminals on THIS
@@ -12,63 +13,99 @@ import { openInTerminal } from './open-in-terminal.js';
  *
  * Detection is best-effort and cross-platform: an editor counts as present if its CLI is on PATH
  * or (macOS) its .app bundle is installed. Finder/file-manager and Terminal are always offered.
+ *
+ * WSL (#361): when this process itself runs inside WSL, `process.platform` reads `linux` but the
+ * user's GUI apps mostly live on the Windows side, reachable through interop. `resolveOnPath`
+ * additionally probes `.exe`/`.cmd`/`.bat` suffixes there (Node's own PATH lookup only does that
+ * under real win32), and `openInApp`/`openFileManager` translate the worktree path to its
+ * `\\wsl$\…` (or `C:\…`) form before handing it to a resolved Windows-side binary — a WSL-native
+ * launcher (e.g. VS Code's Remote-WSL `code` shim) keeps the POSIX path unchanged.
  */
 
 export interface OpenTarget {
   id: string;
   label: string;
+  /** A stable icon key the UI maps to a concrete icon component (#361). Optional so an older
+   *  server talking to a newer client (or vice versa) just falls back to a generic icon —
+   *  never a protocol break. */
+  icon?: string;
 }
 
 interface EditorDef {
   id: string;
   label: string;
+  icon: string;
   /** CLI launcher name on PATH, if any. */
   cli?: string;
-  /** macOS .app bundle name (without `.app`), for `open -a` when no CLI is present. */
-  mac?: string;
+  /** macOS .app bundle name(s) (without `.app`), for `open -a` when no CLI is present. Some
+   *  JetBrains products ship differently-named Community/Ultimate/Professional editions, hence
+   *  an array — any installed candidate counts. */
+  mac?: string | string[];
 }
 
 const EDITORS: EditorDef[] = [
-  { id: 'vscode', label: 'VS Code', cli: 'code', mac: 'Visual Studio Code' },
-  { id: 'cursor', label: 'Cursor', cli: 'cursor', mac: 'Cursor' },
-  { id: 'zed', label: 'Zed', cli: 'zed', mac: 'Zed' },
-  { id: 'windsurf', label: 'Windsurf', cli: 'windsurf', mac: 'Windsurf' },
-  { id: 'sublime', label: 'Sublime Text', cli: 'subl', mac: 'Sublime Text' },
-  { id: 'webstorm', label: 'WebStorm', cli: 'webstorm', mac: 'WebStorm' },
-  { id: 'idea', label: 'IntelliJ IDEA', cli: 'idea', mac: 'IntelliJ IDEA' },
-  { id: 'xcode', label: 'Xcode', mac: 'Xcode' },
-  { id: 'warp', label: 'Warp', mac: 'Warp' },
+  { id: 'vscode', label: 'VS Code', icon: 'vscode', cli: 'code', mac: 'Visual Studio Code' },
+  { id: 'cursor', label: 'Cursor', icon: 'cursor', cli: 'cursor', mac: 'Cursor' },
+  { id: 'zed', label: 'Zed', icon: 'zed', cli: 'zed', mac: 'Zed' },
+  { id: 'windsurf', label: 'Windsurf', icon: 'windsurf', cli: 'windsurf', mac: 'Windsurf' },
+  { id: 'sublime', label: 'Sublime Text', icon: 'sublime', cli: 'subl', mac: 'Sublime Text' },
+  // JetBrains (#361 gap 3): Toolbox's "generate shell scripts" produces one bare-name launcher
+  // per product on every OS (idea, pycharm, …); the .app names below cover the Community /
+  // Ultimate / Professional edition splits Toolbox and the standalone installers both produce.
+  { id: 'idea', label: 'IntelliJ IDEA', icon: 'idea', cli: 'idea', mac: ['IntelliJ IDEA', 'IntelliJ IDEA CE', 'IntelliJ IDEA Ultimate'] },
+  { id: 'pycharm', label: 'PyCharm', icon: 'pycharm', cli: 'pycharm', mac: ['PyCharm', 'PyCharm CE', 'PyCharm Professional'] },
+  { id: 'webstorm', label: 'WebStorm', icon: 'webstorm', cli: 'webstorm', mac: 'WebStorm' },
+  { id: 'goland', label: 'GoLand', icon: 'goland', cli: 'goland', mac: 'GoLand' },
+  { id: 'rubymine', label: 'RubyMine', icon: 'rubymine', cli: 'rubymine', mac: 'RubyMine' },
+  { id: 'phpstorm', label: 'PhpStorm', icon: 'phpstorm', cli: 'phpstorm', mac: 'PhpStorm' },
+  { id: 'clion', label: 'CLion', icon: 'clion', cli: 'clion', mac: 'CLion' },
+  { id: 'rider', label: 'Rider', icon: 'rider', cli: 'rider', mac: 'Rider' },
+  { id: 'android-studio', label: 'Android Studio', icon: 'android-studio', cli: 'studio', mac: 'Android Studio' },
+  { id: 'xcode', label: 'Xcode', icon: 'xcode', mac: 'Xcode' },
+  { id: 'warp', label: 'Warp', icon: 'warp', cli: 'warp', mac: 'Warp' },
 ];
 
 const FILE_MANAGER_LABEL =
-  process.platform === 'darwin' ? 'Finder' : process.platform === 'win32' ? 'Explorer' : 'Files';
+  process.platform === 'darwin' ? 'Finder' : process.platform === 'win32' || isWsl() ? 'Explorer' : 'Files';
 
-/** Is `bin` an executable somewhere on PATH? Pure filesystem probe — no child process. */
-function onPath(bin: string): boolean {
+/** Is `bin` (with a Windows suffix under win32/WSL interop) an executable somewhere on PATH?
+ *  Returns the exact resolved name (which may carry the suffix) — pure filesystem probe, no
+ *  child process — or null. Windows-suffix probing also applies inside WSL: interop exposes
+ *  `.exe`/`.cmd`/`.bat` binaries from the Windows side, but Linux doesn't auto-append them the
+ *  way win32 does, so the caller must spawn the exact resolved name. */
+function resolveOnPath(bin: string): string | null {
   const dirs = (process.env.PATH ?? '').split(process.platform === 'win32' ? ';' : ':');
-  const names = process.platform === 'win32' ? [bin, `${bin}.exe`, `${bin}.cmd`] : [bin];
+  const suffixed = process.platform === 'win32' || isWsl();
+  const names = suffixed ? [bin, `${bin}.exe`, `${bin}.cmd`, `${bin}.bat`] : [bin];
   for (const dir of dirs) {
     if (!dir) continue;
     for (const name of names) {
       try {
         accessSync(join(dir, name), constants.X_OK);
-        return true;
+        return name;
       } catch {
         // keep looking
       }
     }
   }
-  return false;
+  return null;
 }
 
-/** macOS: is `<name>.app` installed in a standard Applications dir? */
-function macAppExists(name: string): boolean {
+function onPath(bin: string): boolean {
+  return resolveOnPath(bin) !== null;
+}
+
+/** macOS: is any of `names` (`<name>.app`) installed in a standard Applications dir? */
+function macAppExists(names: string | string[]): boolean {
   if (process.platform !== 'darwin') return false;
-  return [
-    `/Applications/${name}.app`,
-    join(homedir(), 'Applications', `${name}.app`),
-    `/System/Applications/${name}.app`,
-  ].some((p) => existsSync(p));
+  const candidates = Array.isArray(names) ? names : [names];
+  return candidates.some((name) =>
+    [
+      `/Applications/${name}.app`,
+      join(homedir(), 'Applications', `${name}.app`),
+      `/System/Applications/${name}.app`,
+    ].some((p) => existsSync(p)),
+  );
 }
 
 function editorAvailable(editor: EditorDef): boolean {
@@ -80,10 +117,10 @@ function editorAvailable(editor: EditorDef): boolean {
 /** Coding-agent CLIs a session can be handed off to (#cli-handoff). Selecting one opens a
  *  terminal that resumes THIS run's session when the runner matches, or launches a fresh CLI in
  *  the worktree otherwise. The actual command is built server-side (needs the run's session). */
-const AGENT_CLIS: Array<{ runner: 'claude' | 'codex' | 'opencode'; label: string; bin: string; envBin?: string }> = [
-  { runner: 'claude', label: 'Claude CLI', bin: 'claude', envBin: process.env.CEZ_CLAUDE_BIN },
-  { runner: 'codex', label: 'Codex CLI', bin: 'codex', envBin: process.env.CEZ_CODEX_BIN },
-  { runner: 'opencode', label: 'OpenCode', bin: 'opencode', envBin: process.env.CEZ_OPENCODE_BIN },
+const AGENT_CLIS: Array<{ runner: 'claude' | 'codex' | 'opencode'; label: string; icon: string; bin: string; envBin?: string }> = [
+  { runner: 'claude', label: 'Claude CLI', icon: 'claude', bin: 'claude', envBin: process.env.CEZ_CLAUDE_BIN },
+  { runner: 'codex', label: 'Codex CLI', icon: 'codex', bin: 'codex', envBin: process.env.CEZ_CODEX_BIN },
+  { runner: 'opencode', label: 'OpenCode', icon: 'opencode', bin: 'opencode', envBin: process.env.CEZ_OPENCODE_BIN },
 ];
 
 /** The runner behind a `cli:<runner>` open target, or null when the id isn't a CLI handoff. */
@@ -96,25 +133,39 @@ export function agentCliRunner(targetId: string): 'claude' | 'codex' | 'opencode
  *  editor, and every installed coding-agent CLI. Order is stable so the menu never reshuffles. */
 export function detectOpenTargets(): OpenTarget[] {
   const targets: OpenTarget[] = [
-    { id: 'finder', label: FILE_MANAGER_LABEL },
-    { id: 'terminal', label: 'Terminal' },
+    { id: 'finder', label: FILE_MANAGER_LABEL, icon: 'folder' },
+    { id: 'terminal', label: 'Terminal', icon: 'terminal' },
   ];
   for (const editor of EDITORS) {
-    if (editorAvailable(editor)) targets.push({ id: editor.id, label: editor.label });
+    if (editorAvailable(editor)) targets.push({ id: editor.id, label: editor.label, icon: editor.icon });
   }
   for (const cli of AGENT_CLIS) {
     if ((cli.envBin && existsSync(cli.envBin)) || onPath(cli.bin)) {
-      targets.push({ id: `cli:${cli.runner}`, label: cli.label });
+      targets.push({ id: `cli:${cli.runner}`, label: cli.label, icon: cli.icon });
     }
   }
   return targets;
 }
 
-/** Open `dir` in the file manager, natively per platform. */
+/** The (bin, args) a file-manager launch resolves to — pure so the per-platform routing
+ *  (including the WSL→Explorer interop branch) is unit-testable without spawning anything.
+ *  `platform`/`wsl` default to the real environment; tests pass them explicitly. */
+export function fileManagerLaunch(
+  dir: string,
+  platform: NodeJS.Platform = process.platform,
+  wsl: boolean = isWsl(),
+): { bin: string; args: string[] } {
+  if (platform === 'darwin') return { bin: 'open', args: [dir] };
+  if (platform === 'win32') return { bin: 'explorer', args: [dir] };
+  if (wsl) return { bin: 'explorer.exe', args: [translateToWindowsPath(dir)] };
+  return { bin: 'xdg-open', args: [dir] };
+}
+
+/** Open `dir` in the file manager, natively per platform. Under WSL there is no Linux desktop to
+ *  hand `xdg-open` to — go through interop to Windows Explorer instead, translating the path. */
 async function openFileManager(dir: string): Promise<boolean> {
-  if (process.platform === 'darwin') return runDetached('open', [dir]);
-  if (process.platform === 'win32') return runDetached('explorer', [dir]);
-  return runDetached('xdg-open', [dir]);
+  const { bin, args } = fileManagerLaunch(dir);
+  return runDetached(bin, args);
 }
 
 /** Open `dir` in the given target. Unknown/unavailable target → false (the caller 409s). */
@@ -125,9 +176,36 @@ export async function openInApp(targetId: string, dir: string): Promise<boolean>
 
   const editor = EDITORS.find((e) => e.id === targetId);
   if (!editor) return false;
-  if (editor.cli && onPath(editor.cli)) return runDetached(editor.cli, [dir]);
-  if (editor.mac && macAppExists(editor.mac)) return runDetached('open', ['-a', editor.mac, dir]);
+  if (editor.cli) {
+    const resolved = resolveOnPath(editor.cli);
+    if (resolved) return runDetached(resolved, [launchPathFor(resolved, dir)]);
+  }
+  if (editor.mac && macAppExists(editor.mac)) return runDetached('open', ['-a', pickInstalledMacApp(editor.mac), dir]);
   return false;
+}
+
+/** The path argument to hand a resolved binary: a Windows-suffixed name found through WSL
+ *  interop needs the Windows-side path; a bare-name binary (native Linux, or a WSL-aware shim
+ *  like VS Code's Remote-WSL `code`) takes the POSIX path unchanged. `wsl` defaults to the real
+ *  environment; tests pass it explicitly so this needs no global platform stubbing. */
+export function launchPathFor(resolvedBin: string, dir: string, wsl: boolean = isWsl()): string {
+  if (wsl && /\.(exe|cmd|bat)$/i.test(resolvedBin)) return translateToWindowsPath(dir);
+  return dir;
+}
+
+/** Which of an editor's candidate .app names is actually installed — `macAppExists` already
+ *  confirmed at least one is, this just picks it for the `open -a` argument. */
+function pickInstalledMacApp(names: string | string[]): string {
+  const candidates = Array.isArray(names) ? names : [names];
+  return (
+    candidates.find((name) =>
+      [
+        `/Applications/${name}.app`,
+        join(homedir(), 'Applications', `${name}.app`),
+        `/System/Applications/${name}.app`,
+      ].some((p) => existsSync(p)),
+    ) ?? candidates[0]!
+  );
 }
 
 /** Spawn detached; success = no error within a short settle window (mirrors open-in-terminal). */
