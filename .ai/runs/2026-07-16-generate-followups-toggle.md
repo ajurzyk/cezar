@@ -50,8 +50,8 @@ Let users prevent follow-up inbox clutter for individual tasks without changing 
 
 ### Phase 1: Run contract and agent boundary
 
-- [ ] 1.1 Split the handoff and follow-up prompt contracts, add the optional persisted run flag, and make initial/continued agent prompts and environments conditional.
-- [ ] 1.2 Accept and forward the optional API field with omitted-as-enabled semantics, then add server, store, and dry-run runner regression coverage.
+- [x] 1.1 Split the handoff and follow-up prompt contracts, add the optional persisted run flag, and make initial/continued agent prompts and environments conditional. — 38d2f74
+- [x] 1.2 Accept and forward the optional API field with omitted-as-enabled semantics, then add server, store, and dry-run runner regression coverage. — 38d2f74
 
 ### Phase 2: New Task UI and browser contract
 
