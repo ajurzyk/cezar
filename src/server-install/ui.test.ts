@@ -49,4 +49,11 @@ describe('createAutoUi', () => {
     const ui = createAutoUi({ 'pick tools': ['gh', 'codex'] });
     expect(await ui.multiselect({ message: 'pick tools', options: [] })).toEqual(['gh', 'codex']);
   });
+
+  it('routes message() to the sink (plain output, no note box)', () => {
+    const sink = vi.fn();
+    const ui = createAutoUi({}, sink);
+    ui.message('sudo bash -lc ...');
+    expect(sink).toHaveBeenCalledWith('sudo bash -lc ...');
+  });
 });

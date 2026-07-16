@@ -26,6 +26,8 @@ export interface RunOptions {
   dryRun: boolean;
   assumeYes: boolean;
   reconfigure: ReadonlySet<string>;
+  /** `--reinstall`: force every step to re-run, ignoring recorded/present state. */
+  reinstall?: boolean;
   repoRoot: string;
   /** ISO timestamp from the caller (Date.now is guarded in some contexts). */
   now: string;
@@ -72,13 +74,18 @@ export async function runInstall(strategy: PlatformStrategy, opts: RunOptions): 
     await strategy.preflight(ctx); // throws PreflightError to refuse politely
 
     const steps = strategy.steps(ctx);
-    const resolvedCount = steps.filter((s) => isResolved(state.steps[s.id])).length;
-    if (resolvedCount > 0) {
-      ctx.ui.info(`Resuming ${strategy.label} — ${resolvedCount}/${steps.length} steps already done.`);
+    if (opts.reinstall) {
+      ctx.ui.info(`Reinstalling ${strategy.label} — every step will re-run.`);
+    } else {
+      const resolvedCount = steps.filter((s) => isResolved(state.steps[s.id])).length;
+      if (resolvedCount > 0) {
+        ctx.ui.info(`Resuming ${strategy.label} — ${resolvedCount}/${steps.length} steps already done.`);
+      }
     }
 
     for (const step of steps) {
-      const forced = opts.reconfigure.has(step.id);
+      // `--reinstall` forces every step; `--reconfigure` forces the named ones.
+      const forced = opts.reinstall === true || opts.reconfigure.has(step.id);
       if (!forced && isResolved(state.steps[step.id])) {
         ctx.ui.info(`= ${step.title} (already done)`);
         continue;

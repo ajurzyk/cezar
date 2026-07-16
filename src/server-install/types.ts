@@ -97,6 +97,12 @@ export interface Ui {
   intro(message: string): void;
   outro(message: string): void;
   note(message: string, title?: string): void;
+  /**
+   * Plain, un-boxed output — no border/table drawing. Use for shell commands and
+   * other content that a `note()` box would mangle when it wraps (long base64
+   * file-writes, certbot lines). Renders verbatim so it stays copy-pasteable.
+   */
+  message(message: string): void;
   info(message: string): void;
   success(message: string): void;
   warn(message: string): void;

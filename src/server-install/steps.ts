@@ -143,8 +143,8 @@ export async function sudoStep(ctx: InstallContext, opts: SudoStepOpts): Promise
 
   for (;;) {
     ui.info(opts.description);
-    if (opts.note) ui.note(opts.note, 'What this changes');
-    ui.note(display, 'Privileged command');
+    if (opts.note) ui.message(opts.note);
+    ui.message(display);
 
     let mode: 'sudo' | 'delegate';
     if (ctx.assumeYes) {
@@ -172,10 +172,7 @@ export async function sudoStep(ctx: InstallContext, opts: SudoStepOpts): Promise
       const code = await ctx.runner.interactive('sudo', ['bash', '-lc', opts.command]);
       if (code !== 0) ui.warn(`command exited with code ${code}`);
     } else {
-      ui.note(
-        `${display}\n\nCopy the command above and run it as the root user on the server\n(paste it into a root shell, or prefix it with sudo). Then confirm below.`,
-        'Run this as root',
-      );
+      ui.info('Copy the command above and run it as root on the server (paste into a root shell, or prefix with sudo), then confirm below.');
       if (!ctx.assumeYes) {
         const done = await ui.confirm({ message: 'Have you run it as root?', initialValue: true });
         if (done === CANCEL) throw new StepCancelled();

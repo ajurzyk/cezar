@@ -1,6 +1,6 @@
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { CANCEL, PreflightError, type InstallContext, type InstallStep, type PlatformStrategy, type StepArtifact } from '../types.js';
 import { depCheckStep, generatePassword, owned, shared, shquote, StepAborted, StepCancelled, StepSkipped, sudoStep, verifyCommand } from '../steps.js';
 
@@ -331,7 +331,12 @@ const sslStep: InstallStep = {
       command: `certbot --nginx -d ${shquote(String(domain).trim())} --non-interactive --agree-tos -m ${shquote(String(email).trim())} --redirect`,
       skippable: true,
       skipHint: `run later: sudo certbot --nginx -d ${String(domain).trim()}`,
-      verify: (c) => verifyCommand(c, 'test', ['-d', `/etc/letsencrypt/live/${String(domain).trim()}`]),
+      // Verify via the nginx vhost, NOT /etc/letsencrypt/live — that dir is 0700
+      // root, so a non-root `test -d` (the operator ran certbot themselves) fails
+      // with permission-denied and reports a false failure even when the cert was
+      // issued. certbot --nginx writes `ssl_certificate …` into the vhost, which
+      // is world-readable, so grepping it works without root.
+      verify: (c) => verifyCommand(c, 'sh', ['-c', `grep -qs ssl_certificate ${VHOST_AVAILABLE} ${VHOST_ENABLED}`]),
     });
 
     ctx.state.publicUrl = `https://${String(domain).trim()}`;
@@ -360,10 +365,18 @@ const UNIT_NAME = 'cezar.service';
  * must be an ABSOLUTE command — systemd runs units with a minimal PATH
  * (/usr/bin:/bin), so a bare `cezar` (installed via nvm/npm-prefix/npx) would
  * not resolve and the unit would crash-loop.
+ *
+ * cezar's shebang is `#!/usr/bin/env node`, so `node` must be on the unit's PATH
+ * too. With nvm/npm-prefix, node lives next to the cezar bin (or next to the
+ * node running this installer) — neither is in systemd's default PATH — so we
+ * prepend both those dirs. Otherwise the unit starts, can't find node, and
+ * crash-loops (nginx then 502s).
  */
 export function systemdUnit(repoRoot: string, port: number, scope: 'user' | 'system', execStart: string): string {
   const userLine = scope === 'system' ? `User=${userInfo().username}\n` : '';
   const installTarget = scope === 'system' ? 'multi-user.target' : 'default.target';
+  const pathDirs = [dirname(execStart), dirname(process.execPath), '/usr/local/bin', '/usr/bin', '/bin']
+    .filter((d, i, a) => d && d !== '.' && a.indexOf(d) === i);
   return `# Managed by cezar server-install — do not edit by hand.
 [Unit]
 Description=cezar cockpit
@@ -374,7 +387,7 @@ Wants=network-online.target
 Type=simple
 ${userLine}WorkingDirectory=${repoRoot}
 Environment=CEZ_REMOTE=1
-Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=PATH=${pathDirs.join(':')}
 ExecStart=${execStart} serve --no-open --port ${port}
 Restart=on-failure
 RestartSec=5
@@ -387,11 +400,11 @@ WantedBy=${installTarget}
 /** Absolute path to the cezar CLI on this box, or a bare fallback in dry-run. */
 async function resolveCezarBin(ctx: InstallContext): Promise<string> {
   if (ctx.dryRun) return 'cezar';
-  // Non-login shell (`-c`, not `-lc`): a login shell would source ~/.profile and
-  // any banner it echoes would be prepended to the path. Take the last line to
-  // be extra safe. Fall back to a bare `cezar` (with Environment=PATH set).
-  const out = (await ctx.runner.capture('bash', ['-c', 'command -v cezar'])).stdout.trim();
-  const last = out.split('\n').filter(Boolean).pop();
+  // Login shell (`-lc`) so nvm / npm-prefix PATH additions from ~/.profile etc.
+  // are present — otherwise `command -v cezar` misses those installs. A banner a
+  // profile echoes lands on earlier lines, so take the LAST non-empty line.
+  const out = (await ctx.runner.capture('bash', ['-lc', 'command -v cezar'])).stdout.trim();
+  const last = out.split('\n').map((s) => s.trim()).filter(Boolean).pop();
   return last || 'cezar';
 }
 

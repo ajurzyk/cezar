@@ -32,6 +32,7 @@ Options:
       --platform <id>         server-install target (ubuntu-vps | macosx-ngrok)
       --yes                   server-install: accept safe defaults (never auto-sudo)
       --reconfigure <ids>     server-install: force re-run of step id(s), comma-separated
+      --reinstall             server-install: force re-run of every step (full reinstall)
   -h, --help                  show this help
 
 Zero config: uses your logged-in \`claude\` CLI (and \`gh\` for GitHub bits).
@@ -50,6 +51,7 @@ async function main(): Promise<void> {
       platform: { type: 'string' },
       yes: { type: 'boolean', default: false },
       reconfigure: { type: 'string' },
+      reinstall: { type: 'boolean', default: false },
       help: { type: 'boolean', short: 'h', default: false },
     },
     allowPositionals: true,
@@ -79,6 +81,7 @@ async function main(): Promise<void> {
       await serverCommand('install', repoRoot, values.platform, {
         yes: Boolean(values.yes),
         reconfigure: values.reconfigure,
+        reinstall: Boolean(values.reinstall),
       });
       return;
     case 'server-uninstall':
@@ -268,7 +271,7 @@ async function serverCommand(
   mode: 'install' | 'uninstall',
   repoRoot: string,
   platform: string | undefined,
-  flags: { yes: boolean; reconfigure?: string },
+  flags: { yes: boolean; reconfigure?: string; reinstall?: boolean },
 ): Promise<void> {
   const { getStrategy, availablePlatformIds } = await import('./server-install/strategies.js');
   const { runInstall, runUninstall } = await import('./server-install/engine.js');
@@ -296,6 +299,7 @@ async function serverCommand(
     dryRun: process.env.CEZ_DRY_RUN === '1',
     assumeYes: flags.yes,
     reconfigure: new Set((flags.reconfigure ?? '').split(',').map((s) => s.trim()).filter(Boolean)),
+    reinstall: Boolean(flags.reinstall),
     repoRoot,
     now: new Date().toISOString(),
   };

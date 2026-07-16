@@ -78,6 +78,20 @@ describe('engine', () => {
     expect(a2.run).toHaveBeenCalledOnce();
   });
 
+  it('--reinstall re-runs every step even when all are already done', async () => {
+    const a = fakeStep('a');
+    const b = fakeStep('b');
+    await runInstall(strategyOf([a, b]), opts());
+    const a2 = fakeStep('a');
+    const b2 = fakeStep('b');
+    const res = await runInstall(strategyOf([a2, b2]), opts({ reinstall: true }));
+    expect(res.status).toBe('complete');
+    expect(a2.run).toHaveBeenCalledOnce();
+    expect(b2.run).toHaveBeenCalledOnce();
+    // check() is bypassed for forced steps, so a "present" probe can't skip them
+    expect(a2.check).not.toHaveBeenCalled();
+  });
+
   it('a failing (aborted) required step stops with state intact, installed stays false', async () => {
     const a = fakeStep('a', { run: vi.fn(async () => { throw new StepAborted('nope'); }) });
     const b = fakeStep('b');

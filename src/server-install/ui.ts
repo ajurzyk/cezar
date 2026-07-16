@@ -55,6 +55,9 @@ export function createClackUi(backend: PromptBackend = realBackend): Ui {
     intro: (m) => backend.intro(m),
     outro: (m) => backend.outro(m),
     note: (m, title) => backend.note(m, title),
+    // Raw, un-boxed: clack's note() draws a bordered box that breaks when a long
+    // command wraps. Write straight to stdout so the command stays selectable.
+    message: (m) => process.stdout.write(`\n${m}\n`),
     info: (m) => backend.log.info(m),
     success: (m) => backend.log.success(m),
     warn: (m) => backend.log.warn(m),
@@ -118,6 +121,7 @@ export function createAutoUi(answers: Record<string, unknown> = {}, sink: (m: st
     intro: sink,
     outro: sink,
     note: (m) => sink(m),
+    message: sink,
     info: sink,
     success: sink,
     warn: sink,
