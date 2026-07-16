@@ -23,7 +23,7 @@ import { loadWorkflows } from './load.js';
 import type { RunRecord, RunStore } from '../runs/store.js';
 import { deriveTitleSummary } from '../runs/title-summary.js';
 import { UiEventSink } from '../runs/ui-event-sink.js';
-import { DEFAULT_ALLOWED_TOOLS, stepKind, type WorkflowDef, type WorkflowStepDef } from './types.js';
+import { chainStepNote, DEFAULT_ALLOWED_TOOLS, stepKind, type WorkflowDef, type WorkflowStepDef } from './types.js';
 
 const CHECK_OUTPUT_CAP = 20_000;
 /** An interactive session that hears nothing from the user closes itself. */
@@ -816,6 +816,8 @@ export class RunManager {
           startImages,
           taskBackend,
           extraSystemPrompt,
+          i,
+          workflow.steps.length,
         );
         startImages = undefined;
         checkFailure = null;
@@ -901,6 +903,11 @@ export class RunManager {
     images: ContentBlock[] | undefined,
     taskBackend: RunnerId,
     extraSystemPrompt: string | undefined,
+    /** This step's position in `workflow.steps` (0-based) and the workflow's
+     *  total step count — used only to build the chain-boundary note below
+     *  (#410). */
+    stepIndex: number,
+    totalSteps: number,
   ): Promise<string | null> {
     let systemPrompt: string | undefined;
     if (step.skill) {
@@ -931,6 +938,8 @@ export class RunManager {
     }
 
     let userPrompt = applyTemplate(step.prompt ?? '{{task}}', input.task);
+    const chainNote = chainStepNote(step, stepIndex, totalSteps);
+    if (chainNote) userPrompt = `${chainNote}\n\n---\n\n${userPrompt}`;
     if (checkFailure) {
       userPrompt += `\n\nA verification command failed after the previous attempt. Fix the cause. Failing output:\n\n${checkFailure}`;
     }

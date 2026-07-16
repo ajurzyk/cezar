@@ -155,7 +155,7 @@ async function respond(userText, imageCount) {
     // Leave a visible trace in the cwd (the task worktree under spec 006) so
     // the Diff view has something real to show in dry runs.
     try {
-      appendFileSync('notes.md', `mock notes — ${new Date().toISOString()}: ${userText.slice(0, 100)}\n`);
+      appendFileSync('notes.md', `mock notes — ${new Date().toISOString()}: ${userText.slice(0, 400)}\n`);
     } catch {
       // read-only cwd — the mock still works, just without a diff
     }

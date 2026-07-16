@@ -108,6 +108,32 @@ export function stepKind(step: WorkflowStepDef): 'agent' | 'check' {
 }
 
 /**
+ * A guard note prepended to an agent step's prompt when the workflow chains
+ * 2+ steps (#410): every step gets the SAME `input.task` text and shares one
+ * run-level handoff journal, so a later step's fresh session can read an
+ * earlier step's own "done" signal (its final report, its handoff Resume
+ * notes) and — with nothing in its prompt saying otherwise — conclude the
+ * OVERALL task is already achieved. Since only the chain's last step honors
+ * `CEZ:DONE` as an early-completion signal (`run.ts`'s `interactive` gate),
+ * this silently skipped exactly the last selected skill: it ended its first
+ * turn with the marker instead of doing its own step's work. The note makes
+ * the step boundary explicit so the agent knows an earlier step's completion
+ * doesn't cover this one. Undefined when there's only one agent step in the
+ * workflow — the common single-step case stays byte-for-byte unchanged.
+ */
+export function chainStepNote(step: WorkflowStepDef, index: number, total: number): string | undefined {
+  if (total <= 1) return undefined;
+  const label = step.skill ? `the "${step.skill}" skill` : step.name ? `"${step.name}"` : 'this step';
+  return (
+    `This run is a chain of ${total} steps; you are running step ${index + 1} of ${total}. ` +
+    `Your job in THIS step is ${label} — do its work in full, even if an earlier step in this ` +
+    `same run already reported its own work done (its report, or this run's handoff file, may ` +
+    `say so). An earlier step's completion does not mean your step's work is done. Only end this ` +
+    `turn with CEZ:DONE once step ${index + 1}'s own goal is achieved, not just the run's overall task.`
+  );
+}
+
+/**
  * Structural checks beyond the per-step schema: ids must be unique and every
  * `onFail.retry` must reference an *earlier* step (loops only go backwards).
  * Returns a human-readable problem, or null when the list is sound. Shared by
