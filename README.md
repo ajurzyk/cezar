@@ -17,7 +17,7 @@ and a run never stops to ask; it just finishes. Leave it on a VPS and you get
 a dev team that's *always on* — a mobile-friendly cockpit you can check from
 your phone, working your backlog while you're away.
 
-[A look inside](#a-look-inside) · [What it solves](#what-it-solves) · [Who it's for](#who-its-for) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Core concepts](#core-concepts) · [Cockpit tour](#cockpit-tour) · [Agent backends](#coding-agent-backends)
+[A look inside](#a-look-inside) · [What cezar does best](#what-cezar-does-best) · [What it solves](#what-it-solves) · [Who it's for](#who-its-for) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Core concepts](#core-concepts) · [Cockpit tour](#cockpit-tour) · [Agent backends](#coding-agent-backends)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](#license)
 ![Node 20+](https://img.shields.io/badge/Node-20%2B-339933)
@@ -49,6 +49,28 @@ Click any thumbnail for the full-size screenshot.
 | **Workflow builder** | **GitHub, one click away** | **Skills + fire-and-forget** |
 | [![The workflow builder — drag skills into an ordered chain of agent steps and shell checks](docs/screenshots/workflow-builder.png)](docs/screenshots/workflow-builder.png) | [![The GitHub tab — hand an open issue to the agent with a workflow and skills](docs/screenshots/github-issues.png)](docs/screenshots/github-issues.png) | [![The task composer — pick a skill playbook and flip the Autonomous flag to run unattended](docs/screenshots/skills-autonomous.png)](docs/screenshots/skills-autonomous.png) |
 | *Stitch skills and shell checks into a reusable YAML chain, no code.* | *Open issues and PRs via your `gh` — run the agent straight on an issue.* | *Pick a Markdown skill and flip **Autonomous** — the run never stops to ask, so you can walk away.* |
+
+---
+
+## What cezar does best 🏆
+
+Plenty of tools wrap a single coding agent in a nicer window — a "Codex GUI", a
+conductor-style app, one-agent front-ends. cezar's bet is different. Three things
+it does better than any of them:
+
+- 🪶 **Genuinely zero config.** `npx cezar-cli` in your repo and you're running —
+  no wizard, no API keys, no env vars, no schema, no database. It rides the
+  `claude` / `codex` / `opencode` logins and the `gh` you already have, and every
+  missing piece degrades gracefully instead of blocking you.
+- 🖥️ **Built for a server (VPS mode).** cezar is made to live on a **VPS, cloud,
+  or dedicated box** as an always-on janitor for your repo — headless-first, with
+  a mobile-friendly cockpit you drive from anywhere. It's a coding server you can
+  actually watch, not a desktop app bolted onto one machine.
+- 🔀 **Parallel + autonomous orchestration.** The real edge: cezar runs **many
+  agents at once** in isolated worktrees, **queues** the overflow, and pushes each
+  one **autonomously** through skill playbooks — fire-and-forget. This is exactly
+  what single-agent GUIs don't do well: they babysit one agent, while cezar
+  orchestrates a whole team and drains your backlog while you're away.
 
 ---
 
