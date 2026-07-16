@@ -1,5 +1,5 @@
 import { CANCEL, PreflightError, type InstallContext, type InstallStep, type PlatformStrategy, type StepArtifact } from '../types.js';
-import { depCheckStep, owned, shquote, StepCancelled, sudoStep, verifyCommand } from '../steps.js';
+import { depCheckStep, owned, shared, shquote, StepCancelled, StepSkipped, sudoStep, verifyCommand } from '../steps.js';
 
 /**
  * The `ubuntu-vps` strategy: stand up an authenticated, proxied cezar on a bare
@@ -120,6 +120,81 @@ const nginxProxyStep: InstallStep = {
   },
 };
 
+const HOSTNAME_RE = /^(?=.{1,253}$)([a-z0-9](-?[a-z0-9])*\.)+[a-z]{2,}$/i;
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+const sslStep: InstallStep = {
+  id: 'ssl',
+  title: 'Domain + SSL (Let’s Encrypt)',
+  optional: true,
+  async check() {
+    return false; // optional — the engine gates it with a confirm; certbot is idempotent
+  },
+  async run(ctx): Promise<{ artifacts: StepArtifact[] }> {
+    const domain = await ctx.ui.text({
+      message: 'Domain pointing at this server (an A/AAAA record must resolve here)',
+      placeholder: 'cezar.example.com',
+      validate: (v) => (HOSTNAME_RE.test(v.trim()) ? undefined : 'enter a valid domain'),
+    });
+    if (domain === CANCEL) throw new StepCancelled();
+    const email = await ctx.ui.text({
+      message: 'Email for Let’s Encrypt renewal notices',
+      placeholder: 'you@example.com',
+      validate: (v) => (EMAIL_RE.test(v.trim()) ? undefined : 'enter a valid email'),
+    });
+    if (email === CANCEL) throw new StepCancelled();
+
+    await sudoStep(ctx, {
+      description: 'Install certbot + its nginx plugin.',
+      command: 'apt-get install -y certbot python3-certbot-nginx',
+      verify: (c) => verifyCommand(c, 'certbot', ['--version']),
+    });
+
+    if (ctx.dryRun) {
+      ctx.ui.info(`DRY RUN — would run: sudo certbot --nginx -d ${domain} --redirect`);
+    } else {
+      // certbot can legitimately fail on external state (DNS not pointed, LE
+      // rate limit), so it does not go through sudoStep's redo loop — we let the
+      // operator retry or skip and finish by hand later.
+      for (;;) {
+        const code = await ctx.runner.interactive('sudo', [
+          'certbot', '--nginx', '-d', String(domain), '--non-interactive', '--agree-tos', '-m', String(email), '--redirect',
+        ]);
+        if (code === 0) break;
+        ctx.ui.warn(
+          'certbot did not complete. Usual causes: the domain’s DNS is not pointed at this server yet, or a Let’s Encrypt rate limit.',
+        );
+        const choice = await ctx.ui.select<'retry' | 'skip'>({
+          message: 'What now?',
+          options: [
+            { value: 'retry', label: 'Retry certbot' },
+            { value: 'skip', label: 'Skip SSL — I’ll run certbot later', hint: `sudo certbot --nginx -d ${domain}` },
+          ],
+          initialValue: 'skip',
+        });
+        if (choice === CANCEL || choice === 'skip') throw new StepSkipped('certbot did not complete');
+      }
+    }
+
+    ctx.state.publicUrl = `https://${String(domain)}`;
+    // The cert + its auto-renewal timer are `shared`: uninstall lists them, it
+    // does not delete them (removing a cert can break other vhosts).
+    return {
+      artifacts: [shared('cert', { name: String(domain), removeHint: `sudo certbot delete --cert-name ${String(domain)}` })],
+    };
+  },
+  async undo(ctx, created) {
+    const cert = (created?.artifacts ?? []).find((a) => a.type === 'cert');
+    if (cert) {
+      ctx.ui.note(
+        `The TLS certificate for ${cert.name ?? 'your domain'} and its auto-renewal timer were left in place.\nRemove them yourself if you want them gone:\n${cert.removeHint ?? ''}`,
+        'SSL',
+      );
+    }
+    // The vhost (with certbot’s edits) is removed by the nginx-proxy step’s undo.
+  },
+};
+
 const identityStep: InstallStep = {
   id: 'identity',
   title: 'Identity check (proxy challenges anonymous requests)',
@@ -169,7 +244,7 @@ export const ubuntuVps: PlatformStrategy = {
     }
   },
   steps(): InstallStep[] {
-    // Phase 1: deps → proxy → identity. Phase 2 inserts ssl + autostart before identity.
-    return [depCheckStep(), nginxProxyStep, identityStep];
+    // deps → proxy → (optional) ssl → identity. Autostart inserted in step 2.2.
+    return [depCheckStep(), nginxProxyStep, sslStep, identityStep];
   },
 };

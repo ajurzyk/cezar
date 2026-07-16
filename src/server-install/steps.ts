@@ -54,6 +54,8 @@ export async function hasPasswordlessSudo(ctx: InstallContext): Promise<boolean>
 
 export class StepCancelled extends Error {}
 export class StepAborted extends Error {}
+/** Thrown from an optional step's `run()` to record it as `skipped` (e.g. certbot DNS not ready). */
+export class StepSkipped extends Error {}
 
 export interface SudoStepOpts {
   /** One-line description of what/why (shown above the command). */

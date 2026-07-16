@@ -2,7 +2,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { cezarHomeDir } from '../paths.js';
 import { acquireLock, isResolved, loadServerState, saveServerState } from './state.js';
-import { StepAborted, StepCancelled, defaultRunner } from './steps.js';
+import { StepAborted, StepCancelled, StepSkipped, defaultRunner } from './steps.js';
 import { createAutoUi, createClackUi } from './ui.js';
 import {
   PreflightError,
@@ -105,6 +105,12 @@ export async function runInstall(strategy: PlatformStrategy, opts: RunOptions): 
         state.updatedAt = opts.now;
         await ctx.save();
       } catch (err) {
+        if (err instanceof StepSkipped) {
+          state.steps[step.id] = { status: 'skipped', created: null };
+          await ctx.save();
+          ctx.ui.info(`— ${step.title} (skipped: ${err.message})`);
+          continue;
+        }
         if (err instanceof StepCancelled) {
           state.steps[step.id] = { status: 'pending', created: null };
           await ctx.save();
