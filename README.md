@@ -85,8 +85,8 @@ and an orchestrator keeps a whole queue of them moving.
 - 🔀 **Locked into one agent vendor.** Most tools wed you to a single CLI. cezar
   drives **Claude Code, Codex and OpenCode** through one runner seam — set a
   default, pick a backend per task, or mix them inside one workflow (implement
-  with one agent, review with another). Codex and OpenCode reach whatever models
-  their CLIs are pointed at, **open-source ones included**. See
+  with one agent, review with another) — and through **OpenCode** you can point
+  a run at **open-source or local models**, not just the big vendors. See
   [Agent backends](#coding-agent-backends).
 - ⚡ **Setup tax.** No wizard, no env vars, no schema. Skills are Markdown, workflows
   are short YAML, and everything degrades: no `gh` → works without PRs, no network
