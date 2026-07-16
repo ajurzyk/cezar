@@ -73,6 +73,8 @@ and giving "Core concepts" emojis plus the queue and memory-usage facts.
 
 ## Progress
 
+PR: #412
+
 > Convention: `- [ ]` pending, `- [x]` done. Append ` — <commit sha>` when a step lands. Do not rename step titles.
 
 ### Phase 1: Ground the claims
@@ -96,4 +98,4 @@ and giving "Core concepts" emojis plus the queue and memory-usage facts.
 ### Phase 4: Validate and ship
 
 - [x] 4.1 Docs-only gate: no docs linter in repo; every screenshot ref resolves; manual diff re-read; mobile claim verified against e2e iPhone specs
-- [ ] 4.2 Self-review and open the PR
+- [x] 4.2 Self-review and open the PR — #412 (self-review only; left in review for a human)
