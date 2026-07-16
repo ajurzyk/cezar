@@ -21,7 +21,7 @@ Tracking issue: #419
 | 2 | 2.2 | ubuntu-vps autostart step (systemd) | done | d10ba40 |
 | 3 | 3.1 | `platforms/macosx-ngrok.ts` + registry | done | 386e4f0 |
 | 3 | 3.2-review-fix | Address adversarial review — security + robustness fixes | done | 7704ded |
-| 3 | 3.3-review-fix | Uninstall clears skipped/pending entries on completion | done | PENDING33 |
+| 3 | 3.3-review-fix | Uninstall clears skipped/pending entries on completion | done | b605fc9 |
 
 ## Goal
 

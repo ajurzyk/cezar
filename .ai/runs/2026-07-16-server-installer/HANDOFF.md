@@ -1,25 +1,18 @@
 # Handoff — server-installer
 
-**State:** in-progress
+**State:** complete (pending final review pass + summary)
 **Branch:** `feat/server-installer`
-**PR:** not opened yet
-**Checkpoint:** 2 (Phase 1 complete — steps 1.1–1.8 verified, all gates green)
+**PR:** #423
+**Checkpoint:** 3 / final gate — all green
 
-## Next concrete action
+## What shipped
 
-Step 2.1 — add the optional **SSL step** to `platforms/ubuntu-vps.ts`: `certbot --nginx -d <domain>` via `sudoStep`; if DNS isn't pointed / LE rate-limited, show the reason and mark the step `skipped` (install still completes). Record the cert domain as a `shared` artifact (cert + renewal timer survive uninstall); only the vhost reference is `owned`. Insert it into `steps()` before `identityStep`. Add a dry-run unit test.
+All 11 spec steps + 2 review-fix steps. `cezar server-install --platform <ubuntu-vps|macosx-ngrok>` and `cezar server-uninstall`, strategy-driven engine, sudoStep, idempotent resume, `~/.cezar/server.json`, `@clack/prompts` TUI (lazy-loaded), full install↔uninstall reversibility.
 
-## Phase 1 in place (shipped install + uninstall)
+## Verification
 
-- Engine: `runInstall`/`runUninstall`, resume, `--reconfigure`, single-writer lock.
-- ubuntu-vps: deps (reuses `detectEnvironment`) → nginx+htpasswd → identity 401 check; full `undo` per step.
-- CLI: `server-install`/`server-uninstall` on the `cezar` bin (lazy import keeps @clack out of the serve graph); `npm run server-install`.
-- Tests: 8 server-install unit files + packaged e2e round-trip.
+Full gate green: typecheck, npm test (1960), test:unit, build (check:pack ok), test:package (install→uninstall round-trip). Adversarial review done; H1 auth-bypass + all High/Medium findings fixed. See `final-gate-checks.md`.
 
-## Remaining steps
+## Next action
 
-2.1 SSL · 2.2 autostart (systemd) · 3.1 macosx-ngrok + register in `strategies.ts`.
-
-## Validation
-
-Gate all green at checkpoint 2: typecheck, `npm test` (1948), `npm run test:unit`, `npm run build`, `npm run test:package`.
+Second automated review pass, then PR summary comment + merge readiness. No open TODOs.
