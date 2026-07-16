@@ -298,9 +298,14 @@ export class ClaudeCliRunner implements AgentRunner {
 /**
  * Build the headless argv. `--input-format stream-json` reads user messages
  * from stdin; `--output-format stream-json --verbose` gives per-event NDJSON;
- * `--permission-mode acceptEdits` lets edits through without a TTY prompt.
+ * `--permission-mode dontAsk` keeps headless runs non-interactive: tools in
+ * `--allowedTools` proceed and everything else is denied instead of prompting.
+ * `CEZ_APPROVAL_GATE=1` opts back into Claude's approval UI (#435).
  */
-export function buildClaudeArgs(spec: AgentRunSpec): string[] {
+export function buildClaudeArgs(
+  spec: AgentRunSpec,
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
   const args: string[] = [
     '--input-format',
     'stream-json',
@@ -308,7 +313,7 @@ export function buildClaudeArgs(spec: AgentRunSpec): string[] {
     'stream-json',
     '--verbose',
     '--permission-mode',
-    'acceptEdits',
+    env.CEZ_APPROVAL_GATE === '1' ? 'acceptEdits' : 'dontAsk',
   ];
   if (spec.systemPrompt) {
     args.push('--append-system-prompt', spec.systemPrompt);
