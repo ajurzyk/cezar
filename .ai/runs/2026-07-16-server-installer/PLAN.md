@@ -10,8 +10,8 @@ Tracking issue: #419
 | Phase | Step | Title | Status | Commit |
 |-------|------|-------|--------|--------|
 | 1 | 1.1 | `src/paths.ts` — cezarHomeDir + serverStatePath | done | 60d9d30 |
-| 1 | 1.2 | `src/server-install/types.ts` — contracts + zod ServerState | done | PENDING12 |
-| 1 | 1.3 | `src/server-install/state.ts` — load/save/resume | todo | — |
+| 1 | 1.2 | `src/server-install/types.ts` — contracts + zod ServerState | done | 05c56ac |
+| 1 | 1.3 | `src/server-install/state.ts` — load/save/resume | done | PENDING13 |
 | 1 | 1.4 | `src/server-install/ui.ts` — @clack wrappers + cancel sentinel | todo | — |
 | 1 | 1.5 | `src/server-install/steps.ts` — sudoStep/verifyCommand/depCheckStep | todo | — |
 | 1 | 1.6 | `src/server-install/engine.ts` — runInstall/runUninstall + lock | todo | — |
