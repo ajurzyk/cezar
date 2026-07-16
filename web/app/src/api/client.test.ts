@@ -148,10 +148,17 @@ describe('request shapes', () => {
     },
     {
       name: 'continueRun (with text)',
-      call: () => continueRun('run-1', 'keep going'),
+      call: () => continueRun('run-1', { text: 'keep going' }),
       path: '/api/runs/run-1/continue',
       method: 'POST',
       body: { text: 'keep going' },
+    },
+    {
+      name: 'continueRun (runner + model override, #401)',
+      call: () => continueRun('run-1', { runner: 'codex', model: 'gpt-5.1-codex' }),
+      path: '/api/runs/run-1/continue',
+      method: 'POST',
+      body: { runner: 'codex', model: 'gpt-5.1-codex' },
     },
     { name: 'deleteRun', call: () => deleteRun('run-1'), path: '/api/runs/run-1', method: 'DELETE' },
     // Inbox actions (R6 1.2): the exact legacy endpoints, ids URL-encoded like every other path.

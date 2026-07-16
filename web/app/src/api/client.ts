@@ -30,6 +30,7 @@ import type {
   RepoCommitPayload,
   RunCommitsResponse,
   RepoResponse,
+  Runner,
   RunRecord,
   WorktreeEntry,
   SaveWorkflowInput,
@@ -320,9 +321,23 @@ export function finishRun(id: string): Promise<FinishResponse> {
   return mutate<FinishResponse>('POST', runPath(id, '/finish'))
 }
 
-/** Reopen a finished run's session. 409 (with the reason) when it cannot be resumed. */
-export function continueRun(id: string, text?: string): Promise<ContinueResponse> {
-  return mutate<ContinueResponse>('POST', runPath(id, '/continue'), text === undefined ? {} : { text })
+/** The follow-up composer's optional overrides for a Continue (#401): pick which backend and
+ *  model handle the reopened session. Omitted fields keep the run's current backend/model. */
+export interface ContinueOptions {
+  text?: string
+  runner?: Runner
+  model?: string
+}
+
+/** Reopen a finished run's session. 409 (with the reason) when it cannot be resumed. An optional
+ *  runner/model override lets the follow-up choose the engine; omitted keeps the run's current
+ *  backend (backward compat). */
+export function continueRun(id: string, opts: ContinueOptions = {}): Promise<ContinueResponse> {
+  const body: Record<string, unknown> = {}
+  if (opts.text !== undefined) body.text = opts.text
+  if (opts.runner !== undefined) body.runner = opts.runner
+  if (opts.model !== undefined) body.model = opts.model
+  return mutate<ContinueResponse>('POST', runPath(id, '/continue'), body)
 }
 
 /** Draft PR from the review gate (spec 009): push the branch, `gh pr create --draft`; the run

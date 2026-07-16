@@ -1,17 +1,15 @@
-import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { MessageSquareTextIcon, PlayIcon, SearchXIcon } from 'lucide-react'
+import { MessageSquareTextIcon, SearchXIcon } from 'lucide-react'
 import { useMemo } from 'react'
 import { Link, useLocation, useParams } from 'react-router'
 
-import { ApiError, continueRun } from '@/api/client'
-import { queryKeys, useRun, useRuns, useSendMessage } from '@/api/queries'
+import { ApiError } from '@/api/client'
+import { useRun, useRuns, useSendMessage } from '@/api/queries'
 import { useRunEvents } from '@/api/run-events'
 import type { ApiRun } from '@/api/types'
 import { CenteredState } from '@/components/centered-state'
 import { Composer } from '@/components/composer/composer'
 import { StatusDot } from '@/components/status-dot'
 import { Button } from '@/components/ui/button'
-import { toast } from '@/components/ui/toaster'
 import { useKeyboardInsetVar } from '@/lib/keyboard-inset'
 import { taskPrUrl } from '@/lib/tasks-table'
 import { cn } from '@/lib/utils'
@@ -26,9 +24,10 @@ import {
   ToolStreak,
   UserBubble,
 } from './thread-items'
+import { ContinueAction } from './follow-up-engine'
 import { PlanDock, planCounts } from './plan-dock'
 import { AcceptCelebration, ReviewPanel } from './review-panel'
-import { queuePosition, runActionFlags } from './run-actions'
+import { queuePosition } from './run-actions'
 import { RunHeader } from './run-header'
 import { groupThreadItems, type ThreadBlock } from './thread-groups'
 import { ThreadLoading } from './thread-loading'
@@ -243,31 +242,6 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
         </div>
       </div>
     </div>
-  )
-}
-
-/** The closed composer's way out (legacy "Session closed — Continue to reopen."): reopens the
- *  last agent session, exactly like the header's Continue — hidden when the run has no session
- *  to resume (the flags rule in run-actions.ts). */
-function ContinueAction({ run }: { run: ApiRun }) {
-  const queryClient = useQueryClient()
-  const mutation = useMutation({
-    mutationFn: () => continueRun(run.id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.runs.all }),
-    onError: (error: Error) => toast(error.message, { tone: 'danger' }),
-  })
-  if (!runActionFlags(run).continueRun) return null
-  return (
-    <Button
-      type="button"
-      variant="outline"
-      size="sm"
-      disabled={mutation.isPending}
-      onClick={() => mutation.mutate()}
-    >
-      <PlayIcon aria-hidden="true" className="size-3.5" />
-      Continue
-    </Button>
   )
 }
 

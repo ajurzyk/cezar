@@ -1,13 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import {
-  CheckIcon,
-  ChevronDownIcon,
-  EyeIcon,
-  SparklesIcon,
-  SquareIcon,
-  WorkflowIcon,
-} from 'lucide-react'
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { CheckIcon, EyeIcon, SparklesIcon, SquareIcon, WorkflowIcon } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router'
 
 import { createRun, getLaunchKey, postPlan, putConfig, putUiState } from '@/api/client'
@@ -15,6 +8,7 @@ import { queryKeys, useConfig, useHealth, useRepo, useSkills, useUiState, useWor
 import type { ImageInput, RepoResponse, Runner, Skill, WorkflowDef } from '@/api/types'
 import { TwinkleBackdrop } from '@/components/centered-state'
 import { Composer } from '@/components/composer/composer'
+import { PickerPill, RunnerPill, chevron, chipClass } from '@/components/picker-pill'
 import { SkillPreviewDialog } from '@/components/skill-detail'
 import {
   Command,
@@ -24,13 +18,6 @@ import {
   CommandItem,
   CommandList,
 } from '@/components/ui/command'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { toast } from '@/components/ui/toaster'
 import { isProjectSkill, multiWordFilter, orderSkillsByRecency, skillKeywords } from '@/lib/skills'
@@ -54,7 +41,6 @@ import {
   resolveRunner,
   resolveSource,
   startedRunPath,
-  RUNNERS,
   type TaskSource,
 } from './new-task-form'
 import { parseNewTaskParams } from './new-task-params'
@@ -484,12 +470,6 @@ function AutonomousToggle({
   )
 }
 
-/** The mockup's `.chip`: a quiet bordered pill that darkens on hover. */
-const chipClass =
-  'inline-flex h-[26px] items-center gap-1.5 rounded-full border border-border bg-card px-2.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-55'
-
-const chevron = <ChevronDownIcon aria-hidden="true" className="size-2.5 shrink-0 text-soft-foreground" />
-
 /**
  * The workflow/skill picker (#385's searchable cmdk dropdown, #377's project-first ordering):
  * ONE pill for both kinds of source. Groups follow the mockup — Project skills (bold), Global,
@@ -633,98 +613,6 @@ function SourcePill({
         </PopoverContent>
       </Popover>
     </>
-  )
-}
-
-/** Runner choice — rendered only when the host offers more than one backend, so a claude-only
- *  machine keeps the simple form (legacy rule). */
-function RunnerPill({
-  runners,
-  value,
-  onPick,
-}: {
-  runners: readonly Runner[]
-  value: Runner
-  onPick: (runner: Runner) => void
-}) {
-  const options = RUNNERS.filter((r) => runners.includes(r.id))
-  return (
-    <PickerPill
-      slot="runner-pill"
-      ariaLabel="Runner"
-      label={value}
-      value={value}
-      onPick={(next) => onPick(next as Runner)}
-      options={options.map((r) => ({ value: r.id, label: r.label, desc: r.desc }))}
-    />
-  )
-}
-
-/** A generic single-choice pill (runner / model / variants): DropdownMenu radio semantics,
- *  two-line items (label + quiet description), disabled state carries its reason as `title`. */
-function PickerPill({
-  slot,
-  ariaLabel,
-  label,
-  value,
-  options,
-  onPick,
-  disabled = false,
-  hint,
-  disabledHint,
-}: {
-  slot: string
-  ariaLabel: string
-  label: ReactNode
-  value: string
-  options: ReadonlyArray<{ value: string; label: string; desc?: string }>
-  onPick: (value: string) => void
-  disabled?: boolean
-  /** Hover explanation for the enabled pill — what the setting does (e.g. the ×1 variants pill). */
-  hint?: string
-  disabledHint?: string
-}) {
-  const trigger = (
-    <button
-      type="button"
-      data-slot={slot}
-      aria-label={ariaLabel}
-      disabled={disabled}
-      title={disabled ? disabledHint : hint}
-      className={chipClass}
-    >
-      {label}
-      {chevron}
-    </button>
-  )
-  // Radix never opens a disabled trigger, but `disabled:pointer-events-none` would also kill
-  // the explanatory title tooltip — so the disabled pill renders bare, in a plain span wrapper
-  // that still receives hover.
-  if (disabled) {
-    return (
-      <span title={disabledHint} className="inline-flex">
-        {trigger}
-      </span>
-    )
-  }
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>{trigger}</DropdownMenuTrigger>
-      <DropdownMenuContent align="start" data-testid={`${slot}-menu`}>
-        <DropdownMenuRadioGroup value={value} onValueChange={onPick}>
-          {options.map((option) => (
-            <DropdownMenuRadioItem key={option.value} value={option.value} className="gap-2.5">
-              <span className="flex min-w-0 flex-col">
-                <span className="text-[12.5px] font-medium">{option.label}</span>
-                {option.desc ? (
-                  <span className="text-[11.5px] text-muted-foreground">{option.desc}</span>
-                ) : null}
-              </span>
-            </DropdownMenuRadioItem>
-          ))}
-        </DropdownMenuRadioGroup>
-      </DropdownMenuContent>
-    </DropdownMenu>
   )
 }
 

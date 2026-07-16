@@ -67,7 +67,7 @@ function ReviewActions({ run }: { run: ApiRun }) {
   // back into the SAME session via continue, prefixed `Review feedback:` — the run leaves
   // `review`, works, and gates again. On success the status flip unmounts this panel.
   const sendBack = useMutation({
-    mutationFn: (text: string) => continueRun(run.id, `Review feedback:\n${text}`),
+    mutationFn: (text: string) => continueRun(run.id, { text: `Review feedback:\n${text}` }),
     onSuccess: () => {
       setNotes('')
       invalidate()

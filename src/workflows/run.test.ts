@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createWorktree } from '../git-worktree.js';
 import { RunStore, type RunRecord } from '../runs/store.js';
 import { RunManager } from './run.js';
@@ -92,5 +92,79 @@ describe('RunManager.recordTurnEnd', () => {
 
   it('is a quiet no-op for an unknown run', async () => {
     await expect(manager.recordTurnEnd('nope', TURN_TEXT)).resolves.toBeUndefined();
+  });
+});
+
+/**
+ * `continueRun` runner/model override (#401): the follow-up composer can pick which backend and
+ * model reopen the session. The override is persisted as the run's current backend BEFORE the
+ * continuation is scheduled (so `runContinuation` reads it off the record); omitted fields
+ * preserve the run's current choice. We stub the private continuation so no live session
+ * starts — the assertion is only the synchronous record persistence.
+ */
+describe('RunManager.continueRun override', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  let manager: RunManager;
+
+  beforeEach(() => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-continue-'));
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot);
+    // No live agent — we only assert the synchronous persistence continueRun does before it
+    // hands off to the (stubbed) continuation.
+    (manager as unknown as { runContinuation: () => Promise<void> }).runContinuation = async () => {};
+  });
+
+  afterEach(() => {
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  /** A finished run with a resumable session on the `claude`/`sonnet` backend. */
+  function resumableRun(): string {
+    const record = store.createRun({
+      title: 't',
+      workflow: 'quick-task',
+      task: 't',
+      runner: 'claude',
+      model: 'sonnet',
+      steps: [{ id: 's1', name: 'Work', kind: 'agent' }],
+    });
+    store.updateRun(record.id, { status: 'done', finishedAt: new Date().toISOString() });
+    store.updateStep(record.id, 's1', { sessionId: 'sess-1' });
+    return record.id;
+  }
+
+  it('persists a runner + model override as the run current backend', () => {
+    const id = resumableRun();
+    expect(manager.continueRun(id, { runner: 'codex', model: 'gpt-5.1-codex' })).toEqual({ ok: true });
+    const after = store.getRun(id);
+    expect(after?.runner).toBe('codex');
+    expect(after?.model).toBe('gpt-5.1-codex');
+  });
+
+  it('an omitted override preserves the run current backend/model (backward compat)', () => {
+    const id = resumableRun();
+    expect(manager.continueRun(id, { text: 'keep going' })).toEqual({ ok: true });
+    const after = store.getRun(id);
+    expect(after?.runner).toBe('claude');
+    expect(after?.model).toBe('sonnet');
+  });
+
+  it("an empty model clears the pin so the runner picks the model (auto)", () => {
+    const id = resumableRun();
+    manager.continueRun(id, { model: '' });
+    expect(store.getRun(id)?.model).toBeUndefined();
+    // Runner untouched → the run keeps its backend.
+    expect(store.getRun(id)?.runner).toBe('claude');
+  });
+
+  it('refuses to continue a run with no resumable session (no override persisted)', () => {
+    const record = store.createRun({ title: 't', workflow: 'quick-task', task: 't', runner: 'claude', steps: [] });
+    store.updateRun(record.id, { status: 'done' });
+    const result = manager.continueRun(record.id, { runner: 'codex' });
+    expect(result.ok).toBe(false);
+    expect(store.getRun(record.id)?.runner).toBe('claude');
   });
 });

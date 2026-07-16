@@ -370,10 +370,9 @@ export class RunManager {
         finishedAt,
         currentStepId: undefined,
       });
-      const resumed = this.continueRun(
-        run.id,
-        'The cezar process restarted while you were working on this task. Read the handoff file (CEZ_HANDOFF_FILE) to recover context, then continue the task from where you left off.',
-      );
+      const resumed = this.continueRun(run.id, {
+        text: 'The cezar process restarted while you were working on this task. Read the handoff file (CEZ_HANDOFF_FILE) to recover context, then continue the task from where you left off.',
+      });
       this.store.appendEvent(run.id, {
         type: 'lifecycle',
         message: resumed.ok
@@ -491,7 +490,10 @@ export class RunManager {
    * behaves exactly like an interactive step: `waiting` after each turn,
    * messages via sendMessage, closed by finish/idle/cancel.
    */
-  continueRun(runId: string, text?: string): { ok: boolean; error?: string } {
+  continueRun(
+    runId: string,
+    opts: { text?: string; runner?: RunnerId; model?: string } = {},
+  ): { ok: boolean; error?: string } {
     if (this.active.has(runId)) return { ok: false, error: 'run is still active' };
     const run = this.store.getRun(runId);
     if (!run) return { ok: false, error: 'not found' };
@@ -502,10 +504,23 @@ export class RunManager {
     const sessionId = [...run.steps].reverse().find((s) => s.sessionId)?.sessionId;
     if (!sessionId) return { ok: false, error: 'no agent session to resume' };
 
+    // Follow-up runner/model override (#401): the composer lets the user pick which backend and
+    // model handle this continuation. Omitted → the run's current backend/model is kept
+    // (backward compat). A provided choice is persisted BEFORE scheduling, so it becomes the
+    // run's current backend — `runContinuation` reads it off the record, later continuations
+    // default to it, and the header reflects the active engine. An empty model ('') clears the
+    // pin, letting the runner pick the model (auto).
+    if (opts.runner !== undefined || opts.model !== undefined) {
+      this.store.updateRun(runId, {
+        ...(opts.runner !== undefined ? { runner: opts.runner } : {}),
+        ...(opts.model !== undefined ? { model: opts.model || undefined } : {}),
+      });
+    }
+
     const continuations = run.steps.filter((s) => s.id.startsWith('continue-')).length;
     const stepId = `continue-${continuations + 1}`;
     this.store.addStep(runId, { id: stepId, name: 'Continue', kind: 'agent' });
-    void this.runContinuation(runId, stepId, sessionId, text?.trim() || 'Continue.').catch(
+    void this.runContinuation(runId, stepId, sessionId, opts.text?.trim() || 'Continue.').catch(
       (err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
         this.store.updateRun(runId, {
@@ -624,6 +639,8 @@ export class RunManager {
       }
     };
 
+    // Backend + model come off the record: the run's current backend by default, or the
+    // follow-up override that `continueRun` persisted before scheduling (#401).
     const runner = createRunner(record?.runner ?? 'claude');
     const session = runner.startSession(
       {
@@ -636,6 +653,7 @@ export class RunManager {
         allowedTools: DEFAULT_ALLOWED_TOOLS,
         additionalDirectories: [join(this.dataDir, 'runs')],
         env: this.agentEnv(runId),
+        model: record?.model,
         sessionId,
         resume: true,
         timeoutMs: 0,

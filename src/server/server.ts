@@ -224,6 +224,15 @@ const messageSchema = z
     message: 'message needs text or at least one image',
   });
 
+// "Continue"/"Send back" body (spec 003 / #401): every field optional, so an empty POST reopens
+// the last session on the run's current backend (backward compat). A runner/model override lets
+// the follow-up composer choose which engine handles the continuation.
+const continueSchema = z.object({
+  text: z.string().max(100_000).optional(),
+  runner: z.enum(['claude', 'codex', 'opencode']).optional(),
+  model: z.string().max(200).optional(),
+});
+
 export function createApp(deps: ServerDeps): Hono {
   const { repoRoot, store, manager, version, update, bindHost } = deps;
   const dataDir = join(repoRoot, '.ai/cezar');
@@ -679,8 +688,15 @@ export function createApp(deps: ServerDeps): Hono {
   app.post('/api/runs/:id/continue', async (c) => {
     const id = c.req.param('id');
     if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
-    const body = (await c.req.json().catch(() => ({}))) as { text?: unknown };
-    const result = manager.continueRun(id, typeof body.text === 'string' ? body.text : undefined);
+    const parsed = continueSchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) {
+      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
+    }
+    const result = manager.continueRun(id, {
+      text: parsed.data.text,
+      runner: parsed.data.runner,
+      model: parsed.data.model,
+    });
     if (!result.ok) return c.json({ error: result.error }, 409);
     return c.json({ continued: true });
   });
