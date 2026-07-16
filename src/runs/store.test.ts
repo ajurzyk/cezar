@@ -213,6 +213,30 @@ describe('RunStore — referenced-PR discovery (#407, spec 2026-07-16-pr-autodis
     );
   });
 
+  it('disambiguates by a PR number the prompt names as a pasted URL, not just a bare number', () => {
+    const { store, run } = freshRun('review https://github.com/open-mercato/cezar/pull/3777 please');
+    store.appendEvent(run.id, {
+      type: 'result',
+      result: 'It supersedes https://github.com/open-mercato/cezar/pull/12.',
+    });
+    // Two candidates now (3777 seeded from the prompt, 12 from the event); the
+    // prompt names 3777 even though it only appears inside the URL path.
+    expect(store.getRun(run.id)?.referencedPullRequestUrl).toBe(
+      'https://github.com/open-mercato/cezar/pull/3777',
+    );
+  });
+
+  it('does not treat a substring of a longer number as a prompt match', () => {
+    const { store, run } = freshRun('om-auto-review-pr 4170');
+    store.appendEvent(run.id, {
+      type: 'result',
+      result:
+        'https://github.com/open-mercato/cezar/pull/170 and https://github.com/open-mercato/cezar/pull/70',
+    });
+    // Neither 170 nor 70 is named (only "4170" is in the prompt) → ambiguous.
+    expect(store.getRun(run.id)?.referencedPullRequestUrl).toBeUndefined();
+  });
+
   it('the created tier still wins and stops discovery', () => {
     const { store, run } = freshRun();
     store.appendEvent(run.id, {

@@ -168,7 +168,9 @@ function resolveReferencedPr(candidates: string[], task: string): string | undef
   if (candidates.length === 1) return candidates[0];
   const named = candidates.filter((url) => {
     const num = url.split('/').pop() ?? '';
-    return num !== '' && new RegExp(`(?<![\\d/])#?${num}(?!\\d)`).test(task);
+    // `\d` boundaries only: they reject `170` inside `4170` yet still match a
+    // number written as `#4170`, ` 4170`, or inside a pasted `…/pull/4170`.
+    return num !== '' && new RegExp(`(?<!\\d)#?${num}(?!\\d)`).test(task);
   });
   return named.length === 1 ? named[0] : undefined;
 }
