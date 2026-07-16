@@ -90,7 +90,8 @@ export interface StartRunInput {
    *  user — turn-ends auto-continue until the agent signals done or the safety
    *  cap is hit. No "needs you" is ever raised. */
   autonomous?: boolean;
-  /** Follow-up inbox generation. Omitted means enabled for compatibility. */
+  /** Follow-up inbox generation (spec 007, #444). Omitted means enabled for
+   *  compatibility; the handoff journal runs either way. */
   generateFollowups?: boolean;
 }
 
@@ -212,12 +213,19 @@ export class RunManager {
   }
 
   /** Env the spawned claude gets so the agent can find its handoff file and
-   *  the global inbox (spec 007). */
+   *  the global inbox (spec 007; the inbox only when the run opted in).
+   *
+   *  `CEZ_TODOS_FILE` is set to `''` rather than omitted when follow-ups are
+   *  off: runners spawn with `{ ...process.env, ...spec.env }`, so omitting the
+   *  key would let a value inherited from *this* process through — a nested
+   *  cezar (an agent running `cez serve`/`cez run`/the test suite) would then
+   *  write follow-ups into the parent's inbox despite the opt-out. Empty is the
+   *  established "absent" spelling — consumers guard with `if (todosFile)`. */
   private agentEnv(runId: string, generateFollowups = true): Record<string, string> {
     return {
       CEZ_HANDOFF_FILE: handoffPath(this.dataDir, runId),
       CEZ_TASK_ID: runId,
-      ...(generateFollowups ? { CEZ_TODOS_FILE: todosPath(this.dataDir) } : {}),
+      CEZ_TODOS_FILE: generateFollowups ? todosPath(this.dataDir) : '',
     };
   }
 

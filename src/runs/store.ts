@@ -57,7 +57,8 @@ const runRecordSchema = z.object({
    *  contract are derivable from the persisted workflow and would bloat the
    *  index. Resolved at execute time (a queued run picks up config edits). */
   systemPrompt: z.string().optional(),
-  /** Per-task follow-up inbox contract. Missing on old runs means enabled. */
+  /** Per-task follow-up inbox contract (spec 007, #444). Missing on old runs
+   *  means enabled — the historical behavior. */
   generateFollowups: z.boolean().optional(),
   status: z.enum(['queued', 'running', 'waiting', 'review', 'done', 'failed', 'cancelled']),
   createdAt: z.string(),

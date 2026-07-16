@@ -111,7 +111,8 @@ const startRunSchema = z
     // Autonomous mode (#autonomous): the run never parks at `waiting` — it
     // auto-continues until the agent signals done. No "needs you" is raised.
     autonomous: z.boolean().optional(),
-    // Generate follow-up inbox entries. Omitted means enabled for old clients.
+    // Generate follow-up inbox entries (spec 007, #444). Omitted means enabled
+    // for old clients — the handoff journal is unaffected either way.
     generateFollowups: z.boolean().optional(),
     // Per-run system-prompt override (R2 2.3) — programmatic callers only
     // (bookmarklets, scripts); deliberately NOT a composer-UI control. Wins

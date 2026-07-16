@@ -114,7 +114,9 @@ export function deleteHandoff(dataDir: string, runId: string): void {
 /**
  * Appended to every agent step's `--append-system-prompt` (spec 007). The
  * matching handoff/task env vars are set on every agent process;
- * CEZ_TODOS_FILE is present only when follow-up generation is enabled.
+ * CEZ_TODOS_FILE carries a usable path only when follow-up generation is
+ * enabled (#444) — opted-out runs get it empty, never absent, so an inherited
+ * value from a parent cezar cannot shine through (`RunManager.agentEnv`).
  */
 export const HANDOFF_ONLY_INSTRUCTIONS = `## Handoff (cezar)
 
