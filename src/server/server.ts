@@ -42,7 +42,7 @@ import {
   readWorktreePath,
 } from './git-changes.js';
 import { loadConfig, type CezConfig } from '../config.js';
-import { resolveCapabilities } from './capabilities.js';
+import { isLoopbackHost, resolveCapabilities } from './capabilities.js';
 import { resolveForge } from './forge/index.js';
 import { fetchGithub } from './github.js';
 import { ensureLaunchKey } from './launch-key.js';
@@ -233,6 +233,65 @@ export function createApp(deps: ServerDeps): Hono {
   startTodosWatch(dataDir); // inbox live updates (spec 007)
   const launchKey = ensureLaunchKey(dataDir); // bookmarklet auto-start secret (spec 011)
   const app = new Hono();
+
+  // ---- request-origin guard (#426) -----------------------------------------
+  // This server executes agents with shell access — "start a task" ≈ run code
+  // as the user — so "bind 127.0.0.1 + same-origin" is not a perimeter on its
+  // own: any page the user visits can still POST to us (CSRF), and DNS
+  // rebinding can point a foreign domain at loopback and read our responses.
+  // Two zero-config checks close both holes on every /api route EXCEPT
+  // /api/health (the intentional cross-origin discovery endpoint, spec 011 —
+  // it exposes nothing sensitive, see #431):
+  //   1. Host allowlist (loopback deployments only) — a request whose Host is
+  //      not a loopback name did not really originate from this machine. A
+  //      rebound `evil.com` still sends `Host: evil.com`, so this kills DNS
+  //      rebinding for reads AND writes. Skipped in hosted mode (CEZ_REMOTE /
+  //      non-loopback bind), where the reverse proxy forwards the real public
+  //      Host and TLS+auth own the perimeter.
+  //   2. Same-origin write guard — a cross-origin write always carries an
+  //      `Origin` header (browsers attach it to every non-GET), so its host
+  //      must match the served Host. A blind CSRF POST from evil.tld is
+  //      rejected; the cockpit's own same-origin fetch (Origin === Host, or no
+  //      Origin at all for non-browser callers) passes untouched. Works in both
+  //      local and hosted mode because it compares Origin to the actual Host.
+  const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+  const isHostedMode = () => !resolveCapabilities(process.env, bindHost).localHandoff;
+  app.use('/api/*', async (c, next) => {
+    // /api/health stays wide open: the bookmarklets probe it cross-origin from
+    // github.com to discover which local port serves which repo.
+    if (c.req.path === '/api/health') return next();
+
+    const hostName = hostnameOfHost(c.req.header('host'));
+    if (!isHostedMode() && !isLoopbackHost(hostName)) {
+      return c.json(
+        { error: 'forbidden: unexpected Host header — this request did not originate from this machine (see #426)' },
+        403,
+      );
+    }
+
+    if (MUTATING_METHODS.has(c.req.method)) {
+      const origin = c.req.header('origin');
+      if (origin !== undefined) {
+        const originHost = hostnameOfOrigin(origin);
+        // Same-origin when the Origin host matches the served Host, or when both
+        // are loopback — the `npm run dev` cockpit reaches us through Vite's
+        // `changeOrigin` proxy, so its Origin is `localhost:5173` while our Host
+        // is `127.0.0.1:<port>`; both name this one machine, never a remote site.
+        const sameOrigin =
+          originHost !== null &&
+          (originHost === hostName || (isLoopbackHost(originHost) && isLoopbackHost(hostName)));
+        if (!sameOrigin) {
+          return c.json({ error: 'forbidden: cross-origin request rejected (same-origin only)' }, 403);
+        }
+      }
+      // Belt-and-suspenders for browsers that send Sec-Fetch metadata: an
+      // explicit cross-site marker is rejected regardless of the Origin dance.
+      if (c.req.header('sec-fetch-site') === 'cross-site') {
+        return c.json({ error: 'forbidden: cross-site request rejected (same-origin only)' }, 403);
+      }
+    }
+    return next();
+  });
 
   // ---- static GUI ----------------------------------------------------------
   const webDir = resolveWebDir();
@@ -1277,6 +1336,26 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
   // hosted/VPS deployment (which also flips CEZ_REMOTE to gate the local-handoff endpoints) —
   // src/index.ts never passes it, so the loopback guarantee holds for the normal CLI.
   return serve({ fetch: app.fetch, port, hostname: deps.bindHost ?? '127.0.0.1' });
+}
+
+/** The bare hostname of a `Host` header — port stripped, IPv6 brackets
+ *  removed, lowercased. `[::1]:4321` → `::1`, `127.0.0.1:4321` → `127.0.0.1`. */
+function hostnameOfHost(host: string | undefined): string {
+  if (!host) return '';
+  const bracketed = host.match(/^\[([^\]]+)\]/);
+  if (bracketed?.[1]) return bracketed[1].toLowerCase();
+  return (host.split(':')[0] ?? '').toLowerCase();
+}
+
+/** The hostname of an `Origin` header, or `null` when it is not a parseable URL
+ *  (e.g. the opaque `"null"` origin of a sandboxed iframe). Brackets stripped so
+ *  it compares equal to `hostnameOfHost` for IPv6. */
+function hostnameOfOrigin(origin: string): string | null {
+  try {
+    return new URL(origin).hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  } catch {
+    return null;
+  }
 }
 
 function resolveWebDir(): string {
