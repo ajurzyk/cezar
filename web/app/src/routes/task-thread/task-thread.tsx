@@ -145,7 +145,7 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
     <div data-route="task-thread" className="flex min-h-full flex-col">
       <RunHeader run={run} planTally={planTally} />
 
-      {/* Row spacing lives on each thread row (pb-3.5, both render modes measure alike);
+      {/* Row spacing lives on each thread row (pb-2.5, both render modes measure alike);
           this gap only separates the sections — rows, empty state, footer, review panel. */}
       <div className="mx-auto flex w-full max-w-[820px] flex-1 flex-col gap-3.5 px-4 py-5 md:px-6">
         <ThreadCardCache runId={run.id}>
