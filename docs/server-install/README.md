@@ -12,9 +12,9 @@ yourself. It's idempotent and resumable, and it ends with a real
 works behind its login.
 
 ```bash
-cezar server-install --platform <id>     # install
-cezar server-deploy  --platform <id>     # redeploy a new version (reload the service)
-cezar server-uninstall --platform <id>   # reverse it
+npx cezar-cli server-install   --platform <id>   # install
+npx cezar-cli server-deploy    --platform <id>   # redeploy a new version (reload the service)
+npx cezar-cli server-uninstall --platform <id>   # reverse it
 ```
 
 ## Available providers
@@ -43,7 +43,7 @@ platforms slot in without touching the engine.
 
 ## Redeploying a new version
 
-`cezar server-deploy --platform <id>` is the standardized, per-strategy way to
+`npx cezar-cli server-deploy --platform <id>` is the standardized, per-strategy way to
 roll out a new cezar: it restarts the service and re-verifies. See each guide's
 **Updating / redeploying** section for the checkout-vs-npx details.
 

@@ -52,7 +52,7 @@ HTTPS URL.
 Reload the public tunnel with the standardized command:
 
 ```bash
-cezar server-deploy --platform macosx-ngrok
+npx cezar-cli server-deploy --platform macosx-ngrok
 ```
 
 `server-deploy` restarts the ngrok launchd agent and re-verifies the basic-auth

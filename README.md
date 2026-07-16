@@ -17,7 +17,7 @@ and a run never stops to ask; it just finishes. Leave it on a VPS and you get
 a dev team that's *always on* — a mobile-friendly cockpit you can check from
 your phone, working your backlog while you're away.
 
-[A look inside](#a-look-inside) · [What cezar does best](#what-cezar-does-best) · [What it solves](#what-it-solves) · [Who it's for](#who-its-for) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Core concepts](#core-concepts) · [Cockpit tour](#cockpit-tour) · [Agent backends](#coding-agent-backends)
+[A look inside](#a-look-inside) · [What cezar does best](#what-cezar-does-best) · [What it solves](#what-it-solves) · [Who it's for](#who-its-for) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Core concepts](#core-concepts) · [Cockpit tour](#cockpit-tour) · [Agent backends](#coding-agent-backends) · [Remote access](#remote-access-host-cezar-on-a-server)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](#license)
 ![Node 20+](https://img.shields.io/badge/Node-20%2B-339933)
@@ -393,9 +393,9 @@ strategy**, and never escalates silently: every privileged command is printed
 and verified, and it ends with a real authenticated end-to-end check.
 
 ```bash
-cezar server-install --platform ubuntu-vps     # stand it up
-cezar server-deploy  --platform ubuntu-vps     # roll out a new version (reload the service)
-cezar server-uninstall --platform ubuntu-vps   # reverse it
+npx cezar-cli server-install   --platform ubuntu-vps   # stand it up
+npx cezar-cli server-deploy    --platform ubuntu-vps   # roll out a new version (reload the service)
+npx cezar-cli server-uninstall --platform ubuntu-vps   # reverse it
 ```
 
 | Provider | `--platform` | Public front | Guide |

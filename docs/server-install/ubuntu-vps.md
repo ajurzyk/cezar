@@ -85,7 +85,7 @@ Once a new cezar is available (a fresh local build, or a newly published
 `cezar-cli`), reload the running service with one standardized command:
 
 ```bash
-cezar server-deploy --platform ubuntu-vps
+npx cezar-cli server-deploy --platform ubuntu-vps
 #   from a checkout:  node dist/index.js server-deploy --platform ubuntu-vps
 #   npm script:       npm run server-deploy -- --platform ubuntu-vps
 ```
@@ -95,7 +95,7 @@ answer, and re-runs the same authenticated end-to-end check as install — so a
 green deploy means the cockpit is actually serving the new version.
 
 - **From a checkout** the service runs `<node> <repo>/dist/index.js` — so build
-  first, then deploy: `git pull && npm run build && cezar server-deploy --platform ubuntu-vps`.
+  first, then deploy: `git pull && npm run build && npx cezar-cli server-deploy --platform ubuntu-vps`.
 - **Via npx** the service runs `npx --yes cezar-cli` — a restart pulls the latest
   published version, so `server-deploy` alone is enough.
 
