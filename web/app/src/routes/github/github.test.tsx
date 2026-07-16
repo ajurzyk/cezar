@@ -1,5 +1,5 @@
 import { QueryClientProvider } from '@tanstack/react-query'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -517,5 +517,74 @@ describe('the hand-to-agent run (legacy three-way body)', () => {
 
     await waitFor(() => expect(screen.getByText('a task is already running')).toBeTruthy())
     expect(document.querySelector('[data-slot="gh-queued"]')).toBeNull()
+  })
+})
+
+// ---- prompt templates (#413) --------------------------------------------------------------------
+
+describe('the follow-up prompt template menu (#413)', () => {
+  /** Radix opens the menu on pointerdown, not click (same contract as tools-menu.test.tsx). */
+  async function openTemplateMenu(): Promise<HTMLElement> {
+    fireEvent.pointerDown(document.querySelector('[data-slot="prompt-template-trigger"]')!)
+    return await screen.findByRole('menu')
+  }
+
+  it('an untouched ui-state shows the built-in templates, and inserting one fills the custom prompt', async () => {
+    stubFetch()
+    await openDetail()
+
+    const menu = await openTemplateMenu()
+    expect(within(menu).getAllByRole('menuitem').length).toBeGreaterThan(1)
+    const addTests = menu.querySelector('[data-slot="prompt-template-option"][data-template="add-tests"]')
+    expect(addTests).not.toBeNull()
+
+    fireEvent.click(addTests!)
+    await waitFor(() =>
+      expect(screen.getByLabelText('Custom prompt')).toHaveProperty(
+        'value',
+        'Also add or update tests covering this change.',
+      ),
+    )
+  })
+
+  it('a user-edited ui-state templates list replaces the built-ins in the menu', async () => {
+    stubFetch({
+      'GET /api/ui-state': () =>
+        jsonResponse({ promptTemplates: [{ id: 'custom-1', label: 'My snippet', text: 'Custom instructions.' }] }),
+    })
+    await openDetail()
+
+    const menu = await openTemplateMenu()
+    expect(menu.querySelectorAll('[data-slot="prompt-template-option"]')).toHaveLength(1)
+    expect(menu.querySelector('[data-template="custom-1"]')?.textContent).toContain('My snippet')
+
+    fireEvent.click(menu.querySelector('[data-template="custom-1"]')!)
+    await waitFor(() =>
+      expect(screen.getByLabelText('Custom prompt')).toHaveProperty('value', 'Custom instructions.'),
+    )
+  })
+
+  it('inserting a second template stacks it below the first, separated by a blank line', async () => {
+    stubFetch()
+    await openDetail()
+
+    const firstMenu = await openTemplateMenu()
+    fireEvent.click(firstMenu.querySelector('[data-template="add-tests"]')!)
+    await waitFor(() =>
+      expect(screen.getByLabelText('Custom prompt')).toHaveProperty(
+        'value',
+        'Also add or update tests covering this change.',
+      ),
+    )
+
+    const secondMenu = await openTemplateMenu()
+    fireEvent.click(secondMenu.querySelector('[data-template="update-docs"]')!)
+
+    await waitFor(() =>
+      expect(screen.getByLabelText('Custom prompt')).toHaveProperty(
+        'value',
+        'Also add or update tests covering this change.\n\nAlso update any relevant documentation or comments.',
+      ),
+    )
   })
 })

@@ -193,6 +193,20 @@ const uiStateSchema = z
         density: z.enum(['comfortable', 'compact', 'ultra']).optional(),
       })
       .optional(),
+    // Follow-up prompt templates (#413): reusable snippets insertable into the GitHub hand-over
+    // and Inbox follow-up composers. Absent → the client's built-in defaults; present (even `[]`)
+    // is the user's own edited list, from Settings → Prompt templates. Additive, like the rest of
+    // ui-state — the cockpit is the only writer, so validation stays generous but bounded.
+    promptTemplates: z
+      .array(
+        z.object({
+          id: z.string().min(1).max(64),
+          label: z.string().trim().min(1).max(80),
+          text: z.string().trim().min(1).max(2000),
+        }),
+      )
+      .max(50)
+      .optional(),
   })
   .passthrough();
 
@@ -200,6 +214,21 @@ const uiStateSchema = z
 const patchRunSchema = z.object({
   title: z.string().trim().min(1).max(300).optional(),
 });
+
+// Inbox "▶ Run" body (#413): optional extra instructions — e.g. a prompt template inserted in
+// the Inbox composer — appended to the entry's suggested/summary task text. Old clients that
+// POST with no body at all keep the pre-#413 behavior exactly (see the route: a body-less
+// request parses to `undefined`, and an absent `prompt` never touches `task`).
+const startTodoBodySchema = z
+  .object({
+    prompt: z
+      .string()
+      .trim()
+      .max(20_000, 'prompt must be at most 20000 characters')
+      .optional()
+      .transform((s) => (s ? s : undefined)),
+  })
+  .optional();
 
 // Session commit (redesign R5 — §"Git/session API additions").
 const gitCommitSchema = z.object({
@@ -964,8 +993,16 @@ export function createApp(deps: ServerDeps): Hono {
     if (!todo) return c.json({ error: 'not found' }, 404);
     if (todo.startedTaskId) return c.json({ error: 'already started' }, 409);
 
+    // Body is optional — a request with none at all (the pre-#413 client) parses to
+    // `undefined` here, same as an empty `{}`.
+    const parsedBody = startTodoBodySchema.safeParse(await c.req.json().catch(() => undefined));
+    if (!parsedBody.success) {
+      return c.json({ error: parsedBody.error.issues.map((i) => i.message).join('; ') }, 400);
+    }
+
     let task = (todo.suggestedPrompt ?? todo.summary).trim() || todo.summary;
     if (todo.suggestedArgs) task += `\n\nArguments: ${todo.suggestedArgs}`;
+    if (parsedBody.data?.prompt) task += `\n\n${parsedBody.data.prompt}`;
 
     let workflow: WorkflowDef | undefined;
     if (todo.suggestedSkill) {

@@ -495,6 +495,10 @@ export interface UiState {
   /** Settings → Notifications (redesign R6 1.7): the browser-notification toggle. Off unless
    *  literally `true`. Permission itself is per-browser and never persisted. */
   notifications?: { enabled?: boolean }
+  /** Follow-up prompt templates (#413): reusable snippets insertable into the GitHub hand-over
+   *  and Inbox follow-up composers. Absent → the built-in defaults (`lib/prompt-templates.ts`);
+   *  present (even `[]`) is the user's own edited list from Settings → Prompt templates. */
+  promptTemplates?: { id: string; label: string; text: string }[]
   [key: string]: unknown
 }
 
