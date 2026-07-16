@@ -89,9 +89,15 @@ describe('the inbox against the live dry-run server', () => {
     // The meta row is honest about a source task the server no longer has.
     expect(browser.text(`${CARD}[data-id="e2e-inbox-1"]`)).toContain('source task deleted')
     expect(browser.text(`${CARD}[data-id="e2e-inbox-1"]`)).toContain('skill: om-fix')
-    // Both actions are on every card.
-    expect(browser.count(`${CARD} [data-action="todo-run"]`)).toBe(2)
-    expect(browser.count(`${CARD} [data-action="todo-dismiss"]`)).toBe(2)
+    // The primary action follows actionability (spec 007): e2e-inbox-1 carries a skill, so it
+    // is runnable and keeps Run + Dismiss; e2e-inbox-2 has nothing to execute, so it is a note
+    // and offers Acknowledge alone.
+    expect(browser.count(`${CARD}[data-id="e2e-inbox-1"] [data-action="todo-run"]`)).toBe(1)
+    expect(browser.count(`${CARD}[data-id="e2e-inbox-1"] [data-action="todo-dismiss"]`)).toBe(1)
+    expect(browser.count(`${CARD}[data-id="e2e-inbox-1"] [data-action="todo-acknowledge"]`)).toBe(0)
+    expect(browser.count(`${CARD}[data-id="e2e-inbox-2"] [data-action="todo-acknowledge"]`)).toBe(1)
+    expect(browser.count(`${CARD}[data-id="e2e-inbox-2"] [data-action="todo-run"]`)).toBe(0)
+    expect(browser.count(`${CARD}[data-id="e2e-inbox-2"] [data-action="todo-dismiss"]`)).toBe(0)
 
     browser.screenshot(`${artifactsDir}/inbox-cards.png`)
   })
