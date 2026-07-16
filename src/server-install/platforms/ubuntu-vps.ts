@@ -1,3 +1,6 @@
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir, userInfo } from 'node:os';
+import { join } from 'node:path';
 import { CANCEL, PreflightError, type InstallContext, type InstallStep, type PlatformStrategy, type StepArtifact } from '../types.js';
 import { depCheckStep, owned, shared, shquote, StepCancelled, StepSkipped, sudoStep, verifyCommand } from '../steps.js';
 
@@ -195,6 +198,95 @@ const sslStep: InstallStep = {
   },
 };
 
+const UNIT_NAME = 'cezar.service';
+
+/** systemd unit that runs `cezar serve` loopback-bound with CEZ_REMOTE=1. */
+export function systemdUnit(repoRoot: string, port: number, scope: 'user' | 'system'): string {
+  const userLine = scope === 'system' ? `User=${userInfo().username}\n` : '';
+  const installTarget = scope === 'system' ? 'multi-user.target' : 'default.target';
+  return `# Managed by cezar server-install — do not edit by hand.
+[Unit]
+Description=cezar cockpit
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+${userLine}WorkingDirectory=${repoRoot}
+Environment=CEZ_REMOTE=1
+ExecStart=cezar serve --no-open --port ${port}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=${installTarget}
+`;
+}
+
+const autostartStep: InstallStep = {
+  id: 'autostart',
+  title: 'Autostart on boot (systemd)',
+  optional: true,
+  async check() {
+    return false; // optional — engine gates with a confirm
+  },
+  async run(ctx): Promise<{ artifacts: StepArtifact[] }> {
+    // Prefer a rootless `systemd --user` service + linger; fall back to a
+    // system unit (via sudoStep) only when the user bus is unavailable.
+    const userBus = ctx.dryRun ? true : (await ctx.runner.capture('systemctl', ['--user', 'is-system-running'])).code !== 127;
+
+    if (userBus) {
+      const unitPath = join(homedir(), '.config', 'systemd', 'user', UNIT_NAME);
+      if (ctx.dryRun) {
+        ctx.ui.info(`DRY RUN — would write ${unitPath} and enable it (systemctl --user enable --now cezar).`);
+      } else {
+        mkdirSync(join(homedir(), '.config', 'systemd', 'user'), { recursive: true });
+        writeFileSync(unitPath, systemdUnit(ctx.repoRoot, ctx.state.primaryPort, 'user'), 'utf8');
+        await ctx.runner.interactive('systemctl', ['--user', 'daemon-reload']);
+        await ctx.runner.interactive('systemctl', ['--user', 'enable', '--now', UNIT_NAME]);
+      }
+      // Linger lets the user service survive logout / start at boot — usually needs root.
+      await sudoStep(ctx, {
+        description: 'Enable linger so the cockpit starts at boot without a login session.',
+        command: `loginctl enable-linger ${shquote(userInfo().username)}`,
+        verify: (c) =>
+          verifyCommand(c, 'loginctl', ['show-user', userInfo().username, '-p', 'Linger'], (r) =>
+            r.stdout.includes('Linger=yes'),
+          ),
+      });
+      return { artifacts: [owned('service', { name: UNIT_NAME, scope: 'user', path: unitPath })] };
+    }
+
+    // System unit fallback.
+    const b64 = Buffer.from(systemdUnit(ctx.repoRoot, ctx.state.primaryPort, 'system'), 'utf8').toString('base64');
+    await sudoStep(ctx, {
+      description: 'Install the cezar systemd unit and enable it at boot.',
+      command: `printf %s ${shquote(b64)} | base64 --decode > /etc/systemd/system/${UNIT_NAME} && systemctl daemon-reload && systemctl enable --now ${UNIT_NAME}`,
+      verify: (c) => verifyCommand(c, 'systemctl', ['is-enabled', UNIT_NAME]),
+    });
+    return { artifacts: [owned('service', { name: UNIT_NAME, scope: 'system', path: `/etc/systemd/system/${UNIT_NAME}` })] };
+  },
+  async undo(ctx, created) {
+    const svc = (created?.artifacts ?? []).find((a) => a.type === 'service');
+    if (!svc) return;
+    if (svc.scope === 'user') {
+      if (!ctx.dryRun) {
+        await ctx.runner.interactive('systemctl', ['--user', 'disable', '--now', UNIT_NAME]);
+        if (svc.path) rmSync(svc.path, { force: true });
+        await ctx.runner.interactive('systemctl', ['--user', 'daemon-reload']);
+      } else {
+        ctx.ui.info('DRY RUN — would disable and remove the user service.');
+      }
+      return;
+    }
+    await sudoStep(ctx, {
+      description: 'Disable and remove the cezar systemd unit.',
+      command: `systemctl disable --now ${UNIT_NAME}; rm -f /etc/systemd/system/${UNIT_NAME} && systemctl daemon-reload`,
+      verify: (c) => verifyCommand(c, 'sh', ['-c', `! systemctl is-enabled ${UNIT_NAME}`]),
+    });
+  },
+};
+
 const identityStep: InstallStep = {
   id: 'identity',
   title: 'Identity check (proxy challenges anonymous requests)',
@@ -244,7 +336,7 @@ export const ubuntuVps: PlatformStrategy = {
     }
   },
   steps(): InstallStep[] {
-    // deps → proxy → (optional) ssl → identity. Autostart inserted in step 2.2.
-    return [depCheckStep(), nginxProxyStep, sslStep, identityStep];
+    // deps → proxy → (optional) ssl → (optional) autostart → identity.
+    return [depCheckStep(), nginxProxyStep, sslStep, autostartStep, identityStep];
   },
 };

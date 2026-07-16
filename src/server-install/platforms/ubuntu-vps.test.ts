@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ubuntuVps } from './ubuntu-vps.js';
+import { systemdUnit, ubuntuVps } from './ubuntu-vps.js';
 import { createAutoUi } from '../ui.js';
 import type { InstallContext, InstallStep, Runner, Ui } from '../types.js';
 
@@ -43,8 +43,9 @@ describe('ubuntu-vps ssl step', () => {
 
   it('is optional and appears before identity', () => {
     const ids = ubuntuVps.steps(ctxWith({})).map((s) => s.id);
-    expect(ids).toEqual(['deps', 'nginx-proxy', 'ssl', 'identity']);
+    expect(ids).toEqual(['deps', 'nginx-proxy', 'ssl', 'autostart', 'identity']);
     expect(stepById('ssl').optional).toBe(true);
+    expect(stepById('autostart').optional).toBe(true);
   });
 
   it('dry-run records the cert as a shared artifact and sets publicUrl', async () => {
@@ -64,5 +65,30 @@ describe('ubuntu-vps ssl step', () => {
     await stepById('ssl').undo(ctx, { artifacts: [{ kind: 'shared', type: 'cert', name: 'x.example.com', removeHint: 'sudo certbot delete --cert-name x.example.com' }] });
     expect(note).toHaveBeenCalledOnce();
     expect(note.mock.calls[0]?.[0]).toContain('certbot delete');
+  });
+});
+
+describe('systemdUnit', () => {
+  it('runs cezar serve loopback with CEZ_REMOTE=1 and the port', () => {
+    const unit = systemdUnit('/srv/app', 4321, 'user');
+    expect(unit).toContain('Environment=CEZ_REMOTE=1');
+    expect(unit).toContain('ExecStart=cezar serve --no-open --port 4321');
+    expect(unit).toContain('WorkingDirectory=/srv/app');
+    expect(unit).toContain('WantedBy=default.target');
+  });
+  it('system scope pins User= and multi-user.target', () => {
+    const unit = systemdUnit('/srv/app', 5000, 'system');
+    expect(unit).toContain('User=');
+    expect(unit).toContain('WantedBy=multi-user.target');
+  });
+});
+
+describe('ubuntu-vps autostart step (dry-run)', () => {
+  it('records a user-scoped service artifact and writes nothing to disk', async () => {
+    const created = await stepById('autostart').run(ctxWith({ dryRun: true }));
+    const svc = created?.artifacts.find((a) => a.type === 'service');
+    expect(svc?.kind).toBe('owned');
+    expect(svc?.scope).toBe('user');
+    expect(svc?.name).toBe('cezar.service');
   });
 });
