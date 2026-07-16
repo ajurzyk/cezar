@@ -12,7 +12,7 @@ Status: in-progress
 
 | Phase | Step | Title | Status | Commit |
 |-------|------|-------|--------|--------|
-| 1 | 1.1 | Config catalog (`src/agent-config/catalog.ts`) | todo | — |
+| 1 | 1.1 | Config catalog (`src/agent-config/catalog.ts`) | done | a5c9ba4 |
 | 1 | 1.2 | Home-path helpers (`src/paths.ts`) | todo | — |
 | 1 | 1.3 | Validators + JSONC stripper (`src/agent-config/validate.ts`, add `smol-toml`) | todo | — |
 | 1 | 1.4 | Reader/writer (`src/agent-config/files.ts`) | todo | — |
