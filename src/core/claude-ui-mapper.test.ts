@@ -258,6 +258,78 @@ describe('mapClaudeMessage edge cases', () => {
     expect(unchanged.events.map((event) => event.type)).toEqual(['item.started']);
   });
 
+  it('drops a task TaskUpdate deletes, and keeps minting ids that never collide', () => {
+    const taskUse = (id: string, name: string, input: unknown) => ({
+      type: 'assistant' as const,
+      message: { role: 'assistant', content: [{ type: 'tool_use', id, name, input }] },
+    });
+    let state = createClaudeUiState();
+    state = mapClaudeMessage(taskUse('toolu_c1', 'TaskCreate', { subject: 'Task A', description: 'd' }), state).state;
+    state = mapClaudeMessage(taskUse('toolu_c2', 'TaskCreate', { subject: 'Task B', description: 'd' }), state).state;
+
+    // `deleted` is a real TaskUpdate status: it removes the task outright.
+    const deleted = mapClaudeMessage(taskUse('toolu_u1', 'TaskUpdate', { taskId: '1', status: 'deleted' }), state);
+    state = deleted.state;
+    expect(deleted.events.at(-1)).toEqual({
+      type: 'plan.updated',
+      entries: [{ content: 'Task B', status: 'pending' }],
+    });
+
+    // Task B keeps id '2': a create after a delete must not re-mint a live id.
+    const created = mapClaudeMessage(taskUse('toolu_c3', 'TaskCreate', { subject: 'Task C', description: 'd' }), state);
+    state = created.state;
+    const progressed = mapClaudeMessage(taskUse('toolu_u2', 'TaskUpdate', { taskId: '3', status: 'completed' }), state);
+    state = progressed.state;
+    expect(progressed.events.at(-1)).toEqual({
+      type: 'plan.updated',
+      entries: [
+        { content: 'Task B', status: 'pending' },
+        { content: 'Task C', status: 'completed' },
+      ],
+    });
+
+    // Deleting an unknown id changes nothing; deleting the rest empties the plan.
+    expect(
+      mapClaudeMessage(taskUse('toolu_u3', 'TaskUpdate', { taskId: '1', status: 'deleted' }), state).events.map(
+        (event) => event.type,
+      ),
+    ).toEqual(['item.started']);
+    state = mapClaudeMessage(taskUse('toolu_u4', 'TaskUpdate', { taskId: '2', status: 'deleted' }), state).state;
+    const emptied = mapClaudeMessage(taskUse('toolu_u5', 'TaskUpdate', { taskId: '3', status: 'deleted' }), state);
+    expect(emptied.events.at(-1)).toEqual({ type: 'plan.updated', entries: [] });
+  });
+
+  it('applies TaskUpdate subject and activeForm edits, and trims the subject', () => {
+    const taskUse = (id: string, name: string, input: unknown) => ({
+      type: 'assistant' as const,
+      message: { role: 'assistant', content: [{ type: 'tool_use', id, name, input }] },
+    });
+    let state = createClaudeUiState();
+    const created = mapClaudeMessage(
+      taskUse('toolu_c1', 'TaskCreate', { subject: '  Old name  ', description: 'd' }),
+      state,
+    );
+    state = created.state;
+    expect(created.events.at(-1)).toEqual({
+      type: 'plan.updated',
+      entries: [{ content: 'Old name', status: 'pending' }],
+    });
+
+    const renamed = mapClaudeMessage(
+      taskUse('toolu_u1', 'TaskUpdate', { taskId: '1', subject: 'New name', activeForm: 'Doing the new thing' }),
+      state,
+    );
+    state = renamed.state;
+    expect(renamed.events.at(-1)).toEqual({
+      type: 'plan.updated',
+      entries: [{ content: 'New name', status: 'pending', activeForm: 'Doing the new thing' }],
+    });
+
+    // A metadata-only update that changes nothing we render stays silent.
+    const noop = mapClaudeMessage(taskUse('toolu_u2', 'TaskUpdate', { taskId: '1', owner: 'someone' }), state);
+    expect(noop.events.map((event) => event.type)).toEqual(['item.started']);
+  });
+
   it('ignores TaskCreate without a usable subject', () => {
     const mapped = mapClaudeMessage(
       {

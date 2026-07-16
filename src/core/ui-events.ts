@@ -285,7 +285,8 @@ export interface UiItemCompletedEvent {
 
 /**
  * Full-replacement plan snapshot (ACP semantics).
- * claude: `TodoWrite` tool input; codex: `todoList`/`plan` items;
+ * claude: `TodoWrite` tool input, or a snapshot folded from the incremental
+ * `TaskCreate`/`TaskUpdate` calls; codex: `todoList`/`plan` items;
  * opencode: `todowrite` tool — identical semantics across all three.
  */
 export interface UiPlanUpdatedEvent {

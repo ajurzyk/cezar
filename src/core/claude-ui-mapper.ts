@@ -50,6 +50,9 @@ export interface ClaudeUiMapperState {
   /** The running plan built incrementally by Claude's task tools, keyed by
    *  the sequential task ids used by TaskUpdate. */
   readonly tasks: ReadonlyMap<string, PlanEntry>;
+  /** Count of TaskCreate calls seen, so ids stay monotonic — deriving them from
+   *  `tasks.size` would re-mint a live id after a task is deleted. */
+  readonly taskSeq: number;
 }
 
 export interface ClaudeUiMapping {
@@ -67,6 +70,7 @@ export function createClaudeUiState(opts: { fallbackSessionId?: string } = {}): 
     itemSeq: 0,
     openTools: new Map(),
     tasks: new Map(),
+    taskSeq: 0,
   };
 }
 
@@ -133,6 +137,7 @@ function mapAssistant(msg: Record<string, unknown>, state: ClaudeUiMapperState):
   let itemSeq = state.itemSeq;
   let openTools: Map<string, UiToolItem> | null = null;
   let tasks = state.tasks;
+  let taskSeq = state.taskSeq;
 
   for (const raw of content) {
     if (!isRecord(raw)) continue;
@@ -169,9 +174,10 @@ function mapAssistant(msg: Record<string, unknown>, state: ClaudeUiMapperState):
         const entries = planEntries(raw.input);
         if (entries) events.push({ type: 'plan.updated', entries });
       } else {
-        const nextTasks = applyTaskTool(raw.name, raw.input, tasks);
-        if (nextTasks) {
-          tasks = nextTasks;
+        const folded = applyTaskTool(raw.name, raw.input, tasks, taskSeq);
+        if (folded) {
+          tasks = folded.tasks;
+          taskSeq = folded.taskSeq;
           events.push({ type: 'plan.updated', entries: [...tasks.values()] });
         }
       }
@@ -182,7 +188,7 @@ function mapAssistant(msg: Record<string, unknown>, state: ClaudeUiMapperState):
   }
 
   if (events.length === 0) return { events, state };
-  return { events, state: { ...state, itemSeq, openTools: openTools ?? state.openTools, tasks } };
+  return { events, state: { ...state, itemSeq, openTools: openTools ?? state.openTools, tasks, taskSeq } };
 }
 
 /** claude `Edit`/`Write` inputs carry the diff inline (§7.1). */
@@ -209,10 +215,17 @@ function editArtifacts(
 
 const PLAN_STATUSES: readonly PlanStatus[] = ['pending', 'in_progress', 'completed'];
 
-/** TaskUpdate also uses `running` for an active task. */
+/** `TaskUpdate.status` is `pending | in_progress | completed | deleted`. `deleted`
+ *  is handled by the caller — it drops the entry, since PlanStatus has no such
+ *  state. `running` is tolerated defensively as an alias for `in_progress`. */
 function normalizePlanStatus(value: unknown): PlanStatus | undefined {
   if (value === 'running') return 'in_progress';
   return PLAN_STATUSES.find((status) => status === value);
+}
+
+interface TaskFold {
+  readonly tasks: Map<string, PlanEntry>;
+  readonly taskSeq: number;
 }
 
 /** Fold one Claude task-tool call into the session's incremental plan. */
@@ -220,15 +233,18 @@ function applyTaskTool(
   name: string,
   input: unknown,
   tasks: ReadonlyMap<string, PlanEntry>,
-): Map<string, PlanEntry> | undefined {
+  taskSeq: number,
+): TaskFold | undefined {
   const key = name.toLowerCase();
   if (key === 'taskcreate') {
-    if (!isRecord(input) || typeof input.subject !== 'string' || input.subject.trim() === '') return undefined;
-    const next = new Map(tasks);
-    const entry: PlanEntry = { content: input.subject, status: 'pending' };
+    if (!isRecord(input) || typeof input.subject !== 'string') return undefined;
+    const content = input.subject.trim();
+    if (content === '') return undefined;
+    const entry: PlanEntry = { content, status: 'pending' };
     if (typeof input.activeForm === 'string') entry.activeForm = input.activeForm;
-    next.set(String(next.size + 1), entry);
-    return next;
+    const next = new Map(tasks);
+    next.set(String(taskSeq + 1), entry);
+    return { tasks: next, taskSeq: taskSeq + 1 };
   }
   if (key === 'taskupdate') {
     if (!isRecord(input)) return undefined;
@@ -240,11 +256,37 @@ function applyTaskTool(
           : undefined;
     if (id === undefined) return undefined;
     const existing = tasks.get(id);
+    if (existing === undefined) return undefined;
+
+    // `deleted` removes the task outright ("permanently removes the task").
+    if (input.status === 'deleted') {
+      const next = new Map(tasks);
+      next.delete(id);
+      return { tasks: next, taskSeq };
+    }
+
+    const entry: PlanEntry = { ...existing };
+    let changed = false;
     const status = normalizePlanStatus(input.status);
-    if (existing === undefined || status === undefined || status === existing.status) return undefined;
+    if (status !== undefined && status !== existing.status) {
+      entry.status = status;
+      changed = true;
+    }
+    if (typeof input.subject === 'string') {
+      const content = input.subject.trim();
+      if (content !== '' && content !== existing.content) {
+        entry.content = content;
+        changed = true;
+      }
+    }
+    if (typeof input.activeForm === 'string' && input.activeForm !== existing.activeForm) {
+      entry.activeForm = input.activeForm;
+      changed = true;
+    }
+    if (!changed) return undefined;
     const next = new Map(tasks);
-    next.set(id, { ...existing, status });
-    return next;
+    next.set(id, entry);
+    return { tasks: next, taskSeq };
   }
   return undefined;
 }
