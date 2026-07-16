@@ -28,10 +28,12 @@ A dependency-free interactive wizard — `npx @pat-lewczuk/cezar server-install 
 
 ## Progress
 
+PR: #420
+
 > Convention: `- [ ]` pending, `- [x]` done. Append ` — <commit sha>` when a step lands. Do not rename step titles.
 
 ### Phase 1: Land the spec + tracking issue
 
-- [ ] 1.1 Add the finalized spec `.ai/specs/2026-07-16-server-installer.md`
-- [ ] 1.2 Open the `Implement: server installer & uninstaller` tracking issue
-- [ ] 1.3 Open the docs PR, normalize labels, post the summary comment
+- [x] 1.1 Add the finalized spec `.ai/specs/2026-07-16-server-installer.md` — 0898339
+- [x] 1.2 Open the `Implement: server installer & uninstaller` tracking issue — #419
+- [x] 1.3 Open the docs PR, normalize labels, post the summary comment — #420
