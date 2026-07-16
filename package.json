@@ -24,6 +24,9 @@
     "check:pack": "node scripts/check-pack.mjs",
     "dev": "node scripts/dev.mjs",
     "dev:server": "tsx src/index.ts",
+    "server-install": "tsx src/index.ts server-install",
+    "server-deploy": "tsx src/index.ts server-deploy",
+    "server-uninstall": "tsx src/index.ts server-uninstall",
     "dev:web": "vite --config web/app/vite.config.ts",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -36,6 +39,7 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
+    "@clack/prompts": "^0.11.0",
     "@hono/node-server": "^1.13.0",
     "hono": "^4.6.0",
     "yaml": "^2.5.0",
