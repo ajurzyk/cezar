@@ -22,6 +22,7 @@ Tracking issue: #419
 | 3 | 3.1 | `platforms/macosx-ngrok.ts` + registry | done | 386e4f0 |
 | 3 | 3.2-review-fix | Address adversarial review — security + robustness fixes | done | 7704ded |
 | 3 | 3.3-review-fix | Uninstall clears skipped/pending entries on completion | done | b605fc9 |
+| 3 | 3.4-review-fix | Second-pass review — htpasswd perms, platform-switch, hardening | done | 4f1c508 |
 
 ## Goal
 

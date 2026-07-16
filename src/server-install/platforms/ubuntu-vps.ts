@@ -92,14 +92,24 @@ const nginxProxyStep: InstallStep = {
     //    command; the plaintext is fed to openssl via stdin so it never appears
     //    in the process argv (visible to other users via `ps`). apr1 is what
     //    nginx's auth_basic expects.
-    const hash = ctx.dryRun
-      ? '<dry-run-hash>'
-      : (await ctx.runner.capture('openssl', ['passwd', '-apr1', '-stdin'], { input: `${String(password)}\n` })).stdout.trim();
+    let hash = '<dry-run-hash>';
+    if (!ctx.dryRun) {
+      const out = await ctx.runner.capture('openssl', ['passwd', '-apr1', '-stdin'], { input: `${String(password)}\n` });
+      hash = out.stdout.trim();
+      if (out.code !== 0 || !hash) throw new StepAborted('failed to hash the password (openssl) — cannot write htpasswd');
+    }
+    // nginx workers run as www-data and read auth_basic_user_file per request,
+    // so the file must be group-readable by www-data — 0640 root:root would make
+    // every request 500. 0640 root:www-data: readable by nginx, not by others.
     await sudoStep(ctx, {
       description: 'Write the htpasswd identity file.',
-      command: `install -d -m 0755 /etc/cezar && printf '%s:%s\\n' ${shquote(user)} ${shquote(hash)} > ${HTPASSWD} && chmod 0640 ${HTPASSWD}`,
+      command: `install -d -m 0755 /etc/cezar && printf '%s:%s\\n' ${shquote(user)} ${shquote(hash)} > ${HTPASSWD} && chown root:www-data ${HTPASSWD} && chmod 0640 ${HTPASSWD}`,
       verify: (c) => verifyCommand(c, 'test', ['-f', HTPASSWD]),
     });
+
+    // Record whether the distro's default site was enabled *before* we disable
+    // it, so undo only re-enables it if we were the one who removed it.
+    const defaultWasEnabled = await verifyCommand(ctx, 'test', ['-L', '/etc/nginx/sites-enabled/default']);
 
     // 4) vhost + enable + reload
     await sudoStep(ctx, {
@@ -110,23 +120,27 @@ const nginxProxyStep: InstallStep = {
       verify: (c) => verifyCommand(c, 'test', ['-f', VHOST_ENABLED]),
     });
 
-    return {
-      artifacts: [
-        owned('file', { path: VHOST_AVAILABLE }),
-        owned('symlink', { path: VHOST_ENABLED }),
-        owned('htpasswd', { path: HTPASSWD, name: user }),
-      ],
-    };
+    const artifacts: StepArtifact[] = [
+      owned('file', { path: VHOST_AVAILABLE }),
+      owned('symlink', { path: VHOST_ENABLED }),
+      owned('htpasswd', { path: HTPASSWD, name: user }),
+    ];
+    if (defaultWasEnabled) artifacts.push(owned('nginx-default', { path: '/etc/nginx/sites-enabled/default' }));
+    return { artifacts };
   },
-  async undo(ctx) {
+  async undo(ctx, created) {
     // Remove the *known* cezar-owned paths (constants), so uninstall works even
     // if server.json was lost and the step was re-recorded with created=null.
-    // Also restore the default site symlink the run removed, and drop /etc/cezar.
+    // Only re-enable the default site if the run recorded that it disabled it.
+    const restoreDefault = (created?.artifacts ?? []).some((a) => a.type === 'nginx-default');
+    const restoreClause = restoreDefault
+      ? ` && { [ -e /etc/nginx/sites-available/default ] && ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default || true; }`
+      : '';
     await sudoStep(ctx, {
-      description: 'Remove the cezar nginx site + htpasswd, restore the default site, reload nginx.',
+      description: 'Remove the cezar nginx site + htpasswd, reload nginx.',
       command:
         `rm -f ${VHOST_ENABLED} ${VHOST_AVAILABLE} ${HTPASSWD}` +
-        ` && { [ -e /etc/nginx/sites-available/default ] && ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default || true; }` +
+        restoreClause +
         ` && { rmdir /etc/cezar 2>/dev/null || true; }` +
         ` && { nginx -t && systemctl reload nginx || true; }`,
       verify: (c) => verifyCommand(c, 'sh', ['-c', `! test -f ${VHOST_ENABLED}`]),
@@ -243,8 +257,12 @@ WantedBy=${installTarget}
 /** Absolute path to the cezar CLI on this box, or a bare fallback in dry-run. */
 async function resolveCezarBin(ctx: InstallContext): Promise<string> {
   if (ctx.dryRun) return 'cezar';
-  const found = (await ctx.runner.capture('bash', ['-lc', 'command -v cezar'])).stdout.trim();
-  return found || 'cezar';
+  // Non-login shell (`-c`, not `-lc`): a login shell would source ~/.profile and
+  // any banner it echoes would be prepended to the path. Take the last line to
+  // be extra safe. Fall back to a bare `cezar` (with Environment=PATH set).
+  const out = (await ctx.runner.capture('bash', ['-c', 'command -v cezar'])).stdout.trim();
+  const last = out.split('\n').filter(Boolean).pop();
+  return last || 'cezar';
 }
 
 const autostartStep: InstallStep = {

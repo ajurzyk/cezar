@@ -102,6 +102,18 @@ describe('engine', () => {
     const after = loadServerState();
     expect(after.steps).toEqual({});
     expect(after.installed).toBe(false);
+    // platform is cleared so the host can be re-installed with any platform
+    expect(after.platform).toBeUndefined();
+  });
+
+  it('after a full uninstall the host can be installed with a different platform', async () => {
+    await runInstall(strategyOf([fakeStep('a')]), opts()); // records platform ubuntu-vps
+    await runUninstall(strategyOf([fakeStep('a')]), opts());
+    // a strategy with a different id must not trip the "already has X install" guard
+    const other: PlatformStrategy = { id: 'macosx-ngrok', label: 'mac', preflight: async () => {}, steps: () => [fakeStep('m')] };
+    const res = await runInstall(other, opts());
+    expect(res.status).toBe('complete');
+    expect(res.state.platform).toBe('macosx-ngrok');
   });
 
   it('optional step declined at the confirm prompt is skipped and does not block installed=true', async () => {

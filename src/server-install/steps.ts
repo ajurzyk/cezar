@@ -28,6 +28,9 @@ export const defaultRunner: Runner = {
       child.stderr?.on('data', (d) => (stderr += String(d)));
       child.on('error', () => resolve({ code: 127, stdout, stderr }));
       child.on('close', (code) => resolve({ code: code ?? 0, stdout, stderr }));
+      // A child that exits before draining stdin makes the write emit EPIPE;
+      // swallow it so `capture` never crashes the CLI.
+      child.stdin?.on('error', () => {});
       if (opts?.input != null) child.stdin?.end(opts.input);
       else child.stdin?.end();
     });

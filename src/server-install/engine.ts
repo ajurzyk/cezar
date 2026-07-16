@@ -193,9 +193,14 @@ export async function runUninstall(strategy: PlatformStrategy, opts: RunOptions)
     }
 
     // Every `done` step was reversed above; `skipped`/`pending` entries had no
-    // system effect. A completed uninstall leaves the record empty.
+    // system effect. A completed uninstall leaves the record empty so the host
+    // can be re-installed with any platform (the install guard keys off
+    // `platform`, so it must be cleared here too).
     state.steps = {};
     state.installed = false;
+    state.platform = undefined;
+    state.publicUrl = undefined;
+    state.ephemeral = undefined;
     state.updatedAt = opts.now;
     await ctx.save();
     return { status: 'complete', state };
