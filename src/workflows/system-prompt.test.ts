@@ -1,10 +1,10 @@
 import { execFile } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { HANDOFF_INSTRUCTIONS } from '../handoff.js';
+import { HANDOFF_INSTRUCTIONS, HANDOFF_ONLY_INSTRUCTIONS } from '../handoff.js';
 import { RunStore } from '../runs/store.js';
 import type { WorkflowDef } from './types.js';
 import { RunManager, composeSystemPrompt, resolveExtraSystemPrompt } from './run.js';
@@ -98,7 +98,11 @@ describe('systemPrompt end-to-end (dry run)', () => {
     ],
   };
 
-  async function runToEnd(input: { task: string; systemPrompt?: string }): Promise<string> {
+  async function runToEnd(input: {
+    task: string;
+    systemPrompt?: string;
+    generateFollowups?: boolean;
+  }): Promise<string> {
     writeFileSync(argsFile, '', 'utf8'); // fresh capture per run
     const record = manager.startRun(workflow, input);
     const terminal = new Set(['done', 'review', 'failed', 'cancelled']);
@@ -136,5 +140,19 @@ describe('systemPrompt end-to-end (dry run)', () => {
     const prompt = capturedSystemPrompt();
     expect(prompt).toBe(composeSystemPrompt(OVERRIDE_PROMPT, HANDOFF_INSTRUCTIONS));
     expect(prompt).not.toContain(CONFIG_PROMPT);
+  }, 30_000);
+
+  it('explicit opt-out keeps handoff behavior but removes inbox prompt and environment', async () => {
+    const todosFile = join(repoRoot, '.ai/cezar/todos.json');
+    rmSync(todosFile, { force: true });
+    const id = await runToEnd({ task: 'do the thing quietly', generateFollowups: false });
+    const record = store.getRun(id);
+    expect(record?.generateFollowups).toBe(false);
+    expect(capturedSystemPrompt()).toBe(composeSystemPrompt(CONFIG_PROMPT, HANDOFF_ONLY_INSTRUCTIONS));
+    expect(capturedSystemPrompt()).not.toContain('CEZ_TODOS_FILE');
+    expect(existsSync(todosFile)).toBe(false);
+    expect(readFileSync(join(repoRoot, '.ai/cezar/runs', `${id}.handoff.md`), 'utf8')).toContain(
+      'mock: implemented the change',
+    );
   }, 30_000);
 });
