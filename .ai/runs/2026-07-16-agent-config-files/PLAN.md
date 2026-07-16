@@ -18,7 +18,7 @@ Status: in-progress
 | 1 | 1.4 | Reader/writer (`src/agent-config/files.ts`) | done | 4d908ce |
 | 1 | 1.5 | API routes + hosted-mode gate (`src/server/server.ts`) | done | a9fa0a1 |
 | 2 | 2.1 | Add `toml` to highlighter `LANG_LOADERS` | done | PENDING |
-| 2 | 2.2 | Code editor overlay (`web/app/src/components/code-editor.tsx`) | todo | — |
+| 2 | 2.2 | Code editor overlay (`web/app/src/components/code-editor.tsx`) | done | PENDING |
 | 3 | 3.1 | Registry: add `agent-config`, unhide `mcp`; fix section/route tests | todo | — |
 | 3 | 3.2 | API client types + queries | todo | — |
 | 3 | 3.3 | `agent-config-section.tsx` | todo | — |
