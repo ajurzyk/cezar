@@ -156,7 +156,7 @@ function AgentConfigView({ listing, installed }: { listing: AgentConfigListing; 
   )
 }
 
-function FileEditor({ file }: { file: AgentConfigFile }) {
+export function FileEditor({ file }: { file: AgentConfigFile }) {
   const fileQuery = useAgentConfigFile(file.id)
   const put = usePutAgentConfigFile(file.id)
   const [draft, setDraft] = useState<string | null>(null)

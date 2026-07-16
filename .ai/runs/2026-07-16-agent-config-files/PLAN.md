@@ -22,7 +22,7 @@ Status: in-progress
 | 3 | 3.1 | Registry: add `agent-config`, unhide `mcp`; fix section/route tests | todo | — |
 | 3 | 3.2 | API client types + queries | done | PENDING |
 | 3 | 3.3 | `agent-config-section.tsx` | done | PENDING |
-| 3 | 3.4 | `mcp-section.tsx` | todo | — |
+| 3 | 3.4 | `mcp-section.tsx` | done | PENDING |
 | 4 | 4.1 | Worktree seeding of the personal layer (`src/workflows/run.ts`) | todo | — |
 | 5 | 5.1 | Docs: AGENTS.md, README, BACKWARD_COMPATIBILITY.md §2, CHANGELOG | todo | — |
 
