@@ -1,4 +1,4 @@
-import { execFile, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { detectEnvironment, type BackendCheck } from '../core/backend-detect.js';
 import {
   CANCEL,
@@ -18,12 +18,18 @@ import {
 
 /** Real command runner (Node child_process). */
 export const defaultRunner: Runner = {
-  capture(program, args) {
+  capture(program, args, opts) {
+    // spawn (not execFile) so a secret can be fed via stdin instead of argv.
     return new Promise((resolve) => {
-      execFile(program, args, { timeout: 120_000, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
-        const code = err && typeof (err as { code?: unknown }).code === 'number' ? (err as { code: number }).code : err ? 1 : 0;
-        resolve({ code, stdout: String(stdout), stderr: String(stderr) });
-      });
+      const child = spawn(program, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+      let stdout = '';
+      let stderr = '';
+      child.stdout?.on('data', (d) => (stdout += String(d)));
+      child.stderr?.on('data', (d) => (stderr += String(d)));
+      child.on('error', () => resolve({ code: 127, stdout, stderr }));
+      child.on('close', (code) => resolve({ code: code ?? 0, stdout, stderr }));
+      if (opts?.input != null) child.stdin?.end(opts.input);
+      else child.stdin?.end();
     });
   },
   interactive(program, args) {

@@ -139,8 +139,12 @@ export interface CommandResult {
  * step helpers, not the runner.
  */
 export interface Runner {
-  /** Capture stdout/stderr; never throws on non-zero exit (returns the code). */
-  capture(program: string, args: string[]): Promise<CommandResult>;
+  /**
+   * Capture stdout/stderr; never throws on non-zero exit (returns the code).
+   * `opts.input` is written to the child's stdin — use it to pass secrets
+   * (passwords, tokens) so they never appear in the process's argv.
+   */
+  capture(program: string, args: string[], opts?: { input?: string }): Promise<CommandResult>;
   /** Inherit stdio (streams live output). Resolves with the exit code. */
   interactive(program: string, args: string[]): Promise<number>;
 }

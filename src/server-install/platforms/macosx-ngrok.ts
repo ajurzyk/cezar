@@ -2,7 +2,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { CANCEL, PreflightError, type InstallContext, type InstallStep, type PlatformStrategy, type StepArtifact } from '../types.js';
-import { brewInstallTool, brewRemoveHint, depCheckStep, owned, shared, StepCancelled, verifyCommand } from '../steps.js';
+import { brewInstallTool, brewRemoveHint, depCheckStep, owned, shared, StepAborted, StepCancelled, verifyCommand } from '../steps.js';
 
 /**
  * The `macosx-ngrok` strategy: the app runs locally on a Mac and ngrok is the
@@ -15,12 +15,19 @@ import { brewInstallTool, brewRemoveHint, depCheckStep, owned, shared, StepCance
 const PLIST_LABEL = 'ai.cezar.ngrok';
 const plistPath = (): string => join(homedir(), 'Library', 'LaunchAgents', `${PLIST_LABEL}.plist`);
 
+/** Escape a value for inclusion in plist XML text. */
+function escapeXml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 /** launchd agent that keeps an authenticated ngrok tunnel to the local cockpit up. */
 export function launchdPlist(port: number, basicAuth: string, domain?: string): string {
   const args = ['http', String(port), '--basic-auth', basicAuth];
   if (domain) args.push('--domain', domain);
+  // Escape every arg — a password/domain with `&`, `<`, `>` would otherwise
+  // produce invalid plist XML and launchctl would silently fail to load it.
   const argXml = ['/opt/homebrew/bin/ngrok', ...args]
-    .map((a) => `      <string>${a}</string>`)
+    .map((a) => `      <string>${escapeXml(a)}</string>`)
     .join('\n');
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!-- Managed by cezar server-install — do not edit by hand. -->
@@ -63,6 +70,10 @@ const ngrokStep: InstallStep = {
       validate: (v) => (v.trim() ? undefined : 'authtoken is required'),
     });
     if (token === CANCEL) throw new StepCancelled();
+    // ngrok config add-authtoken takes the token as an argument (no stdin form).
+    // Accepted here: macosx-ngrok targets a single-user local Mac, not a shared
+    // multi-user host, so the `ps` argv-exposure risk that matters on a VPS
+    // does not apply. The token lands in ngrok's own config, not in server.json.
     if (!ctx.dryRun) await ctx.runner.interactive('ngrok', ['config', 'add-authtoken', String(token)]);
 
     // 3) reserved domain (optional → ephemeral URL)
@@ -85,6 +96,9 @@ const ngrokStep: InstallStep = {
       validate: (v) => (v.length >= 6 ? undefined : 'use at least 6 characters'),
     });
     if (password === CANCEL) throw new StepCancelled();
+    if (!ctx.dryRun && String(password).length < 6) {
+      throw new StepAborted('a basic-auth password (≥6 chars) is required — run server-install without --yes to set one');
+    }
     const basicAuth = `${String(user)}:${String(password)}`;
 
     // 5) launchd agent (the plist embeds the basic-auth creds, like htpasswd on Linux)

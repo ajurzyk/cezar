@@ -2,7 +2,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { CANCEL, PreflightError, type InstallContext, type InstallStep, type PlatformStrategy, type StepArtifact } from '../types.js';
-import { depCheckStep, owned, shared, shquote, StepCancelled, StepSkipped, sudoStep, verifyCommand } from '../steps.js';
+import { depCheckStep, owned, shared, shquote, StepAborted, StepCancelled, StepSkipped, sudoStep, verifyCommand } from '../steps.js';
 
 /**
  * The `ubuntu-vps` strategy: stand up an authenticated, proxied cezar on a bare
@@ -81,15 +81,23 @@ const nginxProxyStep: InstallStep = {
       validate: (v) => (v.length >= 6 ? undefined : 'use at least 6 characters'),
     });
     if (password === CANCEL) throw new StepCancelled();
+    // The non-interactive UI (`--yes`) cannot invent a password and does not run
+    // validators — refuse rather than write an empty-password htpasswd (a public
+    // cockpit anyone can open). A real install must set a password interactively.
+    if (!ctx.dryRun && String(password).length < 6) {
+      throw new StepAborted('a cockpit password (≥6 chars) is required — run server-install without --yes to set one');
+    }
 
     // 3) htpasswd file. The hash (not the plaintext) is embedded in the write
-    //    command. openssl is always present on Ubuntu; apr1 is what nginx expects.
+    //    command; the plaintext is fed to openssl via stdin so it never appears
+    //    in the process argv (visible to other users via `ps`). apr1 is what
+    //    nginx's auth_basic expects.
     const hash = ctx.dryRun
       ? '<dry-run-hash>'
-      : (await ctx.runner.capture('openssl', ['passwd', '-apr1', password])).stdout.trim();
+      : (await ctx.runner.capture('openssl', ['passwd', '-apr1', '-stdin'], { input: `${String(password)}\n` })).stdout.trim();
     await sudoStep(ctx, {
       description: 'Write the htpasswd identity file.',
-      command: `install -d -m 0755 /etc/cezar && printf '%s:%s\\n' ${shquote(user)} ${shquote(hash)} > ${HTPASSWD} && chmod 0644 ${HTPASSWD}`,
+      command: `install -d -m 0755 /etc/cezar && printf '%s:%s\\n' ${shquote(user)} ${shquote(hash)} > ${HTPASSWD} && chmod 0640 ${HTPASSWD}`,
       verify: (c) => verifyCommand(c, 'test', ['-f', HTPASSWD]),
     });
 
@@ -110,14 +118,17 @@ const nginxProxyStep: InstallStep = {
       ],
     };
   },
-  async undo(ctx, created) {
-    const paths = (created?.artifacts ?? [])
-      .filter((a) => a.kind === 'owned' && a.path)
-      .map((a) => a.path as string);
-    if (paths.length === 0) return;
+  async undo(ctx) {
+    // Remove the *known* cezar-owned paths (constants), so uninstall works even
+    // if server.json was lost and the step was re-recorded with created=null.
+    // Also restore the default site symlink the run removed, and drop /etc/cezar.
     await sudoStep(ctx, {
-      description: 'Remove the cezar nginx site + htpasswd and reload nginx.',
-      command: `rm -f ${paths.map(shquote).join(' ')} && (nginx -t && systemctl reload nginx || true)`,
+      description: 'Remove the cezar nginx site + htpasswd, restore the default site, reload nginx.',
+      command:
+        `rm -f ${VHOST_ENABLED} ${VHOST_AVAILABLE} ${HTPASSWD}` +
+        ` && { [ -e /etc/nginx/sites-available/default ] && ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default || true; }` +
+        ` && { rmdir /etc/cezar 2>/dev/null || true; }` +
+        ` && { nginx -t && systemctl reload nginx || true; }`,
       verify: (c) => verifyCommand(c, 'sh', ['-c', `! test -f ${VHOST_ENABLED}`]),
     });
   },
@@ -200,8 +211,13 @@ const sslStep: InstallStep = {
 
 const UNIT_NAME = 'cezar.service';
 
-/** systemd unit that runs `cezar serve` loopback-bound with CEZ_REMOTE=1. */
-export function systemdUnit(repoRoot: string, port: number, scope: 'user' | 'system'): string {
+/**
+ * systemd unit that runs cezar loopback-bound with CEZ_REMOTE=1. `execStart`
+ * must be an ABSOLUTE command — systemd runs units with a minimal PATH
+ * (/usr/bin:/bin), so a bare `cezar` (installed via nvm/npm-prefix/npx) would
+ * not resolve and the unit would crash-loop.
+ */
+export function systemdUnit(repoRoot: string, port: number, scope: 'user' | 'system', execStart: string): string {
   const userLine = scope === 'system' ? `User=${userInfo().username}\n` : '';
   const installTarget = scope === 'system' ? 'multi-user.target' : 'default.target';
   return `# Managed by cezar server-install — do not edit by hand.
@@ -214,13 +230,21 @@ Wants=network-online.target
 Type=simple
 ${userLine}WorkingDirectory=${repoRoot}
 Environment=CEZ_REMOTE=1
-ExecStart=cezar serve --no-open --port ${port}
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=${execStart} serve --no-open --port ${port}
 Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=${installTarget}
 `;
+}
+
+/** Absolute path to the cezar CLI on this box, or a bare fallback in dry-run. */
+async function resolveCezarBin(ctx: InstallContext): Promise<string> {
+  if (ctx.dryRun) return 'cezar';
+  const found = (await ctx.runner.capture('bash', ['-lc', 'command -v cezar'])).stdout.trim();
+  return found || 'cezar';
 }
 
 const autostartStep: InstallStep = {
@@ -231,9 +255,12 @@ const autostartStep: InstallStep = {
     return false; // optional — engine gates with a confirm
   },
   async run(ctx): Promise<{ artifacts: StepArtifact[] }> {
-    // Prefer a rootless `systemd --user` service + linger; fall back to a
-    // system unit (via sudoStep) only when the user bus is unavailable.
-    const userBus = ctx.dryRun ? true : (await ctx.runner.capture('systemctl', ['--user', 'is-system-running'])).code !== 127;
+    const execStart = await resolveCezarBin(ctx);
+    // Prefer a rootless `systemd --user` service + linger; fall back to a system
+    // unit (via sudoStep) when the user bus is not reachable. `show-environment`
+    // exits 0 iff the user manager is up — on a headless SSH box with no session
+    // it fails (exit 1, not 127), which the old `!== 127` test misread as "up".
+    const userBus = ctx.dryRun ? true : (await ctx.runner.capture('systemctl', ['--user', 'show-environment'])).code === 0;
 
     if (userBus) {
       const unitPath = join(homedir(), '.config', 'systemd', 'user', UNIT_NAME);
@@ -241,9 +268,12 @@ const autostartStep: InstallStep = {
         ctx.ui.info(`DRY RUN — would write ${unitPath} and enable it (systemctl --user enable --now cezar).`);
       } else {
         mkdirSync(join(homedir(), '.config', 'systemd', 'user'), { recursive: true });
-        writeFileSync(unitPath, systemdUnit(ctx.repoRoot, ctx.state.primaryPort, 'user'), 'utf8');
+        writeFileSync(unitPath, systemdUnit(ctx.repoRoot, ctx.state.primaryPort, 'user', execStart), 'utf8');
         await ctx.runner.interactive('systemctl', ['--user', 'daemon-reload']);
         await ctx.runner.interactive('systemctl', ['--user', 'enable', '--now', UNIT_NAME]);
+        if ((await ctx.runner.capture('systemctl', ['--user', 'is-enabled', UNIT_NAME])).code !== 0) {
+          ctx.ui.warn('The user service did not enable cleanly — check `systemctl --user status cezar`.');
+        }
       }
       // Linger lets the user service survive logout / start at boot — usually needs root.
       await sudoStep(ctx, {
@@ -258,7 +288,7 @@ const autostartStep: InstallStep = {
     }
 
     // System unit fallback.
-    const b64 = Buffer.from(systemdUnit(ctx.repoRoot, ctx.state.primaryPort, 'system'), 'utf8').toString('base64');
+    const b64 = Buffer.from(systemdUnit(ctx.repoRoot, ctx.state.primaryPort, 'system', execStart), 'utf8').toString('base64');
     await sudoStep(ctx, {
       description: 'Install the cezar systemd unit and enable it at boot.',
       command: `printf %s ${shquote(b64)} | base64 --decode > /etc/systemd/system/${UNIT_NAME} && systemctl daemon-reload && systemctl enable --now ${UNIT_NAME}`,

@@ -104,13 +104,26 @@ describe('engine', () => {
     expect(after.installed).toBe(false);
   });
 
-  it('optional step can be skipped and does not block installed=true', async () => {
+  it('optional step declined at the confirm prompt is skipped and does not block installed=true', async () => {
     const a = fakeStep('a');
     const opt = fakeStep('opt', { optional: true });
     const ui = { ...createAutoUi(), confirm: async () => false };
-    const res = await runInstall(strategyOf([a, opt]), opts({ ui }));
+    const res = await runInstall(strategyOf([a, opt]), opts({ ui, assumeYes: false }));
     expect(opt.run).not.toHaveBeenCalled();
     expect(res.state.steps.opt?.status).toBe('skipped');
     expect(res.state.installed).toBe(true); // optional skip doesn't block
+  });
+
+  it('--yes skips optional steps rather than running them non-interactively', async () => {
+    const a = fakeStep('a');
+    const opt = fakeStep('opt', { optional: true });
+    // confirm would return true, but --yes must not even ask for an optional step.
+    const confirm = vi.fn(async () => true);
+    const ui = { ...createAutoUi(), confirm };
+    const res = await runInstall(strategyOf([a, opt]), opts({ ui, assumeYes: true }));
+    expect(confirm).not.toHaveBeenCalled();
+    expect(opt.run).not.toHaveBeenCalled();
+    expect(res.state.steps.opt?.status).toBe('skipped');
+    expect(res.state.installed).toBe(true);
   });
 });

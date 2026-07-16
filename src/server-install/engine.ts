@@ -5,6 +5,7 @@ import { acquireLock, isResolved, loadServerState, saveServerState } from './sta
 import { StepAborted, StepCancelled, StepSkipped, defaultRunner } from './steps.js';
 import { createAutoUi, createClackUi } from './ui.js';
 import {
+  CANCEL,
   PreflightError,
   type InstallContext,
   type PlatformStrategy,
@@ -90,8 +91,23 @@ export async function runInstall(strategy: PlatformStrategy, opts: RunOptions): 
       }
 
       if (step.optional) {
+        // `--yes` = accept safe defaults, and the safe default for an optional
+        // step (SSL against a real domain, autostart) is to SKIP it — never run
+        // it non-interactively against placeholder input.
+        if (ctx.assumeYes) {
+          state.steps[step.id] = { status: 'skipped', created: null };
+          await ctx.save();
+          ctx.ui.info(`— ${step.title} (skipped: --yes)`);
+          continue;
+        }
         const proceed = await ctx.ui.confirm({ message: `Set up ${step.title}?`, initialValue: true });
-        if (proceed === false || proceed === undefined) {
+        if (proceed === CANCEL) {
+          state.steps[step.id] = { status: 'pending', created: null };
+          await ctx.save();
+          ctx.ui.warn(`Cancelled at "${step.title}". Progress saved — re-run to resume.`);
+          return { status: 'cancelled', state };
+        }
+        if (proceed !== true) {
           state.steps[step.id] = { status: 'skipped', created: null };
           await ctx.save();
           ctx.ui.info(`— ${step.title} (skipped)`);
