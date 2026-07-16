@@ -15,8 +15,8 @@ Tracking issue: #419
 | 1 | 1.4 | `src/server-install/ui.ts` — @clack wrappers + cancel sentinel | done | bca8202 |
 | 1 | 1.5 | `src/server-install/steps.ts` — sudoStep/verifyCommand/depCheckStep | done | 1599abb |
 | 1 | 1.6 | `src/server-install/engine.ts` — runInstall/runUninstall + lock | done | 27da0e7 |
-| 1 | 1.7 | `strategies.ts` + `platforms/ubuntu-vps.ts` (Phase-1 steps) | done | PENDING17 |
-| 1 | 1.8 | `src/index.ts` wiring + npm script + e2e | todo | — |
+| 1 | 1.7 | `strategies.ts` + `platforms/ubuntu-vps.ts` (Phase-1 steps) | done | 3bb88ae |
+| 1 | 1.8 | `src/index.ts` wiring + npm script + e2e | done | PENDING18 |
 | 2 | 2.1 | ubuntu-vps SSL step (certbot --nginx) | todo | — |
 | 2 | 2.2 | ubuntu-vps autostart step (systemd) | todo | — |
 | 3 | 3.1 | `platforms/macosx-ngrok.ts` + registry | todo | — |

@@ -24,6 +24,8 @@
     "check:pack": "node scripts/check-pack.mjs",
     "dev": "node scripts/dev.mjs",
     "dev:server": "tsx src/index.ts",
+    "server-install": "tsx src/index.ts server-install",
+    "server-uninstall": "tsx src/index.ts server-uninstall",
     "dev:web": "vite --config web/app/vite.config.ts",
     "test": "vitest run",
     "test:watch": "vitest",

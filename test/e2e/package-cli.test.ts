@@ -85,6 +85,45 @@ test('the release tarball installs and runs the dry-run CLI workflow', { timeout
     }>;
     assert.equal(runs.length, 1);
     assert.ok(['done', 'review'].includes(runs[0]?.status ?? ''), 'the dry-run workflow should finish successfully');
+
+    // server-install / server-uninstall dry-run round-trip. CEZ_HOME isolates
+    // ~/.cezar/server.json to a temp dir; CEZ_DRY_RUN performs no real sudo.
+    assert.match(help.stdout, /cezar server-install/);
+    const cezHome = join(root, 'cez-home');
+    const serverEnv = { ...process.env, CEZ_DRY_RUN: '1', CEZ_HOME: cezHome };
+    const serverExec = { cwd: consumerDir, env: serverEnv, timeout: 60_000, maxBuffer: 10 * 1024 * 1024 } as const;
+
+    await execFile(
+      process.execPath,
+      [cliPath, 'server-install', '--platform', 'ubuntu-vps', '--yes', '--repo', fixtureRepo],
+      serverExec,
+    );
+    const state = JSON.parse(await readFile(join(cezHome, 'server.json'), 'utf8')) as {
+      platform: string;
+      installed: boolean;
+      steps: Record<string, unknown>;
+    };
+    assert.equal(state.platform, 'ubuntu-vps', 'server-install records the platform');
+    assert.equal(state.installed, true, 'server-install flips installed=true when all required steps are done');
+    assert.ok(state.steps['nginx-proxy'], 'server-install ran the nginx-proxy step');
+
+    await execFile(
+      process.execPath,
+      [cliPath, 'server-uninstall', '--platform', 'ubuntu-vps', '--yes'],
+      serverExec,
+    );
+    const reversed = JSON.parse(await readFile(join(cezHome, 'server.json'), 'utf8')) as {
+      installed: boolean;
+      steps: Record<string, unknown>;
+    };
+    assert.deepEqual(reversed.steps, {}, 'server-uninstall reverses every step');
+    assert.equal(reversed.installed, false, 'server-uninstall clears installed');
+
+    // Unknown platform exits non-zero.
+    await assert.rejects(
+      execFile(process.execPath, [cliPath, 'server-install', '--platform', 'nope'], serverExec),
+      'unknown platform should exit 1',
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

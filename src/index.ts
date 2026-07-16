@@ -20,6 +20,8 @@ Usage:
   cezar                     start the cockpit (server + GUI) for the current repo
   cezar run "<task>"        run a task headless in the terminal
   cezar init                scaffold .ai/cezar/ (example workflow + skill)
+  cezar server-install      interactive wizard to host cezar on a server
+  cezar server-uninstall    reverse a server-install
 
 Options:
   -p, --port <n>              cockpit port (default 4321)
@@ -27,6 +29,9 @@ Options:
       --workflow <name>       workflow for \`run\` (default: quick-task)
       --model <model>         model override for \`run\`
       --no-open               don't open the browser
+      --platform <id>         server-install target (ubuntu-vps | macosx-ngrok)
+      --yes                   server-install: accept safe defaults (never auto-sudo)
+      --reconfigure <ids>     server-install: force re-run of step id(s), comma-separated
   -h, --help                  show this help
 
 Zero config: uses your logged-in \`claude\` CLI (and \`gh\` for GitHub bits).
@@ -42,6 +47,9 @@ async function main(): Promise<void> {
       workflow: { type: 'string' },
       model: { type: 'string' },
       'no-open': { type: 'boolean', default: false },
+      platform: { type: 'string' },
+      yes: { type: 'boolean', default: false },
+      reconfigure: { type: 'string' },
       help: { type: 'boolean', short: 'h', default: false },
     },
     allowPositionals: true,
@@ -66,6 +74,15 @@ async function main(): Promise<void> {
       return;
     case 'init':
       initCommand(repoRoot);
+      return;
+    case 'server-install':
+      await serverCommand('install', repoRoot, values.platform, {
+        yes: Boolean(values.yes),
+        reconfigure: values.reconfigure,
+      });
+      return;
+    case 'server-uninstall':
+      await serverCommand('uninstall', repoRoot, values.platform, { yes: Boolean(values.yes) });
       return;
     default:
       console.error(`unknown command: ${command}\n`);
@@ -240,6 +257,63 @@ async function runCommand(
   }
   console.log(`\nrun ${final} — ${record?.tokensUsed ?? 0} tokens — details in the cockpit: npx cezar`);
   process.exitCode = final === 'done' || final === 'review' ? 0 : 1;
+}
+
+// ---- server-install / server-uninstall --------------------------------------
+// The whole server-install module (and its @clack/prompts dependency) is loaded
+// lazily here so it never enters the `serve`/`run`/`init` import graph — the
+// runtime server stack stays tiny (AGENTS.md).
+
+async function serverCommand(
+  mode: 'install' | 'uninstall',
+  repoRoot: string,
+  platform: string | undefined,
+  flags: { yes: boolean; reconfigure?: string },
+): Promise<void> {
+  const { getStrategy, availablePlatformIds } = await import('./server-install/strategies.js');
+  const { runInstall, runUninstall } = await import('./server-install/engine.js');
+
+  const ids = availablePlatformIds();
+  // Uninstall can read the platform from the recorded state when omitted.
+  let chosen = platform;
+  if (mode === 'uninstall' && !chosen) {
+    const { loadServerState } = await import('./server-install/state.js');
+    chosen = loadServerState().platform;
+  }
+  if (!chosen) {
+    console.error(`--platform is required. Valid platforms: ${ids.join(', ')}`);
+    process.exitCode = 1;
+    return;
+  }
+  const strategy = getStrategy(chosen);
+  if (!strategy) {
+    console.error(`unknown platform: ${chosen} (valid: ${ids.join(', ')})`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const runOpts = {
+    dryRun: process.env.CEZ_DRY_RUN === '1',
+    assumeYes: flags.yes,
+    reconfigure: new Set((flags.reconfigure ?? '').split(',').map((s) => s.trim()).filter(Boolean)),
+    repoRoot,
+    now: new Date().toISOString(),
+  };
+
+  try {
+    const result = mode === 'install' ? await runInstall(strategy, runOpts) : await runUninstall(strategy, runOpts);
+    if (mode === 'install' && result.status === 'complete') {
+      console.log(`\n  cezar server-install (${chosen}) complete.`);
+      console.log(`  Reverse it any time with: cezar server-uninstall --platform ${chosen}\n`);
+    } else if (mode === 'uninstall' && result.status === 'complete') {
+      console.log(`\n  cezar server-uninstall (${chosen}) complete — the changes it made were reversed.\n`);
+    }
+    // complete + cancelled (resumable) exit 0; failed exits 1.
+    process.exitCode = result.status === 'failed' ? 1 : 0;
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exitCode = 1;
+  }
 }
 
 // ---- init --------------------------------------------------------------------
