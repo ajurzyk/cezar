@@ -1,6 +1,6 @@
 # Handoff — server-installer
 
-**State:** complete (pending final review pass + summary)
+**State:** complete — PR #423 open (draft), full gate green, 2 review passes applied
 **Branch:** `feat/server-installer`
 **PR:** #423
 **Checkpoint:** 3 / final gate — all green
