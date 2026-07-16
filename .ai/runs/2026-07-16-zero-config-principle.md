@@ -24,4 +24,4 @@ Add a top-level `## Zero config` section to `AGENTS.md` capturing cezar's zero-c
 
 ### Phase 1: Add the section
 
-- [ ] 1.1 Insert `## Zero config` into AGENTS.md before `## Task routing`
+- [x] 1.1 Insert `## Zero config` into AGENTS.md before `## Task routing` — d2593cc
