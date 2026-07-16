@@ -36,6 +36,9 @@ import type {
   SaveWorkflowResponse,
   SetConfigInput,
   SetConfigResponse,
+  AgentConfigListing,
+  AgentConfigFileContent,
+  SetAgentConfigInput,
   Skill,
   StartTodoResponse,
   TodoItem,
@@ -443,4 +446,21 @@ export function putUiState(patch: UiState): Promise<UiState> {
  *  unrelated user keys survive; `null` clears a knob back to its default. */
 export function putConfig(patch: SetConfigInput): Promise<SetConfigResponse> {
   return mutate<SetConfigResponse>('PUT', '/api/config', patch)
+}
+
+// ---- agent config files (spec #404) -----------------------------------------------------------
+
+/** The coding agents' own config files, per scope, with vendor precedence. `editable:false` in hosted mode. */
+export function getAgentConfig(opts: ReadOptions = {}): Promise<AgentConfigListing> {
+  return get<AgentConfigListing>('/api/agent-config', opts)
+}
+
+/** One config file's raw contents + version token (addressed by catalog id). */
+export function getAgentConfigFile(id: string, opts: ReadOptions = {}): Promise<AgentConfigFileContent> {
+  return get<AgentConfigFileContent>(`/api/agent-config/${encodeURIComponent(id)}`, opts)
+}
+
+/** Save a config file raw. Validated + stale-guarded server-side; 409s in hosted mode. */
+export function putAgentConfigFile(id: string, body: SetAgentConfigInput): Promise<AgentConfigFileContent> {
+  return mutate<AgentConfigFileContent>('PUT', `/api/agent-config/${encodeURIComponent(id)}`, body)
 }

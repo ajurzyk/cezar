@@ -20,7 +20,7 @@ Status: in-progress
 | 2 | 2.1 | Add `toml` to highlighter `LANG_LOADERS` | done | PENDING |
 | 2 | 2.2 | Code editor overlay (`web/app/src/components/code-editor.tsx`) | done | PENDING |
 | 3 | 3.1 | Registry: add `agent-config`, unhide `mcp`; fix section/route tests | todo | — |
-| 3 | 3.2 | API client types + queries | todo | — |
+| 3 | 3.2 | API client types + queries | done | PENDING |
 | 3 | 3.3 | `agent-config-section.tsx` | todo | — |
 | 3 | 3.4 | `mcp-section.tsx` | todo | — |
 | 4 | 4.1 | Worktree seeding of the personal layer (`src/workflows/run.ts`) | todo | — |

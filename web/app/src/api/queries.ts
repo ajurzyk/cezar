@@ -1,6 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import {
+  getAgentConfig,
+  getAgentConfigFile,
+  putAgentConfigFile,
   getConfig,
   getGithub,
   getGroup,
@@ -25,7 +28,7 @@ import {
   patchRun,
   sendMessage,
 } from './client'
-import type { MessageInput, PatchRunInput } from './types'
+import type { MessageInput, PatchRunInput, SetAgentConfigInput } from './types'
 
 /**
  * Query keys, in one place and exported, because they are a contract rather than an
@@ -64,6 +67,9 @@ export const queryKeys = {
   uiState: ['ui-state'] as const,
   /** The Settings → Agents knobs (`GET /api/config`, R6 1.5). */
   config: ['config'] as const,
+  /** The agents' own config files (`GET /api/agent-config`, #404) + per-file contents. */
+  agentConfig: ['agent-config'] as const,
+  agentConfigFile: (id: string) => ['agent-config', 'file', id] as const,
   github: (params: { limit?: number } = {}) => ['github', params.limit ?? null] as const,
   openTargets: ['open-targets'] as const,
 } as const
@@ -263,6 +269,35 @@ export function useUiState() {
   return useQuery({
     queryKey: queryKeys.uiState,
     queryFn: ({ signal }) => getUiState({ signal }),
+  })
+}
+
+/** The agents' own config files (#404): the listing with vendor precedence + on-disk state. */
+export function useAgentConfig() {
+  return useQuery({
+    queryKey: queryKeys.agentConfig,
+    queryFn: ({ signal }) => getAgentConfig({ signal }),
+  })
+}
+
+/** One config file's raw contents. `enabled:false` until a file is selected. */
+export function useAgentConfigFile(id: string | null) {
+  return useQuery({
+    queryKey: queryKeys.agentConfigFile(id ?? ''),
+    queryFn: ({ signal }) => getAgentConfigFile(id as string, { signal }),
+    enabled: id !== null,
+  })
+}
+
+/** Save a config file. Invalidates the listing (exists/version/size move) and the file itself. */
+export function usePutAgentConfigFile(id: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (body: SetAgentConfigInput) => putAgentConfigFile(id, body),
+    onSuccess: (result) => {
+      queryClient.setQueryData(queryKeys.agentConfigFile(id), result)
+      void queryClient.invalidateQueries({ queryKey: queryKeys.agentConfig })
+    },
   })
 }
 

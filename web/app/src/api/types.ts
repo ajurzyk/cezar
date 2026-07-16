@@ -560,6 +560,70 @@ export interface SetConfigInput {
 /** The PUT answer: the same shape GET serves (the pre-R6 fields stayed, the rest is additive). */
 export type SetConfigResponse = ConfigResponse
 
+// ---- Agent config files (spec #404) -----------------------------------------------------------
+
+export type AgentConfigFormat = 'json' | 'jsonc' | 'toml' | 'markdown'
+export type AgentConfigScope = 'user' | 'project' | 'local'
+export type AgentConfigKind = 'settings' | 'memory' | 'mcp'
+export type AgentConfigTracked = 'tracked' | 'gitignored' | 'outside-repo'
+
+/** One config file in `GET /api/agent-config`'s listing (its on-disk state + vendor facts). */
+export interface AgentConfigFile {
+  id: string
+  runners: Runner[]
+  kind: AgentConfigKind
+  scope: AgentConfigScope
+  label: string
+  path: string
+  format: AgentConfigFormat
+  tracked: AgentConfigTracked
+  /** Copied into each run's worktree so it takes effect immediately (Claude's personal layer). */
+  seeded: boolean
+  /** This file holds MCP server definitions (drives the MCP section's filter). */
+  holdsMcp: boolean
+  /** The vendor's own documented precedence, quoted verbatim. */
+  precedence: string
+  /** The vendor's documented mid-run reload behaviour, when they document one. */
+  hotReload?: string
+  docsUrl: string
+  exists: boolean
+  size: number
+  /** sha256 of the bytes, or null when absent. Echoed back on PUT for the stale-write guard. */
+  version: string | null
+  /** False in hosted mode (whole feature is read-only there). */
+  writable: boolean
+  readOnlyReason?: string
+}
+
+/** Read-only listing of the MCP servers Claude keeps in ~/.claude.json (never edited by cezar). */
+export interface UserMcpListing {
+  path: string
+  servers: string[]
+  readable: boolean
+}
+
+/** `GET /api/agent-config`. `editable` is false in hosted mode; `userMcp` is withheld (null) there. */
+export interface AgentConfigListing {
+  editable: boolean
+  files: AgentConfigFile[]
+  userMcp: UserMcpListing | null
+}
+
+/** `GET /api/agent-config/:id` — the raw file contents + its version token. */
+export interface AgentConfigFileContent {
+  id: string
+  path: string
+  exists: boolean
+  content: string
+  version: string | null
+}
+
+/** `PUT /api/agent-config/:id` body. `version` must match what was read (null = expect-absent). */
+export interface SetAgentConfigInput {
+  content: string
+  version: string | null
+}
+
 /** A local app a worktree can be opened in (#open-in): editor, file manager, or terminal. */
 export interface OpenTarget {
   id: string
