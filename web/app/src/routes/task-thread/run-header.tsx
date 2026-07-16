@@ -494,9 +494,17 @@ function ConfirmDialog({ run, actions }: { run: ApiRun; actions: RunActions }) {
         <AlertDialogHeader>
           <AlertDialogTitle>{confirming === 'delete' ? 'Delete this task?' : 'Cancel this task?'}</AlertDialogTitle>
           <AlertDialogDescription>
-            {confirming === 'delete'
-              ? 'This removes the run, its transcript, its worktree and its branch. There is no undo.'
-              : 'The agent is stopped and the run completes as cancelled. The worktree stays.'}
+            {confirming === 'delete' ? (
+              <>
+                This removes the run, its transcript, its worktree and its branch. There is no
+                undo.
+                <span className="mt-1 block truncate font-medium text-foreground" title={runTitle(run)}>
+                  {runTitle(run)}
+                </span>
+              </>
+            ) : (
+              'The agent is stopped and the run completes as cancelled. The worktree stays.'
+            )}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
@@ -509,7 +517,7 @@ function ConfirmDialog({ run, actions }: { run: ApiRun; actions: RunActions }) {
               actions.setConfirming(null)
             }}
           >
-            {confirming === 'delete' ? `Delete ${runTitle(run).slice(0, 40)}` : 'Cancel the run'}
+            {confirming === 'delete' ? 'Delete' : 'Cancel the run'}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
