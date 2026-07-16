@@ -23,7 +23,7 @@ Request: Extend PR #441 so every isolated Git task either receives a proper work
 - [x] Fail an isolated Git run before its first step when worktree creation is unrecoverable — verified with a RunManager regression test.
 - [x] Keep explicit opt-out runs serialized — verified with a parallel overlap regression test.
 - [x] Run `npm run typecheck`, `npm test`, `npm run test:unit`, `npm run build`, and `npm run test:package` in order.
-- [ ] Review, commit, push, and update PR #441.
+- [x] Review, commit, push, and update PR #441 — implementation commit `a9ebcf8`.
 
 ## Execution Log
 
@@ -52,8 +52,14 @@ Request: Extend PR #441 so every isolated Git task either receives a proper work
 - Ran: `npm run test:package` — packaged dry-run CLI E2E passed.
 - Reviewed: `CODE_REVIEW.md`, `BACKWARD_COMPATIBILITY.md`, full local diff, and `git diff --check`; no protected API, state, CLI, workflow, or package surface changed.
 
+### 2026-07-16 19:34 Europe/Warsaw
+
+- Committed: `a9ebcf8 fix(worktrees): fail closed and recover task branches`.
+- Pushed: `HEAD` to `origin/fix/issue-438-worktrees-separation` without rewriting history.
+- Updated: PR #441 description and summary comment with recovery behavior, fail-closed semantics, verification, and residual risk.
+
 ## Final Status
 
-- Completed: diagnosis, specification, implementation, focused tests, full validation, and compatibility review.
-- Not completed: commit/push and PR update.
+- Completed: diagnosis, specification, implementation, focused tests, full validation, compatibility review, commit/push, and PR update.
+- Not completed: none.
 - Residual risks: a genuinely read-only or corrupt Git repository now fails an isolated task instead of allowing it to execute in the user's root; the error is retained on the run for recovery/action.

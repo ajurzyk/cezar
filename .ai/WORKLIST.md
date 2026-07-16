@@ -8,4 +8,4 @@ PR: #441
 - [x] Stop isolated Git tasks before workflow execution when worktree creation remains unavailable — verified with a RunManager regression test that detects any repository-root command.
 - [x] Preserve serialized repository-root execution for explicit opt-out tasks — verified with two parallel opt-out runs and an overlap detector.
 - [x] Run the repository validation gate and review the complete PR diff — all commands in `.ai/agentic.config.json` passed.
-- [ ] Commit and push the extension to `fix/issue-438-worktrees-separation`, then update PR #441.
+- [x] Commit and push the extension to `fix/issue-438-worktrees-separation`, then update PR #441 — implementation commit `a9ebcf8`.
