@@ -74,9 +74,15 @@ export interface SudoStepOpts {
  *
  * Throws `StepCancelled` if the user cancels, `StepAborted` if they give up after a failed verify.
  */
+/** Single-quote a shell string so a copy-paste of `display` runs exactly what we run. */
+export function shquote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
 export async function sudoStep(ctx: InstallContext, opts: SudoStepOpts): Promise<void> {
   const { ui } = ctx;
-  const display = `sudo ${opts.command}`;
+  // What we actually run — and what the operator copy-pastes in the delegate path.
+  const display = `sudo bash -lc ${shquote(opts.command)}`;
 
   if (ctx.dryRun) {
     ui.info(`DRY RUN — would run: ${display}`);
