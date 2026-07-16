@@ -46,6 +46,8 @@ Let users prevent follow-up inbox clutter for individual tasks without changing 
 
 ## Progress
 
+PR: #444
+
 > Convention: `- [ ]` pending, `- [x]` done. Append ` — <commit sha>` when a step lands. Do not rename step titles.
 
 ### Phase 1: Run contract and agent boundary
