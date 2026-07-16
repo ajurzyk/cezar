@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { createServer } from 'node:net';
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -267,12 +267,39 @@ async function runCommand(
 // lazily here so it never enters the `serve`/`run`/`init` import graph — the
 // runtime server stack stays tiny (AGENTS.md).
 
+/**
+ * Prepend the operator's login-shell PATH to this process's PATH so tool
+ * detection and installs find things in ~/.local/bin, nvm, and other
+ * profile-added dirs even when the installer was launched non-interactively.
+ * Best-effort: a shell that errors or hangs leaves PATH untouched.
+ */
+function augmentPathFromLoginShell(): void {
+  try {
+    const out = execFileSync('bash', ['-lc', 'printf %s "$PATH"'], { timeout: 5000, encoding: 'utf8' });
+    const loginPath = out.split('\n').map((s) => s.trim()).filter(Boolean).pop() ?? '';
+    if (!loginPath) return;
+    const seen = new Set<string>();
+    process.env.PATH = [...loginPath.split(':'), ...(process.env.PATH ?? '').split(':')]
+      .filter((d) => d && !seen.has(d) && seen.add(d))
+      .join(':');
+  } catch {
+    // best effort — keep the existing PATH
+  }
+}
+
 async function serverCommand(
   mode: 'install' | 'uninstall',
   repoRoot: string,
   platform: string | undefined,
   flags: { yes: boolean; reconfigure?: string; reinstall?: boolean },
 ): Promise<void> {
+  // Detection (claude/gh/codex) and tool installs resolve executables off the
+  // process PATH. When the installer is launched from a non-login shell (an
+  // `ssh host cmd`, a script, a fresh service context), ~/.local/bin and nvm's
+  // bin are absent, so tools the user actually has look "not installed". Merge
+  // the login shell's PATH first so we see exactly what the operator sees.
+  augmentPathFromLoginShell();
+
   const { getStrategy, availablePlatformIds } = await import('./server-install/strategies.js');
   const { runInstall, runUninstall } = await import('./server-install/engine.js');
 

@@ -398,7 +398,10 @@ const UNIT_NAME = 'cezar.service';
 export function systemdUnit(repoRoot: string, port: number, scope: 'user' | 'system', execStart: string): string {
   const userLine = scope === 'system' ? `User=${userInfo().username}\n` : '';
   const installTarget = scope === 'system' ? 'multi-user.target' : 'default.target';
-  const pathDirs = [dirname(process.execPath), '/usr/local/bin', '/usr/bin', '/bin']
+  // Give the service the operator's own PATH (node dir + the login PATH the CLI
+  // merged in, e.g. ~/.local/bin and nvm) so cezar can spawn claude / gh / codex
+  // at runtime — systemd's default PATH has none of those.
+  const pathDirs = [dirname(process.execPath), ...(process.env.PATH ?? '').split(':'), '/usr/local/bin', '/usr/bin', '/bin']
     .filter((d, i, a) => d && d !== '.' && a.indexOf(d) === i);
   return `# Managed by cezar server-install — do not edit by hand.
 [Unit]
