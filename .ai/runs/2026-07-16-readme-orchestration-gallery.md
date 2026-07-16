@@ -1,6 +1,6 @@
 # README: orchestration-first gallery, positioning prose, emoji sweep
 
-Status: in-progress
+Status: complete
 
 ## Goal
 
@@ -77,23 +77,23 @@ and giving "Core concepts" emojis plus the queue and memory-usage facts.
 
 ### Phase 1: Ground the claims
 
-- [ ] 1.1 Establish queue facts
-- [ ] 1.2 Establish memory facts
+- [x] 1.1 Establish queue facts — Explore agent (maxParallel default 2, non-git=1, FIFO with positions, restart recovery, cancel-while-queued; no reorder)
+- [x] 1.2 Establish memory facts — Explore agent (peak RSS/CPU sampling, opt-in memoryLimitMb pause-and-advance, append-only NDJSON, coalesced deltas; NOT log truncation/ring buffer/streaming replay)
 
 ### Phase 2: Capture the screenshots
 
-- [ ] 2.1 Boot the cockpit and seed a presentable task set
-- [ ] 2.2 Capture task-view.png
-- [ ] 2.3 Capture skills-autonomous.png
+- [x] 2.1 Boot the cockpit and seed a presentable task set — seed.mjs, 16 runs, CEZ_NO_RECOVER harness
+- [x] 2.2 Capture task-view.png — c-later
+- [x] 2.3 Capture skills-autonomous.png — c-later
 
 ### Phase 3: Rewrite the prose
 
-- [ ] 3.1 Rewire the gallery table to the six agreed cells
-- [ ] 3.2 Add the fire-and-forget positioning paragraph
-- [ ] 3.3 Rewrite "What it solves"
-- [ ] 3.4 Emoji + queue + memory in "Core concepts"
+- [x] 3.1 Rewire the gallery table to the six agreed cells
+- [x] 3.2 Add the fire-and-forget positioning paragraph
+- [x] 3.3 Rewrite "What it solves"
+- [x] 3.4 Emoji + queue + memory in "Core concepts"
 
 ### Phase 4: Validate and ship
 
-- [ ] 4.1 Validation gate + diff re-read
+- [x] 4.1 Docs-only gate: no docs linter in repo; every screenshot ref resolves; manual diff re-read; mobile claim verified against e2e iPhone specs
 - [ ] 4.2 Self-review and open the PR
