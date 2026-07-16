@@ -60,4 +60,4 @@ Let users prevent follow-up inbox clutter for individual tasks without changing 
 
 ### Phase 3: Verification and review
 
-- [ ] 3.1 Run the full configured validation gate, apply code-review and backward-compatibility checks, and remove any scope drift.
+- [x] 3.1 Run the full configured validation gate, apply code-review and backward-compatibility checks, and remove any scope drift. — 98db454
