@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createAutoUi } from './ui.js';
-import { sudoStep, StepAborted, verifyCommand } from './steps.js';
+import { generatePassword, sudoStep, StepAborted, StepSkipped, verifyCommand } from './steps.js';
 import type { CommandResult, InstallContext, Runner, Ui } from './types.js';
 
 function makeCtx(over: {
@@ -24,6 +24,7 @@ function makeCtx(over: {
     reconfigure: over.reconfigure ?? new Set(),
     repoRoot: '/repo',
     now: '2026-07-16T00:00:00.000Z',
+    prefs: {},
   };
 }
 
@@ -84,6 +85,54 @@ describe('sudoStep', () => {
     await expect(sudoStep(ctx, { description: 'x', command: 'true', verify })).rejects.toBeInstanceOf(
       StepAborted,
     );
+  });
+
+  it('defaults the mode prompt to delegate and reuses the choice for later steps', async () => {
+    const select = vi.fn(async (_o: { initialValue?: string }) => 'delegate' as never);
+    const verify = vi.fn(async () => true);
+    const ui = { ...createAutoUi(), select, confirm: async () => true } as Ui;
+    const ctx = makeCtx({ ui });
+    await sudoStep(ctx, { description: 'a', command: 'true', verify });
+    await sudoStep(ctx, { description: 'b', command: 'true', verify });
+    expect(select).toHaveBeenCalledTimes(1); // asked once, remembered after (issue #6)
+    expect(select.mock.calls[0]?.[0]?.initialValue).toBe('delegate'); // issue #1
+    expect(ctx.prefs.sudoMode).toBe('delegate');
+  });
+
+  it('skippable step offers Skip on repeated failure and throws StepSkipped', async () => {
+    const verify = vi.fn(async () => false);
+    const ui = scriptedUi(['delegate', 'skip'], [true]); // pick delegate, confirm run, then skip
+    const ctx = makeCtx({ ui, runner: { interactive: async () => 0, capture: async () => ({ code: 1, stdout: '', stderr: '' }) } });
+    await expect(
+      sudoStep(ctx, { description: 'ssl', command: 'certbot ...', skippable: true, skipHint: 'later', verify }),
+    ).rejects.toBeInstanceOf(StepSkipped);
+  });
+
+  it('--yes on a skippable step skips (not aborts) when verification fails', async () => {
+    const verify = vi.fn(async () => false);
+    const ctx = makeCtx({
+      assumeYes: true,
+      runner: { capture: async () => ({ code: 0, stdout: '', stderr: '' }), interactive: async () => 0 },
+    });
+    await expect(
+      sudoStep(ctx, { description: 'ssl', command: 'certbot', skippable: true, verify }),
+    ).rejects.toBeInstanceOf(StepSkipped);
+  });
+});
+
+describe('generatePassword', () => {
+  it('is strong: default length, every character class, and crypto-varied', () => {
+    const p = generatePassword();
+    expect(p.length).toBe(16);
+    expect(/[a-z]/.test(p)).toBe(true);
+    expect(/[A-Z]/.test(p)).toBe(true);
+    expect(/[0-9]/.test(p)).toBe(true);
+    expect(/[!@#$%^&*\-_=+]/.test(p)).toBe(true);
+    expect(generatePassword()).not.toBe(generatePassword());
+  });
+
+  it('never drops below 8 characters even when asked for fewer', () => {
+    expect(generatePassword(4).length).toBe(8);
   });
 });
 

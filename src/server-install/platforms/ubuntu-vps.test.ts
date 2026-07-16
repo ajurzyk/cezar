@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { systemdUnit, ubuntuVps } from './ubuntu-vps.js';
+import { nginxVhost, systemdUnit, ubuntuVps } from './ubuntu-vps.js';
 import { StepAborted } from '../steps.js';
 import { createAutoUi } from '../ui.js';
 import type { InstallContext, InstallStep, Runner, Ui } from '../types.js';
@@ -20,6 +20,7 @@ function ctxWith(over: { ui?: Ui; runner?: Runner; dryRun?: boolean }): InstallC
     reconfigure: new Set(),
     repoRoot: '/repo',
     now: '2026-07-16T00:00:00.000Z',
+    prefs: {},
   };
 }
 
@@ -92,6 +93,39 @@ describe('ubuntu-vps nginx-proxy security', () => {
   it('refuses an empty/too-short password instead of creating an open cockpit (H1)', async () => {
     const capture = vi.fn(async (_p: string, _a: string[], _o?: { input?: string }) => ({ code: 0, stdout: '', stderr: '' }));
     await expect(stepById('nginx-proxy').run(secCtx('', capture))).rejects.toBeInstanceOf(StepAborted);
+  });
+});
+
+describe('nginxVhost', () => {
+  it('defaults to a catch-all server_name and can target a domain', () => {
+    expect(nginxVhost(4321)).toContain('server_name _;');
+    // The SSL step rewrites server_name to the domain so certbot --nginx can find it.
+    expect(nginxVhost(4321, 'cezar.example.com')).toContain('server_name cezar.example.com;');
+  });
+});
+
+describe('ubuntu-vps nginx-proxy identity (interactive, dry-run)', () => {
+  it('suggests the current OS user and can auto-generate the cockpit password', async () => {
+    const notes: string[] = [];
+    const password = vi.fn(async () => 'should-not-be-asked');
+    const ui = {
+      ...createAutoUi(),
+      // username: echo back the suggested (initialValue) default
+      text: async (o: { initialValue?: string }) => o.initialValue ?? 'x',
+      // credential prompt: pick the first option ("Generate a strong password for me")
+      select: async (o: { options: Array<{ value: string }> }) => o.options[0]?.value,
+      password,
+      note: (m: string) => { notes.push(m); },
+    } as unknown as Ui;
+    // Interactive path (assumeYes:false) is where the generate/manual menu lives.
+    const ctx = { ...ctxWith({ dryRun: true, ui }), assumeYes: false } as InstallContext;
+    const created = await stepById('nginx-proxy').run(ctx);
+
+    expect(password).not.toHaveBeenCalled(); // generated, not typed (issue #3)
+    expect(notes.some((m) => m.includes('Password:'))).toBe(true); // shown once so it can be saved
+    const htp = created?.artifacts.find((a) => a.type === 'htpasswd');
+    expect(htp?.kind).toBe('owned');
+    expect(htp?.name).toBeTruthy(); // the suggested current-user default (issue #2)
   });
 });
 

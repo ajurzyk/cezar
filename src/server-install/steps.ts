@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { randomInt } from 'node:crypto';
 import { detectEnvironment, type BackendCheck } from '../core/backend-detect.js';
 import {
   CANCEL,
@@ -71,8 +72,46 @@ export interface SudoStepOpts {
   description: string;
   /** The privileged shell command (without a leading `sudo`). May use pipes/redirects. */
   command: string;
+  /**
+   * Optional human-readable context (e.g. the file contents being written) shown
+   * in its own box before the raw command — keeps big base64 file-writes legible.
+   */
+  note?: string;
+  /**
+   * Optional step: when verification keeps failing the operator can *skip* it
+   * (thrown as `StepSkipped`) instead of aborting the whole install. Used by SSL
+   * (certbot can legitimately fail on external DNS / rate limits).
+   */
+  skippable?: boolean;
+  /** Shown next to the "Skip" choice — how to finish this step by hand later. */
+  skipHint?: string;
   /** Prove the command actually took effect. Runs after every attempt. */
   verify: (ctx: InstallContext) => Promise<boolean>;
+}
+
+/**
+ * A strong random cockpit password: guaranteed to mix lower/upper letters, a
+ * digit and a symbol, drawn from a crypto RNG, with visually-ambiguous glyphs
+ * (0/O/1/l/I) removed. Offered by the identity step so operators don't fall back
+ * to a weak hand-picked password.
+ */
+export function generatePassword(length = 16): string {
+  const lower = 'abcdefghijkmnpqrstuvwxyz'; // no l
+  const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ'; // no I, O
+  const digits = '23456789'; // no 0, 1
+  const symbols = '!@#$%^&*-_=+';
+  const all = lower + upper + digits + symbols;
+  const pick = (set: string) => set.charAt(randomInt(set.length));
+  const chars = [pick(lower), pick(upper), pick(digits), pick(symbols)];
+  while (chars.length < Math.max(length, 8)) chars.push(pick(all));
+  // Fisher–Yates shuffle so the guaranteed-class chars aren't always in front.
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = randomInt(i + 1);
+    const tmp = chars[i] as string;
+    chars[i] = chars[j] as string;
+    chars[j] = tmp;
+  }
+  return chars.join('');
 }
 
 /**
@@ -103,31 +142,42 @@ export async function sudoStep(ctx: InstallContext, opts: SudoStepOpts): Promise
   const passwordless = await hasPasswordlessSudo(ctx);
 
   for (;;) {
-    ui.note(display, opts.description);
+    ui.info(opts.description);
+    if (opts.note) ui.note(opts.note, 'What this changes');
+    ui.note(display, 'Privileged command');
 
     let mode: 'sudo' | 'delegate';
     if (ctx.assumeYes) {
       mode = passwordless ? 'sudo' : 'delegate';
+    } else if (ctx.prefs.sudoMode) {
+      // Remembered from an earlier answer — don't ask again this run (issue #6).
+      mode = ctx.prefs.sudoMode;
     } else {
+      // Default to "I'll run it myself as root" — the safe, no-surprise choice
+      // for operators who prefer to paste privileged commands into a root shell.
       const choice = await ui.select<'sudo' | 'delegate'>({
         message: 'How should this privileged command run?',
         options: [
+          { value: 'delegate', label: "I'll run it myself as root", hint: 'paste & run as root, then confirm' },
           { value: 'sudo', label: 'Run it now via sudo', hint: 'streams output here' },
-          { value: 'delegate', label: "I'll run it myself as root", hint: 'paste & run, then confirm' },
         ],
-        initialValue: 'sudo',
+        initialValue: 'delegate',
       });
       if (choice === CANCEL) throw new StepCancelled();
       mode = choice;
+      ctx.prefs.sudoMode = choice; // reuse this choice for every later privileged command
     }
 
     if (mode === 'sudo') {
       const code = await ctx.runner.interactive('sudo', ['bash', '-lc', opts.command]);
       if (code !== 0) ui.warn(`command exited with code ${code}`);
     } else {
-      ui.note(display, 'Run this as root on the server, then confirm below');
+      ui.note(
+        `${display}\n\nCopy the command above and run it as the root user on the server\n(paste it into a root shell, or prefix it with sudo). Then confirm below.`,
+        'Run this as root',
+      );
       if (!ctx.assumeYes) {
-        const done = await ui.confirm({ message: 'Have you run it?', initialValue: true });
+        const done = await ui.confirm({ message: 'Have you run it as root?', initialValue: true });
         if (done === CANCEL) throw new StepCancelled();
       }
     }
@@ -138,7 +188,24 @@ export async function sudoStep(ctx: InstallContext, opts: SudoStepOpts): Promise
     }
 
     ui.error('That did not take effect — the verification check still fails.');
-    if (ctx.assumeYes) throw new StepAborted(`verification failed for: ${opts.command}`);
+    if (ctx.assumeYes) {
+      throw opts.skippable
+        ? new StepSkipped(`verification failed for: ${opts.command}`)
+        : new StepAborted(`verification failed for: ${opts.command}`);
+    }
+    if (opts.skippable) {
+      const next = await ui.select<'retry' | 'skip'>({
+        message: 'That did not verify. What now?',
+        options: [
+          { value: 'retry', label: 'Try again' },
+          { value: 'skip', label: 'Skip this step', hint: opts.skipHint },
+        ],
+        initialValue: 'retry',
+      });
+      if (next === CANCEL) throw new StepCancelled();
+      if (next === 'skip') throw new StepSkipped(`skipped: ${opts.command}`);
+      continue;
+    }
     const redo = await ui.confirm({ message: 'Try again?', initialValue: true });
     if (redo === CANCEL || redo === false) throw new StepAborted(`gave up on: ${opts.command}`);
   }

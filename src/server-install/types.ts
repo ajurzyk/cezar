@@ -166,6 +166,13 @@ export interface InstallContext {
   repoRoot: string;
   /** ISO timestamp for this run (passed in — Date.now guard). */
   now: string;
+  /**
+   * Choices remembered for the rest of the run so the wizard stops re-asking.
+   * `sudoMode` is set the first time the operator answers the sudo-vs-delegate
+   * prompt — once they pick "I'll run it myself as root", every later privileged
+   * command reuses that choice instead of prompting again.
+   */
+  prefs: { sudoMode?: 'sudo' | 'delegate' };
 }
 
 export interface InstallStep {

@@ -2,7 +2,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { CANCEL, PreflightError, type InstallContext, type InstallStep, type PlatformStrategy, type StepArtifact } from '../types.js';
-import { depCheckStep, owned, shared, shquote, StepAborted, StepCancelled, StepSkipped, sudoStep, verifyCommand } from '../steps.js';
+import { depCheckStep, generatePassword, owned, shared, shquote, StepAborted, StepCancelled, StepSkipped, sudoStep, verifyCommand } from '../steps.js';
 
 /**
  * The `ubuntu-vps` strategy: stand up an authenticated, proxied cezar on a bare
@@ -17,13 +17,32 @@ const VHOST_AVAILABLE = '/etc/nginx/sites-available/cezar';
 const VHOST_ENABLED = '/etc/nginx/sites-enabled/cezar';
 const HTPASSWD = '/etc/cezar/htpasswd';
 
-/** The nginx server block: auth_basic identity + SSE-safe proxy to loopback. */
-export function nginxVhost(port: number): string {
+/** Best-effort current OS username, suggested as the default cockpit login. */
+function currentUsername(): string {
+  try {
+    return userInfo().username || 'ops';
+  } catch {
+    return 'ops';
+  }
+}
+
+/** True when ufw is installed and reports `Status: active`. */
+async function ufwIsActive(ctx: InstallContext): Promise<boolean> {
+  const r = await ctx.runner.capture('sh', ['-c', 'command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null || true']);
+  return /Status:\s*active/.test(r.stdout);
+}
+
+/**
+ * The nginx server block: auth_basic identity + SSE-safe proxy to loopback.
+ * `serverName` defaults to the catch-all `_`; the SSL step rewrites it to the
+ * real domain so the `certbot --nginx` plugin can find this vhost to edit.
+ */
+export function nginxVhost(port: number, serverName = '_'): string {
   return `# Managed by cezar server-install — do not edit by hand.
 server {
     listen 80;
     listen [::]:80;
-    server_name _;
+    server_name ${serverName};
 
     auth_basic "cezar";
     auth_basic_user_file ${HTPASSWD};
@@ -69,18 +88,55 @@ const nginxProxyStep: InstallStep = {
       verify: (c) => verifyCommand(c, 'nginx', ['-v']),
     });
 
-    // 2) identity credentials
+    // 2) identity credentials. This is the HTTP Basic-Auth login nginx will
+    //    challenge for over HTTPS — i.e. what you type in the browser to reach
+    //    the cockpit. Suggest the current OS user as a sensible default.
+    const suggestedUser = currentUsername();
     const user = await ctx.ui.text({
-      message: 'Choose the login username for the cockpit',
-      placeholder: 'ops',
+      message: 'Cockpit login username (HTTPS Basic-Auth — you type this in the browser to reach the cockpit)',
+      placeholder: suggestedUser,
+      initialValue: suggestedUser,
       validate: (v) => (v.trim() ? undefined : 'username is required'),
     });
     if (user === CANCEL) throw new StepCancelled();
-    const password = await ctx.ui.password({
-      message: `Set a password for "${user}"`,
-      validate: (v) => (v.length >= 6 ? undefined : 'use at least 6 characters'),
-    });
-    if (password === CANCEL) throw new StepCancelled();
+
+    // Set the cockpit password. Interactive operators may auto-generate a strong
+    // one (shown once) or type their own. Under `--yes` (no human) there is no
+    // menu — the password comes straight from the UI, and the length backstop
+    // below refuses an empty one rather than standing up an open cockpit (H1).
+    let password: string;
+    if (ctx.assumeYes) {
+      const typed = await ctx.ui.password({
+        message: `Set the HTTPS cockpit password for "${user}"`,
+        validate: (v) => (v.length >= 6 ? undefined : 'use at least 6 characters'),
+      });
+      if (typed === CANCEL) throw new StepCancelled();
+      password = String(typed);
+    } else {
+      const how = await ctx.ui.select<'generate' | 'manual'>({
+        message: `Cockpit password for "${user}" (used with the username to log in over HTTPS)`,
+        options: [
+          { value: 'generate', label: 'Generate a strong password for me', hint: 'shown once — save it now' },
+          { value: 'manual', label: 'Type my own password' },
+        ],
+        initialValue: 'generate',
+      });
+      if (how === CANCEL) throw new StepCancelled();
+      if (how === 'generate') {
+        password = generatePassword();
+        ctx.ui.note(
+          `Username: ${user}\nPassword: ${password}\n\nSave these now — this is your cockpit login. cezar stores only a hash; the plaintext is not written anywhere and cannot be recovered.`,
+          'Generated cockpit credentials',
+        );
+      } else {
+        const typed = await ctx.ui.password({
+          message: `Set the HTTPS cockpit password for "${user}"`,
+          validate: (v) => (v.length >= 6 ? undefined : 'use at least 6 characters'),
+        });
+        if (typed === CANCEL) throw new StepCancelled();
+        password = String(typed);
+      }
+    }
     // The non-interactive UI (`--yes`) cannot invent a password and does not run
     // validators — refuse rather than write an empty-password htpasswd (a public
     // cockpit anyone can open). A real install must set a password interactively.
@@ -102,7 +158,8 @@ const nginxProxyStep: InstallStep = {
     // so the file must be group-readable by www-data — 0640 root:root would make
     // every request 500. 0640 root:www-data: readable by nginx, not by others.
     await sudoStep(ctx, {
-      description: 'Write the htpasswd identity file.',
+      description: 'Write the htpasswd identity file that nginx checks on every request.',
+      note: `${HTPASSWD}\n\n${user}:<apr1 hash of your password>`,
       command: `install -d -m 0755 /etc/cezar && printf '%s:%s\\n' ${shquote(user)} ${shquote(hash)} > ${HTPASSWD} && chown root:www-data ${HTPASSWD} && chmod 0640 ${HTPASSWD}`,
       verify: (c) => verifyCommand(c, 'test', ['-f', HTPASSWD]),
     });
@@ -112,13 +169,34 @@ const nginxProxyStep: InstallStep = {
     const defaultWasEnabled = await verifyCommand(ctx, 'test', ['-L', '/etc/nginx/sites-enabled/default']);
 
     // 4) vhost + enable + reload
+    const vhost = nginxVhost(ctx.state.primaryPort);
     await sudoStep(ctx, {
-      description: 'Write the cezar nginx site and reload.',
+      description: 'Write the cezar nginx site, enable it, and reload nginx.',
+      note: `${VHOST_AVAILABLE}\n\n${vhost}`,
       command:
-        writeRootFileCmd(VHOST_AVAILABLE, nginxVhost(ctx.state.primaryPort)) +
+        writeRootFileCmd(VHOST_AVAILABLE, vhost) +
         ` && ln -sf ${VHOST_AVAILABLE} ${VHOST_ENABLED} && rm -f /etc/nginx/sites-enabled/default && nginx -t && systemctl reload nginx`,
       verify: (c) => verifyCommand(c, 'test', ['-f', VHOST_ENABLED]),
     });
+
+    // 5) firewall: if ufw is active, the cockpit is unreachable until 80/443 are
+    //    allowed — a common "installed fine but nothing loads" cause. This is a
+    //    best-effort sub-step of the (required) proxy step: skipping it must not
+    //    fail the whole install, so a StepSkipped is swallowed here.
+    if (!ctx.dryRun && (await ufwIsActive(ctx))) {
+      try {
+        await sudoStep(ctx, {
+          description: 'ufw is active — allow HTTP/HTTPS so the cockpit is reachable.',
+          command: `ufw allow 'Nginx Full'`,
+          skippable: true,
+          skipHint: 'open ports 80 and 443 yourself, or via a cloud firewall',
+          verify: (c) => verifyCommand(c, 'sh', ['-c', "ufw status | grep -q 'Nginx Full'"]),
+        });
+      } catch (err) {
+        if (!(err instanceof StepSkipped)) throw err;
+        ctx.ui.warn('Firewall left unchanged — make sure ports 80 and 443 are reachable, or the cockpit will not load.');
+      }
+    }
 
     const artifacts: StepArtifact[] = [
       owned('file', { path: VHOST_AVAILABLE }),
@@ -178,33 +256,36 @@ const sslStep: InstallStep = {
       verify: (c) => verifyCommand(c, 'certbot', ['--version']),
     });
 
-    if (ctx.dryRun) {
-      ctx.ui.info(`DRY RUN — would run: sudo certbot --nginx -d ${domain} --redirect`);
-    } else {
-      // certbot can legitimately fail on external state (DNS not pointed, LE
-      // rate limit), so it does not go through sudoStep's redo loop — we let the
-      // operator retry or skip and finish by hand later.
-      for (;;) {
-        const code = await ctx.runner.interactive('sudo', [
-          'certbot', '--nginx', '-d', String(domain), '--non-interactive', '--agree-tos', '-m', String(email), '--redirect',
-        ]);
-        if (code === 0) break;
-        ctx.ui.warn(
-          'certbot did not complete. Usual causes: the domain’s DNS is not pointed at this server yet, or a Let’s Encrypt rate limit.',
-        );
-        const choice = await ctx.ui.select<'retry' | 'skip'>({
-          message: 'What now?',
-          options: [
-            { value: 'retry', label: 'Retry certbot' },
-            { value: 'skip', label: 'Skip SSL — I’ll run certbot later', hint: `sudo certbot --nginx -d ${domain}` },
-          ],
-          initialValue: 'skip',
-        });
-        if (choice === CANCEL || choice === 'skip') throw new StepSkipped('certbot did not complete');
-      }
-    }
+    // Point the nginx site's server_name at the domain BEFORE running certbot.
+    // The `certbot --nginx` plugin locates the vhost by matching `server_name`
+    // against `-d <domain>`; with the catch-all `server_name _;` it fails with
+    // "Unable to find a VirtualHost". Doing this first also means that if the
+    // operator skips certbot now, a later manual `certbot --nginx -d <domain>`
+    // just works — no "could not find a matching server" (issue #8).
+    const domainVhost = nginxVhost(ctx.state.primaryPort, String(domain).trim());
+    await sudoStep(ctx, {
+      description: `Point the nginx site at ${String(domain).trim()} so certbot can configure TLS for it.`,
+      note: `${VHOST_AVAILABLE}\n\nserver_name ${String(domain).trim()};`,
+      command:
+        writeRootFileCmd(VHOST_AVAILABLE, domainVhost) +
+        ` && ln -sf ${VHOST_AVAILABLE} ${VHOST_ENABLED} && nginx -t && systemctl reload nginx`,
+      verify: (c) =>
+        verifyCommand(c, 'sh', ['-c', `grep -qF ${shquote(`server_name ${String(domain).trim()}`)} ${VHOST_AVAILABLE}`]),
+    });
 
-    ctx.state.publicUrl = `https://${String(domain)}`;
+    // certbot can legitimately fail on external state (DNS not pointed yet, LE
+    // rate limit). Route it through sudoStep so it honors the sudo/delegate
+    // choice (issue #7) and offers Skip on repeated failure (issue #8) — on
+    // skip, nginx is already configured for a later manual certbot run.
+    await sudoStep(ctx, {
+      description: `Obtain and install a Let’s Encrypt certificate for ${String(domain).trim()} (adds HTTPS + redirect).`,
+      command: `certbot --nginx -d ${shquote(String(domain).trim())} --non-interactive --agree-tos -m ${shquote(String(email).trim())} --redirect`,
+      skippable: true,
+      skipHint: `run later: sudo certbot --nginx -d ${String(domain).trim()}`,
+      verify: (c) => verifyCommand(c, 'test', ['-d', `/etc/letsencrypt/live/${String(domain).trim()}`]),
+    });
+
+    ctx.state.publicUrl = `https://${String(domain).trim()}`;
     // The cert + its auto-renewal timer are `shared`: uninstall lists them, it
     // does not delete them (removing a cert can break other vhosts).
     return {
@@ -346,16 +427,27 @@ const identityStep: InstallStep = {
       ctx.ui.info('DRY RUN — would verify an anonymous request to the proxy returns 401.');
       return { artifacts: [] };
     }
-    const challenged = await verifyCommand(
-      ctx,
-      'curl',
-      ['-s', '-o', '/dev/null', '-w', '%{http_code}', 'http://127.0.0.1/'],
-      (r) => r.stdout.trim() === '401',
-    );
+    const httpCode = (await ctx.runner.capture('curl', ['-s', '-o', '/dev/null', '-w', '%{http_code}', 'http://127.0.0.1/'])).stdout.trim();
+    let challenged = httpCode === '401';
+    // When SSL + --redirect is active, port 80 answers 301 → check the HTTPS
+    // listener instead (self-signed check with -k; the cert is issued for the
+    // domain, and we're hitting it over loopback).
+    if (!challenged && (httpCode === '301' || httpCode === '302')) {
+      const httpsCode = (await ctx.runner.capture('curl', ['-sk', '-o', '/dev/null', '-w', '%{http_code}', 'https://127.0.0.1/'])).stdout.trim();
+      challenged = httpsCode === '401';
+    }
     if (challenged) {
       ctx.ui.success('The proxy challenges unauthenticated requests (401). Identity is enforced.');
     } else {
-      ctx.ui.warn('Could not confirm a 401 challenge — verify nginx is running and the htpasswd file is set.');
+      ctx.ui.warn(
+        `Could not confirm a 401 challenge (nginx answered "${httpCode || 'no response'}" on 127.0.0.1:80).\n` +
+          'The cockpit may be unreachable. Check, on the server:\n' +
+          '  • sudo systemctl status nginx   (is it running?)\n' +
+          '  • sudo nginx -t                 (is the config valid?)\n' +
+          '  • sudo ss -ltnp | grep -E ":80|:443"  (is nginx listening?)\n' +
+          '  • ports 80/443 open in ufw AND any cloud firewall (Hetzner/AWS)\n' +
+          `  • cezar itself running on 127.0.0.1:${ctx.state.primaryPort} (the autostart step, or \`cezar serve\`)`,
+      );
     }
     return { artifacts: [] };
   },

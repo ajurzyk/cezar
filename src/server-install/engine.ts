@@ -51,6 +51,7 @@ function buildContext(state: ServerState, opts: RunOptions): InstallContext {
     reconfigure: opts.reconfigure,
     repoRoot: opts.repoRoot,
     now: opts.now,
+    prefs: {},
   };
 }
 
