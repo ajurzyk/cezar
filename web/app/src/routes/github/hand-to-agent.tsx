@@ -181,6 +181,7 @@ function WorkflowPicker({
   onChange: (workflow: string | null) => void
 }) {
   const [open, setOpen] = useState(false)
+  const listRef = useRef<HTMLDivElement>(null)
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
@@ -197,8 +198,8 @@ function WorkflowPicker({
       </PopoverTrigger>
       <PopoverContent align="start" sideOffset={8} className="w-[320px] max-w-[calc(100vw-2rem)] p-0">
         <Command filter={multiWordFilter}>
-          <CommandInput placeholder="search workflows…" />
-          <CommandList data-slot="gh-workflow-menu" className="max-h-64">
+          <CommandInput placeholder="search workflows…" onInput={() => listRef.current?.scrollTo(0, 0)} />
+          <CommandList ref={listRef} data-slot="gh-workflow-menu" className="max-h-64">
             <CommandEmpty>Nothing matches.</CommandEmpty>
             <CommandGroup>
               {workflows.map((workflowDef) => {
