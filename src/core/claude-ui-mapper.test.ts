@@ -236,7 +236,10 @@ describe('mapClaudeMessage edge cases', () => {
       ],
     });
 
-    const update = mapClaudeMessage(taskUse('toolu_u1', 'TaskUpdate', { taskId: '1', status: 'running' }), state);
+    const update = mapClaudeMessage(
+      taskUse('toolu_u1', 'TaskUpdate', { taskId: '1', status: 'in_progress' }),
+      state,
+    );
     state = update.state;
     expect(update.events.at(-1)).toEqual({
       type: 'plan.updated',
@@ -246,16 +249,74 @@ describe('mapClaudeMessage edge cases', () => {
       ],
     });
 
+    // A numeric taskId is coerced, so the update still lands on task 2.
+    const numeric = mapClaudeMessage(taskUse('toolu_u2', 'TaskUpdate', { taskId: 2, status: 'completed' }), state);
+    state = numeric.state;
+    expect(numeric.events.at(-1)).toEqual({
+      type: 'plan.updated',
+      entries: [
+        { content: 'Wire the dock', status: 'in_progress', activeForm: 'Wiring the dock' },
+        { content: 'Add tests', status: 'completed' },
+      ],
+    });
+
     const unknown = mapClaudeMessage(
-      taskUse('toolu_u2', 'TaskUpdate', { taskId: '9', status: 'completed' }),
+      taskUse('toolu_u3', 'TaskUpdate', { taskId: '9', status: 'completed' }),
       state,
     );
     expect(unknown.events.map((event) => event.type)).toEqual(['item.started']);
     const unchanged = mapClaudeMessage(
-      taskUse('toolu_u3', 'TaskUpdate', { taskId: 2, status: 'pending' }),
+      taskUse('toolu_u4', 'TaskUpdate', { taskId: '2', status: 'completed' }),
       state,
     );
     expect(unchanged.events.map((event) => event.type)).toEqual(['item.started']);
+  });
+
+  it('tolerates `running` as an alias for in_progress, though the schema has no such status', () => {
+    const mapped = mapClaudeMessage(
+      {
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'toolu_u1', name: 'TaskUpdate', input: { taskId: '1', status: 'running' } }],
+        },
+      },
+      mapClaudeMessage(
+        {
+          type: 'assistant',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'tool_use', id: 'toolu_c1', name: 'TaskCreate', input: { subject: 'A', description: 'd' } }],
+          },
+        },
+        createClaudeUiState(),
+      ).state,
+    );
+    expect(mapped.events.at(-1)).toEqual({
+      type: 'plan.updated',
+      entries: [{ content: 'A', status: 'in_progress' }],
+    });
+  });
+
+  it('keeps ids aligned when a blank-subject TaskCreate mints an id we do not render', () => {
+    const taskUse = (id: string, name: string, input: unknown) => ({
+      type: 'assistant' as const,
+      message: { role: 'assistant', content: [{ type: 'tool_use', id, name, input }] },
+    });
+    let state = createClaudeUiState();
+    // The harness accepts a blank subject and mints id '1', so nothing is
+    // rendered but the counter must still advance.
+    const blank = mapClaudeMessage(taskUse('toolu_c1', 'TaskCreate', { subject: '   ', description: 'd' }), state);
+    state = blank.state;
+    expect(blank.events.map((event) => event.type)).toEqual(['item.started']);
+
+    state = mapClaudeMessage(taskUse('toolu_c2', 'TaskCreate', { subject: 'Real task', description: 'd' }), state).state;
+    // The harness calls the real task '2' — its update must land.
+    const update = mapClaudeMessage(taskUse('toolu_u1', 'TaskUpdate', { taskId: '2', status: 'completed' }), state);
+    expect(update.events.at(-1)).toEqual({
+      type: 'plan.updated',
+      entries: [{ content: 'Real task', status: 'completed' }],
+    });
   });
 
   it('drops a task TaskUpdate deletes, and keeps minting ids that never collide', () => {

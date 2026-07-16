@@ -178,7 +178,7 @@ function mapAssistant(msg: Record<string, unknown>, state: ClaudeUiMapperState):
         if (folded) {
           tasks = folded.tasks;
           taskSeq = folded.taskSeq;
-          events.push({ type: 'plan.updated', entries: [...tasks.values()] });
+          if (folded.emit) events.push({ type: 'plan.updated', entries: [...tasks.values()] });
         }
       }
       openTools ??= new Map(state.openTools);
@@ -226,6 +226,8 @@ function normalizePlanStatus(value: unknown): PlanStatus | undefined {
 interface TaskFold {
   readonly tasks: Map<string, PlanEntry>;
   readonly taskSeq: number;
+  /** False when only the id counter moved and the rendered plan did not. */
+  readonly emit: boolean;
 }
 
 /** Fold one Claude task-tool call into the session's incremental plan. */
@@ -237,14 +239,18 @@ function applyTaskTool(
 ): TaskFold | undefined {
   const key = name.toLowerCase();
   if (key === 'taskcreate') {
+    // `subject` is required, so a create without one is rejected and mints no id.
     if (!isRecord(input) || typeof input.subject !== 'string') return undefined;
     const content = input.subject.trim();
-    if (content === '') return undefined;
+    // A blank subject still passes the schema, so the id counter must advance
+    // even when there is nothing worth rendering — skipping it would offset
+    // every later id and silently misroute their updates.
+    if (content === '') return { tasks: new Map(tasks), taskSeq: taskSeq + 1, emit: false };
     const entry: PlanEntry = { content, status: 'pending' };
-    if (typeof input.activeForm === 'string') entry.activeForm = input.activeForm;
+    if (typeof input.activeForm === 'string' && input.activeForm !== '') entry.activeForm = input.activeForm;
     const next = new Map(tasks);
     next.set(String(taskSeq + 1), entry);
-    return { tasks: next, taskSeq: taskSeq + 1 };
+    return { tasks: next, taskSeq: taskSeq + 1, emit: true };
   }
   if (key === 'taskupdate') {
     if (!isRecord(input)) return undefined;
@@ -262,7 +268,7 @@ function applyTaskTool(
     if (input.status === 'deleted') {
       const next = new Map(tasks);
       next.delete(id);
-      return { tasks: next, taskSeq };
+      return { tasks: next, taskSeq, emit: true };
     }
 
     const entry: PlanEntry = { ...existing };
@@ -279,14 +285,16 @@ function applyTaskTool(
         changed = true;
       }
     }
-    if (typeof input.activeForm === 'string' && input.activeForm !== existing.activeForm) {
+    // An empty activeForm would blank the dock's label exactly while the row is
+    // in progress, so it is ignored like an empty subject.
+    if (typeof input.activeForm === 'string' && input.activeForm !== '' && input.activeForm !== existing.activeForm) {
       entry.activeForm = input.activeForm;
       changed = true;
     }
     if (!changed) return undefined;
     const next = new Map(tasks);
     next.set(id, entry);
-    return { tasks: next, taskSeq };
+    return { tasks: next, taskSeq, emit: true };
   }
   return undefined;
 }
