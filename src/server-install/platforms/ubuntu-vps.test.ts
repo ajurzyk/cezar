@@ -43,11 +43,13 @@ describe('ubuntu-vps ssl step', () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  it('is optional and appears before identity', () => {
+  it('orders the steps and only SSL is optional (the service must run)', () => {
     const ids = ubuntuVps.steps(ctxWith({})).map((s) => s.id);
     expect(ids).toEqual(['deps', 'nginx-proxy', 'ssl', 'autostart', 'identity']);
     expect(stepById('ssl').optional).toBe(true);
-    expect(stepById('autostart').optional).toBe(true);
+    // The service step is required now — after install cezar must actually run.
+    expect(stepById('autostart').optional).toBeFalsy();
+    expect(stepById('identity').optional).toBeFalsy();
   });
 
   it('dry-run records the cert as a shared artifact and sets publicUrl', async () => {
@@ -151,5 +153,47 @@ describe('ubuntu-vps autostart step (dry-run)', () => {
     expect(svc?.kind).toBe('owned');
     expect(svc?.scope).toBe('user');
     expect(svc?.name).toBe('cezar.service');
+  });
+});
+
+describe('ubuntu-vps identity step (end-to-end verify)', () => {
+  /** A runner whose curl returns codes by URL/args; sleep + everything else ok. */
+  function curlRunner(byPort: string, throughProxy: string): Runner {
+    return {
+      interactive: async () => 0,
+      capture: async (program, args) => {
+        if (program === 'curl') {
+          const target = args[args.length - 1] ?? '';
+          const code = target.includes(`:${4321}`) ? byPort : throughProxy;
+          return { code: 0, stdout: code, stderr: '' };
+        }
+        return { code: 0, stdout: '', stderr: '' };
+      },
+    };
+  }
+
+  it('passes when cezar is up, anon is 401, and an authed request reaches it', async () => {
+    const ctx = { ...ctxWith({ runner: curlRunner('200', '401') }), assumeYes: false } as InstallContext;
+    ctx.prefs.cockpit = { user: 'ops', password: 'hunter2!' };
+    // authed request (curl -K -) must return 2xx/3xx — model that by returning 200
+    // for the proxy when credentials are supplied via stdin:
+    ctx.runner = {
+      interactive: async () => 0,
+      capture: async (program, args, opts) => {
+        if (program === 'curl') {
+          const target = args[args.length - 1] ?? '';
+          if (target.includes(':4321')) return { code: 0, stdout: '200', stderr: '' }; // upstream up
+          if (opts?.input) return { code: 0, stdout: '200', stderr: '' }; // authed → ok
+          return { code: 0, stdout: '401', stderr: '' }; // anon → challenged
+        }
+        return { code: 0, stdout: '', stderr: '' };
+      },
+    };
+    await expect(stepById('identity').run(ctx)).resolves.toEqual({ artifacts: [] });
+  });
+
+  it('fails the run when cezar is down (nginx would 502)', async () => {
+    const ctx = { ...ctxWith({ runner: curlRunner('000', '401') }), assumeYes: false } as InstallContext;
+    await expect(stepById('identity').run(ctx)).rejects.toBeInstanceOf(StepAborted);
   });
 });

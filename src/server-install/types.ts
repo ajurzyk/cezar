@@ -171,8 +171,16 @@ export interface InstallContext {
    * `sudoMode` is set the first time the operator answers the sudo-vs-delegate
    * prompt — once they pick "I'll run it myself as root", every later privileged
    * command reuses that choice instead of prompting again.
+   *
+   * `cockpit` holds the credentials just set, IN MEMORY ONLY (never persisted to
+   * `server.json`), so the final verify step can make a real authenticated
+   * request through the proxy. Absent on a resume where the proxy step was
+   * already done — the verify step then falls back to structural checks.
    */
-  prefs: { sudoMode?: 'sudo' | 'delegate' };
+  prefs: {
+    sudoMode?: 'sudo' | 'delegate';
+    cockpit?: { user: string; password: string };
+  };
 }
 
 export interface InstallStep {

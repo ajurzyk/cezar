@@ -32,6 +32,52 @@ async function ufwIsActive(ctx: InstallContext): Promise<boolean> {
   return /Status:\s*active/.test(r.stdout);
 }
 
+/** The HTTP status curl saw for a request ("000" = could not connect / no response). */
+async function curlCode(ctx: InstallContext, args: string[], opts?: { input?: string }): Promise<string> {
+  const r = await ctx.runner.capture('curl', ['-s', '-o', '/dev/null', '-w', '%{http_code}', ...args], opts);
+  return r.stdout.trim() || '000';
+}
+
+/** True once cezar answers on 127.0.0.1:<port> (any HTTP status = the process is up). */
+async function isCezarUp(ctx: InstallContext, port: number): Promise<boolean> {
+  const code = await curlCode(ctx, [`http://127.0.0.1:${port}/`]);
+  return code !== '000';
+}
+
+/** Poll the loopback upstream until cezar responds or the attempts run out. */
+async function waitForCezar(ctx: InstallContext, port: number, attempts = 15): Promise<boolean> {
+  for (let i = 0; i < attempts; i++) {
+    if (await isCezarUp(ctx, port)) return true;
+    // `sleep 1` via the runner keeps this testable (no real timers in unit tests).
+    if (i < attempts - 1) await ctx.runner.capture('sh', ['-c', 'sleep 1']);
+  }
+  return false;
+}
+
+/**
+ * After a service is enabled, wait for cezar to actually answer on the loopback
+ * port. A running unit that crash-loops (bad WorkingDirectory, missing build)
+ * would otherwise leave nginx proxying to nothing (502) while the installer
+ * claims success. On failure, point the operator at the service logs.
+ */
+async function confirmCezarRunning(ctx: InstallContext, statusCmd: string, logsCmd: string): Promise<void> {
+  if (ctx.dryRun) {
+    ctx.ui.info(`DRY RUN — would wait for cezar on 127.0.0.1:${ctx.state.primaryPort}.`);
+    return;
+  }
+  const sp = ctx.ui.spinner();
+  sp.start(`Waiting for cezar to start on 127.0.0.1:${ctx.state.primaryPort}…`);
+  const up = await waitForCezar(ctx, ctx.state.primaryPort);
+  sp.stop(up ? 'cezar is running.' : 'cezar did not come up.');
+  if (!up) {
+    ctx.ui.warn(
+      `cezar is not answering on 127.0.0.1:${ctx.state.primaryPort} yet — nginx will return 502 until it is.\n` +
+        `Check the service:\n  • ${statusCmd}\n  • ${logsCmd}\n` +
+        'Common causes: the WorkingDirectory has no built cezar, or the port is wrong.',
+    );
+  }
+}
+
 /**
  * The nginx server block: auth_basic identity + SSE-safe proxy to loopback.
  * `serverName` defaults to the catch-all `_`; the SSL step rewrites it to the
@@ -143,6 +189,9 @@ const nginxProxyStep: InstallStep = {
     if (!ctx.dryRun && String(password).length < 6) {
       throw new StepAborted('a cockpit password (≥6 chars) is required — run server-install without --yes to set one');
     }
+    // Keep the credentials in memory (never persisted) so the final verify step
+    // can prove an authenticated request actually reaches cezar over the proxy.
+    ctx.prefs.cockpit = { user, password };
 
     // 3) htpasswd file. The hash (not the plaintext) is embedded in the write
     //    command; the plaintext is fed to openssl via stdin so it never appears
@@ -348,10 +397,12 @@ async function resolveCezarBin(ctx: InstallContext): Promise<string> {
 
 const autostartStep: InstallStep = {
   id: 'autostart',
-  title: 'Autostart on boot (systemd)',
-  optional: true,
+  // Required: after install the cockpit must actually be serving, so cezar runs
+  // as a systemd service — started now AND enabled on boot. (id kept as
+  // `autostart` for state compatibility.)
+  title: 'Run cezar as a service (systemd — starts now + on boot)',
   async check() {
-    return false; // optional — engine gates with a confirm
+    return false; // always (re)assert the service is installed and running
   },
   async run(ctx): Promise<{ artifacts: StepArtifact[] }> {
     const execStart = await resolveCezarBin(ctx);
@@ -383,16 +434,18 @@ const autostartStep: InstallStep = {
             r.stdout.includes('Linger=yes'),
           ),
       });
+      await confirmCezarRunning(ctx, 'systemctl --user status cezar', 'journalctl --user -u cezar -n 50 --no-pager');
       return { artifacts: [owned('service', { name: UNIT_NAME, scope: 'user', path: unitPath })] };
     }
 
     // System unit fallback.
     const b64 = Buffer.from(systemdUnit(ctx.repoRoot, ctx.state.primaryPort, 'system', execStart), 'utf8').toString('base64');
     await sudoStep(ctx, {
-      description: 'Install the cezar systemd unit and enable it at boot.',
+      description: 'Install the cezar systemd unit, start it now, and enable it at boot.',
       command: `printf %s ${shquote(b64)} | base64 --decode > /etc/systemd/system/${UNIT_NAME} && systemctl daemon-reload && systemctl enable --now ${UNIT_NAME}`,
       verify: (c) => verifyCommand(c, 'systemctl', ['is-enabled', UNIT_NAME]),
     });
+    await confirmCezarRunning(ctx, 'sudo systemctl status cezar', 'sudo journalctl -u cezar -n 50 --no-pager');
     return { artifacts: [owned('service', { name: UNIT_NAME, scope: 'system', path: `/etc/systemd/system/${UNIT_NAME}` })] };
   },
   async undo(ctx, created) {
@@ -418,38 +471,73 @@ const autostartStep: InstallStep = {
 
 const identityStep: InstallStep = {
   id: 'identity',
-  title: 'Identity check (proxy challenges anonymous requests)',
+  title: 'Verify the cockpit end-to-end (auth + HTTPS reach cezar)',
   async check() {
     return false; // always re-verify; it creates nothing
   },
   async run(ctx): Promise<{ artifacts: StepArtifact[] }> {
     if (ctx.dryRun) {
-      ctx.ui.info('DRY RUN — would verify an anonymous request to the proxy returns 401.');
+      ctx.ui.info('DRY RUN — would verify auth (401 for anon) AND that an authenticated request reaches cezar.');
       return { artifacts: [] };
     }
-    const httpCode = (await ctx.runner.capture('curl', ['-s', '-o', '/dev/null', '-w', '%{http_code}', 'http://127.0.0.1/'])).stdout.trim();
-    let challenged = httpCode === '401';
-    // When SSL + --redirect is active, port 80 answers 301 → check the HTTPS
-    // listener instead (self-signed check with -k; the cert is issued for the
-    // domain, and we're hitting it over loopback).
-    if (!challenged && (httpCode === '301' || httpCode === '302')) {
-      const httpsCode = (await ctx.runner.capture('curl', ['-sk', '-o', '/dev/null', '-w', '%{http_code}', 'https://127.0.0.1/'])).stdout.trim();
-      challenged = httpsCode === '401';
+    const port = ctx.state.primaryPort;
+    const https = ctx.state.publicUrl?.startsWith('https://') ?? false;
+    const base = https ? 'https://127.0.0.1/' : 'http://127.0.0.1/';
+    const tls = https ? ['-k'] : [];
+
+    // 1) Is cezar actually listening on the loopback upstream? nginx challenges
+    //    auth *before* proxying, so an anonymous 401 alone does NOT prove the
+    //    backend is up — check the upstream directly.
+    const upstreamUp = await isCezarUp(ctx, port);
+
+    // 2) An anonymous request through nginx must be challenged (auth is active).
+    const anonCode = await curlCode(ctx, [...tls, base]);
+    const authEnforced = anonCode === '401';
+
+    // 3) The real proof: an AUTHENTICATED request reaches cezar (2xx/3xx — not
+    //    401/403 = bad creds, not 502/504 = upstream down). Credentials are read
+    //    from stdin (curl -K -) so they never land in argv. `null` = not testable
+    //    (a resume where the plaintext password is no longer in memory).
+    let authedOk: boolean | null = null;
+    const cred = ctx.prefs.cockpit;
+    if (cred) {
+      const code = await curlCode(ctx, [...tls, '-K', '-', base], { input: `user = "${cred.user}:${cred.password}"\n` });
+      authedOk = /^[23]\d\d$/.test(code);
     }
-    if (challenged) {
-      ctx.ui.success('The proxy challenges unauthenticated requests (401). Identity is enforced.');
-    } else {
-      ctx.ui.warn(
-        `Could not confirm a 401 challenge (nginx answered "${httpCode || 'no response'}" on 127.0.0.1:80).\n` +
-          'The cockpit may be unreachable. Check, on the server:\n' +
-          '  • sudo systemctl status nginx   (is it running?)\n' +
-          '  • sudo nginx -t                 (is the config valid?)\n' +
-          '  • sudo ss -ltnp | grep -E ":80|:443"  (is nginx listening?)\n' +
-          '  • ports 80/443 open in ufw AND any cloud firewall (Hetzner/AWS)\n' +
-          `  • cezar itself running on 127.0.0.1:${ctx.state.primaryPort} (the autostart step, or \`cezar serve\`)`,
+
+    const url = ctx.state.publicUrl ?? `http://<this-server>`;
+    const coreOk = upstreamUp && authEnforced && authedOk !== false;
+    if (coreOk) {
+      ctx.ui.success(
+        `Cockpit is live at ${url} — ${authedOk ? 'an authenticated request reached cezar' : 'auth is enforced and cezar is up'}. ` +
+          'Log in with the username and password you set.',
       );
+      if (!https) {
+        ctx.ui.warn(
+          'This cockpit is HTTP-only (no domain/SSL configured). To serve it over HTTPS with this same auth, ' +
+            're-run: cezar server-install --platform ubuntu-vps --reconfigure ssl',
+        );
+      }
+      return { artifacts: [] };
     }
-    return { artifacts: [] };
+
+    const problems: string[] = [];
+    if (!upstreamUp) problems.push(`cezar is not listening on 127.0.0.1:${port} — the service is down, so nginx returns 502`);
+    if (!authEnforced) problems.push(`nginx did not challenge an anonymous request (got "${anonCode}") — basic auth may not be active`);
+    if (authedOk === false) problems.push('an authenticated request did not reach cezar (bad credentials, or the upstream is down)');
+    ctx.ui.error(
+      `The cockpit is NOT fully working yet:\n` +
+        problems.map((p) => `  • ${p}`).join('\n') +
+        `\n\nDiagnostics on the server:\n` +
+        `  • systemctl --user status cezar   (or: sudo systemctl status cezar)\n` +
+        `  • sudo systemctl status nginx && sudo nginx -t\n` +
+        `  • sudo ss -ltnp | grep -E ':80|:443|:${port}'\n` +
+        `  • ports 80/443 open in ufw AND any cloud firewall (Hetzner/AWS)`,
+    );
+    // Fail the run so `installed` stays false and the exit code is non-zero —
+    // "complete" must mean the cockpit actually works. Re-run to resume (the
+    // service/proxy steps are idempotent).
+    throw new StepAborted('cockpit verification failed — see the diagnostics above');
   },
   async undo() {
     // nothing created
