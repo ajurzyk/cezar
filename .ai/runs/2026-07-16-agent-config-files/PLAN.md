@@ -15,7 +15,7 @@ Status: in-progress
 | 1 | 1.1 | Config catalog (`src/agent-config/catalog.ts`) | done | PENDING |
 | 1 | 1.2 | Home-path helpers (`src/paths.ts`) | done | PENDING |
 | 1 | 1.3 | Validators + JSONC stripper (`src/agent-config/validate.ts`, add `smol-toml`) | done | PENDING |
-| 1 | 1.4 | Reader/writer (`src/agent-config/files.ts`) | todo | — |
+| 1 | 1.4 | Reader/writer (`src/agent-config/files.ts`) | done | PENDING |
 | 1 | 1.5 | API routes + hosted-mode gate (`src/server/server.ts`) | todo | — |
 | 2 | 2.1 | Add `toml` to highlighter `LANG_LOADERS` | todo | — |
 | 2 | 2.2 | Code editor overlay (`web/app/src/components/code-editor.tsx`) | todo | — |
