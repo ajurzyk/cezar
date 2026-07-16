@@ -55,8 +55,8 @@ Let users prevent follow-up inbox clutter for individual tasks without changing 
 
 ### Phase 2: New Task UI and browser contract
 
-- [ ] 2.1 Add the default-on Generate follow-ups toggle, draft/UI-state persistence, create/planned-run payload propagation, and browser/server type mirrors.
-- [ ] 2.2 Add pure form, draft, plan, and component tests for default-on, remembered, and explicitly-off behavior.
+- [x] 2.1 Add the default-on Generate follow-ups toggle, draft/UI-state persistence, create/planned-run payload propagation, and browser/server type mirrors. — 1646b5c
+- [x] 2.2 Add pure form, draft, plan, and component tests for default-on, remembered, and explicitly-off behavior. — 1646b5c
 
 ### Phase 3: Verification and review
 
