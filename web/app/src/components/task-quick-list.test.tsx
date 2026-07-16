@@ -183,6 +183,23 @@ describe('TaskQuickList', () => {
       expect(document.querySelector('[data-run-id="without"] [data-slot="pr-chip"]')).toBeNull()
     })
 
+    it('also appears for a referenced PR — the task worked ON it (#407)', () => {
+      renderList({
+        runs: [
+          run({
+            id: 'ref',
+            title: 'Review task',
+            status: 'review',
+            referencedPullRequestUrl: 'https://github.com/o/r/pull/4170',
+          }),
+        ],
+      })
+      const chip = within(row('ref') as HTMLElement).getByRole('link', {
+        name: 'Open the pull request for Review task',
+      })
+      expect(chip.getAttribute('href')).toBe('https://github.com/o/r/pull/4170')
+    })
+
     it('is a sibling of the row link, not nested inside it', () => {
       // Two independent targets: the row opens the task, the chip opens the PR. An anchor inside
       // an anchor is invalid HTML, and only one of them would ever fire.

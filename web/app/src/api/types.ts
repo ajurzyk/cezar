@@ -79,6 +79,12 @@ export interface RunRecord {
   tokensUsed: number
   costUsd?: number
   pullRequestUrl?: string
+  /** The PR this task is ABOUT (#407) — auto-discovered from conversation references.
+   *  Display tier only: `pullRequestUrl` (the PR this task CREATED) wins, and the
+   *  Draft-PR / Create-PR action gates ignore it. Read via `taskPrUrl()`. */
+  referencedPullRequestUrl?: string
+  /** The referenced tier's working set (distinct PR URLs spotted, capped server-side). */
+  referencedPrCandidates?: string[]
   /** Absent when the run executed in the repo working tree rather than its own worktree. */
   worktreePath?: string
   branch?: string

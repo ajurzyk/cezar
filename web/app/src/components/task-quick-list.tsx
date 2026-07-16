@@ -10,6 +10,7 @@ import { StatusDot } from '@/components/status-dot'
 import { deriveAttention } from '@/lib/attention'
 import { compactTokens, shortAge } from '@/lib/format'
 import { groupRuns, listCounts, runTitle, type ListView, type QuickListRow } from '@/lib/task-groups'
+import { taskPrUrl } from '@/lib/tasks-table'
 import { useNow } from '@/lib/use-now'
 import { cn } from '@/lib/utils'
 
@@ -209,6 +210,7 @@ function RunRow({
 }) {
   const attention = deriveAttention(run)
   const isActive = run.id === currentRunId
+  const prUrl = taskPrUrl(run)
   // A variant row spends its width on what distinguishes the variants (runner and spend) rather
   // than on an age they all share — they started together. Per the mockup.
   const age = variant
@@ -251,17 +253,17 @@ function RunRow({
             sidebar row has no column to hold an em dash open for. */}
         {run.diffStat ? <DiffStatLabel stat={run.diffStat} className="shrink-0 text-[10.5px]" /> : null}
         {/* The PR chip takes the age's slot when there is one — same as the mockup. */}
-        {run.pullRequestUrl || !age ? null : (
+        {prUrl || !age ? null : (
           <span className="shrink-0 text-[11px] text-soft-foreground tabular-nums">{age}</span>
         )}
       </Link>
-      {run.pullRequestUrl ? (
+      {prUrl ? (
         <a
           data-slot="pr-chip"
-          href={run.pullRequestUrl}
+          href={prUrl}
           target="_blank"
           rel="noopener noreferrer"
-          title={run.pullRequestUrl}
+          title={prUrl}
           aria-label={`Open the pull request for ${runTitle(run)}`}
           className="mr-2.5 inline-flex shrink-0 items-center gap-[3px] rounded-full border border-violet/35 px-1.5 py-px font-mono text-[10.5px] font-semibold text-violet hover:bg-violet/10"
         >
