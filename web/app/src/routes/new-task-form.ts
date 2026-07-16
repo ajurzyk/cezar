@@ -179,8 +179,21 @@ export function buildCreateRunBody(opts: {
   worktree?: boolean
   /** true → autonomous run (never pauses for the user). Sent only when on. */
   autonomous?: boolean
+  /** false → do not ask the agent for follow-up todos. Sent only when off. */
+  generateFollowups?: boolean
 }): CreateRunInput {
-  const { task, source, model, runner, runnerCount, variants, images, worktree, autonomous } = opts
+  const {
+    task,
+    source,
+    model,
+    runner,
+    runnerCount,
+    variants,
+    images,
+    worktree,
+    autonomous,
+    generateFollowups,
+  } = opts
   return {
     task,
     ...(source.source === 'skill'
@@ -193,6 +206,7 @@ export function buildCreateRunBody(opts: {
     // Off only matters for a single run — variants always isolate.
     worktree: worktree === false && variants <= 1 ? false : undefined,
     autonomous: autonomous === true ? true : undefined,
+    generateFollowups: generateFollowups === false ? false : undefined,
   }
 }
 

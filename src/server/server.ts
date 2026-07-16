@@ -183,6 +183,7 @@ const uiStateSchema = z
       .optional(),
     lastWorktree: z.boolean().optional(),
     lastAutonomous: z.boolean().optional(),
+    lastGenerateFollowups: z.boolean().optional(),
     // Runs area presentation (#348): the sidebar-list + detail pane, or the
     // full-width table ("task manager") view.
     runsView: z.enum(['list', 'table']).optional(),

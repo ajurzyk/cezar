@@ -61,8 +61,6 @@ interface ActiveRun {
   /** Autonomous mode (#autonomous): never park at `waiting` — auto-nudge the agent to keep
    *  going until it signals done or the safety cap is hit. */
   autonomous?: boolean;
-  /** Follow-up inbox generation. Omitted means enabled for compatibility. */
-  generateFollowups?: boolean;
   autoContinues?: number;
 }
 
@@ -92,6 +90,8 @@ export interface StartRunInput {
    *  user — turn-ends auto-continue until the agent signals done or the safety
    *  cap is hit. No "needs you" is ever raised. */
   autonomous?: boolean;
+  /** Follow-up inbox generation. Omitted means enabled for compatibility. */
+  generateFollowups?: boolean;
 }
 
 /**
