@@ -750,8 +750,9 @@ export class RunManager {
     emit({ type: 'lifecycle', message: `run started — workflow "${workflow.name}" (runner: ${taskBackend})` });
 
     // Worktree per task (spec 006): the agent works on its own branch in
-    // `.ai/cezar/worktrees/<id>`, never in the user's working tree. Not a git
-    // repo, or worktree creation failed → degrade to running in place.
+    // `.ai/cezar/worktrees/<id>`, never in the user's working tree. A Git task
+    // that requests isolation fails closed if the worktree cannot be
+    // established; only explicit opt-out and non-Git modes run in place.
     const repo = await getRepoInfo(this.repoRoot);
     if (repo && input.worktree === false) {
       // Composer opt-out: run in the repo working tree, no branch/worktree
@@ -786,7 +787,18 @@ export class RunManager {
         this.armAutosave(state);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        emit({ type: 'note', message: `worktree creation failed (${message}) — running in the repo working tree` });
+        const error = `worktree creation failed: ${message}`;
+        emit({ type: 'note', message: `${error} — task stopped before workflow execution` });
+        this.store.updateRun(runId, {
+          status: 'failed',
+          error,
+          finishedAt: new Date().toISOString(),
+          currentStepId: undefined,
+        });
+        emit({ type: 'lifecycle', message: `run failed — ${error}` });
+        this.dropActive(runId);
+        void this.pump();
+        return;
       }
     } else {
       emit({ type: 'note', message: 'not a git repository — running in place, one task at a time' });

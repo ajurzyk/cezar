@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -43,7 +43,28 @@ afterEach(() => {
 });
 
 describe('RunManager repository-root isolation', () => {
-  it('serializes parallel runs when worktree creation degrades to the repository root', async () => {
+  it('fails closed without executing a workflow step when worktree creation fails', async () => {
+    const root = fixtureRepo();
+    const store = RunStore.open(join(root, '.ai/cezar'));
+    const manager = new RunManager(store, root);
+    const workflow: WorkflowDef = {
+      name: 'must-not-run-in-root',
+      source: 'built-in',
+      steps: [{ id: 'check', command: 'node -e "require(\'node:fs\').writeFileSync(\'root-was-touched\',\'yes\')"' }],
+    };
+
+    const record = manager.startRun(workflow, { task: 'isolated task' });
+    await waitForRuns(store, [record.id]);
+
+    expect(store.getRun(record.id)?.status).toBe('failed');
+    expect(store.getRun(record.id)?.error).toContain('worktree creation failed');
+    expect(existsSync(join(root, 'root-was-touched'))).toBe(false);
+    const notes = store.readEvents(record.id).filter((event) => event.type === 'note');
+    expect(notes.some((event) => String(event.message).includes('stopped before workflow execution'))).toBe(true);
+    expect(notes.some((event) => String(event.message).includes('exclusive access'))).toBe(false);
+  });
+
+  it('serializes parallel runs that explicitly opt out of worktrees', async () => {
     const root = fixtureRepo();
     const store = RunStore.open(join(root, '.ai/cezar'));
     const manager = new RunManager(store, root);
@@ -59,15 +80,15 @@ describe('RunManager repository-root isolation', () => {
       ],
     };
 
-    const first = manager.startRun(workflow, { task: 'first' });
-    const second = manager.startRun(workflow, { task: 'second' });
+    const first = manager.startRun(workflow, { task: 'first', worktree: false });
+    const second = manager.startRun(workflow, { task: 'second', worktree: false });
     await waitForRuns(store, [first.id, second.id]);
 
     expect(store.getRun(first.id)?.status).toBe('done');
     expect(store.getRun(second.id)?.status).toBe('done');
     for (const id of [first.id, second.id]) {
       const notes = store.readEvents(id).filter((event) => event.type === 'note');
-      expect(notes.some((event) => String(event.message).includes('worktree creation failed'))).toBe(true);
+      expect(notes.some((event) => String(event.message).includes('worktree off'))).toBe(true);
       expect(notes.some((event) => String(event.message).includes('exclusive access'))).toBe(true);
     }
   });

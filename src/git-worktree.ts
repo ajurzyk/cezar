@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
-import type { Dirent } from 'node:fs';
+import { existsSync, realpathSync, type Dirent } from 'node:fs';
 import { readdir, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 
 /**
  * Git worktree per task (spec 006). Each run gets its own branch
@@ -21,6 +21,11 @@ interface GitResult {
   ok: boolean;
   stdout: string;
   stderr: string;
+}
+
+interface RegisteredWorktree {
+  path: string;
+  branch?: string;
 }
 
 /** Run git, never throw — degradation is the caller's policy. */
@@ -64,10 +69,47 @@ export interface WorktreeInfo {
   baseBranch: string;
 }
 
+/** Parse `git worktree list --porcelain` without assuming paths contain no spaces. */
+async function registeredWorktrees(repoRoot: string): Promise<RegisteredWorktree[]> {
+  const res = await git(repoRoot, ['worktree', 'list', '--porcelain']);
+  if (!res.ok) return [];
+  const worktrees: RegisteredWorktree[] = [];
+  let current: RegisteredWorktree | undefined;
+  for (const line of res.stdout.split('\n')) {
+    if (line.startsWith('worktree ')) {
+      if (current) worktrees.push(current);
+      current = { path: line.slice('worktree '.length) };
+    } else if (current && line.startsWith('branch ')) {
+      current.branch = line.slice('branch '.length);
+    } else if (!line && current) {
+      worktrees.push(current);
+      current = undefined;
+    }
+  }
+  if (current) worktrees.push(current);
+  return worktrees;
+}
+
+function worktreeInfo(path: string, branch: string, baseBranch: string): WorktreeInfo {
+  return { path, branch, baseBranch };
+}
+
+/** Git canonicalizes symlinked path prefixes (macOS `/var` → `/private/var`). */
+function canonicalPath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
 /**
- * `git worktree add -b cez/<id8> .ai/cezar/worktrees/<runId> <base>`.
- * Throws with git's stderr when the worktree can't be created — the run
- * manager then falls back to running in the repo working tree.
+ * Establish the task worktree idempotently. Besides the fresh
+ * `git worktree add -b` path, recover the two normal restart/deletion cases:
+ * reuse an already-registered task worktree, or reattach a surviving task
+ * branch after its directory/registration was removed. Existing non-empty
+ * unregistered paths are never deleted because they may hold recoverable
+ * uncommitted work.
  */
 export async function createWorktree(
   repoRoot: string,
@@ -83,10 +125,68 @@ export async function createWorktree(
     base = head.stdout.trim();
   }
   const branch = branchFor(runId);
-  const path = worktreePathFor(repoRoot, runId);
-  const res = await git(repoRoot, ['worktree', 'add', '-b', branch, path, base]);
-  if (!res.ok) throw new Error(`git worktree add failed: ${res.stderr.trim() || res.stdout.trim()}`);
-  return { path, branch, baseBranch: base };
+  const absolutePath = join(canonicalPath(repoRoot), WORKTREES_DIR, runId);
+  const branchRef = `refs/heads/${branch}`;
+
+  // A missing directory can leave stale administrative metadata behind.
+  // Prune first so the checks below describe the filesystem as it exists now.
+  await git(repoRoot, ['worktree', 'prune']);
+  let registered = await registeredWorktrees(repoRoot);
+  let atPath = registered.find((item) => canonicalPath(item.path) === canonicalPath(absolutePath));
+  if (atPath) {
+    if (atPath.branch !== branchRef) {
+      throw new Error(
+        `managed worktree path is registered to ${atPath.branch ?? 'a detached HEAD'}, expected ${branchRef}`,
+      );
+    }
+    return worktreeInfo(atPath.path, branch, base);
+  }
+
+  // If the directory survived but its administrative entry did not, let Git
+  // repair it. This is non-destructive; an unrepairable non-empty directory is
+  // preserved and reported instead of being recursively removed.
+  if (existsSync(absolutePath)) {
+    await git(repoRoot, ['worktree', 'repair', absolutePath]);
+    registered = await registeredWorktrees(repoRoot);
+    atPath = registered.find((item) => canonicalPath(item.path) === canonicalPath(absolutePath));
+    if (atPath) {
+      if (atPath.branch !== branchRef) {
+        throw new Error(
+          `managed worktree path is registered to ${atPath.branch ?? 'a detached HEAD'}, expected ${branchRef}`,
+        );
+      }
+      return worktreeInfo(atPath.path, branch, base);
+    }
+    const entries = await readdir(absolutePath).catch(() => ['unreadable']);
+    if (entries.length > 0) {
+      throw new Error(`managed worktree path already exists and could not be repaired: ${absolutePath}`);
+    }
+  }
+
+  const branchExists = await git(repoRoot, ['show-ref', '--verify', '--quiet', branchRef]);
+  if (branchExists.ok) {
+    // The task branch may still be checked out after its directory was moved.
+    // Reuse only a path whose basename is the full run id; a same-prefix UUID
+    // collision must fail rather than point two tasks at one worktree.
+    const byBranch = registered.find((item) => item.branch === branchRef);
+    if (byBranch) {
+      if (basename(byBranch.path) !== runId) {
+        throw new Error(`task branch ${branch} is already checked out at ${byBranch.path}`);
+      }
+      return worktreeInfo(byBranch.path, branch, base);
+    }
+    const attach = await git(repoRoot, ['worktree', 'add', absolutePath, branch]);
+    if (!attach.ok) {
+      throw new Error(`git worktree reattach failed: ${attach.stderr.trim() || attach.stdout.trim()}`);
+    }
+    return worktreeInfo(absolutePath, branch, base);
+  }
+
+  const create = await git(repoRoot, ['worktree', 'add', '-b', branch, absolutePath, base]);
+  if (!create.ok) {
+    throw new Error(`git worktree add failed: ${create.stderr.trim() || create.stdout.trim()}`);
+  }
+  return worktreeInfo(absolutePath, branch, base);
 }
 
 /** Remove a task worktree and its branch. Best effort — never throws. */
