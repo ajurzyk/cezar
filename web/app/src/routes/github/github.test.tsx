@@ -269,6 +269,18 @@ describe('the GitHub detail pane', () => {
     expect(checks?.textContent).toContain('checks failing')
   })
 
+  it('the checks badge links to the PR checks tab on GitHub, open in a new tab (#415)', async () => {
+    stubFetch()
+    renderAt('/github/prs/137')
+
+    await waitFor(() => expect(detail()).not.toBeNull())
+    const checks = document.querySelector('[data-slot="gh-checks"]')
+    expect(checks?.tagName).toBe('A')
+    expect(checks?.getAttribute('href')).toBe(`${PR_137.url}/checks`)
+    expect(checks?.getAttribute('target')).toBe('_blank')
+    expect(checks?.getAttribute('rel')).toBe('noopener noreferrer')
+  })
+
   it('renders the issue body through the markdown pipeline', async () => {
     stubFetch()
     renderAt('/github/issues/142')

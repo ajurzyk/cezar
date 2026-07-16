@@ -497,7 +497,7 @@ function GithubDetail({
           {item.labels.map((label) => (
             <LabelChip key={label} label={label} color={colors[label]} />
           ))}
-          {item.checks ? <ChecksBadge checks={item.checks} /> : null}
+          {item.checks ? <ChecksBadge checks={item.checks} url={item.url} /> : null}
         </div>
       ) : null}
 
@@ -514,20 +514,36 @@ function GithubDetail({
   )
 }
 
-/** The checks badge — the legacy tab's three phrases, tinted by outcome. */
-function ChecksBadge({ checks }: { checks: NonNullable<GithubItem['checks']> }) {
+/** The checks badge — the legacy tab's three phrases, tinted by outcome. Links out
+ *  to the PR's checks tab on GitHub (issue #415) when a URL is available. */
+function ChecksBadge({ checks, url }: { checks: NonNullable<GithubItem['checks']>; url?: string }) {
+  const className = cn(
+    'text-[11px] font-medium',
+    checks === 'passing' && 'text-success',
+    checks === 'failing' && 'text-danger',
+    checks === 'pending' && 'text-muted-foreground',
+    url && 'hover:underline',
+  )
+  const label = checks === 'passing' ? '✓ checks passing' : checks === 'failing' ? '✗ checks failing' : '○ checks pending'
+
+  if (!url) {
+    return (
+      <span data-slot="gh-checks" data-checks={checks} className={className}>
+        {label}
+      </span>
+    )
+  }
+
   return (
-    <span
+    <a
+      href={`${url}/checks`}
+      target="_blank"
+      rel="noopener noreferrer"
       data-slot="gh-checks"
       data-checks={checks}
-      className={cn(
-        'text-[11px] font-medium',
-        checks === 'passing' && 'text-success',
-        checks === 'failing' && 'text-danger',
-        checks === 'pending' && 'text-muted-foreground',
-      )}
+      className={className}
     >
-      {checks === 'passing' ? '✓ checks passing' : checks === 'failing' ? '✗ checks failing' : '○ checks pending'}
-    </span>
+      {label}
+    </a>
   )
 }
