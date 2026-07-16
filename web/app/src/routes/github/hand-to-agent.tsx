@@ -9,7 +9,7 @@ import {
   XIcon,
   ZapIcon,
 } from 'lucide-react'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { Link } from 'react-router'
 
 import { createRun } from '@/api/client'
@@ -29,7 +29,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { toast } from '@/components/ui/toaster'
 import { SkillPreviewDialog } from '@/components/skill-detail'
 import { githubRunBody } from '@/lib/github-task'
-import { isProjectSkill } from '@/lib/skills'
+import { isProjectSkill, multiWordFilter, skillKeywords } from '@/lib/skills'
 import { cn } from '@/lib/utils'
 
 /**
@@ -196,7 +196,7 @@ function WorkflowPicker({
         </button>
       </PopoverTrigger>
       <PopoverContent align="start" sideOffset={8} className="w-[320px] max-w-[calc(100vw-2rem)] p-0">
-        <Command>
+        <Command filter={multiWordFilter}>
           <CommandInput placeholder="search workflows…" />
           <CommandList data-slot="gh-workflow-menu" className="max-h-64">
             <CommandEmpty>Nothing matches.</CommandEmpty>
@@ -207,7 +207,7 @@ function WorkflowPicker({
                   <CommandItem
                     key={workflowDef.name}
                     value={`workflow ${workflowDef.name}`}
-                    keywords={workflowDef.description ? [workflowDef.description] : undefined}
+                    keywords={skillKeywords(workflowDef.name, workflowDef.description)}
                     data-slot="gh-workflow-option"
                     data-workflow={workflowDef.name}
                     onSelect={() => {
@@ -252,6 +252,7 @@ function SkillsPicker({
 }) {
   const [open, setOpen] = useState(false)
   const [preview, setPreview] = useState<Skill | null>(null)
+  const listRef = useRef<HTMLDivElement>(null)
   const project = skills.filter(isProjectSkill)
   const global = skills.filter((skill) => !isProjectSkill(skill))
 
@@ -262,7 +263,7 @@ function SkillsPicker({
         key={skill.path}
         // The path suffix keeps values unique when a project skill shadows a global one.
         value={`skill ${skill.name} ${skill.path}`}
-        keywords={skill.description ? [skill.description] : undefined}
+        keywords={skillKeywords(skill.name, skill.description)}
         data-slot="gh-skill-option"
         data-skill={skill.name}
         data-selected={isSelected ? 'true' : undefined}
@@ -310,9 +311,9 @@ function SkillsPicker({
           </button>
         </PopoverTrigger>
         <PopoverContent align="start" sideOffset={8} className="w-[336px] max-w-[calc(100vw-2rem)] p-0">
-          <Command>
-            <CommandInput placeholder="search skills…" />
-            <CommandList data-slot="gh-skill-menu" className="max-h-64">
+          <Command filter={multiWordFilter}>
+            <CommandInput placeholder="search skills…" onInput={() => listRef.current?.scrollTo(0, 0)} />
+            <CommandList ref={listRef} data-slot="gh-skill-menu" className="max-h-64">
               <CommandEmpty>Nothing matches.</CommandEmpty>
               {project.length > 0 ? (
                 <CommandGroup heading="Project skills">{project.map((skill) => skillItem(skill, true))}</CommandGroup>

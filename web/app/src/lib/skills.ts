@@ -69,6 +69,29 @@ export function skillUsedBy(workflows: readonly WorkflowDef[], name: string): st
   return out
 }
 
+/**
+ * Multi-word filter for cmdk `<Command filter={…}>`: splits the typed query on whitespace
+ * and requires every word to appear as a case-insensitive substring in the combined
+ * value + keywords text.  "auto review" finds "om-auto-review-pr", "verify ui" finds
+ * "om-auto-verify-ui".  Returns a 0–1 score (0 = no match) so cmdk hides non-matches
+ * and ranks the rest by coverage.
+ */
+export function multiWordFilter(value: string, search: string, keywords?: string[]): number {
+  const words = search.toLowerCase().split(/\s+/).filter(Boolean)
+  if (words.length === 0) return 1
+  const haystack = [value, ...(keywords ?? [])].join(' ').toLowerCase()
+  if (!words.every((word) => haystack.includes(word))) return 0
+  const matched = words.reduce((sum, w) => sum + w.length, 0)
+  return 0.5 + Math.min(matched / haystack.length, 0.5)
+}
+
+/** Split a skill/workflow name on hyphens so each part is independently searchable as a
+ *  cmdk keyword — keeps the description keyword too. */
+export function skillKeywords(name: string, description?: string | null): string[] {
+  const parts = name.split('-').filter(Boolean)
+  return description ? [...parts, description] : parts
+}
+
 /** The `/` autocomplete's list for a typed query: ordered project-first, then filtered in
  *  place. Matches on the name and, as a fallback, the description ("review" should find
  *  `om-code-review` even when the name says less than the description does). */
