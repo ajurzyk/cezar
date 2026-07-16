@@ -1,16 +1,15 @@
 # Handoff — Agent config files
 
-**State:** Phase 1 (backend) complete and verified at Checkpoint 1. Steps 1.1–1.5 done, full fast gate green (1959+4 tests).
+**State:** Phases 1–3 complete and verified at Checkpoint 2. Backend, editor, and both Settings sections landed; full fast gate green (1972+4 tests). Steps 1.1–1.5, 2.1–2.2, 3.1–3.4 done.
 
-**Next concrete action:** Step 2.1 — add `toml` to `LANG_LOADERS` in `web/app/src/lib/highlighter.ts` (one entry + the lazy `@shikijs/langs/toml` chunk) and extend the grammar-allowlist test.
+**Next concrete action:** Step 4.1 — worktree seeding in `src/workflows/run.ts`. After `createWorktree` (around line 745, where `state.cwd = wt.path`), for each catalog entry with `seeded:true` (Claude's `.claude/settings.local.json` and `CLAUDE.local.md`): if the source exists at `repoRoot` AND `git check-ignore` confirms it is ignored, copy it into `state.cwd` and idempotently append it to the common-dir `.git/info/exclude` (append only if absent). Follow the `materializeSkillDir` precedent (`run.ts:910-923`), emit a `note` event. No-op when absent, genuinely tracked, or no worktree.
 
-**Then:** Step 2.2 — `web/app/src/components/code-editor.tsx`, an overlay-on-`<textarea>` reusing the highlighter singleton (mirror the `useFileTokens` hook in `web/app/src/routes/task-git/file-preview.tsx`). No soft wrap; `HIGHLIGHT_MAX_LINES` cap; language from the catalog `format`, not `langForPath`; Tab not trapped.
+**Then:** Step 5.1 — docs (AGENTS.md task-routing row for `src/agent-config/`, README section, BACKWARD_COMPATIBILITY.md §2 route list, CHANGELOG, note the `smol-toml` dep and that `/settings/mcp` now exists).
 
-**Backend contract now live (for Phase 3 client):**
-- `GET /api/agent-config` → `{ editable, files[], userMcp|null }`. `files[]` items: `id, runners, kind, scope, label, path, format, tracked, seeded, holdsMcp, precedence, hotReload?, docsUrl, exists, size, version, writable, readOnlyReason?`.
-- `GET /api/agent-config/:id` → `{ id, path, exists, content, version }` (404 unknown id).
-- `PUT /api/agent-config/:id` `{ content, version }` → 200 `{...read}` | 400 bad-format | 404 unknown | 409 stale-or-hosted.
+**Then:** final gate (step 7) — full `validation.commands` (typecheck, test, test:unit, build, test:package), the e2e suite (editor alignment), design-system pass, then `om-code-review` + `om-auto-review-pr`.
 
-**Invariant to preserve:** the hosted-mode write gate is by-mode and server-side (`src/server/server.ts`, the `capabilities().localHandoff` check in the PUT handler). Do not let the client's `editable` flag be the only gate.
+**Catalog seeded entries:** `claude.local.settings` (`.claude/settings.local.json`), `claude.local.memory` (`CLAUDE.local.md`). These are the ONLY `seeded:true` rows — verify via `CONFIG_FILES.filter(f => f.seeded)`.
+
+**Invariant to preserve:** the hosted-mode write gate is by-mode and server-side (`src/server/server.ts` PUT handler, `capabilities().localHandoff`).
 
 **Worktree:** `.ai/tmp/om-auto-create-pr-loop/agent-config-files-20260716-095538` (branch `feat/agent-config-files`).

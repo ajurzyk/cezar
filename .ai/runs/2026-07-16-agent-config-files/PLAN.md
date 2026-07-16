@@ -17,12 +17,12 @@ Status: in-progress
 | 1 | 1.3 | Validators + JSONC stripper (`src/agent-config/validate.ts`, add `smol-toml`) | done | 1e65078 |
 | 1 | 1.4 | Reader/writer (`src/agent-config/files.ts`) | done | 4d908ce |
 | 1 | 1.5 | API routes + hosted-mode gate (`src/server/server.ts`) | done | a9fa0a1 |
-| 2 | 2.1 | Add `toml` to highlighter `LANG_LOADERS` | done | PENDING |
-| 2 | 2.2 | Code editor overlay (`web/app/src/components/code-editor.tsx`) | done | PENDING |
-| 3 | 3.1 | Registry: add `agent-config`, unhide `mcp`; fix section/route tests | done | PENDING |
-| 3 | 3.2 | API client types + queries | done | PENDING |
-| 3 | 3.3 | `agent-config-section.tsx` | done | PENDING |
-| 3 | 3.4 | `mcp-section.tsx` | done | PENDING |
+| 2 | 2.1 | Add `toml` to highlighter `LANG_LOADERS` | done | 2e5334b |
+| 2 | 2.2 | Code editor overlay (`web/app/src/components/code-editor.tsx`) | done | a9d748b |
+| 3 | 3.1 | Registry: add `agent-config`, unhide `mcp`; fix section/route tests | done | c1933bc |
+| 3 | 3.2 | API client types + queries | done | 3417a96 |
+| 3 | 3.3 | `agent-config-section.tsx` | done | cd2d194 |
+| 3 | 3.4 | `mcp-section.tsx` | done | 847fa22 |
 | 4 | 4.1 | Worktree seeding of the personal layer (`src/workflows/run.ts`) | todo | — |
 | 5 | 5.1 | Docs: AGENTS.md, README, BACKWARD_COMPATIBILITY.md §2, CHANGELOG | todo | — |
 
