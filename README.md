@@ -10,6 +10,13 @@ or a mix of them per step** — and watch it work live: steps, tool calls,
 tokens, diffs, in a browser cockpit that runs entirely on your machine.
 Your CLI logins, your `gh`, your files. No accounts, no database, no cloud.
 
+🔥 **Fire and forget.** Queue a stack of autonomous coding and maintenance
+tasks and let them run — cezar orchestrates them across isolated worktrees,
+in parallel, and picks up follow-ups on its own. Flip the **Autonomous** flag
+and a run never stops to ask; it just finishes. Leave it on a VPS and you get
+a dev team that's *always on* — a mobile-friendly cockpit you can check from
+your phone, working your backlog while you're away.
+
 [A look inside](#a-look-inside) · [What it solves](#what-it-solves) · [Who it's for](#who-its-for) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Core concepts](#core-concepts) · [Cockpit tour](#cockpit-tour) · [Agent backends](#coding-agent-backends)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](#license)
@@ -35,13 +42,13 @@ inside your repo — plain JSON, NDJSON and Markdown you can `cat` and fix by ha
 
 Click any thumbnail for the full-size screenshot.
 
-| Watch a run live | The review gate | Parallel variants |
+| Orchestrate parallel agents | Watch a run live | Parallel variants |
 |:--:|:--:|:--:|
-| [![A running task streaming agent text, tool calls and screenshots live](docs/screenshots/live-run.png)](docs/screenshots/live-run.png) | [![A finished run parked at the review gate — read the diff, send notes back, open the PR, or accept](docs/screenshots/review-gate.png)](docs/screenshots/review-gate.png) | [![Two competing variants of the same task compared side by side — pick the winner](docs/screenshots/variants-compare.png)](docs/screenshots/variants-compare.png) |
-| *Every step, tool call, token and screenshot — streamed as it happens.* | *Nothing auto-merges: inspect the diff, send notes into the same session, or push a draft PR.* | *Run a task ×2/×3 in isolated worktrees, compare the diffs, keep one.* |
-| **Plan before you run** | **Workflow builder** | **GitHub, one click away** |
-| [![The Plan overlay — an AI-drafted chain of steps you approve before anything runs](docs/screenshots/plan-chain.png)](docs/screenshots/plan-chain.png) | [![The workflow builder — drag skills into an ordered chain of agent steps and shell checks](docs/screenshots/workflow-builder.png)](docs/screenshots/workflow-builder.png) | [![The GitHub tab — hand an open issue to the agent with a workflow and skills](docs/screenshots/github-issues.png)](docs/screenshots/github-issues.png) |
-| *Press **Plan first** and review the proposed chain — trim, reorder, then start.* | *Stitch skills and shell checks into a reusable YAML chain, no code.* | *Open issues and PRs via your `gh` — run the agent straight on an issue.* |
+| [![The Tasks view — parallel runs, a queue with positions, per-run cost and peak memory, and a variants compare card](docs/screenshots/task-view.png)](docs/screenshots/task-view.png) | [![A running task streaming agent text, tool calls and screenshots live](docs/screenshots/live-run.png)](docs/screenshots/live-run.png) | [![Two competing variants of the same task compared side by side — pick the winner](docs/screenshots/variants-compare.png)](docs/screenshots/variants-compare.png) |
+| *Run and queue many tasks at once — each in its own worktree — with live status, cost and peak memory per run.* | *Every step, tool call, token and screenshot — streamed as it happens.* | *Run a task ×2/×3 in isolated worktrees, compare the diffs, keep one.* |
+| **Workflow builder** | **GitHub, one click away** | **Skills + fire-and-forget** |
+| [![The workflow builder — drag skills into an ordered chain of agent steps and shell checks](docs/screenshots/workflow-builder.png)](docs/screenshots/workflow-builder.png) | [![The GitHub tab — hand an open issue to the agent with a workflow and skills](docs/screenshots/github-issues.png)](docs/screenshots/github-issues.png) | [![The task composer — pick a skill playbook and flip the Autonomous flag to run unattended](docs/screenshots/skills-autonomous.png)](docs/screenshots/skills-autonomous.png) |
+| *Stitch skills and shell checks into a reusable YAML chain, no code.* | *Open issues and PRs via your `gh` — run the agent straight on an issue.* | *Pick a Markdown skill and flip **Autonomous** — the run never stops to ask, so you can walk away.* |
 
 ---
 
@@ -49,27 +56,39 @@ Click any thumbnail for the full-size screenshot.
 
 Most "AI coding agent" tooling makes you choose between a **terminal** you can't
 see into once it's running, and a **cloud product** that wants your API key, your
-code on their servers, and an account. cezar is the third option: the agent runs
-locally under *your* subscription, and a cockpit shows you exactly what it's doing.
+code on their servers, and an account. cezar is the third option: the agents run
+locally under *your* subscription, a cockpit shows you exactly what they're doing,
+and an orchestrator keeps a whole queue of them moving.
 
-- **No visibility into a running agent.** A headless `claude` run is a black box
+- 👀 **No visibility into a running agent.** A headless `claude` run is a black box
   until it finishes. cezar streams every step — agent text, each tool call and
   its result, tokens and cost per step — live, and keeps the full replay.
-- **One agent, one working tree, one thing at a time.** Kick off a second task and
+- 🧩 **One agent, one working tree, one thing at a time.** Kick off a second task and
   it fights the first over your files. cezar runs each task in its **own git
   worktree**, so two (or three) agents work in parallel without stepping on
   each other — or on the branch you're editing.
-- **The agent finishes and you have to trust it.** cezar ends non-trivial runs at
+- 🗂️ **A backlog that needs babysitting.** Queue a stack of tasks and cezar
+  **orchestrates** them: it runs up to your parallel limit, holds the rest in an
+  ordered queue, and turns an agent's leftover follow-ups into the next tasks
+  from the **Inbox** — one click each. Point it at a GitHub issue and it runs
+  straight on that, so working the tracker down stops being a manual chore.
+- 🤖 **"Autonomous" means you still have to sit there.** Flip the **Autonomous**
+  flag and a run never parks to ask — it keeps going until the task is done. Pair
+  it with a **skill** (a Markdown playbook) and you've got fire-and-forget
+  automation: hand off "fix this", "upgrade that", "triage these" and walk away.
+- ✅ **The agent finishes and you have to trust it.** cezar ends non-trivial runs at
   a **review gate**: inspect the diff, send notes back into the same session, or
   push a **draft PR** — never an auto-merge.
-- **Losing a session when it fails.** Every run records its `claude` session id.
+- ♻️ **Losing a session when it fails.** Every run records its `claude` session id.
   Take it over interactively in one click (`claude --resume <id>`), or continue it
   in-process from the cockpit.
-- **Locked into one agent vendor.** Most tools wed you to a single CLI. cezar
+- 🔀 **Locked into one agent vendor.** Most tools wed you to a single CLI. cezar
   drives **Claude Code, Codex and OpenCode** through one runner seam — set a
   default, pick a backend per task, or mix them inside one workflow (implement
-  with one agent, review with another). See [Agent backends](#coding-agent-backends).
-- **Setup tax.** No wizard, no env vars, no schema. Skills are Markdown, workflows
+  with one agent, review with another) — and through **OpenCode** you can point
+  a run at **open-source or local models**, not just the big vendors. See
+  [Agent backends](#coding-agent-backends).
+- ⚡ **Setup tax.** No wizard, no env vars, no schema. Skills are Markdown, workflows
   are short YAML, and everything degrades: no `gh` → works without PRs, no network
   → local skills still load, no `.ai/skills` → the bare prompt still runs.
 
@@ -164,28 +183,40 @@ auto-merges: a run with changes rests in `review` until you act on it.
 
 Three words, no jargon — **task**, **skill**, **chain**:
 
-- **Tasks** are the unit of work. Every task is a **run**: `queued → running →
+- 📋 **Tasks** are the unit of work. Every task is a **run**: `queued → running →
   review / done / failed / cancelled`, with a live event log, per-step token and
   cost usage, cancel/delete, and — for anything with a diff — a review gate. Paste
   screenshots into the task, or send follow-up messages into the live session
   while it works.
-- **Skills** are Markdown playbooks. Drop them in `.ai/skills/` or
+- 📖 **Skills** are Markdown playbooks. Drop them in `.ai/skills/` or
   `.ai/cezar/skills/`, or pull them from a shared **team skills repo** (a bare
   git clone cached globally in `~/.cache/cez/`). A workflow step references one by
   `skill: <name>` and its body becomes the agent's extra system prompt — so you
   shape *how* the agent reasons without touching code.
-- **Chains (workflows)** stitch steps into a pipeline: agent steps plus shell
+- 🔗 **Chains (workflows)** stitch steps into a pipeline: agent steps plus shell
   checks, with bounded `onFail` retry loops. Write the YAML yourself, build one by
   drag-ordering skills in the **Workflows** tab, or press **Plan first** and let the
   AI draft a chain for your task that you review, trim and start. The built-in
   `quick-task` (one agent step) works with zero setup.
 
-Two moves that make the cockpit worth the browser tab:
+Four moves that make the cockpit worth the browser tab:
 
-- **Parallel variants (×2 / ×3).** Run the same task as competing agents in
+- 🗃️ **Queue + orchestration.** Start as many tasks as you like: cezar runs up to
+  `maxParallel` at once (default **2**; a non-git directory always runs one) and
+  holds the rest in a FIFO queue with visible positions (`#1`, `#2`, …). Cancel a
+  queued task before it starts; the queue even survives a cockpit restart —
+  everything still `queued` is re-enqueued in order. It's the orchestration layer
+  that turns "one agent at a time" into a backlog that drains itself.
+- 🧠 **Memory-aware runs.** Each run's whole process tree is sampled (~2 s) for CPU
+  and RSS, and its **peak memory** is recorded and shown in the task table. Set an
+  optional per-task **memory ceiling** (`memoryLimitMb`) and a run that crosses it
+  is *paused* — freeing its tree so the queue keeps advancing — and resumes on
+  demand. Event logs are append-only NDJSON and streamed rather than re-serialized,
+  and live UI deltas are coalesced so they never hit disk.
+- 🪞 **Parallel variants (×2 / ×3).** Run the same task as competing agents in
   separate worktrees, then compare their diffs side by side and **pick** one —
   the losers are archived and their worktrees cleaned up.
-- **Review gate.** A finished run with changes waits in `review`. Read the diff,
+- 🛡️ **Review gate.** A finished run with changes waits in `review`. Read the diff,
   type notes that go straight back into the agent's session, or push a
   `gh pr create --draft`. You stay the merge button.
 
