@@ -88,6 +88,11 @@ and an orchestrator keeps a whole queue of them moving.
   with one agent, review with another) — and through **OpenCode** you can point
   a run at **open-source or local models**, not just the big vendors. See
   [Agent backends](#coding-agent-backends).
+- 🖥️ **Close the laptop and the work stops.** A local agent only runs while your
+  machine is on and awake. Put cezar on a **VPS, cloud box, or dedicated server**
+  and the cockpit becomes the GUI for an **always-on AI coding team** — kick off,
+  watch and steer tasks from your laptop or **phone**, on the train or between
+  meetings, while the agents keep grinding through the backlog back on the server.
 - ⚡ **Setup tax.** No wizard, no env vars, no schema. Skills are Markdown, workflows
   are short YAML, and everything degrades: no `gh` → works without PRs, no network
   → local skills still load, no `.ai/skills` → the bare prompt still runs.
@@ -199,7 +204,7 @@ Three words, no jargon — **task**, **skill**, **chain**:
   AI draft a chain for your task that you review, trim and start. The built-in
   `quick-task` (one agent step) works with zero setup.
 
-Four moves that make the cockpit worth the browser tab:
+Five moves that make the cockpit worth the browser tab:
 
 - 🗃️ **Queue + orchestration.** Start as many tasks as you like: cezar runs up to
   `maxParallel` at once (default **2**; a non-git directory always runs one) and
@@ -219,6 +224,11 @@ Four moves that make the cockpit worth the browser tab:
 - 🛡️ **Review gate.** A finished run with changes waits in `review`. Read the diff,
   type notes that go straight back into the agent's session, or push a
   `gh pr create --draft`. You stay the merge button.
+- 📱 **Runs on your coding server, drives from your pocket.** The cockpit is a
+  responsive web app streaming over SSE, so the box running cezar can be a
+  **VPS, cloud, or dedicated server** you never sit in front of. Point a browser
+  — laptop or **phone** — at it and run an **always-on coding team** on the move:
+  start tasks, watch them live, and hit the review gate from anywhere.
 
 ---
 
