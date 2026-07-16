@@ -1,11 +1,16 @@
 # Handoff — Agent config files
 
-**State:** in-progress — run folder just landed. No code Steps yet.
+**State:** Phase 1 (backend) complete and verified at Checkpoint 1. Steps 1.1–1.5 done, full fast gate green (1959+4 tests).
 
-**Next concrete action:** Step 1.1 — write `src/agent-config/catalog.ts` (the `ConfigFileDef` type + the hardcoded table + `listConfigFiles(repoRoot)` / `findConfigFile(id)`), pure, no IO. Unit-test id uniqueness/URL-safety, `<repo>/AGENTS.md` = one entry two runners, `$CODEX_HOME` honoured, every entry has non-empty `precedence` + `docsUrl`.
+**Next concrete action:** Step 2.1 — add `toml` to `LANG_LOADERS` in `web/app/src/lib/highlighter.ts` (one entry + the lazy `@shikijs/langs/toml` chunk) and extend the grammar-allowlist test.
 
-**Authoritative source:** `.ai/specs/2026-07-16-agent-config-files.md` — architecture, API, catalog shape, edge cases. Do not redesign.
+**Then:** Step 2.2 — `web/app/src/components/code-editor.tsx`, an overlay-on-`<textarea>` reusing the highlighter singleton (mirror the `useFileTokens` hook in `web/app/src/routes/task-git/file-preview.tsx`). No soft wrap; `HIGHLIGHT_MAX_LINES` cap; language from the catalog `format`, not `langForPath`; Tab not trapped.
 
-**Critical invariant (review-blocker):** hosted-mode gate is BY MODE — when `capabilities().localHandoff` is false every PUT 409s and `userMcp` is withheld. Step 1.5 must regression-test a repo-LOCAL id 409ing under `CEZ_REMOTE=1`.
+**Backend contract now live (for Phase 3 client):**
+- `GET /api/agent-config` → `{ editable, files[], userMcp|null }`. `files[]` items: `id, runners, kind, scope, label, path, format, tracked, seeded, holdsMcp, precedence, hotReload?, docsUrl, exists, size, version, writable, readOnlyReason?`.
+- `GET /api/agent-config/:id` → `{ id, path, exists, content, version }` (404 unknown id).
+- `PUT /api/agent-config/:id` `{ content, version }` → 200 `{...read}` | 400 bad-format | 404 unknown | 409 stale-or-hosted.
 
-**Worktree:** `.ai/tmp/om-auto-create-pr-loop/agent-config-files-20260716-095538` (branch `feat/agent-config-files`, deps installed).
+**Invariant to preserve:** the hosted-mode write gate is by-mode and server-side (`src/server/server.ts`, the `capabilities().localHandoff` check in the PUT handler). Do not let the client's `editable` flag be the only gate.
+
+**Worktree:** `.ai/tmp/om-auto-create-pr-loop/agent-config-files-20260716-095538` (branch `feat/agent-config-files`).
