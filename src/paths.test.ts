@@ -22,3 +22,15 @@ describe('paths', () => {
     expect(serverLockPath()).toBe('/tmp/cez-home-test/server.install.lock');
   });
 });
+
+it('an EMPTY CEZ_HOME falls back to the default instead of a relative cwd path', () => {
+  const original = process.env.CEZ_HOME;
+  process.env.CEZ_HOME = '';
+  try {
+    expect(cezarHomeDir().startsWith('/')).toBe(true);
+    expect(cezarHomeDir().endsWith('/.cezar')).toBe(true);
+  } finally {
+    if (original === undefined) delete process.env.CEZ_HOME;
+    else process.env.CEZ_HOME = original;
+  }
+});

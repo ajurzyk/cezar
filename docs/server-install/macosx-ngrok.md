@@ -37,7 +37,7 @@ npx cezar-cli server-install --platform macosx-ngrok
 | Step | What happens |
 |------|--------------|
 | **Dependencies** | Detects the agent CLIs / `gh` / `git`; offers to `brew install` the missing ones. |
-| **ngrok tunnel** | Installs ngrok if needed, saves your **authtoken**, and configures the tunnel to the cockpit port with **`--basic-auth`** (username + password) and, if provided, your **reserved domain**. |
+| **ngrok tunnel** | Installs ngrok if needed, saves your **authtoken** (passed via the environment, never on a command line `ps` could read), and configures the tunnel to the cockpit port with **`--basic-auth`** (username + password) and, if provided, your **reserved domain**. The agent plist embeds those credentials, so it is written `0600`. |
 | **Autostart** | Installs a **launchd** agent (`~/Library/LaunchAgents/ai.cezar.ngrok.plist`) with `RunAtLoad` + `KeepAlive` so the authenticated tunnel comes back automatically. |
 | **Verify** | Confirms the ngrok basic-auth gate is active. |
 

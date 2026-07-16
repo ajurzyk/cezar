@@ -117,9 +117,12 @@ The installer is also **idempotent** if you need to change the setup itself:
 node dist/index.js server-uninstall --platform ubuntu-vps
 ```
 
-Removes what cezar **owns** (the nginx vhost, htpasswd, systemd unit). Shared
-tools it merely *lists* for you to remove by hand (agent CLIs, `gh`, `certbot`,
-and the TLS certificate — pulling a cert can break other vhosts).
+Removes what cezar **owns**: the nginx vhost, htpasswd, systemd unit, and boot
+linger (when this install enabled it); the distro's default nginx site is
+re-enabled if the install disabled it. Shared tools it merely *lists* for you
+to remove by hand (agent CLIs, `gh`, and — when this install added them —
+`nginx` and `certbot` packages, plus the TLS certificate: pulling a cert can
+break other vhosts).
 
 ---
 

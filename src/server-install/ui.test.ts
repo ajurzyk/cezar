@@ -36,13 +36,42 @@ describe('createClackUi', () => {
   });
 });
 
+describe('createClackUi non-TTY guard', () => {
+  it('refuses a non-interactive terminal instead of hanging on a prompt', () => {
+    // vitest runs without a TTY, so the real backend must throw the clean
+    // preflight error (a piped/ssh run would otherwise hang holding the lock).
+    expect(() => createClackUi()).toThrow(/not interactive.*--yes/s);
+  });
+});
+
 describe('createAutoUi', () => {
   it('answers with initial values / first option and never blocks', async () => {
     const ui = createAutoUi();
     expect(await ui.confirm({ message: 'ok?', initialValue: false })).toBe(false);
     expect(await ui.select({ message: 'pick', options: [{ value: 'x', label: 'X' }] })).toBe('x');
-    expect(await ui.text({ message: 'name', placeholder: 'def' })).toBe('def');
     expect(await ui.multiselect({ message: 'many', options: [] })).toEqual([]);
+  });
+
+  it('never adopts a placeholder as an answer — it is a hint, not input', async () => {
+    const ui = createAutoUi();
+    expect(await ui.text({ message: 'name', placeholder: 'cezar.ngrok.app' })).toBe('');
+    expect(await ui.text({ message: 'name', placeholder: 'def', initialValue: 'real' })).toBe('real');
+  });
+
+  it('strictValidate makes an invalid auto-answer abort instead of flowing on', async () => {
+    const strict = createAutoUi({}, () => {}, { strictValidate: true });
+    await expect(
+      strict.text({ message: 'authtoken', validate: (v) => (v.trim() ? undefined : 'required') }),
+    ).rejects.toThrow(/cannot auto-answer "authtoken".*required/s);
+    await expect(
+      strict.password({ message: 'pw', validate: (v) => (v.length >= 6 ? undefined : 'too short') }),
+    ).rejects.toThrow(/too short/);
+    // a valid answer (via overrides) passes
+    const withAnswer = createAutoUi({ pw: 'longenough' }, () => {}, { strictValidate: true });
+    expect(await withAnswer.password({ message: 'pw', validate: (v) => (v.length >= 6 ? undefined : 'too short') })).toBe('longenough');
+    // lenient (dry-run) mode walks on with the placeholder-grade value
+    const lenient = createAutoUi();
+    expect(await lenient.password({ message: 'pw', validate: (v) => (v.length >= 6 ? undefined : 'too short') })).toBe('');
   });
 
   it('honors per-message answer overrides', async () => {

@@ -149,3 +149,53 @@ describe('verifyCommand', () => {
     expect(await verifyCommand(ctx, 'nginx', ['-v'], (r) => r.stdout.includes('nginx/'))).toBe(true);
   });
 });
+
+describe('sudoStep secret channel (stdin, never argv)', () => {
+  it('sudo mode pipes `input` to stdin and keeps it out of the command argv', async () => {
+    const interactive = vi.fn(async (_p: string, _a: string[], _o?: { input?: string }) => 0);
+    const ctx = makeCtx({
+      assumeYes: true,
+      runner: {
+        interactive,
+        capture: async () => ({ code: 0, stdout: '', stderr: '' }), // passwordless sudo
+      },
+    });
+    await sudoStep(ctx, {
+      description: 'write credentials',
+      command: 'cat > /etc/cezar/htpasswd && chmod 0640 /etc/cezar/htpasswd',
+      input: 'ops:$apr1$secret-hash\n',
+      inputLabel: 'credential line',
+      verify: async () => true,
+    });
+    expect(interactive).toHaveBeenCalledWith(
+      'sudo',
+      ['bash', '-lc', 'cat > /etc/cezar/htpasswd && chmod 0640 /etc/cezar/htpasswd'],
+      { input: 'ops:$apr1$secret-hash\n' },
+    );
+    const argv = interactive.mock.calls[0]?.[1] ?? [];
+    expect(argv.join(' ')).not.toContain('secret-hash'); // the leak the review flagged
+  });
+
+  it('delegate mode shows the payload on screen (not argv) for a paste + Ctrl-D', async () => {
+    const shown: string[] = [];
+    const ui: Ui = {
+      ...scriptedUi(['delegate'], [true]),
+      message: (m) => shown.push(m),
+      info: (m) => shown.push(m),
+    };
+    const ctx = makeCtx({ ui });
+    await sudoStep(ctx, {
+      description: 'write credentials',
+      command: 'cat > /etc/cezar/htpasswd',
+      input: 'ops:$apr1$secret-hash\n',
+      inputLabel: 'credential line',
+      verify: async () => true,
+    });
+    expect(shown.some((m) => m.includes('Ctrl-D'))).toBe(true);
+    expect(shown.some((m) => m.includes('ops:$apr1$secret-hash'))).toBe(true);
+    // the displayed command itself must not embed the payload
+    const displayed = shown.find((m) => m.startsWith('sudo bash -lc'));
+    expect(displayed).toBeDefined();
+    expect(displayed).not.toContain('secret-hash');
+  });
+});

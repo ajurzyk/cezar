@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { cezarLaunchdPlist, launchdPlist, macosxNgrok } from './macosx-ngrok.js';
@@ -78,5 +78,165 @@ describe('macosx-ngrok', () => {
     const undone = await runUninstall(macosxNgrok, run);
     expect(undone.status).toBe('complete');
     expect(loadServerState().steps).toEqual({});
+  });
+});
+
+describe('macosx-ngrok review fixes (PR #423)', () => {
+  let home: string;
+  const original = process.env.CEZ_HOME;
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'cez-mac-fix-'));
+    process.env.CEZ_HOME = home;
+  });
+  afterEach(() => {
+    if (original === undefined) delete process.env.CEZ_HOME;
+    else process.env.CEZ_HOME = original;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  function ngrokStepOf() {
+    const s = macosxNgrok.steps({} as never).find((x) => x.id === 'ngrok');
+    if (!s) throw new Error('no ngrok step');
+    return s;
+  }
+
+  function ctxFor(runner: Runner, over: Record<string, unknown> = {}) {
+    return {
+      state: { schema: 1, installed: false, primaryPort: 4321, steps: {} },
+      ui: {
+        ...createAutoUi(),
+        password: async (o: { message: string }) => (o.message.includes('authtoken') ? 'SECRET-TOKEN' : 'longenough'),
+        text: async (o: { message: string }) => (o.message.includes('domain') ? '' : 'ops'),
+      },
+      runner,
+      save: async () => {},
+      dryRun: false,
+      assumeYes: true,
+      reconfigure: new Set<string>(),
+      repoRoot: '/repo',
+      now: '2026-07-16T00:00:00.000Z',
+      prefs: {},
+      ...over,
+    } as never;
+  }
+
+  it('never puts the authtoken in argv — it travels via NGROK_AUTHTOKEN env', async () => {
+    const interactiveCalls: Array<{ args: string[]; env?: Record<string, string> }> = [];
+    const runner: Runner = {
+      capture: async (_p, args) => {
+        // launchctl print reports loaded; command -v finds ngrok
+        if (args[0] === 'print' || args.join(' ').includes('command -v')) return { code: 0, stdout: '/opt/homebrew/bin/ngrok', stderr: '' };
+        return { code: 0, stdout: '', stderr: '' };
+      },
+      interactive: async (_p, args, o) => {
+        interactiveCalls.push({ args, env: (o as { env?: Record<string, string> } | undefined)?.env });
+        return 0;
+      },
+    };
+    await ngrokStepOf().run(ctxFor(runner));
+    const tokenCall = interactiveCalls.find((c) => c.args.join(' ').includes('add-authtoken'));
+    expect(tokenCall).toBeDefined();
+    expect(tokenCall?.args.join(' ')).not.toContain('SECRET-TOKEN');
+    expect(tokenCall?.args.join(' ')).toContain('$NGROK_AUTHTOKEN');
+    expect(tokenCall?.env?.NGROK_AUTHTOKEN).toBe('SECRET-TOKEN');
+  });
+
+  it('writes the credential-bearing plist 0600', async () => {
+    const runner: Runner = {
+      capture: async (_p, args) => {
+        if (args[0] === 'print' || args.join(' ').includes('command -v')) return { code: 0, stdout: '/usr/local/bin/ngrok', stderr: '' };
+        return { code: 0, stdout: '', stderr: '' };
+      },
+      interactive: async () => 0,
+    };
+    // point HOME-based plist path into the temp dir via a fake homedir? plistPath()
+    // uses the real homedir — instead assert through the file the step wrote.
+    const oldHome = process.env.HOME;
+    process.env.HOME = home; // node's os.homedir() honors $HOME on posix
+    try {
+      await ngrokStepOf().run(ctxFor(runner));
+      const p = join(home, 'Library', 'LaunchAgents', 'ai.cezar.ngrok.plist');
+      const mode = statSync(p).mode & 0o777;
+      expect(mode).toBe(0o600);
+      expect(readFileSync(p, 'utf8')).toContain('ops:longenough'); // creds live here → hence 0600
+    } finally {
+      if (oldHome === undefined) delete process.env.HOME;
+      else process.env.HOME = oldHome;
+    }
+  });
+
+  it('a failed launchctl bootstrap fails the step instead of recording done', async () => {
+    const runner: Runner = {
+      capture: async (_p, args) => {
+        if (args.join(' ').includes('command -v')) return { code: 0, stdout: '/usr/local/bin/ngrok', stderr: '' };
+        if (args[0] === 'print') return { code: 113, stdout: '', stderr: '' }; // not loaded
+        return { code: 0, stdout: '', stderr: '' };
+      },
+      interactive: async (_p, args) => (args[0] === 'bootstrap' ? 5 : 0),
+    };
+    const oldHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      await expect(ngrokStepOf().run(ctxFor(runner))).rejects.toThrow(/launchctl could not load/);
+    } finally {
+      if (oldHome === undefined) delete process.env.HOME;
+      else process.env.HOME = oldHome;
+    }
+  });
+
+  it('undo removes the agent from static label/path even with created:null', async () => {
+    const commands: string[][] = [];
+    const runner: Runner = {
+      capture: async (_p, args) => {
+        commands.push(args);
+        return { code: 0, stdout: '', stderr: '' };
+      },
+      interactive: async () => 0,
+    };
+    const oldHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      await ngrokStepOf().undo(ctxFor(runner), null);
+      expect(commands.some((c) => c[0] === 'bootout' && (c[1] ?? '').includes('ai.cezar.ngrok'))).toBe(true);
+    } finally {
+      if (oldHome === undefined) delete process.env.HOME;
+      else process.env.HOME = oldHome;
+    }
+  });
+
+  it('rejects a scheme-carrying domain (bare hostname only)', async () => {
+    let domainValidate: ((v: string) => string | undefined) | undefined;
+    const runner: Runner = {
+      capture: async (_p, args) => {
+        if (args[0] === 'print' || args.join(' ').includes('command -v')) return { code: 0, stdout: '/usr/local/bin/ngrok', stderr: '' };
+        return { code: 0, stdout: '', stderr: '' };
+      },
+      interactive: async () => 0,
+    };
+    const ctx = ctxFor(runner, {
+      ui: {
+        ...createAutoUi(),
+        password: async () => 'longenough',
+        text: async (o: { message: string; validate?: (v: string) => string | undefined }) => {
+          if (o.message.includes('domain')) {
+            domainValidate = o.validate;
+            return '';
+          }
+          return 'ops';
+        },
+      },
+    });
+    const oldHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      await ngrokStepOf().run(ctx);
+    } finally {
+      if (oldHome === undefined) delete process.env.HOME;
+      else process.env.HOME = oldHome;
+    }
+    expect(domainValidate).toBeDefined();
+    expect(domainValidate?.('https://cezar.ngrok.app')).toBeDefined();
+    expect(domainValidate?.('cezar.ngrok.app')).toBeUndefined();
+    expect(domainValidate?.('')).toBeUndefined(); // blank = ephemeral, allowed
   });
 });

@@ -36,11 +36,21 @@ export const defaultRunner: Runner = {
       else child.stdin?.end();
     });
   },
-  interactive(program, args) {
+  interactive(program, args, opts) {
     return new Promise((resolve) => {
-      const child = spawn(program, args, { stdio: 'inherit' });
+      // With `input`, stdin is piped (sudo still prompts on /dev/tty, not stdin).
+      // `env` adds variables for in-child `$VAR` expansion — the other secret
+      // channel besides stdin that keeps values out of argv.
+      const child = spawn(program, args, {
+        stdio: [opts?.input != null ? 'pipe' : 'inherit', 'inherit', 'inherit'],
+        env: opts?.env ? { ...process.env, ...opts.env } : undefined,
+      });
       child.on('error', () => resolve(127));
       child.on('close', (code) => resolve(code ?? 0));
+      if (opts?.input != null) {
+        child.stdin?.on('error', () => {}); // EPIPE if the child exits early
+        child.stdin?.end(opts.input);
+      }
     });
   },
 };
@@ -56,11 +66,19 @@ export async function verifyCommand(
   return matcher(await ctx.runner.capture(program, args));
 }
 
-/** True when `sudo -n true` succeeds — the box grants passwordless sudo. */
+/**
+ * True when `sudo -n true` succeeds — the box grants passwordless sudo, OR a
+ * sudo timestamp from an earlier command in this session is still cached.
+ * Both mean "sudo will run right now without prompting", which is exactly the
+ * question `--yes` mode needs answered before choosing sudo over delegate.
+ */
 export async function hasPasswordlessSudo(ctx: InstallContext): Promise<boolean> {
   if (ctx.dryRun) return false;
   return (await ctx.runner.capture('sudo', ['-n', 'true'])).code === 0;
 }
+
+/** A bare DNS hostname — no scheme, no path, no shell/nginx metacharacters. */
+export const HOSTNAME_RE = /^(?=.{1,253}$)([a-z0-9](-?[a-z0-9])*\.)+[a-z]{2,}$/i;
 
 export class StepCancelled extends Error {}
 export class StepAborted extends Error {}
@@ -85,6 +103,15 @@ export interface SudoStepOpts {
   skippable?: boolean;
   /** Shown next to the "Skip" choice — how to finish this step by hand later. */
   skipHint?: string;
+  /**
+   * Secret payload fed to the command's stdin (`cat > file` style) so it never
+   * appears in the process argv (`ps`-readable) or in root's shell history.
+   * Sudo mode pipes it; delegate mode shows it once, on screen only, for the
+   * operator to paste after the command.
+   */
+  input?: string;
+  /** Human name for the stdin payload, e.g. "credential line". */
+  inputLabel?: string;
   /** Prove the command actually took effect. Runs after every attempt. */
   verify: (ctx: InstallContext) => Promise<boolean>;
 }
@@ -135,7 +162,11 @@ export async function sudoStep(ctx: InstallContext, opts: SudoStepOpts): Promise
   const display = `sudo bash -lc ${shquote(opts.command)}`;
 
   if (ctx.dryRun) {
-    ui.info(`DRY RUN — would run: ${display}`);
+    ui.info(
+      opts.input != null
+        ? `DRY RUN — would run: ${display} (with the ${opts.inputLabel ?? 'payload'} on stdin)`
+        : `DRY RUN — would run: ${display}`,
+    );
     return;
   }
 
@@ -169,10 +200,19 @@ export async function sudoStep(ctx: InstallContext, opts: SudoStepOpts): Promise
     }
 
     if (mode === 'sudo') {
-      const code = await ctx.runner.interactive('sudo', ['bash', '-lc', opts.command]);
+      const code = await ctx.runner.interactive(
+        'sudo',
+        ['bash', '-lc', opts.command],
+        opts.input != null ? { input: opts.input } : undefined,
+      );
       if (code !== 0) ui.warn(`command exited with code ${code}`);
     } else {
       ui.info('Copy the command above and run it as root on the server (paste into a root shell, or prefix with sudo), then confirm below.');
+      if (opts.input != null) {
+        // Screen-only: pasted as stdin it stays out of argv AND shell history.
+        ui.info(`The command reads from stdin — after starting it, paste this ${opts.inputLabel ?? 'line'} and press Ctrl-D:`);
+        ui.message(opts.input);
+      }
       if (!ctx.assumeYes) {
         const done = await ui.confirm({ message: 'Have you run it as root?', initialValue: true });
         if (done === CANCEL) throw new StepCancelled();

@@ -103,18 +103,28 @@ describe('engine', () => {
   });
 
   it('runDeploy invokes the strategy redeploy and completes', async () => {
+    await runInstall(strategyOf([fakeStep('a')]), opts()); // deploy needs a completed install
     const redeploy = vi.fn(async () => {});
     const res = await runDeploy(strategyOf([fakeStep('a')], redeploy), opts());
     expect(res.status).toBe('complete');
     expect(redeploy).toHaveBeenCalledOnce();
   });
 
+  it('runDeploy fails cleanly when nothing is installed (no redeploy attempt)', async () => {
+    const redeploy = vi.fn(async () => {});
+    const res = await runDeploy(strategyOf([fakeStep('a')], redeploy), opts());
+    expect(res.status).toBe('failed');
+    expect(redeploy).not.toHaveBeenCalled();
+  });
+
   it('runDeploy fails (not throws) when the strategy has no redeploy', async () => {
+    await runInstall(strategyOf([fakeStep('a')]), opts());
     const res = await runDeploy(strategyOf([fakeStep('a')]), opts());
     expect(res.status).toBe('failed');
   });
 
   it('runDeploy reports failed when redeploy aborts (e.g. verify fails)', async () => {
+    await runInstall(strategyOf([fakeStep('a')]), opts());
     const redeploy = vi.fn(async () => { throw new StepAborted('cockpit down'); });
     const res = await runDeploy(strategyOf([fakeStep('a')], redeploy), opts());
     expect(res.status).toBe('failed');
@@ -169,5 +179,116 @@ describe('engine', () => {
     expect(opt.run).not.toHaveBeenCalled();
     expect(res.state.steps.opt?.status).toBe('skipped');
     expect(res.state.installed).toBe(true);
+  });
+});
+
+describe('engine — ledger preservation and uninstall safety (PR #423 review fixes)', () => {
+  let home: string;
+  const original = process.env.CEZ_HOME;
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'cez-engine-'));
+    process.env.CEZ_HOME = home;
+  });
+  afterEach(() => {
+    if (original === undefined) delete process.env.CEZ_HOME;
+    else process.env.CEZ_HOME = original;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it('a cancelled --reconfigure re-run keeps the previously recorded artifacts', async () => {
+    const a = fakeStep('a');
+    await runInstall(strategyOf([a]), opts());
+    expect(loadServerState().steps.a?.created?.artifacts).toHaveLength(1);
+    const a2 = fakeStep('a', {
+      run: vi.fn(async () => {
+        const { StepCancelled } = await import('./steps.js');
+        throw new StepCancelled();
+      }),
+    });
+    const res = await runInstall(strategyOf([a2]), opts({ reconfigure: new Set(['a']) }));
+    expect(res.status).toBe('cancelled');
+    const after = loadServerState().steps.a;
+    expect(after?.status).toBe('pending');
+    expect(after?.created?.artifacts).toHaveLength(1); // ledger survives the cancel
+  });
+
+  it('a failed re-run keeps the ledger and uninstall still reverses it', async () => {
+    const a = fakeStep('a');
+    await runInstall(strategyOf([a]), opts());
+    const aFail = fakeStep('a', { run: vi.fn(async () => { throw new StepAborted('boom'); }) });
+    await runInstall(strategyOf([aFail]), opts({ reinstall: true }));
+    expect(loadServerState().steps.a?.created?.artifacts).toHaveLength(1);
+    const aUndo = fakeStep('a');
+    const res = await runUninstall(strategyOf([aUndo]), opts());
+    expect(res.status).toBe('complete');
+    expect(aUndo.undo).toHaveBeenCalledOnce(); // failed outcomes are undone too
+  });
+
+  it('uninstall refuses a mismatched --platform and leaves the ledger intact', async () => {
+    await runInstall(strategyOf([fakeStep('a')]), opts());
+    const mac: PlatformStrategy = {
+      id: 'macosx-ngrok',
+      label: 'macOS + ngrok',
+      preflight: async () => {},
+      steps: () => [fakeStep('a')],
+    };
+    await expect(runUninstall(mac, opts())).rejects.toThrow(/ubuntu-vps/);
+    expect(loadServerState().steps.a?.status).toBe('done');
+  });
+
+  it('uninstall keeps (and reports) records for step ids this binary does not know', async () => {
+    await runInstall(strategyOf([fakeStep('a'), fakeStep('future-step')]), opts());
+    // an older binary that only knows step "a"
+    const res = await runUninstall(strategyOf([fakeStep('a')]), opts());
+    expect(res.status).toBe('failed'); // not "complete" — something was left behind
+    const state = loadServerState();
+    expect(state.steps['future-step']?.status).toBe('done'); // ledger preserved
+    expect(state.platform).toBe('ubuntu-vps'); // still claims the host
+  });
+
+  it('unknown --reconfigure ids fail fast instead of silently no-opping', async () => {
+    await runInstall(strategyOf([fakeStep('a')]), opts());
+    await expect(
+      runInstall(strategyOf([fakeStep('a')]), opts({ reconfigure: new Set(['htpasswd']) })),
+    ).rejects.toThrow(/unknown --reconfigure step id.*htpasswd.*valid ids/s);
+  });
+
+  it('a dry-run NEVER persists over a real install record (preview cannot poison the ledger)', async () => {
+    await runInstall(strategyOf([fakeStep('a')]), opts()); // real install
+    const before = JSON.stringify(loadServerState());
+    // preview install AND preview uninstall on top of the real record
+    const resI = await runInstall(strategyOf([fakeStep('a')]), opts({ dryRun: true }));
+    expect(resI.status).toBe('complete');
+    const resU = await runUninstall(strategyOf([fakeStep('a')]), opts({ dryRun: true }));
+    expect(resU.status).toBe('complete');
+    // the on-disk ledger is byte-identical: no dryRun stamp, no deleted steps
+    expect(JSON.stringify(loadServerState())).toBe(before);
+    expect(loadServerState().dryRun).toBeUndefined();
+    expect(loadServerState().steps.a?.status).toBe('done');
+  });
+
+  it('a dry-run preview of platform A does not block a real install of platform B', async () => {
+    await runInstall(strategyOf([fakeStep('a')]), opts({ dryRun: true })); // ubuntu-vps preview
+    expect(loadServerState().dryRun).toBe(true);
+    const mac: PlatformStrategy = {
+      id: 'macosx-ngrok',
+      label: 'macOS + ngrok',
+      preflight: async () => {},
+      steps: () => [fakeStep('m')],
+    };
+    const res = await runInstall(mac, opts());
+    expect(res.status).toBe('complete');
+    expect(res.state.platform).toBe('macosx-ngrok');
+  });
+
+  it('a real install does not resume from a CEZ_DRY_RUN preview record', async () => {
+    const dry = fakeStep('a');
+    await runInstall(strategyOf([dry]), opts({ dryRun: true }));
+    expect(loadServerState().dryRun).toBe(true);
+    const real = fakeStep('a');
+    const res = await runInstall(strategyOf([real]), opts());
+    expect(real.run).toHaveBeenCalledOnce(); // did NOT report "already done"
+    expect(res.state.installed).toBe(true);
+    expect(loadServerState().dryRun).toBeUndefined();
   });
 });

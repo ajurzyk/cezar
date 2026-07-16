@@ -75,33 +75,42 @@ export function acquireLock(): () => void {
   const path = serverLockPath();
   mkdirSync(cezarHomeDir(), { recursive: true, mode: 0o700 });
 
-  if (existsSync(path)) {
-    const holder = readLockPid(path);
-    if (holder !== null && holder !== process.pid && isProcessAlive(holder)) {
-      throw new LockHeldError(
-        `another server-install/uninstall is already running (pid ${holder}). ` +
-          `If that is wrong, remove ${path} and retry.`,
-      );
-    }
-    // stale (dead pid, unreadable, or our own) — reclaim
+  // `wx` makes creation atomic — a plain exists-then-write check would let two
+  // concurrent wizards both "acquire". One reclaim retry handles a stale lock;
+  // if the second attempt still collides, someone live beat us to it.
+  for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      rmSync(path);
-    } catch {
-      // fall through; write below will overwrite
+      writeFileSync(path, `${process.pid}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        try {
+          if (existsSync(path) && readLockPid(path) === process.pid) rmSync(path);
+        } catch {
+          // non-fatal
+        }
+      };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      const holder = readLockPid(path);
+      if (holder !== null && holder !== process.pid && isProcessAlive(holder)) {
+        throw new LockHeldError(
+          `another server-install/uninstall is already running (pid ${holder}). ` +
+            `If that is wrong, remove ${path} and retry.`,
+        );
+      }
+      // stale (dead pid, unreadable, or our own) — reclaim and retry the wx write
+      try {
+        rmSync(path);
+      } catch {
+        // raced with another reclaimer; the retry below decides
+      }
     }
   }
-
-  writeFileSync(path, `${process.pid}\n`, { encoding: 'utf8', mode: 0o600 });
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    try {
-      if (existsSync(path) && readLockPid(path) === process.pid) rmSync(path);
-    } catch {
-      // non-fatal
-    }
-  };
+  throw new LockHeldError(
+    `could not acquire ${path} — another server-install/uninstall grabbed it first; retry in a moment.`,
+  );
 }
 
 function readLockPid(path: string): number | null {

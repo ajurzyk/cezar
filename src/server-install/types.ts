@@ -44,9 +44,14 @@ export const stepCreatedSchema = z
   .nullable();
 export type StepCreated = z.infer<typeof stepCreatedSchema>;
 
-/** Persisted per-step outcome — the `steps` map in `server.json`. */
+/**
+ * Persisted per-step outcome — the `steps` map in `server.json`. A status this
+ * version doesn't know (written by a newer cezar) degrades to `failed`, which
+ * keeps the record AND keeps it on uninstall's undo path — never to a parse
+ * failure that would discard the whole ledger.
+ */
 export const stepOutcomeSchema = z.object({
-  status: z.enum(STEP_STATUSES),
+  status: z.enum(STEP_STATUSES).catch('failed'),
   created: stepCreatedSchema.optional().catch(null),
 });
 export type StepOutcome = z.infer<typeof stepOutcomeSchema>;
@@ -56,21 +61,38 @@ export type StepOutcome = z.infer<typeof stepOutcomeSchema>;
  * field is optional / defaulted so an older cezar still parses a newer file
  * (BACKWARD_COMPATIBILITY cross-version-state rule). No secrets live here.
  */
-export const serverStateSchema = z.object({
-  schema: z.literal(1).catch(1),
-  platform: z.enum(PLATFORM_IDS).optional(),
-  /** Flips true only when every required step is `done`. */
-  installed: z.boolean().default(false),
-  /** ISO stamp set by the caller (Date.now is unavailable in some contexts). */
-  createdAt: z.string().optional(),
-  updatedAt: z.string().optional(),
-  primaryPort: z.number().int().positive().default(4321),
-  /** Public URL / identity user surfaced at the end — display only. */
-  publicUrl: z.string().optional(),
-  /** macOS+ngrok free tier: the tunnel URL changes across restarts. */
-  ephemeral: z.boolean().optional(),
-  steps: z.record(z.string(), stepOutcomeSchema).default({}),
-});
+export const serverStateSchema = z
+  .object({
+    schema: z.literal(1).catch(1),
+    /**
+     * Free string, not an enum: a `server.json` written by a newer cezar with a
+     * platform this version doesn't ship must still parse — the registry lookup
+     * is where "unknown platform" is decided, with the ledger intact.
+     */
+    platform: z.string().min(1).optional().catch(undefined),
+    /** Flips true only when every required step is `done`. */
+    installed: z.boolean().default(false).catch(false),
+    /** True when this record was written by a CEZ_DRY_RUN preview — a real
+     * install/uninstall treats it as no record at all (self-healing). */
+    dryRun: z.boolean().optional().catch(undefined),
+    /** ISO stamp set by the caller (Date.now is unavailable in some contexts). */
+    createdAt: z.string().optional().catch(undefined),
+    updatedAt: z.string().optional().catch(undefined),
+    primaryPort: z.number().int().positive().default(4321).catch(4321),
+    /** Public URL / identity user surfaced at the end — display only. */
+    publicUrl: z.string().optional().catch(undefined),
+    /** macOS+ngrok free tier: the tunnel URL changes across restarts. */
+    ephemeral: z.boolean().optional().catch(undefined),
+    // A single malformed entry degrades to a `failed` record (undo still runs
+    // from constants), never to losing every other step's ledger.
+    steps: z
+      .record(z.string(), stepOutcomeSchema.catch({ status: 'failed', created: null }))
+      .default({})
+      .catch({}),
+  })
+  // Unknown top-level fields written by a newer cezar survive a load+save
+  // round-trip — the file's own additive-safe contract.
+  .passthrough();
 export type ServerState = z.infer<typeof serverStateSchema>;
 
 /** Freshly-initialized state (no install yet). */
@@ -151,8 +173,13 @@ export interface Runner {
    * (passwords, tokens) so they never appear in the process's argv.
    */
   capture(program: string, args: string[], opts?: { input?: string }): Promise<CommandResult>;
-  /** Inherit stdio (streams live output). Resolves with the exit code. */
-  interactive(program: string, args: string[]): Promise<number>;
+  /**
+   * Inherit stdio (streams live output). Resolves with the exit code.
+   * `opts.input` pipes the child's stdin instead of inheriting it — the
+   * secret-passing channel for privileged commands (`cat > file` style), so
+   * credentials never ride in argv where `ps` can read them.
+   */
+  interactive(program: string, args: string[], opts?: { input?: string; env?: Record<string, string> }): Promise<number>;
 }
 
 /** Live install/uninstall context, threaded through every step. */

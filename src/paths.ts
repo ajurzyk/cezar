@@ -13,7 +13,9 @@ import { join } from 'node:path';
  * homedir logic elsewhere.
  */
 export function cezarHomeDir(): string {
-  return process.env.CEZ_HOME ?? join(homedir(), '.cezar');
+  // `|| undefined` so an EMPTY CEZ_HOME (e.g. `CEZ_HOME= cezar …`) falls back
+  // to the default instead of yielding relative paths in the cwd.
+  return (process.env.CEZ_HOME || undefined) ?? join(homedir(), '.cezar');
 }
 
 /**

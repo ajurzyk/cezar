@@ -220,3 +220,176 @@ describe('ubuntu-vps identity step (end-to-end verify)', () => {
     await expect(stepById('identity').run(ctx)).rejects.toBeInstanceOf(StepAborted);
   });
 });
+
+describe('ubuntu-vps review fixes (PR #423)', () => {
+  it('ufwIsActive reads the world-readable ufw.conf, never root-only `ufw status`', async () => {
+    const calls: string[][] = [];
+    const runner: Runner = {
+      capture: async (_p, args) => {
+        calls.push(args);
+        return { code: 0, stdout: 'ufw-enabled\n', stderr: '' };
+      },
+      interactive: async () => 0,
+    };
+    // reach the sub-step via the proxy step's run with everything else stubbed green
+    const ui = {
+      ...createAutoUi(),
+      text: async () => 'ops',
+      password: async () => 'longenough',
+    } as Ui;
+    const interactive = vi.fn(async () => 0);
+    const captured: Array<{ args: string[]; input?: string }> = [];
+    const ctx = {
+      ...ctxWith({ ui }),
+      runner: {
+        capture: async (_p: string, args: string[], o?: { input?: string }) => {
+          captured.push({ args, input: o?.input });
+          if (args.join(' ').includes('openssl') || args[0] === 'passwd') return { code: 0, stdout: '$apr1$abc$hash', stderr: '' };
+          if (args.join(' ').includes('ufw.conf')) return { code: 0, stdout: '', stderr: '' }; // ufw not enabled
+          return { code: 0, stdout: '', stderr: '' };
+        },
+        interactive,
+      },
+    } as InstallContext;
+    await stepById('nginx-proxy').run(ctx);
+    // no capture or interactive call may contain a root-only bare `ufw status` probe
+    const probeCalls = captured.map((c) => c.args.join(' ')).filter((a) => a.includes('ufw'));
+    for (const probe of probeCalls) expect(probe).toContain('ufw.conf');
+    expect(calls.length).toBe(0); // unused first runner sanity
+  });
+
+  it('htpasswd credential line goes to sudo stdin, not argv (hash never ps-visible)', async () => {
+    const ui = { ...createAutoUi(), text: async () => 'ops', password: async () => 'longenough' } as Ui;
+    const interactiveCalls: Array<{ args: string[]; input?: string }> = [];
+    const ctx = {
+      ...ctxWith({ ui }),
+      runner: {
+        capture: async (p: string, args: string[]) => {
+          if (p === 'openssl') return { code: 0, stdout: '$apr1$abc$secret-hash', stderr: '' };
+          return { code: 0, stdout: '', stderr: '' };
+        },
+        interactive: async (_p: string, args: string[], o?: { input?: string }) => {
+          interactiveCalls.push({ args, input: o?.input });
+          return 0;
+        },
+      },
+    } as InstallContext;
+    await stepById('nginx-proxy').run(ctx);
+    const htpasswdCall = interactiveCalls.find((c) => c.args.join(' ').includes('htpasswd'));
+    expect(htpasswdCall).toBeDefined();
+    expect(htpasswdCall?.args.join(' ')).not.toContain('secret-hash');
+    expect(htpasswdCall?.input).toBe('ops:$apr1$abc$secret-hash\n');
+  });
+
+  it('username validation rejects ":" and whitespace (htpasswd separator)', () => {
+    let captured: ((v: string) => string | undefined) | undefined;
+    const ui = {
+      ...createAutoUi(),
+      text: async (o: { message: string; validate?: (v: string) => string | undefined }) => {
+        if (o.message.toLowerCase().includes('username')) captured = o.validate;
+        return 'ops';
+      },
+      password: async () => 'longenough',
+    } as Ui;
+    const runner: Runner = {
+      capture: async (p) => ({ code: 0, stdout: p === 'openssl' ? '$apr1$abc$hash' : '', stderr: '' }),
+      interactive: async () => 0,
+    };
+    const ctx = { ...ctxWith({ ui, runner }) } as InstallContext;
+    return stepById('nginx-proxy')
+      .run(ctx)
+      .then(() => {
+        expect(captured).toBeDefined();
+        expect(captured?.('team:ops')).toMatch(/:/);
+        expect(captured?.('team ops')).toBeDefined();
+        expect(captured?.('ops')).toBeUndefined();
+      });
+  });
+
+  it('identity probe escapes `"` and `\\` in curl config credentials', async () => {
+    const inputs: string[] = [];
+    const ctx = {
+      ...ctxWith({}),
+      prefs: { cockpit: { user: 'ops', password: 'my"pa\\ss1' } },
+      runner: {
+        capture: async (_p: string, args: string[], o?: { input?: string }) => {
+          if (o?.input) inputs.push(o.input);
+          // upstream up + anon 401 + authed 200
+          const joined = args.join(' ');
+          if (joined.includes('4321')) return { code: 0, stdout: '200', stderr: '' };
+          if (o?.input) return { code: 0, stdout: '200', stderr: '' };
+          return { code: 0, stdout: '401', stderr: '' };
+        },
+        interactive: async () => 0,
+      },
+    } as InstallContext;
+    await stepById('identity').run(ctx);
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]).toBe('user = "ops:my\\"pa\\\\ss1"\n');
+  });
+
+  it('SSL re-run with TLS already configured updates server_name in place (no plain-HTTP rewrite)', async () => {
+    const ui = {
+      ...createAutoUi(),
+      text: async (o: { message: string }) => (o.message.includes('Domain') ? 'cezar.example.com' : 'you@example.com'),
+    } as Ui;
+    const commands: string[] = [];
+    const ctx = {
+      ...ctxWith({ ui }),
+      runner: {
+        capture: async (_p: string, args: string[]) => {
+          const joined = args.join(' ');
+          if (joined.includes('ssl_certificate')) return { code: 0, stdout: '', stderr: '' }; // TLS present
+          return { code: 0, stdout: '', stderr: '' };
+        },
+        interactive: async (_p: string, args: string[]) => {
+          commands.push(args.join(' '));
+          return 0;
+        },
+      },
+    } as InstallContext;
+    await stepById('ssl').run(ctx);
+    const rewrites = commands.filter((c) => c.includes('base64 --decode'));
+    const seds = commands.filter((c) => c.includes('sed -i') && c.includes('server_name'));
+    expect(rewrites).toHaveLength(0); // never wipes certbot's 443 config
+    expect(seds).toHaveLength(1);
+  });
+
+  it('uninstall reverses linger only when install recorded enabling it', async () => {
+    const commands: string[] = [];
+    const runner: Runner = {
+      capture: async () => ({ code: 0, stdout: 'Linger=no', stderr: '' }),
+      interactive: async (_p, args) => {
+        commands.push(args.join(' '));
+        return 0;
+      },
+    };
+    const ctx = { ...ctxWith({ runner }) } as InstallContext;
+    await stepById('autostart').undo(ctx, {
+      artifacts: [
+        { kind: 'owned', type: 'service', name: 'cezar.service', scope: 'user', path: '/tmp/does-not-exist.service' },
+        { kind: 'owned', type: 'linger', name: 'ops' },
+      ],
+    });
+    expect(commands.some((c) => c.includes('disable-linger'))).toBe(true);
+    // and without the linger artifact, it is left alone
+    commands.length = 0;
+    await stepById('autostart').undo(ctx, {
+      artifacts: [{ kind: 'owned', type: 'service', name: 'cezar.service', scope: 'user', path: '/tmp/does-not-exist.service' }],
+    });
+    expect(commands.some((c) => c.includes('disable-linger'))).toBe(false);
+  });
+
+  it('systemd unit escapes % so specifier expansion cannot corrupt PATH/ExecStart', () => {
+    const oldPath = process.env.PATH;
+    process.env.PATH = `/weird%dir/bin:${oldPath ?? ''}`;
+    try {
+      const unit = systemdUnit('/repo', 4321, 'user', '/usr/bin/node /x/dist/index.js');
+      expect(unit).toContain('/weird%%dir/bin');
+      expect(unit).not.toMatch(/Environment=PATH=[^\n]*\/weird%dir/);
+    } finally {
+      if (oldPath === undefined) delete process.env.PATH;
+      else process.env.PATH = oldPath;
+    }
+  });
+});

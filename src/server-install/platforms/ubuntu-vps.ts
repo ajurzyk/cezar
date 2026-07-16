@@ -27,10 +27,18 @@ function currentUsername(): string {
   }
 }
 
-/** True when ufw is installed and reports `Status: active`. */
+/**
+ * True when ufw is installed and enabled. `ufw status` needs root and the
+ * installer is mandatorily non-root, so it always failed — instead read
+ * `/etc/ufw/ufw.conf` (world-readable), whose `ENABLED=yes` is the same truth
+ * `ufw enable` maintains.
+ */
 async function ufwIsActive(ctx: InstallContext): Promise<boolean> {
-  const r = await ctx.runner.capture('sh', ['-c', 'command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null || true']);
-  return /Status:\s*active/.test(r.stdout);
+  const r = await ctx.runner.capture('sh', [
+    '-c',
+    'grep -qi "^ENABLED=yes" /etc/ufw/ufw.conf 2>/dev/null && echo ufw-enabled || true',
+  ]);
+  return r.stdout.includes('ufw-enabled');
 }
 
 /** The HTTP status curl saw for a request ("000" = could not connect / no response). */
@@ -154,7 +162,10 @@ const nginxProxyStep: InstallStep = {
     return nginxOk && vhostOk;
   },
   async run(ctx): Promise<{ artifacts: StepArtifact[] }> {
-    // 1) nginx
+    // 1) nginx. Record the package as a `shared` artifact only when this run
+    //    installed it, so uninstall can list it for manual removal without
+    //    claiming a pre-existing nginx.
+    const nginxWasPresent = await verifyCommand(ctx, 'nginx', ['-v']);
     await sudoStep(ctx, {
       description: 'Install nginx (the public TLS + auth front for cezar).',
       command: 'apt-get update && apt-get install -y nginx',
@@ -165,13 +176,20 @@ const nginxProxyStep: InstallStep = {
     //    challenge for over HTTPS — i.e. what you type in the browser to reach
     //    the cockpit. Suggest the current OS user as a sensible default.
     const suggestedUser = currentUsername();
-    const user = await ctx.ui.text({
+    const userAnswer = await ctx.ui.text({
       message: 'Cockpit login username (HTTPS Basic-Auth — you type this in the browser to reach the cockpit)',
       placeholder: suggestedUser,
       initialValue: suggestedUser,
-      validate: (v) => (v.trim() ? undefined : 'username is required'),
+      // htpasswd's line format is `user:hash` — a ":" in the username would
+      // silently corrupt it into a login that can never succeed.
+      validate: (v) => {
+        if (!v.trim()) return 'username is required';
+        if (/[:\s]/.test(v.trim())) return 'no ":" or whitespace — htpasswd uses ":" as its separator';
+        return undefined;
+      },
     });
-    if (user === CANCEL) throw new StepCancelled();
+    if (userAnswer === CANCEL) throw new StepCancelled();
+    const user = String(userAnswer).trim();
 
     // Set the cockpit password. Interactive operators may auto-generate a strong
     // one (shown once) or type their own. Under `--yes` (no human) there is no
@@ -233,10 +251,14 @@ const nginxProxyStep: InstallStep = {
     // nginx workers run as www-data and read auth_basic_user_file per request,
     // so the file must be group-readable by www-data — 0640 root:root would make
     // every request 500. 0640 root:www-data: readable by nginx, not by others.
+    // The credential line travels on STDIN (`cat > file`), never in argv — the
+    // apr1 hash is offline-crackable, and argv is world-readable via `ps`.
     await sudoStep(ctx, {
       description: 'Write the htpasswd identity file that nginx checks on every request.',
       note: `${HTPASSWD}\n\n${user}:<apr1 hash of your password>`,
-      command: `install -d -m 0755 /etc/cezar && printf '%s:%s\\n' ${shquote(user)} ${shquote(hash)} > ${HTPASSWD} && chown root:www-data ${HTPASSWD} && chmod 0640 ${HTPASSWD}`,
+      command: `install -d -m 0755 /etc/cezar && cat > ${HTPASSWD} && chown root:www-data ${HTPASSWD} && chmod 0640 ${HTPASSWD}`,
+      input: `${user}:${hash}\n`,
+      inputLabel: 'credential line (username:hash)',
       verify: (c) => verifyCommand(c, 'test', ['-f', HTPASSWD]),
     });
 
@@ -262,10 +284,31 @@ const nginxProxyStep: InstallStep = {
       try {
         await sudoStep(ctx, {
           description: 'ufw is active — allow HTTP/HTTPS so the cockpit is reachable.',
-          command: `ufw allow 'Nginx Full'`,
+          // Self-verifying: the trailing grep makes the (root) command itself
+          // fail when the rule did not land — needed because rule listing also
+          // requires root, so the unprivileged verify below can't always check.
+          command: `ufw allow 'Nginx Full' && ufw status | grep -qi 'Nginx Full'`,
           skippable: true,
           skipHint: 'open ports 80 and 443 yourself, or via a cloud firewall',
-          verify: (c) => verifyCommand(c, 'sh', ['-c', "ufw status | grep -q 'Nginx Full'"]),
+          verify: async (c) => {
+            if ((await c.runner.capture('sudo', ['-n', 'true'])).code === 0) {
+              return (
+                (await c.runner.capture('sudo', ['-n', 'bash', '-lc', "ufw status | grep -qi 'Nginx Full'"])).code === 0
+              );
+            }
+            // No root and no human in the loop (`--yes`): nobody ran the
+            // command, so it cannot have "verified itself" — fail, which the
+            // skippable path converts into the loud firewall warning below.
+            if (c.assumeYes) return false;
+            // Interactive delegate: the operator confirmed running the
+            // self-verifying command (the trailing grep fails their paste if
+            // the rule is missing); we cannot re-check without root.
+            c.ui.warn(
+              'Cannot list ufw rules without root — trusting the self-verifying command you just ran. ' +
+                'Double-check ports 80/443 are reachable.',
+            );
+            return true;
+          },
         });
       } catch (err) {
         if (!(err instanceof StepSkipped)) throw err;
@@ -279,6 +322,9 @@ const nginxProxyStep: InstallStep = {
       owned('htpasswd', { path: HTPASSWD, name: user }),
     ];
     if (defaultWasEnabled) artifacts.push(owned('nginx-default', { path: '/etc/nginx/sites-enabled/default' }));
+    if (!nginxWasPresent) {
+      artifacts.push(shared('package', { name: 'nginx', removeHint: 'sudo apt-get remove -y nginx' }));
+    }
     return { artifacts };
   },
   async undo(ctx, created) {
@@ -289,6 +335,15 @@ const nginxProxyStep: InstallStep = {
     const restoreClause = restoreDefault
       ? ` && { [ -e /etc/nginx/sites-available/default ] && ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default || true; }`
       : '';
+    // `shared` packages (nginx, when this install added it) are listed, never
+    // auto-removed — the operator may have started depending on them.
+    const sharedPkgs = (created?.artifacts ?? []).filter((a) => a.kind === 'shared');
+    if (sharedPkgs.length > 0) {
+      ctx.ui.note(
+        sharedPkgs.map((a) => a.removeHint ?? a.name ?? '').filter(Boolean).join('\n'),
+        'Installed for cezar but possibly used elsewhere — remove manually if unwanted',
+      );
+    }
     await sudoStep(ctx, {
       description: 'Remove the cezar nginx site + htpasswd, reload nginx.',
       command:
@@ -325,6 +380,7 @@ const sslStep: InstallStep = {
     });
     if (email === CANCEL) throw new StepCancelled();
 
+    const certbotWasPresent = await verifyCommand(ctx, 'certbot', ['--version']);
     await sudoStep(ctx, {
       description: 'Install certbot + its nginx plugin.',
       command: 'apt-get install -y certbot python3-certbot-nginx',
@@ -337,15 +393,33 @@ const sslStep: InstallStep = {
     // "Unable to find a VirtualHost". Doing this first also means that if the
     // operator skips certbot now, a later manual `certbot --nginx -d <domain>`
     // just works — no "could not find a matching server" (issue #8).
-    const domainVhost = nginxVhost(ctx.state.primaryPort, String(domain).trim());
-    await writeFileStep(ctx, {
-      description: `Point the nginx site at ${String(domain).trim()} so certbot can configure TLS for it.`,
-      path: VHOST_AVAILABLE,
-      content: domainVhost,
-      extra: `ln -sf ${VHOST_AVAILABLE} ${VHOST_ENABLED} && nginx -t && systemctl reload nginx`,
-      verify: (c) =>
-        verifyCommand(c, 'sh', ['-c', `grep -qF ${shquote(`server_name ${String(domain).trim()}`)} ${VHOST_AVAILABLE}`]),
-    });
+    //
+    // On a RE-RUN (--reconfigure ssl / --reinstall / resume) the vhost may
+    // already carry certbot's TLS edits (`listen 443 ssl`, `ssl_certificate`).
+    // Rewriting it with the plain-HTTP template would take working HTTPS down
+    // BEFORE certbot runs again — and leave it down if certbot then fails. So
+    // when TLS config is present, only the `server_name` lines are updated
+    // in place; the hostname regex bars every sed/shell metacharacter.
+    const trimmedDomain = String(domain).trim();
+    const vhostHasTls = await verifyCommand(ctx, 'sh', ['-c', `grep -qs ssl_certificate ${VHOST_AVAILABLE}`]);
+    if (vhostHasTls) {
+      await sudoStep(ctx, {
+        description: `Update server_name to ${trimmedDomain} in the existing TLS-enabled nginx site (certbot config preserved).`,
+        command: `sed -i 's/^\\([[:space:]]*\\)server_name .*;/\\1server_name ${trimmedDomain};/' ${VHOST_AVAILABLE} && nginx -t && systemctl reload nginx`,
+        verify: (c) =>
+          verifyCommand(c, 'sh', ['-c', `grep -qF ${shquote(`server_name ${trimmedDomain}`)} ${VHOST_AVAILABLE}`]),
+      });
+    } else {
+      const domainVhost = nginxVhost(ctx.state.primaryPort, trimmedDomain);
+      await writeFileStep(ctx, {
+        description: `Point the nginx site at ${trimmedDomain} so certbot can configure TLS for it.`,
+        path: VHOST_AVAILABLE,
+        content: domainVhost,
+        extra: `ln -sf ${VHOST_AVAILABLE} ${VHOST_ENABLED} && nginx -t && systemctl reload nginx`,
+        verify: (c) =>
+          verifyCommand(c, 'sh', ['-c', `grep -qF ${shquote(`server_name ${trimmedDomain}`)} ${VHOST_AVAILABLE}`]),
+      });
+    }
 
     // certbot can legitimately fail on external state (DNS not pointed yet, LE
     // rate limit). Route it through sudoStep so it honors the sudo/delegate
@@ -364,12 +438,22 @@ const sslStep: InstallStep = {
       verify: (c) => verifyCommand(c, 'sh', ['-c', `grep -qs ssl_certificate ${VHOST_AVAILABLE} ${VHOST_ENABLED}`]),
     });
 
-    ctx.state.publicUrl = `https://${String(domain).trim()}`;
+    ctx.state.publicUrl = `https://${trimmedDomain}`;
     // The cert + its auto-renewal timer are `shared`: uninstall lists them, it
-    // does not delete them (removing a cert can break other vhosts).
-    return {
-      artifacts: [shared('cert', { name: String(domain), removeHint: `sudo certbot delete --cert-name ${String(domain)}` })],
-    };
+    // does not delete them (removing a cert can break other vhosts). Same for
+    // the certbot packages when this run installed them.
+    const artifacts: StepArtifact[] = [
+      shared('cert', { name: trimmedDomain, removeHint: `sudo certbot delete --cert-name ${trimmedDomain}` }),
+    ];
+    if (!certbotWasPresent) {
+      artifacts.push(
+        shared('package', {
+          name: 'certbot + python3-certbot-nginx',
+          removeHint: 'sudo apt-get remove -y certbot python3-certbot-nginx',
+        }),
+      );
+    }
+    return { artifacts };
   },
   async undo(ctx, created) {
     const cert = (created?.artifacts ?? []).find((a) => a.type === 'cert');
@@ -377,6 +461,13 @@ const sslStep: InstallStep = {
       ctx.ui.note(
         `The TLS certificate for ${cert.name ?? 'your domain'} and its auto-renewal timer were left in place.\nRemove them yourself if you want them gone:\n${cert.removeHint ?? ''}`,
         'SSL',
+      );
+    }
+    const pkgs = (created?.artifacts ?? []).filter((a) => a.type === 'package');
+    if (pkgs.length > 0) {
+      ctx.ui.note(
+        pkgs.map((a) => a.removeHint ?? a.name ?? '').filter(Boolean).join('\n'),
+        'Installed for cezar but possibly used elsewhere — remove manually if unwanted',
       );
     }
     // The vhost (with certbot’s edits) is removed by the nginx-proxy step’s undo.
@@ -403,6 +494,9 @@ export function systemdUnit(repoRoot: string, port: number, scope: 'user' | 'sys
   // at runtime — systemd's default PATH has none of those.
   const pathDirs = [dirname(process.execPath), ...(process.env.PATH ?? '').split(':'), '/usr/local/bin', '/usr/bin', '/bin']
     .filter((d, i, a) => d && d !== '.' && a.indexOf(d) === i);
+  // systemd expands `%` specifiers in Environment/ExecStart values — a literal
+  // `%` (possible in an nvm dir name) must be doubled or the unit fails to load.
+  const sysd = (s: string) => s.replace(/%/g, '%%');
   return `# Managed by cezar server-install — do not edit by hand.
 [Unit]
 Description=cezar cockpit
@@ -413,8 +507,8 @@ Wants=network-online.target
 Type=simple
 ${userLine}WorkingDirectory=${repoRoot}
 Environment=CEZ_REMOTE=1
-Environment=PATH=${pathDirs.join(':')}
-ExecStart=${execStart} serve --no-open --port ${port}
+Environment=PATH=${sysd(pathDirs.join(':'))}
+ExecStart=${sysd(execStart)} serve --no-open --port ${port}
 Restart=on-failure
 RestartSec=5
 
@@ -458,8 +552,14 @@ async function resolveExecStart(ctx: InstallContext): Promise<string> {
   // repo being operated on — `--repo` / cwd can differ from where cezar lives.
   const pkgRoot = resolve(fileURLToPath(new URL('../../..', import.meta.url)));
   const entry = join(pkgRoot, 'dist', 'index.js');
-  const npxPath = join(dirname(node), 'npx');
+  let npxPath = join(dirname(node), 'npx');
   if (ctx.dryRun) return serviceExecStart({ node, pkgRoot, entry, entryExists: true, npxPath });
+  // A standalone node binary has no adjacent npx — fall back to the login
+  // shell's, or ExecStart would 203/EXEC (the exact bug 9fea263 fixed).
+  if (!existsSync(npxPath)) {
+    const found = (await ctx.runner.capture('bash', ['-lc', 'command -v npx'])).stdout.trim().split('\n').pop()?.trim();
+    if (found) npxPath = found;
+  }
 
   let globalBin: string | undefined;
   if (!existsSync(entry) && !/[/\\]_npx[/\\]/.test(pkgRoot)) {
@@ -505,17 +605,26 @@ const autostartStep: InstallStep = {
           ctx.ui.warn('The user service did not enable cleanly — check `systemctl --user status cezar`.');
         }
       }
-      // Linger lets the user service survive logout / start at boot — usually needs root.
+      // Linger lets the user service survive logout / start at boot — usually
+      // needs root. Record it as owned only when THIS run turned it on, so
+      // uninstall reverses exactly what install changed (a pre-existing linger
+      // may serve other user services).
+      const osUser = userInfo().username;
+      const lingerWasOn = await verifyCommand(ctx, 'loginctl', ['show-user', osUser, '-p', 'Linger'], (r) =>
+        r.stdout.includes('Linger=yes'),
+      );
       await sudoStep(ctx, {
         description: 'Enable linger so the cockpit starts at boot without a login session.',
-        command: `loginctl enable-linger ${shquote(userInfo().username)}`,
+        command: `loginctl enable-linger ${shquote(osUser)}`,
         verify: (c) =>
-          verifyCommand(c, 'loginctl', ['show-user', userInfo().username, '-p', 'Linger'], (r) =>
+          verifyCommand(c, 'loginctl', ['show-user', osUser, '-p', 'Linger'], (r) =>
             r.stdout.includes('Linger=yes'),
           ),
       });
       await confirmCezarRunning(ctx, 'systemctl --user status cezar', 'journalctl --user -u cezar -n 50 --no-pager');
-      return { artifacts: [owned('service', { name: UNIT_NAME, scope: 'user', path: unitPath })] };
+      const artifacts: StepArtifact[] = [owned('service', { name: UNIT_NAME, scope: 'user', path: unitPath })];
+      if (!lingerWasOn) artifacts.push(owned('linger', { name: osUser }));
+      return { artifacts };
     }
 
     // System unit fallback.
@@ -531,8 +640,9 @@ const autostartStep: InstallStep = {
   },
   async undo(ctx, created) {
     const svc = (created?.artifacts ?? []).find((a) => a.type === 'service');
-    if (!svc) return;
-    if (svc.scope === 'user') {
+    // Reverse linger only when install recorded that it enabled it.
+    const linger = (created?.artifacts ?? []).find((a) => a.type === 'linger');
+    if (svc?.scope === 'user') {
       if (!ctx.dryRun) {
         await ctx.runner.interactive('systemctl', ['--user', 'disable', '--now', UNIT_NAME]);
         if (svc.path) rmSync(svc.path, { force: true });
@@ -540,13 +650,23 @@ const autostartStep: InstallStep = {
       } else {
         ctx.ui.info('DRY RUN — would disable and remove the user service.');
       }
-      return;
+    } else if (svc) {
+      await sudoStep(ctx, {
+        description: 'Disable and remove the cezar systemd unit.',
+        command: `systemctl disable --now ${UNIT_NAME}; rm -f /etc/systemd/system/${UNIT_NAME} && systemctl daemon-reload`,
+        verify: (c) => verifyCommand(c, 'sh', ['-c', `! systemctl is-enabled ${UNIT_NAME}`]),
+      });
     }
-    await sudoStep(ctx, {
-      description: 'Disable and remove the cezar systemd unit.',
-      command: `systemctl disable --now ${UNIT_NAME}; rm -f /etc/systemd/system/${UNIT_NAME} && systemctl daemon-reload`,
-      verify: (c) => verifyCommand(c, 'sh', ['-c', `! systemctl is-enabled ${UNIT_NAME}`]),
-    });
+    if (linger?.name) {
+      await sudoStep(ctx, {
+        description: 'Disable linger (this install enabled it; nothing else needs it).',
+        command: `loginctl disable-linger ${shquote(linger.name)}`,
+        verify: (c) =>
+          verifyCommand(c, 'loginctl', ['show-user', linger.name ?? '', '-p', 'Linger'], (r) =>
+            r.stdout.includes('Linger=no'),
+          ),
+      });
+    }
   },
 };
 
@@ -582,7 +702,13 @@ const identityStep: InstallStep = {
     let authedOk: boolean | null = null;
     const cred = ctx.prefs.cockpit;
     if (cred) {
-      const code = await curlCode(ctx, [...tls, '-K', '-', base], { input: `user = "${cred.user}:${cred.password}"\n` });
+      // curl's config format requires `\` and `"` escaped inside the quoted
+      // value — both are legal password characters; unescaped they break the
+      // config parse and fail a WORKING install with "bad credentials".
+      const curlCfgQuote = (s: string) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      const code = await curlCode(ctx, [...tls, '-K', '-', base], {
+        input: `user = "${curlCfgQuote(cred.user)}:${curlCfgQuote(cred.password)}"\n`,
+      });
       authedOk = /^[23]\d\d$/.test(code);
     }
 
@@ -653,7 +779,13 @@ export const ubuntuVps: PlatformStrategy = {
     // build the unit runs from, or a newly published cezar-cli via npx), then
     // re-run the same end-to-end verify install uses.
     const svc = (ctx.state.steps['autostart']?.created?.artifacts ?? []).find((a) => a.type === 'service');
-    const scope: 'user' | 'system' = svc?.scope === 'user' ? 'user' : 'system';
+    // No recorded artifact (older record, or the step was check()-satisfied):
+    // prefer the scope whose unit file actually exists — the user unit is the
+    // install default, so defaulting to `system` would sudo-restart a unit
+    // that was never installed.
+    const userUnitExists = existsSync(join(homedir(), '.config', 'systemd', 'user', UNIT_NAME));
+    const scope: 'user' | 'system' =
+      svc?.scope === 'user' || svc?.scope === 'system' ? svc.scope : userUnitExists ? 'user' : 'system';
     if (ctx.dryRun) {
       ctx.ui.info(`DRY RUN — would reload+restart the cezar ${scope} service and re-verify the cockpit.`);
       return;

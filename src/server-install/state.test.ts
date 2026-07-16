@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { serverStatePath } from '../paths.js';
@@ -70,5 +70,37 @@ describe('server state', () => {
     const release2 = acquireLock();
     release2();
     release();
+  });
+
+  it('lock acquisition is atomic (wx) — a pre-existing live lock file always wins', () => {
+    // Simulate the race loser: the file appears (live pid) before our write.
+    writeFileSync(join(home, 'server.install.lock'), `${process.pid === 1 ? 2 : 1}\n`, { flag: 'wx' });
+    expect(() => acquireLock()).toThrow(LockHeldError);
+  });
+
+  it('a newer-version server.json degrades per-field, never to a fresh record', () => {
+    writeFileSync(
+      serverStatePath(),
+      JSON.stringify({
+        schema: 1,
+        platform: 'ubuntu-vps-caddy', // platform this version does not ship
+        installed: true,
+        primaryPort: 4321,
+        futureField: { keep: 'me' },
+        steps: {
+          deps: { status: 'done', created: { artifacts: [] } },
+          'future-step': { status: 'running', created: null }, // unknown status
+        },
+      }),
+    );
+    const s = loadServerState();
+    expect(s.platform).toBe('ubuntu-vps-caddy'); // ledger intact
+    expect(s.installed).toBe(true);
+    expect(s.steps.deps?.status).toBe('done');
+    // unknown status degrades to failed (stays on the undo path), not to data loss
+    expect(s.steps['future-step']?.status).toBe('failed');
+    // unknown top-level fields survive a load+save round-trip
+    saveServerState(s);
+    expect(JSON.parse(readFileSync(serverStatePath(), 'utf8')).futureField).toEqual({ keep: 'me' });
   });
 });

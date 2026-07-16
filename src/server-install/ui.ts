@@ -1,5 +1,6 @@
 import * as clack from '@clack/prompts';
-import { CANCEL, type Cancellable, type SpinnerHandle, type Ui } from './types.js';
+import { CANCEL, PreflightError, type Cancellable, type SpinnerHandle, type Ui } from './types.js';
+import { StepAborted } from './steps.js';
 
 /**
  * The interactive surface, implemented over `@clack/prompts` — the one place
@@ -48,6 +49,15 @@ function unwrap<T>(value: T | symbol, isCancel: PromptBackend['isCancel']): Canc
 
 /** The real interactive UI. */
 export function createClackUi(backend: PromptBackend = realBackend): Ui {
+  // clack renders a prompt at stdin-EOF and never resolves — a piped/ssh'd
+  // invocation would hang forever while holding the single-writer install
+  // lock. Refuse up front with the way out. (Injected fake backends are for
+  // tests, which have no TTY.)
+  if (backend === realBackend && (!process.stdin.isTTY || !process.stdout.isTTY)) {
+    throw new PreflightError(
+      'this terminal is not interactive — re-run from a TTY, or pass --yes (or CEZ_DRY_RUN=1) for non-interactive mode',
+    );
+  }
   const wrapValidate = (validate?: (v: string) => string | undefined) =>
     validate ? (v: string | undefined) => validate(v ?? '') : undefined;
 
@@ -114,9 +124,27 @@ export function createClackUi(backend: PromptBackend = realBackend): Ui {
  * logs go to the console. It never touches stdin, so it can drive the engine
  * headless. Optional `answers` override defaults per-prompt-message.
  */
-export function createAutoUi(answers: Record<string, unknown> = {}, sink: (m: string) => void = () => {}): Ui {
+export function createAutoUi(
+  answers: Record<string, unknown> = {},
+  sink: (m: string) => void = () => {},
+  opts: {
+    /**
+     * Enforce each prompt's `validate` on auto-answers (real `--yes` runs must
+     * fail closed on an unanswerable prompt). Off for CEZ_DRY_RUN previews,
+     * which must walk every step with placeholder-grade values.
+     */
+    strictValidate?: boolean;
+  } = {},
+): Ui {
   const answer = <T>(message: string, fallback: T): T =>
     (message in answers ? (answers[message] as T) : fallback);
+  const checkValid = (message: string, v: string, validate?: (v: string) => string | undefined): void => {
+    if (!opts.strictValidate) return;
+    const invalid = validate?.(v);
+    if (invalid !== undefined) {
+      throw new StepAborted(`cannot auto-answer "${message}" (${invalid}) — run without --yes to answer it`);
+    }
+  };
   return {
     intro: sink,
     outro: sink,
@@ -135,11 +163,17 @@ export function createAutoUi(answers: Record<string, unknown> = {}, sink: (m: st
     async confirm(opts) {
       return answer(opts.message, opts.initialValue ?? true);
     },
-    async text(opts) {
-      return answer(opts.message, opts.initialValue ?? opts.placeholder ?? '');
+    // A placeholder is a HINT, never an answer — auto-adopting it turned the
+    // example domain `cezar.ngrok.app` into real input under `--yes`.
+    async text(o) {
+      const v = String(answer(o.message, o.initialValue ?? ''));
+      checkValid(o.message, v, o.validate);
+      return v;
     },
-    async password(opts) {
-      return answer(opts.message, '');
+    async password(o) {
+      const v = String(answer(o.message, ''));
+      checkValid(o.message, v, o.validate);
+      return v;
     },
     spinner(): SpinnerHandle {
       return { start: (m) => m && sink(m), stop: (m) => m && sink(m), message: (m) => sink(m) };
