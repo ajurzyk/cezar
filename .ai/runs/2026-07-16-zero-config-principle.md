@@ -18,6 +18,8 @@ Add a top-level `## Zero config` section to `AGENTS.md` capturing cezar's zero-c
 
 - None to runtime. Doctrine binds future work by intent — that is the point, and why it is a standalone PR.
 
+PR: #409
+
 ## Progress
 
 > Convention: `- [ ]` pending, `- [x]` done. Append ` — <commit sha>` when a step lands. Do not rename step titles.
