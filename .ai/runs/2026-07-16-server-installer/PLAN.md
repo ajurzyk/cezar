@@ -11,8 +11,8 @@ Tracking issue: #419
 |-------|------|-------|--------|--------|
 | 1 | 1.1 | `src/paths.ts` — cezarHomeDir + serverStatePath | done | 60d9d30 |
 | 1 | 1.2 | `src/server-install/types.ts` — contracts + zod ServerState | done | 05c56ac |
-| 1 | 1.3 | `src/server-install/state.ts` — load/save/resume | done | PENDING13 |
-| 1 | 1.4 | `src/server-install/ui.ts` — @clack wrappers + cancel sentinel | todo | — |
+| 1 | 1.3 | `src/server-install/state.ts` — load/save/resume | done | 1a0f9bd |
+| 1 | 1.4 | `src/server-install/ui.ts` — @clack wrappers + cancel sentinel | done | PENDING14 |
 | 1 | 1.5 | `src/server-install/steps.ts` — sudoStep/verifyCommand/depCheckStep | todo | — |
 | 1 | 1.6 | `src/server-install/engine.ts` — runInstall/runUninstall + lock | todo | — |
 | 1 | 1.7 | `strategies.ts` + `platforms/ubuntu-vps.ts` (Phase-1 steps) | todo | — |
