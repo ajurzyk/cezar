@@ -16,6 +16,7 @@ import { todosPath } from '../todos.js';
 import type { AgentEvent, ContentBlock } from '../core/agent-runner.js';
 import { discoverSkills, type Skill } from '../skills.js';
 import { materializeSkillDir } from '../skills-remote.js';
+import { seedAgentConfigLocalLayer } from '../agent-config/seed.js';
 import { loadConfig } from '../config.js';
 import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff, worktreeShortstat } from '../git-worktree.js';
 import { getRepoInfo } from '../server/git.js';
@@ -749,6 +750,15 @@ export class RunManager {
           baseBranch: wt.baseBranch,
         });
         emit({ type: 'note', message: `worktree ready — branch ${wt.branch} (base ${wt.baseBranch})` });
+        // Seed the agents' gitignored personal config layer (Settings → Agent
+        // config, #404) into the worktree so a repo-root edit to it actually
+        // reaches this run — the file is gitignored, so it wouldn't exist here
+        // otherwise. Guarded by git check-ignore; the shared info/exclude keeps
+        // it out of git and out of autosave commits (like team-skill dirs).
+        const seededConfig = await seedAgentConfigLocalLayer(this.repoRoot, state.cwd).catch(() => []);
+        if (seededConfig.length > 0) {
+          emit({ type: 'note', message: `seeded personal agent config: ${seededConfig.join(', ')}` });
+        }
         this.armAutosave(state);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

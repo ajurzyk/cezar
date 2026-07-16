@@ -23,7 +23,7 @@ Status: in-progress
 | 3 | 3.2 | API client types + queries | done | 3417a96 |
 | 3 | 3.3 | `agent-config-section.tsx` | done | cd2d194 |
 | 3 | 3.4 | `mcp-section.tsx` | done | 847fa22 |
-| 4 | 4.1 | Worktree seeding of the personal layer (`src/workflows/run.ts`) | todo | — |
+| 4 | 4.1 | Worktree seeding of the personal layer (`src/workflows/run.ts`) | done | PENDING |
 | 5 | 5.1 | Docs: AGENTS.md, README, BACKWARD_COMPATIBILITY.md §2, CHANGELOG | todo | — |
 
 ## Goal
