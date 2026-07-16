@@ -42,6 +42,8 @@ import {
   readWorktreePath,
 } from './git-changes.js';
 import { loadConfig, type CezConfig } from '../config.js';
+import { readConfigFile, writeConfigFile } from '../agent-config/files.js';
+import { listAgentConfig } from '../agent-config/service.js';
 import { resolveCapabilities } from './capabilities.js';
 import { resolveForge } from './forge/index.js';
 import { fetchGithub } from './github.js';
@@ -1195,6 +1197,52 @@ export function createApp(deps: ServerDeps): Hono {
     }
     // Pre-R6 answer shape ({baseBranch, defaultRunner}) + additive R6 fields.
     return c.json(configAnswer(await loadConfig(repoRoot)));
+  });
+
+  // Agent config files (spec 2026-07-16-agent-config-files, #404): read and
+  // edit the coding agents' OWN config files (Claude/Codex/OpenCode settings,
+  // MCP, memory), raw and per-scope. Additive sibling routes — /api/health keeps
+  // its protected shape (BACKWARD_COMPATIBILITY.md §2).
+  //
+  // Security: writing these files is a local-machine capability. Some of them
+  // (`hooks`, MCP `command`) run shell commands automatically, outside cezar's
+  // allowedTools. So EVERY write 409s in hosted mode (CEZ_REMOTE / non-loopback
+  // bind), matching the open-in-* refusals above. Reads stay open so the section
+  // stays useful for understanding what is in force; the gate is re-checked
+  // server-side on every PUT and never trusts the client.
+  app.get('/api/agent-config', async (c) => {
+    const editable = capabilities().localHandoff;
+    return c.json(await listAgentConfig(repoRoot, process.env, editable));
+  });
+
+  app.get('/api/agent-config/:id', async (c) => {
+    const read = await readConfigFile(c.req.param('id'), repoRoot);
+    if (read === null) return c.json({ error: 'unknown config file' }, 404);
+    if ('error' in read) return c.json({ error: read.error }, 500);
+    return c.json(read);
+  });
+
+  const setAgentConfigSchema = z.object({
+    content: z.string().max(2_000_000),
+    version: z.string().nullable(),
+  });
+  app.put('/api/agent-config/:id', async (c) => {
+    // The real gate: writes are local-only, re-checked here regardless of what
+    // the client believed. This is what closes the hooks-based RCE path.
+    if (!capabilities().localHandoff) {
+      return c.json(
+        { error: 'editing agent config is disabled in hosted mode (CEZ_REMOTE) — edit it from the machine that owns the checkout' },
+        409,
+      );
+    }
+    const parsed = setAgentConfigSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
+    }
+    const out = await writeConfigFile(c.req.param('id'), parsed.data.content, parsed.data.version, repoRoot);
+    if (out === null) return c.json({ error: 'unknown config file' }, 404);
+    if (!out.ok) return c.json({ error: out.error }, out.status);
+    return c.json(out.read);
   });
 
   app.get('/api/repo/diff', async (c) => {
