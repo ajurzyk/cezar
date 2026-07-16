@@ -114,10 +114,10 @@ describe('systemPrompt end-to-end (dry run)', () => {
     return record.id;
   }
 
-  function capturedSystemPrompt(): string {
+  function capturedSystemPrompt(index = 0): string {
     const lines = readFileSync(argsFile, 'utf8').trim().split('\n');
-    expect(lines.length).toBeGreaterThan(0);
-    const argv = JSON.parse(lines[0] as string) as string[];
+    expect(lines.length).toBeGreaterThan(index);
+    const argv = JSON.parse(lines[index] as string) as string[];
     const idx = argv.indexOf('--append-system-prompt');
     expect(idx).toBeGreaterThanOrEqual(0);
     return argv[idx + 1] as string;
@@ -154,5 +154,17 @@ describe('systemPrompt end-to-end (dry run)', () => {
     expect(readFileSync(join(repoRoot, '.ai/cezar/runs', `${id}.handoff.md`), 'utf8')).toContain(
       'mock: implemented the change',
     );
+
+    expect(manager.continueRun(id, 'continue without generating follow-ups')).toEqual({ ok: true });
+    const deadline = Date.now() + 20_000;
+    while (readFileSync(argsFile, 'utf8').trim().split('\n').length < 2) {
+      if (Date.now() > deadline) throw new Error('continuation did not start in time');
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    expect(capturedSystemPrompt(1)).toBe(
+      composeSystemPrompt(CONFIG_PROMPT, HANDOFF_ONLY_INSTRUCTIONS),
+    );
+    expect(capturedSystemPrompt(1)).not.toContain('CEZ_TODOS_FILE');
+    expect(existsSync(todosFile)).toBe(false);
   }, 30_000);
 });

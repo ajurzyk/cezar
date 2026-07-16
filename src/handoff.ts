@@ -113,8 +113,8 @@ export function deleteHandoff(dataDir: string, runId: string): void {
 
 /**
  * Appended to every agent step's `--append-system-prompt` (spec 007). The
- * matching env vars (CEZ_HANDOFF_FILE / CEZ_TODOS_FILE / CEZ_TASK_ID) are set
- * on the spawned claude process.
+ * matching handoff/task env vars are set on every agent process;
+ * CEZ_TODOS_FILE is present only when follow-up generation is enabled.
  */
 export const HANDOFF_ONLY_INSTRUCTIONS = `## Handoff (cezar)
 
