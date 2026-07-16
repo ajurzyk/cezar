@@ -8,6 +8,7 @@ import {
   formatCost,
   formatMem,
   prNumber,
+  taskPrUrl,
   usageCells,
   workflowLabel,
 } from '@/lib/tasks-table'
@@ -147,6 +148,25 @@ describe('finishedRunCount', () => {
         run({ status: 'done', archived: true }),
       ]),
     ).toBe(3)
+  })
+})
+
+describe('taskPrUrl', () => {
+  it('prefers the PR the task created over the one it referenced', () => {
+    const r = run({
+      pullRequestUrl: 'https://github.com/o/r/pull/7',
+      referencedPullRequestUrl: 'https://github.com/o/r/pull/4170',
+    })
+    expect(taskPrUrl(r)).toBe('https://github.com/o/r/pull/7')
+  })
+
+  it('falls back to the referenced PR (#407 — review tasks never create one)', () => {
+    const r = run({ referencedPullRequestUrl: 'https://github.com/o/r/pull/4170' })
+    expect(taskPrUrl(r)).toBe('https://github.com/o/r/pull/4170')
+  })
+
+  it('is undefined when the task has no PR association at all', () => {
+    expect(taskPrUrl(run())).toBeUndefined()
   })
 })
 

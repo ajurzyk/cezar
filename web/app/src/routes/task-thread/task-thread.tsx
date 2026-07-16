@@ -13,6 +13,7 @@ import { StatusDot } from '@/components/status-dot'
 import { Button } from '@/components/ui/button'
 import { toast } from '@/components/ui/toaster'
 import { useKeyboardInsetVar } from '@/lib/keyboard-inset'
+import { taskPrUrl } from '@/lib/tasks-table'
 import { cn } from '@/lib/utils'
 
 import {
@@ -173,12 +174,12 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
             )}
           >
             {footer.label}
-            {run.pullRequestUrl ? (
-              // The run shipped as a PR (review-gate Draft PR, or agent-opened) — the link
-              // stays reachable after the panel is gone, like the legacy list badge.
+            {taskPrUrl(run) ? (
+              // The run shipped as a PR (review-gate Draft PR, or agent-opened), or worked on
+              // one (#407) — the link stays reachable after the panel is gone.
               <a
                 data-slot="pr-link"
-                href={run.pullRequestUrl}
+                href={taskPrUrl(run)}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="font-medium text-foreground underline-offset-2 hover:underline"

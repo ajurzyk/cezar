@@ -65,6 +65,15 @@ const runRecordSchema = z.object({
   costUsd: z.number().optional(),
   /** First GitHub PR URL spotted in the transcript (the janitor trick). */
   pullRequestUrl: z.string().optional(),
+  /** The PR this task is ABOUT (#407, spec 2026-07-16-pr-autodiscovery):
+   *  auto-discovered from conversation references for tasks that work on an
+   *  existing PR (review/continue/merge). Display-only tier — `pullRequestUrl`
+   *  (the PR this task CREATED) always wins, and action gates ignore this. */
+  referencedPullRequestUrl: z.string().optional(),
+  /** Distinct PR URLs spotted so far — the referenced tier's working set,
+   *  persisted so a resumed run keeps disambiguating against the full history
+   *  instead of re-adopting the next URL as "the only one". Capped. */
+  referencedPrCandidates: z.array(z.string()).optional(),
   /** Task worktree (spec 006) — absent when the run executed in the repo root. */
   worktreePath: z.string().optional(),
   /** The task's own branch (`cez/<id8>`), created off `baseBranch`. */
@@ -113,6 +122,58 @@ const PR_URL_RE = /https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+/;
 // reviews or merely references an existing PR must not get mislabeled with its number (#fake-pr).
 const CREATED_PR_RE =
   /\b(?:gh\s+pr\s+create|pull\s*request\s+created|created\s+(?:a\s+)?(?:draft\s+)?(?:pr|pull\s*request)|opened\s+(?:a\s+)?(?:draft\s+)?pull\s*request)\b/i;
+
+/** Referenced-tier working-set cap (spec 2026-07-16-pr-autodiscovery): past
+ *  this many distinct PRs the conversation is a survey, not a subject. */
+const MAX_PR_CANDIDATES = 8;
+
+/**
+ * Every scannable string of one persisted event: the v1 top-level fields plus
+ * the protocol-v2 `item.*` content (nested — the reason v2 streams were
+ * invisible to the janitor, #407). Reasoning items are skipped: thinking text
+ * speculates about PRs the task never touches.
+ */
+function eventTextFragments(event: Record<string, unknown>): string[] {
+  const fragments: string[] = [];
+  for (const key of ['text', 'result', 'message'] as const) {
+    const value = event[key];
+    if (typeof value === 'string') fragments.push(value);
+  }
+  const item = event.item;
+  if (item && typeof item === 'object' && (item as Record<string, unknown>).kind !== 'reasoning') {
+    const it = item as Record<string, unknown>;
+    for (const key of ['text', 'title', 'output'] as const) {
+      const value = it[key];
+      if (typeof value === 'string') fragments.push(value);
+    }
+    if (typeof it.input === 'string') {
+      fragments.push(it.input);
+    } else if (it.input !== undefined) {
+      try {
+        fragments.push(JSON.stringify(it.input));
+      } catch {
+        // circular input — skip it
+      }
+    }
+  }
+  return fragments;
+}
+
+/**
+ * The referenced tier's resolution rule: one distinct URL is the subject;
+ * among several, the one whose PR number the task prompt names (and only when
+ * exactly one matches); otherwise ambiguous — no chip beats a wrong chip.
+ */
+function resolveReferencedPr(candidates: string[], task: string): string | undefined {
+  if (candidates.length === 1) return candidates[0];
+  const named = candidates.filter((url) => {
+    const num = url.split('/').pop() ?? '';
+    // `\d` boundaries only: they reject `170` inside `4170` yet still match a
+    // number written as `#4170`, ` 4170`, or inside a pasted `…/pull/4170`.
+    return num !== '' && new RegExp(`(?<!\\d)#?${num}(?!\\d)`).test(task);
+  });
+  return named.length === 1 ? named[0] : undefined;
+}
 
 /**
  * File-backed run store: `runs.json` index (atomic tmp+rename writes, the
@@ -211,6 +272,9 @@ export class RunStore extends EventEmitter {
         tokensUsed: 0,
       })),
     };
+    // A prompt that pastes a PR URL is already about that PR — seed the
+    // referenced tier so the chip exists before the first event (#407).
+    this.trackReferencedPrs(run, input.task);
     this.runs.set(run.id, run);
     this.pruneOldRuns();
     this.touch(run);
@@ -278,15 +342,40 @@ export class RunStore extends EventEmitter {
     this.emit('event', { runId, event: full });
 
     // The janitor trick: agents print the PR URL after `gh pr create` — the
-    // first one spotted in the transcript becomes the run's PR link.
+    // first one spotted in the transcript becomes the run's PR link. Scans v1
+    // fields AND nested v2 `item.*` content (#407). A URL without the created
+    // phrasing still feeds the referenced tier (the PR the task is about).
     if (!run.pullRequestUrl) {
-      const haystack = [full.text, full.result, full.message]
-        .filter((s): s is string => typeof s === 'string')
-        .join(' ');
-      const match = PR_URL_RE.exec(haystack);
-      if (match && CREATED_PR_RE.test(haystack)) this.updateRun(runId, { pullRequestUrl: match[0] });
+      const haystack = eventTextFragments(full).join(' ');
+      if (haystack.length > 0) {
+        const match = PR_URL_RE.exec(haystack);
+        if (match && CREATED_PR_RE.test(haystack)) {
+          this.updateRun(runId, { pullRequestUrl: match[0] });
+        } else if (match && this.trackReferencedPrs(run, haystack)) {
+          this.touch(run);
+        }
+      }
     }
     return full;
+  }
+
+  /**
+   * Fold every PR URL in `haystack` into the run's referenced-tier working
+   * set and re-resolve `referencedPullRequestUrl` (spec
+   * 2026-07-16-pr-autodiscovery). Mutates the record in place — the caller
+   * owns persistence/fan-out — and reports whether anything changed.
+   */
+  private trackReferencedPrs(run: RunRecord, haystack: string): boolean {
+    const seen = new Set(run.referencedPrCandidates ?? []);
+    const before = seen.size;
+    for (const match of haystack.matchAll(new RegExp(PR_URL_RE.source, 'g'))) {
+      if (seen.size >= MAX_PR_CANDIDATES) break;
+      seen.add(match[0]);
+    }
+    if (seen.size === before) return false;
+    run.referencedPrCandidates = [...seen];
+    run.referencedPullRequestUrl = resolveReferencedPr(run.referencedPrCandidates, run.task);
+    return true;
   }
 
   /**
