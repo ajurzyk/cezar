@@ -13,7 +13,7 @@ Tracking issue: #419
 | 1 | 1.2 | `src/server-install/types.ts` — contracts + zod ServerState | done | 05c56ac |
 | 1 | 1.3 | `src/server-install/state.ts` — load/save/resume | done | 1a0f9bd |
 | 1 | 1.4 | `src/server-install/ui.ts` — @clack wrappers + cancel sentinel | done | bca8202 |
-| 1 | 1.5 | `src/server-install/steps.ts` — sudoStep/verifyCommand/depCheckStep | done | PENDING15 |
+| 1 | 1.5 | `src/server-install/steps.ts` — sudoStep/verifyCommand/depCheckStep | done | 1599abb |
 | 1 | 1.6 | `src/server-install/engine.ts` — runInstall/runUninstall + lock | todo | — |
 | 1 | 1.7 | `strategies.ts` + `platforms/ubuntu-vps.ts` (Phase-1 steps) | todo | — |
 | 1 | 1.8 | `src/index.ts` wiring + npm script + e2e | todo | — |

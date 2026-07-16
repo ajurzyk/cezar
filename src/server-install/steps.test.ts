@@ -3,7 +3,13 @@ import { createAutoUi } from './ui.js';
 import { sudoStep, StepAborted, verifyCommand } from './steps.js';
 import type { CommandResult, InstallContext, Runner, Ui } from './types.js';
 
-function makeCtx(over: Partial<InstallContext> & { ui?: Ui; runner?: Partial<Runner> }): InstallContext {
+function makeCtx(over: {
+  ui?: Ui;
+  runner?: Partial<Runner>;
+  dryRun?: boolean;
+  assumeYes?: boolean;
+  reconfigure?: Set<string>;
+}): InstallContext {
   const runner: Runner = {
     capture: over.runner?.capture ?? (async (): Promise<CommandResult> => ({ code: 0, stdout: '', stderr: '' })),
     interactive: over.runner?.interactive ?? (async () => 0),

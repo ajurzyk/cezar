@@ -59,14 +59,31 @@ export function createClackUi(backend: PromptBackend = realBackend): Ui {
     success: (m) => backend.log.success(m),
     warn: (m) => backend.log.warn(m),
     error: (m) => backend.log.error(m),
-    async select(opts) {
-      return unwrap(await backend.select(opts), backend.isCancel);
+    async select<T>(opts: {
+      message: string;
+      options: Array<{ value: T; label: string; hint?: string }>;
+      initialValue?: T;
+    }) {
+      // clack's `Option<Value>` is a conditional type that can't resolve against
+      // an unconstrained generic; cast the options and keep the explicit T.
+      const res = await backend.select<T>({
+        message: opts.message,
+        options: opts.options as never,
+        initialValue: opts.initialValue,
+      });
+      return unwrap(res, backend.isCancel);
     },
-    async multiselect(opts) {
-      return unwrap(
-        await backend.multiselect({ ...opts, required: opts.required ?? false }),
-        backend.isCancel,
-      );
+    async multiselect<T>(opts: {
+      message: string;
+      options: Array<{ value: T; label: string; hint?: string }>;
+      required?: boolean;
+    }) {
+      const res = await backend.multiselect<T>({
+        message: opts.message,
+        options: opts.options as never,
+        required: opts.required ?? false,
+      });
+      return unwrap(res, backend.isCancel);
     },
     async confirm(opts) {
       return unwrap(await backend.confirm(opts), backend.isCancel);
