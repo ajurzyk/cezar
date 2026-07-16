@@ -144,6 +144,11 @@ describe('systemdUnit', () => {
     expect(unit).toContain('User=');
     expect(unit).toContain('WantedBy=multi-user.target');
   });
+
+  it('takes an absolute "<node> <entry.js>" ExecStart verbatim (no bare name → no 203/EXEC)', () => {
+    const unit = systemdUnit('/srv/app', 4321, 'system', '/usr/bin/node /srv/app/dist/index.js');
+    expect(unit).toContain('ExecStart=/usr/bin/node /srv/app/dist/index.js serve --no-open --port 4321');
+  });
 });
 
 describe('ubuntu-vps autostart step (dry-run)', () => {

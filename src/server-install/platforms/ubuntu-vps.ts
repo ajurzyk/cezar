@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
 import { CANCEL, PreflightError, type InstallContext, type InstallStep, type PlatformStrategy, type StepArtifact } from '../types.js';
@@ -117,6 +117,32 @@ function writeRootFileCmd(path: string, content: string, extra = ''): string {
   return `install -d -m 0755 ${shquote(dir)} && printf %s ${shquote(b64)} | base64 --decode > ${shquote(path)}${extra ? ` && ${extra}` : ''}`;
 }
 
+/**
+ * A sudoStep that writes a root-owned file. The command carries the content as
+ * base64 (so quoting/newlines survive a copy-paste), which is unreadable — so we
+ * always show the DECODED file content in a note first, so the operator can see
+ * exactly what will land on disk and knows the base64 is not doing anything
+ * hidden.
+ */
+function writeFileStep(
+  ctx: InstallContext,
+  opts: {
+    description: string;
+    path: string;
+    content: string;
+    /** Extra shell appended after the write (` && …`). */
+    extra?: string;
+    verify: (c: InstallContext) => Promise<boolean>;
+  },
+): Promise<void> {
+  return sudoStep(ctx, {
+    description: opts.description,
+    note: `This writes ${opts.path} with exactly this content:\n\n${opts.content}`,
+    command: writeRootFileCmd(opts.path, opts.content, opts.extra),
+    verify: opts.verify,
+  });
+}
+
 const nginxProxyStep: InstallStep = {
   id: 'nginx-proxy',
   title: 'Reverse proxy (nginx + htpasswd)',
@@ -219,12 +245,11 @@ const nginxProxyStep: InstallStep = {
 
     // 4) vhost + enable + reload
     const vhost = nginxVhost(ctx.state.primaryPort);
-    await sudoStep(ctx, {
+    await writeFileStep(ctx, {
       description: 'Write the cezar nginx site, enable it, and reload nginx.',
-      note: `${VHOST_AVAILABLE}\n\n${vhost}`,
-      command:
-        writeRootFileCmd(VHOST_AVAILABLE, vhost) +
-        ` && ln -sf ${VHOST_AVAILABLE} ${VHOST_ENABLED} && rm -f /etc/nginx/sites-enabled/default && nginx -t && systemctl reload nginx`,
+      path: VHOST_AVAILABLE,
+      content: vhost,
+      extra: `ln -sf ${VHOST_AVAILABLE} ${VHOST_ENABLED} && rm -f /etc/nginx/sites-enabled/default && nginx -t && systemctl reload nginx`,
       verify: (c) => verifyCommand(c, 'test', ['-f', VHOST_ENABLED]),
     });
 
@@ -312,12 +337,11 @@ const sslStep: InstallStep = {
     // operator skips certbot now, a later manual `certbot --nginx -d <domain>`
     // just works — no "could not find a matching server" (issue #8).
     const domainVhost = nginxVhost(ctx.state.primaryPort, String(domain).trim());
-    await sudoStep(ctx, {
+    await writeFileStep(ctx, {
       description: `Point the nginx site at ${String(domain).trim()} so certbot can configure TLS for it.`,
-      note: `${VHOST_AVAILABLE}\n\nserver_name ${String(domain).trim()};`,
-      command:
-        writeRootFileCmd(VHOST_AVAILABLE, domainVhost) +
-        ` && ln -sf ${VHOST_AVAILABLE} ${VHOST_ENABLED} && nginx -t && systemctl reload nginx`,
+      path: VHOST_AVAILABLE,
+      content: domainVhost,
+      extra: `ln -sf ${VHOST_AVAILABLE} ${VHOST_ENABLED} && nginx -t && systemctl reload nginx`,
       verify: (c) =>
         verifyCommand(c, 'sh', ['-c', `grep -qF ${shquote(`server_name ${String(domain).trim()}`)} ${VHOST_AVAILABLE}`]),
     });
@@ -361,21 +385,19 @@ const sslStep: InstallStep = {
 const UNIT_NAME = 'cezar.service';
 
 /**
- * systemd unit that runs cezar loopback-bound with CEZ_REMOTE=1. `execStart`
- * must be an ABSOLUTE command — systemd runs units with a minimal PATH
- * (/usr/bin:/bin), so a bare `cezar` (installed via nvm/npm-prefix/npx) would
- * not resolve and the unit would crash-loop.
+ * systemd unit that runs cezar loopback-bound with CEZ_REMOTE=1.
  *
- * cezar's shebang is `#!/usr/bin/env node`, so `node` must be on the unit's PATH
- * too. With nvm/npm-prefix, node lives next to the cezar bin (or next to the
- * node running this installer) — neither is in systemd's default PATH — so we
- * prepend both those dirs. Otherwise the unit starts, can't find node, and
- * crash-loops (nginx then 502s).
+ * `execStart` must be an ABSOLUTE command — systemd resolves the ExecStart
+ * executable against its OWN compiled-in PATH (/usr/local/bin:/usr/bin:…), NOT
+ * the unit's `Environment=PATH`, so a bare `cezar` gives status=203/EXEC
+ * ("Unable to locate executable"). `resolveExecStart` therefore returns an
+ * absolute `"<node> <entry.js>"`. We still set `Environment=PATH` (with the
+ * installer's node dir) for any child process the app spawns.
  */
 export function systemdUnit(repoRoot: string, port: number, scope: 'user' | 'system', execStart: string): string {
   const userLine = scope === 'system' ? `User=${userInfo().username}\n` : '';
   const installTarget = scope === 'system' ? 'multi-user.target' : 'default.target';
-  const pathDirs = [dirname(execStart), dirname(process.execPath), '/usr/local/bin', '/usr/bin', '/bin']
+  const pathDirs = [dirname(process.execPath), '/usr/local/bin', '/usr/bin', '/bin']
     .filter((d, i, a) => d && d !== '.' && a.indexOf(d) === i);
   return `# Managed by cezar server-install — do not edit by hand.
 [Unit]
@@ -397,15 +419,29 @@ WantedBy=${installTarget}
 `;
 }
 
-/** Absolute path to the cezar CLI on this box, or a bare fallback in dry-run. */
-async function resolveCezarBin(ctx: InstallContext): Promise<string> {
-  if (ctx.dryRun) return 'cezar';
-  // Login shell (`-lc`) so nvm / npm-prefix PATH additions from ~/.profile etc.
-  // are present — otherwise `command -v cezar` misses those installs. A banner a
-  // profile echoes lands on earlier lines, so take the LAST non-empty line.
+/**
+ * The absolute ExecStart command for the service: `"<node> <cezar entry.js>"`.
+ * Both parts are absolute so systemd never has to resolve a name off PATH.
+ *
+ *  1. Preferred — the repo's own built entry (`<repoRoot>/dist/index.js`): the
+ *     installer is run from a checkout, so this is present and authoritative.
+ *  2. Else a globally-installed `cezar` bin (resolved via a login shell so
+ *     nvm/npm-prefix installs are found), run through the same node.
+ *  3. Else fall back to the repo entry path and warn to build it first.
+ */
+async function resolveExecStart(ctx: InstallContext): Promise<string> {
+  const node = process.execPath; // absolute node running this installer
+  const entry = join(ctx.repoRoot, 'dist', 'index.js');
+  if (ctx.dryRun) return `${node} ${entry}`;
+  if (existsSync(entry)) return `${node} ${entry}`;
   const out = (await ctx.runner.capture('bash', ['-lc', 'command -v cezar'])).stdout.trim();
-  const last = out.split('\n').map((s) => s.trim()).filter(Boolean).pop();
-  return last || 'cezar';
+  const bin = out.split('\n').map((s) => s.trim()).filter(Boolean).pop();
+  if (bin) return `${node} ${bin}`;
+  ctx.ui.warn(
+    `No built cezar found to run: ${entry} is missing and no global 'cezar' is installed.\n` +
+      `Build it first (in ${ctx.repoRoot}: npm install && npm run build), then re-run with --reconfigure autostart.`,
+  );
+  return `${node} ${entry}`;
 }
 
 const autostartStep: InstallStep = {
@@ -418,7 +454,7 @@ const autostartStep: InstallStep = {
     return false; // always (re)assert the service is installed and running
   },
   async run(ctx): Promise<{ artifacts: StepArtifact[] }> {
-    const execStart = await resolveCezarBin(ctx);
+    const execStart = await resolveExecStart(ctx);
     // Prefer a rootless `systemd --user` service + linger; fall back to a system
     // unit (via sudoStep) when the user bus is not reachable. `show-environment`
     // exits 0 iff the user manager is up — on a headless SSH box with no session
@@ -452,10 +488,11 @@ const autostartStep: InstallStep = {
     }
 
     // System unit fallback.
-    const b64 = Buffer.from(systemdUnit(ctx.repoRoot, ctx.state.primaryPort, 'system', execStart), 'utf8').toString('base64');
-    await sudoStep(ctx, {
+    await writeFileStep(ctx, {
       description: 'Install the cezar systemd unit, start it now, and enable it at boot.',
-      command: `printf %s ${shquote(b64)} | base64 --decode > /etc/systemd/system/${UNIT_NAME} && systemctl daemon-reload && systemctl enable --now ${UNIT_NAME}`,
+      path: `/etc/systemd/system/${UNIT_NAME}`,
+      content: systemdUnit(ctx.repoRoot, ctx.state.primaryPort, 'system', execStart),
+      extra: `systemctl daemon-reload && systemctl enable --now ${UNIT_NAME}`,
       verify: (c) => verifyCommand(c, 'systemctl', ['is-enabled', UNIT_NAME]),
     });
     await confirmCezarRunning(ctx, 'sudo systemctl status cezar', 'sudo journalctl -u cezar -n 50 --no-pager');
