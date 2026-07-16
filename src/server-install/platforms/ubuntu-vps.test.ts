@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { nginxVhost, systemdUnit, ubuntuVps } from './ubuntu-vps.js';
+import { nginxVhost, serviceExecStart, systemdUnit, ubuntuVps } from './ubuntu-vps.js';
 import { StepAborted } from '../steps.js';
 import { createAutoUi } from '../ui.js';
 import type { InstallContext, InstallStep, Runner, Ui } from '../types.js';
@@ -148,6 +148,24 @@ describe('systemdUnit', () => {
   it('takes an absolute "<node> <entry.js>" ExecStart verbatim (no bare name → no 203/EXEC)', () => {
     const unit = systemdUnit('/srv/app', 4321, 'system', '/usr/bin/node /srv/app/dist/index.js');
     expect(unit).toContain('ExecStart=/usr/bin/node /srv/app/dist/index.js serve --no-open --port 4321');
+  });
+});
+
+describe('serviceExecStart', () => {
+  const base = { node: '/n/node', entry: '/pkg/dist/index.js', npxPath: '/n/npx' };
+
+  it('runs the built entry for a stable checkout/global install', () => {
+    expect(serviceExecStart({ ...base, pkgRoot: '/pkg', entryExists: true })).toBe('/n/node /pkg/dist/index.js');
+  });
+
+  it('uses the official npx alias when launched from the ephemeral _npx cache', () => {
+    expect(serviceExecStart({ ...base, pkgRoot: '/home/u/.npm/_npx/abcd/node_modules/cezar-cli', entryExists: false }))
+      .toBe('/n/npx --yes cezar-cli');
+  });
+
+  it('falls back to a resolved global bin when the entry is missing', () => {
+    expect(serviceExecStart({ ...base, pkgRoot: '/pkg', entryExists: false, globalBin: '/usr/bin/cezar-cli' }))
+      .toBe('/n/node /usr/bin/cezar-cli');
   });
 });
 

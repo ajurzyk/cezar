@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { CANCEL, PreflightError, type InstallContext, type InstallStep, type PlatformStrategy, type StepArtifact } from '../types.js';
 import { depCheckStep, generatePassword, owned, shared, shquote, StepAborted, StepCancelled, StepSkipped, sudoStep, verifyCommand } from '../steps.js';
 
@@ -419,29 +420,56 @@ WantedBy=${installTarget}
 `;
 }
 
+/** Our official npm package/alias — what `npx <this>` reinstalls the CLI as. */
+const OFFICIAL_CLI_PKG = 'cezar-cli';
+
 /**
- * The absolute ExecStart command for the service: `"<node> <cezar entry.js>"`.
- * Both parts are absolute so systemd never has to resolve a name off PATH.
+ * Decide the absolute ExecStart command for the service, mirroring how the
+ * installer itself was launched so the box keeps running the same cezar:
  *
- *  1. Preferred — the repo's own built entry (`<repoRoot>/dist/index.js`): the
- *     installer is run from a checkout, so this is present and authoritative.
- *  2. Else a globally-installed `cezar` bin (resolved via a login shell so
- *     nvm/npm-prefix installs are found), run through the same node.
- *  3. Else fall back to the repo entry path and warn to build it first.
+ *  - Launched via `npx <alias>` (the CLI package lives in npm's ephemeral
+ *    `_npx` cache, which gets cleaned): the service can't point there, so it
+ *    reinstalls-and-runs the same way — `<abs npx> --yes cezar-cli` (bare `npx`
+ *    would 203/EXEC, so npx is made absolute).
+ *  - A stable install (a checkout, or a global `cezar-cli`/`cezar`): run the
+ *    CLI's own built entry `<node> <pkg>/dist/index.js`, or a resolved global
+ *    bin. Absolute node + absolute script → systemd never resolves off PATH.
  */
+export function serviceExecStart(opts: {
+  node: string;
+  pkgRoot: string;
+  entry: string;
+  entryExists: boolean;
+  npxPath: string;
+  globalBin?: string;
+}): string {
+  if (/[/\\]_npx[/\\]/.test(opts.pkgRoot)) return `${opts.npxPath} --yes ${OFFICIAL_CLI_PKG}`;
+  if (opts.entryExists) return `${opts.node} ${opts.entry}`;
+  if (opts.globalBin) return `${opts.node} ${opts.globalBin}`;
+  return `${opts.node} ${opts.entry}`;
+}
+
 async function resolveExecStart(ctx: InstallContext): Promise<string> {
   const node = process.execPath; // absolute node running this installer
-  const entry = join(ctx.repoRoot, 'dist', 'index.js');
-  if (ctx.dryRun) return `${node} ${entry}`;
-  if (existsSync(entry)) return `${node} ${entry}`;
-  const out = (await ctx.runner.capture('bash', ['-lc', 'command -v cezar'])).stdout.trim();
-  const bin = out.split('\n').map((s) => s.trim()).filter(Boolean).pop();
-  if (bin) return `${node} ${bin}`;
-  ctx.ui.warn(
-    `No built cezar found to run: ${entry} is missing and no global 'cezar' is installed.\n` +
-      `Build it first (in ${ctx.repoRoot}: npm install && npm run build), then re-run with --reconfigure autostart.`,
-  );
-  return `${node} ${entry}`;
+  // The CLI's OWN package root (…/dist/server-install/platforms/ → up 3), NOT the
+  // repo being operated on — `--repo` / cwd can differ from where cezar lives.
+  const pkgRoot = resolve(fileURLToPath(new URL('../../..', import.meta.url)));
+  const entry = join(pkgRoot, 'dist', 'index.js');
+  const npxPath = join(dirname(node), 'npx');
+  if (ctx.dryRun) return serviceExecStart({ node, pkgRoot, entry, entryExists: true, npxPath });
+
+  let globalBin: string | undefined;
+  if (!existsSync(entry) && !/[/\\]_npx[/\\]/.test(pkgRoot)) {
+    const out = (await ctx.runner.capture('bash', ['-lc', `command -v ${OFFICIAL_CLI_PKG} || command -v cezar`])).stdout.trim();
+    globalBin = out.split('\n').map((s) => s.trim()).filter(Boolean).pop();
+    if (!globalBin) {
+      ctx.ui.warn(
+        `Could not locate a built cezar to run (${entry} missing, no global ${OFFICIAL_CLI_PKG}).\n` +
+          `Install it (npm i -g ${OFFICIAL_CLI_PKG}) or build the checkout, then re-run with --reconfigure autostart.`,
+      );
+    }
+  }
+  return serviceExecStart({ node, pkgRoot, entry, entryExists: existsSync(entry), npxPath, globalBin });
 }
 
 const autostartStep: InstallStep = {
