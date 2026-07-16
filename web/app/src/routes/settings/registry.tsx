@@ -2,6 +2,7 @@ import {
   BellIcon,
   BookmarkIcon,
   BotIcon,
+  FileCogIcon,
   GaugeIcon,
   KeyboardIcon,
   PaletteIcon,
@@ -10,9 +11,11 @@ import {
 import type { ComponentType, SVGProps } from 'react'
 
 import { CenteredState } from '@/components/centered-state'
+import { AgentConfigSection } from './agent-config-section'
 import { AgentsSection } from './agents-section'
 import { AppearanceSection } from './appearance'
 import { BookmarkletsSection } from './bookmarklets-section'
+import { McpSection } from './mcp-section'
 import { NotificationsSection } from './notifications-section'
 import { ResourcesSection } from './resources-section'
 
@@ -22,14 +25,15 @@ import { ResourcesSection } from './resources-section'
  * section later is one entry here — no layout work, no route wiring.
  *
  * `hidden` sections are declared but not routed and not listed: they exist so the plan is
- * visible in code (`mcp`, `keyboard` — later phases; `notifications` unhid in Step 1.7)
- * and so unhiding is a one-word diff.
+ * visible in code (`keyboard` — later phase; `notifications` unhid in Step 1.7, `mcp` shipped
+ * with the agent-config feature #404) and so unhiding is a one-word diff.
  */
 
 export type SettingsSectionId =
   | 'bookmarklets'
   | 'appearance'
   | 'agents'
+  | 'agent-config'
   | 'resources'
   | 'mcp'
   | 'notifications'
@@ -84,6 +88,13 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
     component: AgentsSection,
   },
   {
+    id: 'agent-config',
+    title: 'Agent config',
+    description: 'Edit the coding agents’ own config files, per scope.',
+    icon: FileCogIcon,
+    component: AgentConfigSection,
+  },
+  {
     id: 'resources',
     title: 'Resources',
     description: 'Parallel tasks and per-task memory limit.',
@@ -95,8 +106,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
     title: 'MCP',
     description: 'Model Context Protocol servers.',
     icon: PlugIcon,
-    component: comingSoon('MCP', PlugIcon),
-    hidden: true,
+    component: McpSection,
   },
   {
     id: 'notifications',

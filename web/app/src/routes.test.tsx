@@ -84,6 +84,8 @@ describe('route map', () => {
     ['/settings/bookmarklets', 'settings-bookmarklets', 'Bookmarklets'],
     ['/settings/appearance', 'settings-appearance', 'Appearance'],
     ['/settings/agents', 'settings-agents', 'Agents'],
+    ['/settings/agent-config', 'settings-agent-config', 'Agent config'],
+    ['/settings/mcp', 'settings-mcp', 'MCP'],
     ['/settings/notifications', 'settings-notifications', 'Notifications'],
   ]
 
@@ -102,13 +104,13 @@ describe('route map', () => {
     expect(screen.queryByRole('heading', { name: 'Loading task…' })).toBeNull()
   })
 
-  // Hidden registry sections (mcp/keyboard) are deliberately NOT routed —
-  // their URLs stay honest 404s until the section ships (registry.tsx `hidden`).
+  // Hidden registry sections (keyboard) are deliberately NOT routed — their URLs
+  // stay honest 404s until the section ships (registry.tsx `hidden`). mcp shipped
+  // with the agent-config feature (#404), so it is a real route above now.
   const unknown = [
     '/nope-404',
     '/tasks',
     '/settings/nope',
-    '/settings/mcp',
     '/settings/keyboard',
     '/tasks/abc123/nope',
     '/compare',
