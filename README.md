@@ -340,6 +340,25 @@ never blocks startup):
 Run data (`runs.json`, NDJSON event logs, worktrees, `todos.json`) is
 git-ignored automatically; your workflows and skills stay committable.
 
+### Editing the agents' own config (Settings → Agent config / MCP)
+
+cezar picks *which* agent runs; **Settings → Agent config** lets you edit *how* it
+behaves — the config files Claude, Codex and OpenCode read for themselves
+(`.claude/settings.json`, `.mcp.json`, `CLAUDE.md`, `AGENTS.md`,
+`~/.codex/config.toml`, `opencode.json`, …). Each file is edited **raw**, in its
+native format, with syntax highlighting; cezar never rewrites a file it opened.
+Every scope (user / project / local) is shown together with the vendor's own
+documented precedence, so it's clear which file actually wins. **MCP** is a
+filtered view of the same editor over whichever file holds each runner's servers.
+
+Two things worth knowing: because a run works in a git worktree, an edit to a
+*tracked* file (`.claude/settings.json`) reaches a run only after you commit it —
+the UI says so per file; the *gitignored* personal layer
+(`.claude/settings.local.json`, `CLAUDE.local.md`) is copied into each run's
+worktree so it takes effect immediately. And editing is a **local-machine
+capability**: on a hosted cockpit (`CEZ_REMOTE=1`) the section is read-only, since
+these files can run code (hooks, MCP commands).
+
 ---
 
 ## Development
