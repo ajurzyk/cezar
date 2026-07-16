@@ -192,6 +192,9 @@ export async function runUninstall(strategy: PlatformStrategy, opts: RunOptions)
       }
     }
 
+    // Every `done` step was reversed above; `skipped`/`pending` entries had no
+    // system effect. A completed uninstall leaves the record empty.
+    state.steps = {};
     state.installed = false;
     state.updatedAt = opts.now;
     await ctx.save();
