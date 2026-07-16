@@ -131,8 +131,9 @@ export async function createWorktree(
   // A missing directory can leave stale administrative metadata behind.
   // Prune first so the checks below describe the filesystem as it exists now.
   await git(repoRoot, ['worktree', 'prune']);
+  const canonicalTarget = canonicalPath(absolutePath);
   let registered = await registeredWorktrees(repoRoot);
-  let atPath = registered.find((item) => canonicalPath(item.path) === canonicalPath(absolutePath));
+  let atPath = registered.find((item) => canonicalPath(item.path) === canonicalTarget);
   if (atPath) {
     if (atPath.branch !== branchRef) {
       throw new Error(
@@ -148,7 +149,7 @@ export async function createWorktree(
   if (existsSync(absolutePath)) {
     await git(repoRoot, ['worktree', 'repair', absolutePath]);
     registered = await registeredWorktrees(repoRoot);
-    atPath = registered.find((item) => canonicalPath(item.path) === canonicalPath(absolutePath));
+    atPath = registered.find((item) => canonicalPath(item.path) === canonicalTarget);
     if (atPath) {
       if (atPath.branch !== branchRef) {
         throw new Error(

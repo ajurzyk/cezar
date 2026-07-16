@@ -63,3 +63,54 @@ Request: Extend PR #441 so every isolated Git task either receives a proper work
 - Completed: diagnosis, specification, implementation, focused tests, full validation, compatibility review, commit/push, and PR update.
 - Not completed: none.
 - Residual risks: a genuinely read-only or corrupt Git repository now fails an isolated task instead of allowing it to execute in the user's root; the error is retained on the run for recovery/action.
+
+### 2026-07-17 Review round 2 — code review findings on PR #441
+
+Addressed the `CHANGES_REQUESTED` review on the repository-root lease. The
+`git-worktree.ts` half of the PR was approved as-is; findings 5 and 6 were the
+only changes made there.
+
+- Finding 1 (major, verified regression): a lease waiter sat in `active` and
+  outside `waiting`, so it burned a `maxParallel` slot while idle and starved
+  isolated worktree runs — the exact parallelism this PR set out to preserve.
+  Lease waiters now park in `waiting` for the duration of the wait, following
+  the #347 precedent. The store status stays `running`, so the GUI never shows
+  a lease-blocked run as awaiting user input.
+- Finding 2 (major, architectural): decided to **accept and document** that a
+  parked root run holds the lease until its session ends. A parked session is
+  still live and writes to the working tree on resume, so releasing the lease
+  at the park would reintroduce the concurrent-edit bug #438 fixes. The
+  semantics are now stated in the `acquireRepoRoot` doc comment. Finding 1's
+  fix means isolated runs keep flowing regardless of a held root lease.
+- Finding 3 (minor): `cancel()` could not free a run blocked on the lease — it
+  reported success while the run kept its slot until the holder released. The
+  lease wait is now abortable via `interrupt`. This also surfaced a case the
+  review did not name: `cancel()` can land between the run going `running` and
+  reaching `acquireRepoRoot`, while `interrupt` is still the default no-op, so
+  the method now checks `cancelled` before entering the chain.
+- Finding 4 (latent): `state.releaseRepoRoot` is assigned before `await
+  previous`, so a `dropActive` during the wait can no longer strand the tail
+  pending forever. The pre-grant release is chained behind `previous` — a run
+  that has not yet acquired must not hand the tree to the next waiter.
+- Finding 5 (minor): the worktree reuse paths re-anchored `baseBranch` from the
+  current config, shifting `merge-base` under an existing task. A run that
+  already recorded a fork point now keeps it.
+- Finding 6 (nit): hoisted the per-entry `canonicalPath(absolutePath)` out of
+  both `.find()` predicates.
+
+Tests: added `src/workflows/run-lease.test.ts` — real-Git (worktree creation
+not mocked, unlike `run-isolation.test.ts`) coverage that a lease-blocked run
+does not consume a parallel slot, and that cancel-while-blocked settles without
+waiting for the holder. Both tests were confirmed to fail against the pre-fix
+commit and pass after, so they pin the regression rather than merely passing.
+
+- Ran: `npm run typecheck` — passed.
+- Ran: `npm test` — 124 files, 2,042 tests passed.
+- Ran: `npm run test:unit` — 4 tests passed.
+- Ran: `npm run build` — TypeScript, Vite, and check:pack passed.
+- Ran: `npm run test:package` — packaged dry-run CLI E2E passed.
+
+Residual risks: unchanged from the first round, plus the documented finding-2
+semantics — a `worktree: false` run parked for user input owns the working tree
+until its session ends, so other root runs queue for that period. This is
+deliberate: the alternative is concurrent edits to the user's tree.

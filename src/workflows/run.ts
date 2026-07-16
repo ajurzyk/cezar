@@ -414,18 +414,58 @@ export class RunManager {
   }
 
   /**
-   * Acquire the one-at-a-time lease for runs executing in `repoRoot`. The
-   * promise chain is intentionally independent from `maxParallel`: isolated
-   * worktrees keep using all configured slots while root fallbacks line up.
+   * Acquire the one-at-a-time lease for runs executing in `repoRoot`.
+   *
+   * A lease waiter is idle, so it parks in `waiting` and gives its
+   * `maxParallel` slot back (the #347 rule): isolated worktrees keep using
+   * every configured slot while root runs line up. The store status stays
+   * `running` — only the queue's busy count changes, so the GUI never shows a
+   * lease-blocked run as awaiting user input.
+   *
+   * The lease is held for the run's whole lifetime, including the idle
+   * `waiting` parks between agent turns. A parked session is still live and
+   * writes to the working tree the moment it resumes, so handing the tree to
+   * another run there would reintroduce the concurrent-edit bug (#438) this
+   * lease exists to prevent.
+   *
+   * Returns false when the run was cancelled while waiting: the lease was
+   * never granted and the caller must not touch the working tree.
    */
-  private async acquireRepoRoot(state: ActiveRun): Promise<void> {
+  private async acquireRepoRoot(runId: string, state: ActiveRun): Promise<boolean> {
+    // `cancel()` can land between the run going `running` and reaching here,
+    // while `interrupt` is still the default no-op — never enter the chain.
+    if (state.cancelled) return false;
     const previous = this.repoRootTail;
     let release: () => void = () => undefined;
     this.repoRootTail = new Promise<void>((resolve) => {
       release = resolve;
     });
-    await previous;
+    // Until `previous` resolves this run does not own the tree yet, so a drop
+    // during the wait must not hand the tree to the next waiter — chain our
+    // release behind `previous` instead of resolving the tail early.
+    state.releaseRepoRoot = () => {
+      void previous.then(release);
+    };
+    let abort: () => void = () => undefined;
+    const cancelled = new Promise<void>((resolve) => {
+      abort = resolve;
+    });
+    const parked = state.interrupt;
+    state.interrupt = () => {
+      parked();
+      abort();
+    };
+    this.waiting.add(runId);
+    void this.pump();
+    try {
+      await Promise.race([previous, cancelled]);
+    } finally {
+      state.interrupt = parked;
+      this.waiting.delete(runId);
+    }
+    if (state.cancelled) return false;
     state.releaseRepoRoot = release;
+    return true;
   }
 
   cancel(runId: string): boolean {
@@ -567,7 +607,17 @@ export class RunManager {
         type: 'note',
         message: 'waiting for exclusive access to the repository working tree',
       });
-      await this.acquireRepoRoot(state);
+      if (!(await this.acquireRepoRoot(runId, state))) {
+        this.store.updateRun(runId, {
+          status: 'cancelled',
+          finishedAt: new Date().toISOString(),
+          currentStepId: undefined,
+        });
+        this.store.appendEvent(runId, { type: 'lifecycle', message: 'run cancelled' });
+        this.dropActive(runId);
+        void this.pump();
+        return;
+      }
     }
     this.armAutosave(state);
     if (record) seedHandoffFile(this.dataDir, record); // idempotent — normally already there
@@ -762,8 +812,14 @@ export class RunManager {
       // Fork from the configured base branch (config.json `baseBranch`, e.g.
       // `develop`) — also the target of the eventual draft PR. Unresolvable
       // (typo, not fetched) → note + the currently checked-out branch.
-      let base = repo.branch;
-      const configured = config.baseBranch;
+      //
+      // A task that already recorded a fork point keeps it: its worktree is
+      // reused as-is, and re-resolving against a since-changed config would
+      // silently re-anchor the `merge-base` every diff/shortstat is measured
+      // from, shifting "what did this task change" under an existing task.
+      const recorded = this.store.getRun(runId)?.baseBranch;
+      let base = recorded ?? repo.branch;
+      const configured = recorded ? undefined : config.baseBranch;
       if (configured) {
         const resolved = await resolveBaseRef(this.repoRoot, configured);
         if (resolved) {
@@ -809,7 +865,10 @@ export class RunManager {
         type: 'note',
         message: 'waiting for exclusive access to the repository working tree',
       });
-      await this.acquireRepoRoot(state);
+      // A cancel during the wait leaves the lease ungranted; the step loop
+      // below breaks on `cancelled` before touching the tree and settles the
+      // run through the usual path.
+      await this.acquireRepoRoot(runId, state);
     }
 
     // Handoff journal (spec 007) — seeded after the worktree exists so the
