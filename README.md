@@ -384,6 +384,30 @@ can slot in the same way.
 
 ---
 
+## Remote access (host cezar on a server)
+
+cezar runs on `localhost` by default. To reach the cockpit from another machine —
+a shared team box, a VPS, your phone — put an **authenticated public front** in
+front of it. The built-in installer does this interactively, per **platform
+strategy**, and never escalates silently: every privileged command is printed
+and verified, and it ends with a real authenticated end-to-end check.
+
+```bash
+cezar server-install --platform ubuntu-vps     # stand it up
+cezar server-deploy  --platform ubuntu-vps     # roll out a new version (reload the service)
+cezar server-uninstall --platform ubuntu-vps   # reverse it
+```
+
+| Provider | `--platform` | Public front | Guide |
+|----------|--------------|--------------|-------|
+| Ubuntu / Debian VPS | `ubuntu-vps` | nginx + Let's Encrypt HTTPS, htpasswd login, systemd | [Step-by-step →](docs/server-install/ubuntu-vps.md) |
+| macOS + ngrok | `macosx-ngrok` | ngrok tunnel + `--basic-auth`, launchd | [Step-by-step →](docs/server-install/macosx-ngrok.md) |
+
+See the **[Remote access overview](docs/server-install/README.md)** for how it
+works and how to redeploy new versions.
+
+---
+
 ## Configuration (optional)
 
 Zero config is the default — everything below is opt-in via

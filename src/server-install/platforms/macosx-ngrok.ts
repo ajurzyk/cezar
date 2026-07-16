@@ -181,4 +181,18 @@ export const macosxNgrok: PlatformStrategy = {
       identityStep,
     ];
   },
+  async redeploy(ctx: InstallContext) {
+    // Restart the ngrok launchd agent (the public front) and re-verify. On macOS
+    // cezar itself runs locally — restart it the way you launched it; this
+    // reloads the tunnel that fronts it.
+    if (ctx.dryRun) {
+      ctx.ui.info('DRY RUN — would restart the ngrok launchd agent and re-verify.');
+      return;
+    }
+    ctx.ui.info('Redeploying — restarting the ngrok tunnel.');
+    const uid = process.getuid ? process.getuid() : 0;
+    const code = await ctx.runner.interactive('launchctl', ['kickstart', '-k', `gui/${uid}/${PLIST_LABEL}`]);
+    if (code !== 0) ctx.ui.warn(`launchctl kickstart returned non-zero — check \`launchctl print gui/${uid}/${PLIST_LABEL}\`.`);
+    await identityStep.run(ctx);
+  },
 };

@@ -210,6 +210,13 @@ export interface PlatformStrategy {
   preflight(ctx: InstallContext): Promise<void>;
   /** Ordered steps for this platform. */
   steps(ctx: InstallContext): InstallStep[];
+  /**
+   * Reload the running cockpit to pick up a new cezar version (a fresh local
+   * build or a newly published `cezar-cli`) — the standardized `server-deploy`
+   * entry point. Typically: restart the service + re-verify. Throw `StepAborted`
+   * to report a failed deploy.
+   */
+  redeploy?(ctx: InstallContext): Promise<void>;
 }
 
 /** Thrown by `preflight` to stop with a clean, user-facing reason (no stack). */

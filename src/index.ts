@@ -21,6 +21,7 @@ Usage:
   cezar run "<task>"        run a task headless in the terminal
   cezar init                scaffold .ai/cezar/ (example workflow + skill)
   cezar server-install      interactive wizard to host cezar on a server
+  cezar server-deploy       redeploy a new version (reload the service) + verify
   cezar server-uninstall    reverse a server-install
 
 Options:
@@ -83,6 +84,9 @@ async function main(): Promise<void> {
         reconfigure: values.reconfigure,
         reinstall: Boolean(values.reinstall),
       });
+      return;
+    case 'server-deploy':
+      await serverCommand('deploy', repoRoot, values.platform, { yes: Boolean(values.yes) });
       return;
     case 'server-uninstall':
       await serverCommand('uninstall', repoRoot, values.platform, { yes: Boolean(values.yes) });
@@ -288,7 +292,7 @@ function augmentPathFromLoginShell(): void {
 }
 
 async function serverCommand(
-  mode: 'install' | 'uninstall',
+  mode: 'install' | 'uninstall' | 'deploy',
   repoRoot: string,
   platform: string | undefined,
   flags: { yes: boolean; reconfigure?: string; reinstall?: boolean },
@@ -301,12 +305,12 @@ async function serverCommand(
   augmentPathFromLoginShell();
 
   const { getStrategy, availablePlatformIds } = await import('./server-install/strategies.js');
-  const { runInstall, runUninstall } = await import('./server-install/engine.js');
+  const { runInstall, runUninstall, runDeploy } = await import('./server-install/engine.js');
 
   const ids = availablePlatformIds();
-  // Uninstall can read the platform from the recorded state when omitted.
+  // Uninstall and deploy can read the platform from the recorded state when omitted.
   let chosen = platform;
-  if (mode === 'uninstall' && !chosen) {
+  if ((mode === 'uninstall' || mode === 'deploy') && !chosen) {
     const { loadServerState } = await import('./server-install/state.js');
     chosen = loadServerState().platform;
   }
@@ -332,10 +336,17 @@ async function serverCommand(
   };
 
   try {
-    const result = mode === 'install' ? await runInstall(strategy, runOpts) : await runUninstall(strategy, runOpts);
+    const result =
+      mode === 'install'
+        ? await runInstall(strategy, runOpts)
+        : mode === 'deploy'
+          ? await runDeploy(strategy, runOpts)
+          : await runUninstall(strategy, runOpts);
     if (mode === 'install' && result.status === 'complete') {
       console.log(`\n  cezar server-install (${chosen}) complete.`);
-      console.log(`  Reverse it any time with: cezar server-uninstall --platform ${chosen}\n`);
+      console.log(`  Redeploy a new version any time with: cezar server-deploy --platform ${chosen}\n`);
+    } else if (mode === 'deploy' && result.status === 'complete') {
+      console.log(`\n  cezar server-deploy (${chosen}) complete — the service was reloaded and verified.\n`);
     } else if (mode === 'uninstall' && result.status === 'complete') {
       console.log(`\n  cezar server-uninstall (${chosen}) complete — the changes it made were reversed.\n`);
     }

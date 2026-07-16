@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runInstall, runUninstall, type RunOptions } from './engine.js';
+import { runDeploy, runInstall, runUninstall, type RunOptions } from './engine.js';
 import { loadServerState } from './state.js';
 import { StepAborted } from './steps.js';
 import { createAutoUi } from './ui.js';
@@ -35,8 +35,8 @@ function fakeStep(id: string, over: Partial<InstallStep> = {}): InstallStep {
   };
 }
 
-function strategyOf(steps: InstallStep[]): PlatformStrategy {
-  return { id: 'ubuntu-vps', label: 'Ubuntu VPS', preflight: async () => {}, steps: () => steps };
+function strategyOf(steps: InstallStep[], redeploy?: PlatformStrategy['redeploy']): PlatformStrategy {
+  return { id: 'ubuntu-vps', label: 'Ubuntu VPS', preflight: async () => {}, steps: () => steps, redeploy };
 }
 
 describe('engine', () => {
@@ -100,6 +100,24 @@ describe('engine', () => {
     expect(res.state.installed).toBe(false);
     expect(b.run).not.toHaveBeenCalled();
     expect(loadServerState().steps.a?.status).toBe('failed');
+  });
+
+  it('runDeploy invokes the strategy redeploy and completes', async () => {
+    const redeploy = vi.fn(async () => {});
+    const res = await runDeploy(strategyOf([fakeStep('a')], redeploy), opts());
+    expect(res.status).toBe('complete');
+    expect(redeploy).toHaveBeenCalledOnce();
+  });
+
+  it('runDeploy fails (not throws) when the strategy has no redeploy', async () => {
+    const res = await runDeploy(strategyOf([fakeStep('a')]), opts());
+    expect(res.status).toBe('failed');
+  });
+
+  it('runDeploy reports failed when redeploy aborts (e.g. verify fails)', async () => {
+    const redeploy = vi.fn(async () => { throw new StepAborted('cockpit down'); });
+    const res = await runDeploy(strategyOf([fakeStep('a')], redeploy), opts());
+    expect(res.status).toBe('failed');
   });
 
   it('install-then-uninstall calls each undo with its recorded created and empties state', async () => {

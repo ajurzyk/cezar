@@ -217,6 +217,42 @@ export async function runUninstall(strategy: PlatformStrategy, opts: RunOptions)
   }
 }
 
+/**
+ * Reload the running cockpit to pick up a new cezar version — the standardized
+ * `server-deploy` flow. Delegates to the platform's `redeploy` (restart service
+ * + re-verify); holds the single-writer lock for the whole run.
+ */
+export async function runDeploy(strategy: PlatformStrategy, opts: RunOptions): Promise<RunResult> {
+  const release = acquireLock();
+  try {
+    const state = loadServerState();
+    if (state.platform && state.platform !== strategy.id) {
+      throw new PreflightError(
+        `this host has a ${state.platform} install recorded — deploy it with --platform ${state.platform}`,
+      );
+    }
+    const ctx = buildContext(state, opts);
+    if (!strategy.redeploy) {
+      ctx.ui.warn(`${strategy.label} does not support server-deploy.`);
+      return { status: 'failed', state };
+    }
+    try {
+      await strategy.redeploy(ctx);
+    } catch (err) {
+      if (err instanceof StepAborted || err instanceof StepCancelled) {
+        ctx.ui.error(`Deploy did not complete: ${err.message}`);
+        return { status: 'failed', state };
+      }
+      throw err;
+    }
+    state.updatedAt = opts.now;
+    await ctx.save();
+    return { status: 'complete', state };
+  } finally {
+    release();
+  }
+}
+
 /** True when at least one repo instance is registered (multi-project registry). */
 function liveInstancesExist(): boolean {
   const dir = join(cezarHomeDir(), 'instances');

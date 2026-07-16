@@ -648,4 +648,33 @@ export const ubuntuVps: PlatformStrategy = {
     // deps → proxy → (optional) ssl → (optional) autostart → identity.
     return [depCheckStep(), nginxProxyStep, sslStep, autostartStep, identityStep];
   },
+  async redeploy(ctx: InstallContext) {
+    // Restart the systemd service so it picks up the new cezar (a fresh local
+    // build the unit runs from, or a newly published cezar-cli via npx), then
+    // re-run the same end-to-end verify install uses.
+    const svc = (ctx.state.steps['autostart']?.created?.artifacts ?? []).find((a) => a.type === 'service');
+    const scope: 'user' | 'system' = svc?.scope === 'user' ? 'user' : 'system';
+    if (ctx.dryRun) {
+      ctx.ui.info(`DRY RUN — would reload+restart the cezar ${scope} service and re-verify the cockpit.`);
+      return;
+    }
+    ctx.ui.info(`Redeploying — restarting the cezar ${scope} service to pick up the new version.`);
+    if (scope === 'user') {
+      await ctx.runner.interactive('systemctl', ['--user', 'daemon-reload']);
+      const code = await ctx.runner.interactive('systemctl', ['--user', 'restart', UNIT_NAME]);
+      if (code !== 0) ctx.ui.warn('systemctl --user restart returned non-zero — check `systemctl --user status cezar`.');
+    } else {
+      await sudoStep(ctx, {
+        description: 'Reload systemd and restart the cezar service.',
+        command: `systemctl daemon-reload && systemctl restart ${UNIT_NAME}`,
+        verify: (c) => verifyCommand(c, 'systemctl', ['is-active', UNIT_NAME]),
+      });
+    }
+    await confirmCezarRunning(
+      ctx,
+      scope === 'user' ? 'systemctl --user status cezar' : 'sudo systemctl status cezar',
+      scope === 'user' ? 'journalctl --user -u cezar -n 50 --no-pager' : 'sudo journalctl -u cezar -n 50 --no-pager',
+    );
+    await identityStep.run(ctx); // throws StepAborted if the cockpit isn't fully working
+  },
 };
