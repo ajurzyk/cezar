@@ -18,8 +18,8 @@ Tracking issue: #419
 | 1 | 1.7 | `strategies.ts` + `platforms/ubuntu-vps.ts` (Phase-1 steps) | done | 3bb88ae |
 | 1 | 1.8 | `src/index.ts` wiring + npm script + e2e | done | 693cda2 |
 | 2 | 2.1 | ubuntu-vps SSL step (certbot --nginx) | done | 67e99b6 |
-| 2 | 2.2 | ubuntu-vps autostart step (systemd) | done | PENDING22 |
-| 3 | 3.1 | `platforms/macosx-ngrok.ts` + registry | todo | — |
+| 2 | 2.2 | ubuntu-vps autostart step (systemd) | done | d10ba40 |
+| 3 | 3.1 | `platforms/macosx-ngrok.ts` + registry | done | PENDING31 |
 
 ## Goal
 

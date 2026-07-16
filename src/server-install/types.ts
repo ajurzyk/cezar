@@ -67,6 +67,8 @@ export const serverStateSchema = z.object({
   primaryPort: z.number().int().positive().default(4321),
   /** Public URL / identity user surfaced at the end — display only. */
   publicUrl: z.string().optional(),
+  /** macOS+ngrok free tier: the tunnel URL changes across restarts. */
+  ephemeral: z.boolean().optional(),
   steps: z.record(z.string(), stepOutcomeSchema).default({}),
 });
 export type ServerState = z.infer<typeof serverStateSchema>;

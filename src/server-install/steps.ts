@@ -150,7 +150,21 @@ export function shared(type: string, fields: Omit<StepArtifact, 'kind' | 'type'>
  * the per-tool authorization instruction (agent CLIs need an interactive login
  * a wizard cannot fully automate). `detect` is injectable for tests.
  */
-export function depCheckStep(detect: () => Promise<BackendCheck[]> = detectEnvironment): InstallStep {
+/** How a given platform installs one missing tool. Platform-agnostic seam. */
+export type ToolInstaller = (ctx: InstallContext, name: string) => Promise<void>;
+
+export interface DepStepOpts {
+  detect?: () => Promise<BackendCheck[]>;
+  /** Per-platform installer; defaults to the apt/npm (Ubuntu) one. */
+  installTool?: ToolInstaller;
+  /** Per-tool manual-removal hint shown by uninstall. */
+  removeHint?: (name: string) => string;
+}
+
+export function depCheckStep(opts: DepStepOpts = {}): InstallStep {
+  const detect = opts.detect ?? detectEnvironment;
+  const install = opts.installTool ?? aptInstallTool;
+  const hintFor = opts.removeHint ?? removeHintFor;
   return {
     id: 'deps',
     title: 'Dependencies (agent CLIs + gh)',
@@ -177,8 +191,8 @@ export function depCheckStep(detect: () => Promise<BackendCheck[]> = detectEnvir
       const installed: StepArtifact[] = [];
       for (const name of pick) {
         const check = missing.find((c) => c.name === name);
-        await installTool(ctx, name);
-        installed.push(shared('package', { name, removeHint: removeHintFor(name) }));
+        await install(ctx, name);
+        installed.push(shared('package', { name, removeHint: hintFor(name) }));
         if (check?.hint) ctx.ui.note(check.hint, `Authorize ${name}`);
       }
       return { artifacts: installed };
@@ -195,11 +209,13 @@ export function depCheckStep(detect: () => Promise<BackendCheck[]> = detectEnvir
   };
 }
 
-async function installTool(ctx: InstallContext, name: string): Promise<void> {
-  const npmGlobal: Record<string, string> = {
-    claude: '@anthropic-ai/claude-code',
-    codex: '@openai/codex',
-  };
+const NPM_GLOBAL: Record<string, string> = {
+  claude: '@anthropic-ai/claude-code',
+  codex: '@openai/codex',
+};
+
+/** Ubuntu/Debian installer: apt for gh, sudo npm -g for the agent CLIs (system node). */
+export const aptInstallTool: ToolInstaller = async (ctx, name) => {
   if (name === 'gh') {
     await sudoStep(ctx, {
       description: 'Install the GitHub CLI (only needed for PR creation).',
@@ -208,20 +224,45 @@ async function installTool(ctx: InstallContext, name: string): Promise<void> {
     });
     return;
   }
+  await installViaNpmOrNote(ctx, name, true);
+};
+
+/** macOS installer: brew (no sudo) for gh, npm -g for the agent CLIs. */
+export const brewInstallTool: ToolInstaller = async (ctx, name) => {
+  if (name === 'gh') {
+    if (ctx.dryRun) {
+      ctx.ui.info('DRY RUN — would run: brew install gh');
+      return;
+    }
+    await ctx.runner.interactive('brew', ['install', 'gh']);
+    return;
+  }
+  await installViaNpmOrNote(ctx, name, false);
+};
+
+async function installViaNpmOrNote(ctx: InstallContext, name: string, sudo: boolean): Promise<void> {
   if (name === 'opencode') {
     ctx.ui.note('Install OpenCode from https://opencode.ai, then re-run.', 'opencode');
     return;
   }
-  const pkg = npmGlobal[name];
+  const pkg = NPM_GLOBAL[name];
   if (!pkg) {
     ctx.ui.warn(`no known installer for ${name} — install it manually`);
     return;
   }
-  await sudoStep(ctx, {
-    description: `Install ${name} globally via npm.`,
-    command: `npm install -g ${pkg}`,
-    verify: (c) => verifyCommand(c, name, ['--version']),
-  });
+  if (sudo) {
+    await sudoStep(ctx, {
+      description: `Install ${name} globally via npm.`,
+      command: `npm install -g ${pkg}`,
+      verify: (c) => verifyCommand(c, name, ['--version']),
+    });
+    return;
+  }
+  if (ctx.dryRun) {
+    ctx.ui.info(`DRY RUN — would run: npm install -g ${pkg}`);
+    return;
+  }
+  await ctx.runner.interactive('npm', ['install', '-g', pkg]);
 }
 
 function removeHintFor(name: string): string {
@@ -230,5 +271,15 @@ function removeHintFor(name: string): string {
     codex: 'npm rm -g @openai/codex',
   };
   if (name === 'gh') return 'sudo apt-get remove -y gh';
+  return npm[name] ?? `# remove ${name} manually`;
+}
+
+/** macOS-flavored removal hints (brew instead of apt). */
+export function brewRemoveHint(name: string): string {
+  const npm: Record<string, string> = {
+    claude: 'npm rm -g @anthropic-ai/claude-code',
+    codex: 'npm rm -g @openai/codex',
+  };
+  if (name === 'gh') return 'brew uninstall gh';
   return npm[name] ?? `# remove ${name} manually`;
 }

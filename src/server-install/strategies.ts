@@ -1,3 +1,4 @@
+import { macosxNgrok } from './platforms/macosx-ngrok.js';
 import { ubuntuVps } from './platforms/ubuntu-vps.js';
 import { PLATFORM_IDS, type PlatformId, type PlatformStrategy } from './types.js';
 
@@ -8,7 +9,7 @@ import { PLATFORM_IDS, type PlatformId, type PlatformStrategy } from './types.js
  */
 const REGISTRY: Partial<Record<PlatformId, PlatformStrategy>> = {
   'ubuntu-vps': ubuntuVps,
-  // 'macosx-ngrok' registered in Phase 3.
+  'macosx-ngrok': macosxNgrok,
 };
 
 export function getStrategy(id: string): PlatformStrategy | undefined {
