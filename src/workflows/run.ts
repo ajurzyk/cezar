@@ -224,7 +224,7 @@ export class RunManager {
     group?: { groupId: string; variant: string },
   ): RunRecord {
     const run = this.store.createRun({
-      title: makeTitle(input.task) + (group ? ` (${group.variant})` : ''),
+      title: makeRunTitle(input.task, workflow) + (group ? ` (${group.variant})` : ''),
       workflow: workflow.name,
       task: input.task,
       model: input.model,
@@ -906,7 +906,11 @@ export class RunManager {
     if (step.skill) {
       const skill = skills.find((s) => s.name === step.skill);
       if (skill) {
-        systemPrompt = skill.body.trim();
+        // The body alone often does not identify the selected skill. Keep its
+        // name and catalog description in the normalized runner payload so a
+        // numeric task such as "432" still gives the model enough context to
+        // describe the work — and therefore derive a useful title (#432).
+        systemPrompt = skillSystemPrompt(skill);
         // Directory team skills (SKILL.md + references/) get materialized
         // into <cwd>/.claude/skills/<name>/ — the run's worktree when there
         // is one — so claude sees the companion files on disk; the shared
@@ -1281,7 +1285,28 @@ function applyTemplate(template: string, task: string): string {
   return template.replaceAll('{{task}}', task);
 }
 
-function makeTitle(task: string): string {
+/**
+ * Immediate title shown while a run is queued. The LLM-derived
+ * `titleSummary` still replaces it after the first informative turn; this is
+ * only the honest fallback before any model has answered (#432).
+ */
+export function makeRunTitle(task: string, workflow: WorkflowDef): string {
   const firstLine = task.trim().split('\n')[0] ?? '';
-  return firstLine.length > 80 ? `${firstLine.slice(0, 77)}…` : firstLine || '(untitled task)';
+  const skill = workflow.steps.find((step) => stepKind(step) === 'agent' && step.skill)?.skill?.trim();
+  const contextual = skill && !firstLine.startsWith(`/${skill}`)
+    ? `/${skill}${firstLine ? ` ${firstLine}` : ''}`
+    : firstLine;
+  const chars = [...(contextual || '(untitled task)')];
+  return chars.length > 80 ? `${chars.slice(0, 79).join('').trimEnd()}…` : chars.join('');
+}
+
+/** Skill identity is context, while the Markdown body remains instructions. */
+export function skillSystemPrompt(skill: Pick<Skill, 'name' | 'description' | 'body'>): string {
+  return [
+    `Selected skill: /${skill.name}`,
+    ...(skill.description ? [`Description: ${skill.description}`] : []),
+    '',
+    'Skill instructions:',
+    skill.body.trim(),
+  ].join('\n');
 }
