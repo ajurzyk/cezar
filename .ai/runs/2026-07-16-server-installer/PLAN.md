@@ -9,7 +9,7 @@ Tracking issue: #419
 
 | Phase | Step | Title | Status | Commit |
 |-------|------|-------|--------|--------|
-| 1 | 1.1 | `src/paths.ts` — cezarHomeDir + serverStatePath | todo | — |
+| 1 | 1.1 | `src/paths.ts` — cezarHomeDir + serverStatePath | done | afdc179 |
 | 1 | 1.2 | `src/server-install/types.ts` — contracts + zod ServerState | todo | — |
 | 1 | 1.3 | `src/server-install/state.ts` — load/save/resume | todo | — |
 | 1 | 1.4 | `src/server-install/ui.ts` — @clack wrappers + cancel sentinel | todo | — |
