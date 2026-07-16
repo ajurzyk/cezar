@@ -39,18 +39,21 @@ export function stripJsonComments(input: string): string {
       continue;
     }
     if (ch === '/' && input[i + 1] === '/') {
+      // Line comment runs to EOL; nothing follows it on the line, so dropping the
+      // body doesn't shift any later token — only the newline must be preserved.
       while (i < input.length && input[i] !== '\n') i++;
       out += input[i] === '\n' ? '\n' : '';
       continue;
     }
     if (ch === '/' && input[i + 1] === '*') {
+      out += '  '; // the opening `/*`, blanked in place so same-line offsets after it hold
       i += 2;
       while (i < input.length && !(input[i] === '*' && input[i + 1] === '/')) {
         out += input[i] === '\n' ? '\n' : ' ';
         i++;
       }
-      i++; // land on the '/'
-      out += '  ';
+      i++; // land on the closing '/'
+      out += '  '; // the closing `*/`
       continue;
     }
     out += ch;

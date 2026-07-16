@@ -20,6 +20,15 @@ describe('stripJsonComments', () => {
   it('preserves newlines so error offsets line up', () => {
     expect(stripJsonComments('{\n// c\n}')).toBe('{\n\n}');
   });
+
+  it('preserves byte length across a block comment (offsets after it hold)', () => {
+    const src = '{/* hi */"a":1}';
+    const out = stripJsonComments(src);
+    expect(out.length).toBe(src.length);
+    // the token after the comment sits at the same index in source and stripped output
+    expect(out.indexOf('"a"')).toBe(src.indexOf('"a"'));
+    expect(JSON.parse(out)).toEqual({ a: 1 });
+  });
 });
 
 describe('validateConfig', () => {

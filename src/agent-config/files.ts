@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { agentHomePaths } from '../paths.js';
@@ -86,6 +86,18 @@ export async function writeConfigFile(
       return { ok: false, status: 500, error: (err as Error).message };
     }
   }
+  // Footgun guard: emptying a populated file passes format validation (empty is
+  // valid TOML/markdown, and JSON just errors) but silently wipes real config —
+  // unrecoverable for the gitignored/home files that aren't in git. Refuse it;
+  // deleting a config file is a deliberate act, not a stray select-all-delete.
+  if (content.trim() === '' && current !== null && current.trim() !== '') {
+    return {
+      ok: false,
+      status: 400,
+      error: 'refusing to overwrite a non-empty config file with empty content — delete the file manually if you mean to remove it',
+    };
+  }
+
   const currentVersion = current === null ? null : hashBytes(current);
   if (currentVersion !== version) {
     return {
@@ -108,7 +120,9 @@ export async function writeConfigFile(
       // file/link absent — target stays as the resolved path (the create case)
     }
     await mkdir(dirname(target), { recursive: true });
-    const tmp = `${target}.cez-tmp-${process.pid}`;
+    // Unique per write (not just per process) so two concurrent saves of the same
+    // file can't rename the same tmp path over each other and tear the bytes.
+    const tmp = `${target}.cez-tmp-${process.pid}-${randomUUID()}`;
     await writeFile(tmp, content, 'utf8');
     await rename(tmp, target);
     const written = await readFile(target, 'utf8');

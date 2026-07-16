@@ -60,6 +60,19 @@ describe('writeConfigFile', () => {
     expect(out).toMatchObject({ ok: false, status: 409 });
   });
 
+  it('refuses to empty a populated file (wipe footgun), but allows creating an empty markdown', async () => {
+    const first = (await writeConfigFile('claude.project.settings', '{"a":1}', null, repo, env)) as {
+      ok: true;
+      read: { version: string };
+    };
+    const wipe = await writeConfigFile('claude.project.settings', '   ', first.read.version, repo, env);
+    expect(wipe).toMatchObject({ ok: false, status: 400 });
+    expect(readFileSync(join(repo, '.claude', 'settings.json'), 'utf8')).toBe('{"a":1}');
+    // creating a fresh empty markdown file is still fine (nothing to clobber)
+    const created = await writeConfigFile('claude.project.memory', '', null, repo, env);
+    expect(created).toMatchObject({ ok: true });
+  });
+
   it('accepts a write with the correct current version', async () => {
     const first = (await writeConfigFile('claude.project.settings', '{"a":1}', null, repo, env)) as {
       ok: true;

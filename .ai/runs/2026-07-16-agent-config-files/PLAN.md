@@ -26,6 +26,7 @@ Status: in-progress
 | 4 | 4.1 | Worktree seeding of the personal layer (`src/workflows/run.ts`) | done | 3f61a24 |
 | 5 | 5.1 | Docs: AGENTS.md, README, BACKWARD_COMPATIBILITY.md §2, CHANGELOG | done | a4686f3 |
 | 5 | 5.2-review-fix | Gate home-dir file READS in hosted mode (disclosure fix) | done | PENDING |
+| 5 | 5.3-review-fix | Refuse empty-over-non-empty write; JSONC offset + tmp-name uniqueness | done | PENDING |
 
 ## Goal
 
