@@ -5,6 +5,7 @@ import type { HealthResponse } from '@/api/types'
 import { AppShell, type RepoChip } from '@/components/app-shell'
 import { CommandPalette } from '@/components/command-palette'
 import { ListViewProvider } from '@/components/list-view'
+import { SkillsBanner } from '@/components/skills-banner'
 import { TaskQuickListContainer } from '@/components/task-quick-list'
 import { ToolsMenu } from '@/components/tools-menu'
 
@@ -36,7 +37,8 @@ export function repoChipOf(health: HealthResponse | undefined): RepoChip | null 
  *
  * Nothing here caches boot-time values (#369: the legacy UI read the branch once at startup and
  * then showed a stale branch forever). The chips read whatever is currently in the health query,
- * so making them live is Step 3.2's job of invalidating that query — not a change here.
+ * so keeping them live is `useHealth`'s job — its poll plus Step 3.2's reconnect/visibility
+ * reconcile — not a change here.
  */
 export function AppShellContainer({ children }: { children: ReactNode }) {
   const health = useHealth()
@@ -60,6 +62,7 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
         forgeAvailable={health.data?.forge?.available === true}
         taskQuickList={<TaskQuickListContainer />}
         toolsMenu={<ToolsMenu health={health.data} />}
+        banner={<SkillsBanner />}
       >
         {children}
       </AppShell>

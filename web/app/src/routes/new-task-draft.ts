@@ -25,6 +25,8 @@ export interface NewTaskDraft {
   /** Autonomous (#autonomous): true never pauses for the user. null → remembered
    *  `lastAutonomous` / default (off). */
   autonomous: boolean | null
+  /** Follow-up generation is default-on. null → remembered value / on. */
+  generateFollowups: boolean | null
 }
 
 const EMPTY: NewTaskDraft = {
@@ -36,6 +38,7 @@ const EMPTY: NewTaskDraft = {
   planFirst: false,
   worktree: null,
   autonomous: null,
+  generateFollowups: null,
 }
 
 const STORAGE_KEY = 'cez-new-task-draft'
@@ -53,6 +56,8 @@ function normalize(raw: unknown): NewTaskDraft {
     planFirst: obj.planFirst === true,
     worktree: typeof obj.worktree === 'boolean' ? obj.worktree : null,
     autonomous: typeof obj.autonomous === 'boolean' ? obj.autonomous : null,
+    generateFollowups:
+      typeof obj.generateFollowups === 'boolean' ? obj.generateFollowups : null,
   }
 }
 

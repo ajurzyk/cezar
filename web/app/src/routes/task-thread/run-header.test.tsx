@@ -239,7 +239,7 @@ describe('actions hit their endpoints', () => {
 
     expect(sent.some((r) => r.method === 'DELETE')).toBe(false)
     const dialog = await screen.findByRole('alertdialog')
-    fireEvent.click(within(dialog).getByRole('button', { name: /^Delete / }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }))
     await waitFor(() => {
       expect(sent.some((r) => r.method === 'DELETE' && r.path === '/api/runs/r1')).toBe(true)
     })
@@ -247,6 +247,16 @@ describe('actions hit their endpoints', () => {
     await waitFor(() => {
       expect(document.querySelector('[data-slot="home-probe"]')).not.toBeNull()
     })
+  })
+
+  it('the delete confirm button stays "Delete" even for a long task name, which appears in the description instead (#403)', async () => {
+    const longTitle = 'create a github issue for saving unsuccessfully finished tasks automatically'
+    renderHeader(run('failed', { titleSummary: longTitle }))
+    fireEvent.click(actionBar().getByRole('button', { name: 'Delete' }))
+
+    const dialog = await screen.findByRole('alertdialog')
+    expect(within(dialog).getByRole('button', { name: 'Delete' })).not.toBeNull()
+    expect(within(dialog).getByText(longTitle)).not.toBeNull()
   })
 
   it('dismissing the confirm keeps the run', async () => {
@@ -388,7 +398,7 @@ describe('notes panel', () => {
 })
 
 describe('meta line, tabs, pill and resume hint', () => {
-  it('meta shows workflow · model · branch chip · ± · tokens · cost; runner only when not claude', () => {
+  it('meta shows workflow · branch chip · ± · tokens · cost, with runner/model tucked into the agent badge', () => {
     stubFetch()
     renderHeader(
       run('done', {
@@ -401,20 +411,49 @@ describe('meta line, tabs, pill and resume hint', () => {
     )
     const meta = document.querySelector('[data-slot="run-meta"]') as HTMLElement
     expect(meta.textContent).toContain('quick-task')
-    expect(meta.textContent).toContain('codex')
-    expect(meta.textContent).toContain('gpt-5.2-codex')
+    // Runner/model are no longer loose text next to the workflow — they live in the badge.
+    expect(meta.textContent).not.toContain('codex')
+    expect(meta.textContent).not.toContain('gpt-5.2-codex')
     expect(within(meta).getByText('cez/r1').getAttribute('data-slot')).toBe('branch-chip')
     expect(meta.querySelector('[data-slot="diff-stat"]')?.textContent).toBe('+42 −7')
     expect(meta.textContent).toContain('27.0k tokens')
     expect(meta.textContent).toContain('$0.04')
     // No context gauge: RunRecord carries no context-window data to draw one from.
     expect(meta.querySelector('[data-slot="context-gauge"]')).toBeNull()
+
+    const badge = within(meta).getByRole('button', { name: /Agent: codex, model gpt-5.2-codex/ })
+    expect(badge.getAttribute('data-slot')).toBe('agent-badge')
   })
 
-  it('a claude run keeps the runner out of the meta line', () => {
+  it('the agent badge reveals runner and model on click, reading "auto" when the model is unset', async () => {
+    stubFetch()
+    renderHeader(run('done', { runner: 'opencode' }))
+    const meta = document.querySelector('[data-slot="run-meta"]') as HTMLElement
+    fireEvent.pointerDown(within(meta).getByRole('button', { name: /Agent: opencode/ }))
+    const menu = await screen.findByRole('menu')
+    expect(within(menu).getByText('runner: opencode')).not.toBeNull()
+    expect(within(menu).getByText('model: auto')).not.toBeNull()
+  })
+
+  // #416: the record persists only the runner the caller ASKED for (`src/runs/store.ts`), while
+  // the run executes as `input.runner ?? config.defaultRunner` (`src/workflows/run.ts`). So a
+  // record without a runner must name the repo's DEFAULT agent — hardcoding 'claude' here would
+  // confidently name the wrong agent on a codex/opencode repo, which is the exact question the
+  // badge exists to answer.
+  it('a run with no explicit runner names the repo default from health, not a hardcoded claude', async () => {
+    stubFetch({ '/api/health': () => jsonResponse({ defaultRunner: 'codex' }) })
+    renderHeader(run('done', { runner: undefined }))
+    const meta = document.querySelector('[data-slot="run-meta"]') as HTMLElement
+    const badge = await within(meta).findByRole('button', { name: /Agent: codex, model auto/ })
+    expect(badge.getAttribute('data-slot')).toBe('agent-badge')
+  })
+
+  it('a claude run still gets an agent badge — Claude is the default, not a hidden runner', () => {
     stubFetch()
     renderHeader(run('done', { runner: 'claude' }))
-    expect(document.querySelector('[data-slot="run-meta"]')?.textContent).not.toContain('claude')
+    const meta = document.querySelector('[data-slot="run-meta"]') as HTMLElement
+    expect(meta.textContent).not.toContain('claude')
+    expect(within(meta).getByRole('button', { name: /Agent: claude, model auto/ })).not.toBeNull()
   })
 
   it('tabs: Session is current; Changes and Files link to the routed surfaces', () => {

@@ -1,13 +1,19 @@
 import { execFile } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { HANDOFF_INSTRUCTIONS } from '../handoff.js';
+import { HANDOFF_INSTRUCTIONS, HANDOFF_ONLY_INSTRUCTIONS } from '../handoff.js';
 import { RunStore } from '../runs/store.js';
 import type { WorkflowDef } from './types.js';
-import { RunManager, composeSystemPrompt, resolveExtraSystemPrompt } from './run.js';
+import {
+  RunManager,
+  composeSystemPrompt,
+  makeRunTitle,
+  resolveExtraSystemPrompt,
+  skillSystemPrompt,
+} from './run.js';
 
 const run = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
@@ -41,6 +47,31 @@ describe('composeSystemPrompt', () => {
   });
 });
 
+describe('skill-aware task naming (#432)', () => {
+  const skillWorkflow: WorkflowDef = {
+    name: '(planned)',
+    source: 'built-in',
+    steps: [{ id: 'task', name: 'om-auto-review-pr', skill: 'om-auto-review-pr', prompt: '{{task}}' }],
+  };
+
+  it('uses the selected skill as the queued fallback for argument-only tasks', () => {
+    expect(makeRunTitle('432', skillWorkflow)).toBe('/om-auto-review-pr 432');
+  });
+
+  it('does not duplicate a skill command the user already supplied', () => {
+    expect(makeRunTitle('/om-auto-review-pr 432', skillWorkflow)).toBe('/om-auto-review-pr 432');
+  });
+
+  it('keeps the legacy task-only fallback when no skill is selected', () => {
+    const workflow: WorkflowDef = {
+      name: 'quick-task',
+      source: 'built-in',
+      steps: [{ id: 'task', prompt: '{{task}}' }],
+    };
+    expect(makeRunTitle('Fix the login bug', workflow)).toBe('Fix the login bug');
+  });
+});
+
 /**
  * End-to-end through the real engine with CEZ_DRY_RUN=1: the config default
  * and the per-run override must reach the claude CLI's argv verbatim
@@ -50,8 +81,11 @@ describe('composeSystemPrompt', () => {
 describe('systemPrompt end-to-end (dry run)', () => {
   const CONFIG_PROMPT = 'CONFIG-DEFAULT: always write tests first.';
   const OVERRIDE_PROMPT = 'PER-RUN OVERRIDE: answer in bullet points.';
+  const SKILL_DESCRIPTION = 'Review a pull request by number and report actionable findings.';
+  const SKILL_BODY = 'Inspect the selected pull request and review its diff.';
   let repoRoot: string;
   let argsFile: string;
+  let inheritedTodos: string;
   let store: RunStore;
   let manager: RunManager;
   const savedEnv: Record<string, string | undefined> = {};
@@ -59,15 +93,29 @@ describe('systemPrompt end-to-end (dry run)', () => {
   beforeAll(async () => {
     repoRoot = mkdtempSync(join(tmpdir(), 'cez-sysprompt-'));
     argsFile = join(repoRoot, 'mock-args.ndjson');
+    inheritedTodos = join(repoRoot, 'inherited-todos.json');
     savedEnv.CEZ_DRY_RUN = process.env.CEZ_DRY_RUN;
     savedEnv.CEZ_MOCK_ARGS_FILE = process.env.CEZ_MOCK_ARGS_FILE;
+    savedEnv.CEZ_TODOS_FILE = process.env.CEZ_TODOS_FILE;
     process.env.CEZ_DRY_RUN = '1';
     process.env.CEZ_MOCK_ARGS_FILE = argsFile;
+    // Simulate a nested cezar (an agent running `cez serve` / the test suite):
+    // the parent process already carries CEZ_TODOS_FILE. Runners spawn with
+    // `{ ...process.env, ...spec.env }`, so `agentEnv` must *shadow* this for
+    // every run — never merely omit the key — or an opted-out agent writes
+    // follow-ups into the parent's inbox. Asserted per test below.
+    process.env.CEZ_TODOS_FILE = inheritedTodos;
     await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
     writeFileSync(join(repoRoot, 'a.txt'), 'one\n');
     await run('git', ['add', '-A'], { cwd: repoRoot });
     await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repoRoot });
     mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
+    mkdirSync(join(repoRoot, '.ai/skills/om-auto-review-pr'), { recursive: true });
+    writeFileSync(
+      join(repoRoot, '.ai/skills/om-auto-review-pr/SKILL.md'),
+      `---\nname: om-auto-review-pr\ndescription: ${SKILL_DESCRIPTION}\n---\n${SKILL_BODY}\n`,
+      'utf8',
+    );
     writeFileSync(
       join(repoRoot, '.ai/cezar', 'config.json'),
       JSON.stringify({ systemPrompt: CONFIG_PROMPT, maxParallel: 1 }),
@@ -98,9 +146,21 @@ describe('systemPrompt end-to-end (dry run)', () => {
     ],
   };
 
-  async function runToEnd(input: { task: string; systemPrompt?: string }): Promise<string> {
+  const skillWorkflow: WorkflowDef = {
+    name: '(planned)',
+    source: 'built-in',
+    steps: [
+      { id: 'review', name: 'om-auto-review-pr', skill: 'om-auto-review-pr', prompt: '{{task}}' },
+      { id: 'verify', command: 'true' },
+    ],
+  };
+
+  async function runToEnd(
+    input: { task: string; systemPrompt?: string; generateFollowups?: boolean },
+    selectedWorkflow: WorkflowDef = workflow,
+  ): Promise<string> {
     writeFileSync(argsFile, '', 'utf8'); // fresh capture per run
-    const record = manager.startRun(workflow, input);
+    const record = manager.startRun(selectedWorkflow, input);
     const terminal = new Set(['done', 'review', 'failed', 'cancelled']);
     const deadline = Date.now() + 20_000;
     while (!terminal.has(store.getRun(record.id)?.status ?? '')) {
@@ -110,10 +170,10 @@ describe('systemPrompt end-to-end (dry run)', () => {
     return record.id;
   }
 
-  function capturedSystemPrompt(): string {
+  function capturedSystemPrompt(index = 0): string {
     const lines = readFileSync(argsFile, 'utf8').trim().split('\n');
-    expect(lines.length).toBeGreaterThan(0);
-    const argv = JSON.parse(lines[0] as string) as string[];
+    expect(lines.length).toBeGreaterThan(index);
+    const argv = JSON.parse(lines[index] as string) as string[];
     const idx = argv.indexOf('--append-system-prompt');
     expect(idx).toBeGreaterThanOrEqual(0);
     return argv[idx + 1] as string;
@@ -136,5 +196,76 @@ describe('systemPrompt end-to-end (dry run)', () => {
     const prompt = capturedSystemPrompt();
     expect(prompt).toBe(composeSystemPrompt(OVERRIDE_PROMPT, HANDOFF_INSTRUCTIONS));
     expect(prompt).not.toContain(CONFIG_PROMPT);
+  }, 30_000);
+
+  it('sends skill identity, description, instructions, and numeric task context to the runner', async () => {
+    const id = await runToEnd({ task: '432' }, skillWorkflow);
+    const record = store.getRun(id);
+
+    expect(record?.title).toBe('/om-auto-review-pr 432');
+    // The display title remains LLM-derived after a turn; the skill-aware
+    // title above is only the queued fallback.
+    expect(record?.titleSummary).toBeDefined();
+    expect(record?.titleSummary).not.toBe(record?.title);
+
+    const skillPrompt = skillSystemPrompt({
+      name: 'om-auto-review-pr',
+      description: SKILL_DESCRIPTION,
+      body: SKILL_BODY,
+    });
+    expect(capturedSystemPrompt()).toBe(
+      composeSystemPrompt(skillPrompt, CONFIG_PROMPT, HANDOFF_INSTRUCTIONS),
+    );
+
+    // The mock writes the actual first user message it received into the run
+    // worktree, proving the argument is still the runner's user prompt rather
+    // than being swallowed by title construction.
+    const worktreePath = record?.worktreePath;
+    if (!worktreePath) throw new Error('run did not create its worktree');
+    expect(readFileSync(join(worktreePath, 'notes.md'), 'utf8')).toContain(': 432\n');
+  }, 30_000);
+
+  // The positive control for the opt-out test below: without this, flipping the
+  // `generateFollowups` default or mistyping the `!== false` guard would stop
+  // every run from producing inbox entries with the whole suite still green.
+  it('by default the agent gets the run own inbox, never an inherited one', async () => {
+    const todosFile = join(repoRoot, '.ai/cezar/todos.json');
+    rmSync(todosFile, { force: true });
+    rmSync(inheritedTodos, { force: true });
+    await runToEnd({ task: 'do the thing with follow-ups' });
+    expect(capturedSystemPrompt()).toContain('CEZ_TODOS_FILE');
+    expect(existsSync(todosFile)).toBe(true);
+    expect(existsSync(inheritedTodos)).toBe(false);
+  }, 30_000);
+
+  it('explicit opt-out keeps handoff behavior but removes inbox prompt and environment', async () => {
+    const todosFile = join(repoRoot, '.ai/cezar/todos.json');
+    rmSync(todosFile, { force: true });
+    rmSync(inheritedTodos, { force: true });
+    const id = await runToEnd({ task: 'do the thing quietly', generateFollowups: false });
+    const record = store.getRun(id);
+    expect(record?.generateFollowups).toBe(false);
+    expect(capturedSystemPrompt()).toBe(composeSystemPrompt(CONFIG_PROMPT, HANDOFF_ONLY_INSTRUCTIONS));
+    expect(capturedSystemPrompt()).not.toContain('CEZ_TODOS_FILE');
+    expect(existsSync(todosFile)).toBe(false);
+    // The opt-out must survive an inherited CEZ_TODOS_FILE (nested cezar):
+    // omitting the key instead of shadowing it leaks into the parent's inbox.
+    expect(existsSync(inheritedTodos)).toBe(false);
+    expect(readFileSync(join(repoRoot, '.ai/cezar/runs', `${id}.handoff.md`), 'utf8')).toContain(
+      'mock: implemented the change',
+    );
+
+    expect(manager.continueRun(id, 'continue without generating follow-ups')).toEqual({ ok: true });
+    const deadline = Date.now() + 20_000;
+    while (readFileSync(argsFile, 'utf8').trim().split('\n').length < 2) {
+      if (Date.now() > deadline) throw new Error('continuation did not start in time');
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    expect(capturedSystemPrompt(1)).toBe(
+      composeSystemPrompt(CONFIG_PROMPT, HANDOFF_ONLY_INSTRUCTIONS),
+    );
+    expect(capturedSystemPrompt(1)).not.toContain('CEZ_TODOS_FILE');
+    expect(existsSync(todosFile)).toBe(false);
+    expect(existsSync(inheritedTodos)).toBe(false);
   }, 30_000);
 });

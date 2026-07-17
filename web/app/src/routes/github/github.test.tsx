@@ -7,7 +7,7 @@ import { createQueryClient } from '@/api/query-client'
 import type { GithubData, GithubItem, Skill, WorkflowsResponse } from '@/api/types'
 import { Toaster, resetToasts } from '@/components/ui/toaster'
 
-import { GithubRoute } from './github'
+import { GithubIndexRoute, GithubRoute } from './github'
 
 beforeAll(() => {
   // cmdk scrolls the selected item into view; jsdom has no scrollIntoView.
@@ -140,13 +140,15 @@ function stubFetch(overrides: Record<string, () => Response> = {}): SentRequest[
   return sent
 }
 
-/** Cold-load the tab at a URL, with the same route map routes.tsx registers. */
+/** Cold-load the tab at a URL, with the same route map routes.tsx registers — `/github` goes
+ *  through `GithubIndexRoute` (#417) exactly like production, so the remembered-tab redirect
+ *  is exercised the same way a real navigation would hit it. */
 function renderAt(entry: string) {
   render(
     <QueryClientProvider client={createQueryClient()}>
       <MemoryRouter initialEntries={[entry]}>
         <Routes>
-          <Route path="/github" element={<GithubRoute view="issues" />} />
+          <Route path="/github" element={<GithubIndexRoute />} />
           <Route path="/github/prs" element={<GithubRoute view="prs" />} />
           <Route path="/github/issues/:n" element={<GithubRoute view="issues" />} />
           <Route path="/github/prs/:n" element={<GithubRoute view="prs" />} />
@@ -199,6 +201,35 @@ describe('the GitHub tab lists', () => {
     expect(rows()[0]?.getAttribute('href')).toBe('/github/prs/137')
   })
 
+  it('a PR row shows a checks glyph tinted by outcome (#400); an issue row shows none', async () => {
+    const passing: GithubItem = { ...PR_137, number: 201, url: 'u201', checks: 'passing' }
+    const pending: GithubItem = { ...PR_137, number: 202, url: 'u202', checks: 'pending' }
+    const none: GithubItem = { ...PR_137, number: 203, url: 'u203', checks: null }
+    stubFetch({
+      'GET /api/github': () => jsonResponse({ ...GITHUB, prs: [PR_137, passing, pending, none] }),
+    })
+    renderAt('/github/prs')
+
+    await waitFor(() => expect(rows()).toHaveLength(4))
+    const glyph = (number: string) =>
+      document.querySelector(`[data-slot="gh-row"][data-number="${number}"] [data-slot="gh-row-checks"]`)
+
+    expect(glyph('137')?.getAttribute('data-checks')).toBe('failing')
+    expect(glyph('137')?.textContent).toBe('✗')
+    expect(glyph('201')?.getAttribute('data-checks')).toBe('passing')
+    expect(glyph('201')?.textContent).toBe('✓')
+    expect(glyph('202')?.getAttribute('data-checks')).toBe('pending')
+    expect(glyph('202')?.textContent).toBe('○')
+    expect(glyph('203')).toBeNull()
+
+    // Issues never carry `checks` — no glyph on their rows either.
+    cleanup()
+    stubFetch()
+    renderAt('/github')
+    await waitFor(() => expect(rows().length).toBeGreaterThan(0))
+    expect(document.querySelector('[data-slot="gh-row-checks"]')).toBeNull()
+  })
+
   it('counts at the fast-batch cap render as 30+ until the full fetch lands', async () => {
     const many: GithubData = {
       ...GITHUB,
@@ -249,6 +280,54 @@ describe('the GitHub tab lists', () => {
   })
 })
 
+describe('remembering the last-selected tab (#417)', () => {
+  it('clicking Pull requests persists the choice via PUT /api/ui-state', async () => {
+    const sent = stubFetch()
+    renderAt('/github')
+    await waitFor(() => expect(rows()).toHaveLength(2))
+
+    fireEvent.click(screen.getByRole('link', { name: /Pull requests/ }))
+
+    await waitFor(() =>
+      expect(sent.some((request) => request.method === 'PUT' && request.path === '/api/ui-state')).toBe(
+        true,
+      ),
+    )
+    const put = sent.find((request) => request.method === 'PUT' && request.path === '/api/ui-state')
+    expect(put?.body).toEqual({ githubView: 'prs' })
+  })
+
+  it('opening /github restores "prs" when that was the last-selected tab', async () => {
+    stubFetch({ 'GET /api/ui-state': () => jsonResponse({ githubView: 'prs' }) })
+    renderAt('/github')
+
+    await waitFor(() => expect(rows()).toHaveLength(1))
+    expect(rows()[0]?.getAttribute('href')).toBe('/github/prs/137')
+  })
+
+  it('opening /github falls back to Issues when nothing was ever remembered', async () => {
+    stubFetch({ 'GET /api/ui-state': () => jsonResponse({}) })
+    renderAt('/github')
+
+    await waitFor(() => expect(rows()).toHaveLength(2))
+    expect(rows()[0]?.getAttribute('href')).toBe('/github/issues/142')
+  })
+
+  it('clicking Issues while "prs" is remembered switches to Issues instead of bouncing back', async () => {
+    // The regression this guards: without eagerly patching the query cache on click, the
+    // index route would still read the stale "prs" remembered choice and redirect the click
+    // straight back to /github/prs, making the Issues tab unclickable.
+    stubFetch({ 'GET /api/ui-state': () => jsonResponse({ githubView: 'prs' }) })
+    renderAt('/github/prs')
+    await waitFor(() => expect(rows()).toHaveLength(1))
+
+    fireEvent.click(screen.getByRole('link', { name: /^Issues/ }))
+
+    await waitFor(() => expect(rows()).toHaveLength(2))
+    expect(rows().map((row) => row.dataset.number)).toEqual(['142', '139'])
+  })
+})
+
 describe('the GitHub detail pane', () => {
   it('a PR renders the meta line, ± stat, label chips and the checks badge', async () => {
     stubFetch()
@@ -267,6 +346,18 @@ describe('the GitHub detail pane', () => {
     const checks = document.querySelector('[data-slot="gh-checks"]')
     expect(checks?.getAttribute('data-checks')).toBe('failing')
     expect(checks?.textContent).toContain('checks failing')
+  })
+
+  it('the checks badge links to the PR checks tab on GitHub, open in a new tab (#415)', async () => {
+    stubFetch()
+    renderAt('/github/prs/137')
+
+    await waitFor(() => expect(detail()).not.toBeNull())
+    const checks = document.querySelector('[data-slot="gh-checks"]')
+    expect(checks?.tagName).toBe('A')
+    expect(checks?.getAttribute('href')).toBe(`${PR_137.url}/checks`)
+    expect(checks?.getAttribute('target')).toBe('_blank')
+    expect(checks?.getAttribute('rel')).toBe('noopener noreferrer')
   })
 
   it('renders the issue body through the markdown pipeline', async () => {

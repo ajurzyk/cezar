@@ -7,6 +7,7 @@ import { onUsage, registerRunProcess, unregisterRunProcess, type ProcessUsage } 
 import { createRunner } from '../core/runner-factory.js';
 import type { RunnerId } from '../core/agent-runner.js';
 import {
+  HANDOFF_ONLY_INSTRUCTIONS,
   HANDOFF_INSTRUCTIONS,
   appendHandoffHeartbeat,
   handoffPath,
@@ -89,6 +90,9 @@ export interface StartRunInput {
    *  user — turn-ends auto-continue until the agent signals done or the safety
    *  cap is hit. No "needs you" is ever raised. */
   autonomous?: boolean;
+  /** Follow-up inbox generation (spec 007, #444). Omitted means enabled for
+   *  compatibility; the handoff journal runs either way. */
+  generateFollowups?: boolean;
 }
 
 /**
@@ -209,12 +213,19 @@ export class RunManager {
   }
 
   /** Env the spawned claude gets so the agent can find its handoff file and
-   *  the global inbox (spec 007). */
-  private agentEnv(runId: string): Record<string, string> {
+   *  the global inbox (spec 007; the inbox only when the run opted in).
+   *
+   *  `CEZ_TODOS_FILE` is set to `''` rather than omitted when follow-ups are
+   *  off: runners spawn with `{ ...process.env, ...spec.env }`, so omitting the
+   *  key would let a value inherited from *this* process through — a nested
+   *  cezar (an agent running `cez serve`/`cez run`/the test suite) would then
+   *  write follow-ups into the parent's inbox despite the opt-out. Empty is the
+   *  established "absent" spelling — consumers guard with `if (todosFile)`. */
+  private agentEnv(runId: string, generateFollowups = true): Record<string, string> {
     return {
       CEZ_HANDOFF_FILE: handoffPath(this.dataDir, runId),
-      CEZ_TODOS_FILE: todosPath(this.dataDir),
       CEZ_TASK_ID: runId,
+      CEZ_TODOS_FILE: generateFollowups ? todosPath(this.dataDir) : '',
     };
   }
 
@@ -224,11 +235,12 @@ export class RunManager {
     group?: { groupId: string; variant: string },
   ): RunRecord {
     const run = this.store.createRun({
-      title: makeTitle(input.task) + (group ? ` (${group.variant})` : ''),
+      title: makeRunTitle(input.task, workflow) + (group ? ` (${group.variant})` : ''),
       workflow: workflow.name,
       task: input.task,
       model: input.model,
       runner: input.runner,
+      generateFollowups: input.generateFollowups,
       groupId: group?.groupId,
       variant: group?.variant,
       steps: workflow.steps.map((s) => ({ id: s.id, name: s.name ?? s.id, kind: stepKind(s) })),
@@ -326,7 +338,12 @@ export class RunManager {
         if (workflow) {
           this.pendingJobs.set(run.id, {
             workflow,
-            input: { task: run.task, model: run.model, runner: run.runner },
+            input: {
+              task: run.task,
+              model: run.model,
+              runner: run.runner,
+              generateFollowups: run.generateFollowups,
+            },
           });
           this.queue.push(run.id);
           this.store.appendEvent(run.id, { type: 'lifecycle', message: 'cezar restarted — task re-queued' });
@@ -529,6 +546,7 @@ export class RunManager {
     // Continuation runs in the task's worktree when it still exists (spec
     // 006) — the resumed session sees exactly what the original run left.
     const record = this.store.getRun(runId);
+    const generateFollowups = record?.generateFollowups !== false;
     const cwd =
       record?.worktreePath && existsSync(record.worktreePath)
         ? record.worktreePath
@@ -630,12 +648,15 @@ export class RunManager {
         // The Continue step is a fresh agent session on the same run — the
         // run's extra system prompt (already resolved at execute time and
         // echoed on the record) rides along with the handoff contract.
-        systemPrompt: composeSystemPrompt(record?.systemPrompt, HANDOFF_INSTRUCTIONS),
+        systemPrompt: composeSystemPrompt(
+          record?.systemPrompt,
+          generateFollowups ? HANDOFF_INSTRUCTIONS : HANDOFF_ONLY_INSTRUCTIONS,
+        ),
         userPrompt: prompt,
         cwd: state.cwd,
         allowedTools: DEFAULT_ALLOWED_TOOLS,
         additionalDirectories: [join(this.dataDir, 'runs')],
-        env: this.agentEnv(runId),
+        env: this.agentEnv(runId, generateFollowups),
         sessionId,
         resume: true,
         timeoutMs: 0,
@@ -906,7 +927,11 @@ export class RunManager {
     if (step.skill) {
       const skill = skills.find((s) => s.name === step.skill);
       if (skill) {
-        systemPrompt = skill.body.trim();
+        // The body alone often does not identify the selected skill. Keep its
+        // name and catalog description in the normalized runner payload so a
+        // numeric task such as "432" still gives the model enough context to
+        // describe the work — and therefore derive a useful title (#432).
+        systemPrompt = skillSystemPrompt(skill);
         // Directory team skills (SKILL.md + references/) get materialized
         // into <cwd>/.claude/skills/<name>/ — the run's worktree when there
         // is one — so claude sees the companion files on disk; the shared
@@ -1012,7 +1037,11 @@ export class RunManager {
         {
           // Skill body, then the run's extra prompt (POST override or config
           // default), then the handoff/todos contract — every agent step.
-          systemPrompt: composeSystemPrompt(systemPrompt, extraSystemPrompt, HANDOFF_INSTRUCTIONS),
+          systemPrompt: composeSystemPrompt(
+            systemPrompt,
+            extraSystemPrompt,
+            input.generateFollowups === false ? HANDOFF_ONLY_INSTRUCTIONS : HANDOFF_INSTRUCTIONS,
+          ),
           userPrompt,
           images,
           cwd: state.cwd,
@@ -1020,7 +1049,7 @@ export class RunManager {
           bashAllowlist: step.bashAllowlist,
           // The handoff file lives outside the worktree — grant access.
           additionalDirectories: [join(this.dataDir, 'runs')],
-          env: this.agentEnv(runId),
+          env: this.agentEnv(runId, input.generateFollowups !== false),
           model: step.model ?? input.model,
           sessionId,
           // Interactive sessions have no wall clock — the idle timer rules.
@@ -1281,7 +1310,28 @@ function applyTemplate(template: string, task: string): string {
   return template.replaceAll('{{task}}', task);
 }
 
-function makeTitle(task: string): string {
+/**
+ * Immediate title shown while a run is queued. The LLM-derived
+ * `titleSummary` still replaces it after the first informative turn; this is
+ * only the honest fallback before any model has answered (#432).
+ */
+export function makeRunTitle(task: string, workflow: WorkflowDef): string {
   const firstLine = task.trim().split('\n')[0] ?? '';
-  return firstLine.length > 80 ? `${firstLine.slice(0, 77)}…` : firstLine || '(untitled task)';
+  const skill = workflow.steps.find((step) => stepKind(step) === 'agent' && step.skill)?.skill?.trim();
+  const contextual = skill && !firstLine.startsWith(`/${skill}`)
+    ? `/${skill}${firstLine ? ` ${firstLine}` : ''}`
+    : firstLine;
+  const chars = [...(contextual || '(untitled task)')];
+  return chars.length > 80 ? `${chars.slice(0, 79).join('').trimEnd()}…` : chars.join('');
+}
+
+/** Skill identity is context, while the Markdown body remains instructions. */
+export function skillSystemPrompt(skill: Pick<Skill, 'name' | 'description' | 'body'>): string {
+  return [
+    `Selected skill: /${skill.name}`,
+    ...(skill.description ? [`Description: ${skill.description}`] : []),
+    '',
+    'Skill instructions:',
+    skill.body.trim(),
+  ].join('\n');
 }
