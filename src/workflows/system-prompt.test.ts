@@ -7,7 +7,13 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { HANDOFF_INSTRUCTIONS, HANDOFF_ONLY_INSTRUCTIONS } from '../handoff.js';
 import { RunStore } from '../runs/store.js';
 import type { WorkflowDef } from './types.js';
-import { RunManager, composeSystemPrompt, resolveExtraSystemPrompt } from './run.js';
+import {
+  RunManager,
+  composeSystemPrompt,
+  makeRunTitle,
+  resolveExtraSystemPrompt,
+  skillSystemPrompt,
+} from './run.js';
 
 const run = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
@@ -41,6 +47,31 @@ describe('composeSystemPrompt', () => {
   });
 });
 
+describe('skill-aware task naming (#432)', () => {
+  const skillWorkflow: WorkflowDef = {
+    name: '(planned)',
+    source: 'built-in',
+    steps: [{ id: 'task', name: 'om-auto-review-pr', skill: 'om-auto-review-pr', prompt: '{{task}}' }],
+  };
+
+  it('uses the selected skill as the queued fallback for argument-only tasks', () => {
+    expect(makeRunTitle('432', skillWorkflow)).toBe('/om-auto-review-pr 432');
+  });
+
+  it('does not duplicate a skill command the user already supplied', () => {
+    expect(makeRunTitle('/om-auto-review-pr 432', skillWorkflow)).toBe('/om-auto-review-pr 432');
+  });
+
+  it('keeps the legacy task-only fallback when no skill is selected', () => {
+    const workflow: WorkflowDef = {
+      name: 'quick-task',
+      source: 'built-in',
+      steps: [{ id: 'task', prompt: '{{task}}' }],
+    };
+    expect(makeRunTitle('Fix the login bug', workflow)).toBe('Fix the login bug');
+  });
+});
+
 /**
  * End-to-end through the real engine with CEZ_DRY_RUN=1: the config default
  * and the per-run override must reach the claude CLI's argv verbatim
@@ -50,6 +81,8 @@ describe('composeSystemPrompt', () => {
 describe('systemPrompt end-to-end (dry run)', () => {
   const CONFIG_PROMPT = 'CONFIG-DEFAULT: always write tests first.';
   const OVERRIDE_PROMPT = 'PER-RUN OVERRIDE: answer in bullet points.';
+  const SKILL_DESCRIPTION = 'Review a pull request by number and report actionable findings.';
+  const SKILL_BODY = 'Inspect the selected pull request and review its diff.';
   let repoRoot: string;
   let argsFile: string;
   let inheritedTodos: string;
@@ -82,6 +115,12 @@ describe('systemPrompt end-to-end (dry run)', () => {
     await run('git', ['add', '-A'], { cwd: repoRoot });
     await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repoRoot });
     mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
+    mkdirSync(join(repoRoot, '.ai/skills/om-auto-review-pr'), { recursive: true });
+    writeFileSync(
+      join(repoRoot, '.ai/skills/om-auto-review-pr/SKILL.md'),
+      `---\nname: om-auto-review-pr\ndescription: ${SKILL_DESCRIPTION}\n---\n${SKILL_BODY}\n`,
+      'utf8',
+    );
     writeFileSync(
       join(repoRoot, '.ai/cezar', 'config.json'),
       JSON.stringify({ systemPrompt: CONFIG_PROMPT, maxParallel: 1 }),
@@ -112,13 +151,21 @@ describe('systemPrompt end-to-end (dry run)', () => {
     ],
   };
 
-  async function runToEnd(input: {
-    task: string;
-    systemPrompt?: string;
-    generateFollowups?: boolean;
-  }): Promise<string> {
+  const skillWorkflow: WorkflowDef = {
+    name: '(planned)',
+    source: 'built-in',
+    steps: [
+      { id: 'review', name: 'om-auto-review-pr', skill: 'om-auto-review-pr', prompt: '{{task}}' },
+      { id: 'verify', command: 'true' },
+    ],
+  };
+
+  async function runToEnd(
+    input: { task: string; systemPrompt?: string; generateFollowups?: boolean },
+    selectedWorkflow: WorkflowDef = workflow,
+  ): Promise<string> {
     writeFileSync(argsFile, '', 'utf8'); // fresh capture per run
-    const record = manager.startRun(workflow, input);
+    const record = manager.startRun(selectedWorkflow, input);
     const terminal = new Set(['done', 'review', 'failed', 'cancelled']);
     const deadline = Date.now() + 20_000;
     while (!terminal.has(store.getRun(record.id)?.status ?? '')) {
@@ -156,8 +203,36 @@ describe('systemPrompt end-to-end (dry run)', () => {
     expect(prompt).not.toContain(CONFIG_PROMPT);
   }, 30_000);
 
+  it('sends skill identity, description, instructions, and numeric task context to the runner', async () => {
+    const id = await runToEnd({ task: '432' }, skillWorkflow);
+    const record = store.getRun(id);
+
+    expect(record?.title).toBe('/om-auto-review-pr 432');
+    // The display title remains LLM-derived after a turn; the skill-aware
+    // title above is only the queued fallback.
+    expect(record?.titleSummary).toBeDefined();
+    expect(record?.titleSummary).not.toBe(record?.title);
+
+    const skillPrompt = skillSystemPrompt({
+      name: 'om-auto-review-pr',
+      description: SKILL_DESCRIPTION,
+      body: SKILL_BODY,
+    });
+    expect(capturedSystemPrompt()).toBe(
+      composeSystemPrompt(skillPrompt, CONFIG_PROMPT, HANDOFF_INSTRUCTIONS),
+    );
+
+    // The mock writes the actual first user message it received into the run
+    // worktree, proving the argument is still the runner's user prompt rather
+    // than being swallowed by title construction.
+    const worktreePath = record?.worktreePath;
+    if (!worktreePath) throw new Error('run did not create its worktree');
+    expect(readFileSync(join(worktreePath, 'notes.md'), 'utf8')).toContain(': 432\n');
+  }, 30_000);
+
   // The positive control for the opt-out test below: without this, mistyping the `!== false`
   // guard would stop every run from producing inbox entries with the whole suite still green.
+  // This suite explicitly enables the global inbox in beforeAll (#471).
   it('on an inbox-enabled server the agent gets the run own inbox, never an inherited one', async () => {
     const todosFile = join(repoRoot, '.ai/cezar/todos.json');
     rmSync(todosFile, { force: true });
