@@ -18,6 +18,11 @@
 | 2 | 2.2 | Hide the composer's follow-up toggle when the capability is off | done | 0a41323 |
 | 3 | 3.1 | Document the flag (.env.example, README, BACKWARD_COMPATIBILITY, spec 007) | done | 328dbb7 |
 
+> **Review fixes (appended after `om-code-review`).** `4.1-review-fix` — merge `main` (six PRs
+> landed mid-run; `app-shell.tsx` conflicted and cezar's autosaver committed it mid-resolution,
+> markers and all). `4.2-review-fix` — normalize the record in `recover()`, stop the `/inbox`
+> "Inbox empty" flash, correct the live-flip claim in `capabilities.ts`.
+
 ## Goal
 
 Make the global follow-up inbox (the "global task list") **off by default**, re-enabled
