@@ -300,7 +300,7 @@ type ToolKind =
   | 'think' | 'fetch' | 'task'   // 'task' = subagent spawn (Task / subtask / review)
   | 'plan' | 'other';            // superset of ACP ToolKind
 type StopReason = 'end_turn' | 'max_tokens' | 'refusal' | 'cancelled' | 'timeout' | 'error';
-type PlanStatus = 'pending' | 'in_progress' | 'completed';
+type PlanStatus = 'pending' | 'in_progress' | 'completed' | 'cancelled'; // 'cancelled' is opencode-only
 
 interface TokenUsage {          // raw counts, never pre-weighted
   input: number; output: number;

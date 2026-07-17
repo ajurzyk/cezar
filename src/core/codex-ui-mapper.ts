@@ -52,6 +52,12 @@ export interface CodexUiMapperState {
   /** Accumulated `outputDelta` text per commandExecution item, attached to
    *  the final snapshot when the wire `item/completed` carries no output. */
   readonly outputs: ReadonlyMap<string, string>;
+  /** True once `turn/plan/updated` has spoken. Both that notification and the
+   *  `plan`/`todoList` item arm write `plan.updated`, so without a precedence
+   *  rule the last frame wins and a prose plan item would flatten the real
+   *  checklist into one entry. The authoritative channel latches this and the
+   *  item arm stands down (see `mapItemLifecycle`). */
+  readonly planFromNotification: boolean;
 }
 
 export interface CodexUiMapping {
@@ -66,6 +72,7 @@ export function createCodexUiState(): CodexUiMapperState {
     currentTurnId: null,
     knownItems: new Set(),
     outputs: new Map(),
+    planFromNotification: false,
   };
 }
 
@@ -176,12 +183,18 @@ function turnStopReason(params: Record<string, unknown>, failed: boolean): StopR
 function mapTurnPlanUpdated(params: Record<string, unknown>, state: CodexUiMapperState): CodexUiMapping {
   const entries = turnPlanEntries(params.plan);
   if (!entries) return { events: [], state };
-  return { events: [{ type: 'plan.updated', entries }], state };
+  return {
+    events: [{ type: 'plan.updated', entries }],
+    state: state.planFromNotification ? state : { ...state, planFromNotification: true },
+  };
 }
 
-/** `plan: [{step, status}]` → plan entries. An empty array is a legitimate
- *  snapshot (the agent cleared its plan); a non-array is malformed and maps to
- *  zero events so a garbled frame cannot wipe a good plan. */
+/** `plan: [{step, status}]` → plan entries. An EMPTY array is a legitimate
+ *  snapshot (the agent cleared its plan) and clears the dock; anything else that
+ *  yields no entries — a non-array, or rows we could not read a step out of —
+ *  is malformed and maps to zero events, so a garbled frame cannot wipe a good
+ *  plan. The distinction matters: "the agent has no steps" and "we failed to
+ *  parse the steps" look identical downstream once they are both `[]`. */
 function turnPlanEntries(plan: unknown): PlanEntry[] | undefined {
   if (!Array.isArray(plan)) return undefined;
   const entries: PlanEntry[] = [];
@@ -191,6 +204,7 @@ function turnPlanEntries(plan: unknown): PlanEntry[] | undefined {
     if (content === undefined) continue;
     entries.push({ content, status: turnPlanStatus(step.status) });
   }
+  if (plan.length > 0 && entries.length === 0) return undefined;
   return entries;
 }
 
@@ -230,7 +244,14 @@ function mapItemLifecycle(
   // as cheap tolerance: these types are marked EXPERIMENTAL upstream, codex's
   // exec transport does emit a `todo_list` item, and a stray snapshot is better
   // rendered than dropped. The real plan channel is `turn/plan/updated`.
+  //
+  // That makes this the SECOND writer of `plan.updated`, so it yields to the
+  // first: once the notification has delivered a real checklist, a prose `plan`
+  // item must not flatten it back into a single entry. Upstream says the two are
+  // mutually exclusive (codex rejects `update_plan` in plan mode) — this does not
+  // depend on that holding.
   if (type === 'todoList' || type === 'todo_list' || type === 'plan') {
+    if (state.planFromNotification) return { events: [], state };
     const entries = planEntriesOf(raw);
     if (!entries) return { events: [], state };
     return { events: [{ type: 'plan.updated', entries }], state };

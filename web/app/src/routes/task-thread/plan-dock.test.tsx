@@ -110,9 +110,13 @@ describe('PlanDock', () => {
     expect(rows.map((row) => row.getAttribute('data-status'))).toEqual(['completed', 'cancelled'])
     expect(rows.map((row) => row.textContent)).toEqual(['Ship the fix', 'Rework the parser'])
     expect(rows[1]!.className).toContain('line-through')
-    // Not the pending ○ and not the pulsing ◐ — cancelled has its own glyph.
-    expect(rows[1]!.querySelector('svg')?.getAttribute('class')).not.toContain('animate-pulse')
     expect(rows[1]!.querySelector('[data-slot="plan-tag"]')).toBeNull()
+
+    // Pin the ⊘ by its own slash path: asserting only "not animate-pulse" would
+    // also pass for the pending ○, i.e. it would survive deleting the glyph.
+    const cancelledIcon = rows[1]!.querySelector('svg')!
+    expect(cancelledIcon.querySelector('path')?.getAttribute('d')).toBe('m8.5 15.5 7-7')
+    expect(cancelledIcon.getAttribute('class')).not.toContain('animate-pulse')
   })
 
   it('collapsing folds the list to "Plan · N/M — {activeForm of the current item}"', () => {
