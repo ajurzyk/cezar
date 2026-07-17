@@ -45,6 +45,9 @@ export type AppShellProps = {
    *  Defaults to shown so the presentational shell stays renderable alone; the container
    *  passes the health payload's truth. */
   forgeAvailable?: boolean
+  /** Inbox gating (#471): `false` drops the Inbox nav item and its badge — the global inbox is
+   *  opt-in via `CEZ_FOLLOWUPS=1`. Defaults to shown for the same reason as `forgeAvailable`. */
+  inboxAvailable?: boolean
 }
 
 /**
@@ -72,6 +75,7 @@ export function AppShell({
   taskQuickList,
   toolsMenu,
   forgeAvailable = true,
+  inboxAvailable = true,
 }: AppShellProps) {
   const { pathname } = useLocation()
   const activeTo = activeNavPath(pathname)
@@ -100,9 +104,10 @@ export function AppShell({
 
   const nav = {
     activeTo,
-    items: visibleNavItems(forgeAvailable),
+    items: visibleNavItems({ forge: forgeAvailable, inbox: inboxAvailable }),
     repo,
-    inboxCount,
+    // The badge belongs to the Inbox item — with the item gone there is nothing to badge.
+    inboxCount: inboxAvailable ? inboxCount : null,
     version,
     latestVersion,
     taskQuickList,
