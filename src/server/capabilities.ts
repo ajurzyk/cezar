@@ -33,7 +33,12 @@ export function isLoopbackHost(host: string | undefined): boolean {
 
 /** `CEZ_REMOTE=1` or a non-loopback bind host ⇒ hosted mode (no local handoff).
  *  `CEZ_FOLLOWUPS=1` ⇒ the follow-up inbox exists (#471).
- *  Read per request — cheap, and tests/ops can flip the env live. */
+ *
+ *  Read per request — cheap, and tests/ops can flip `CEZ_REMOTE` live. `followups` is honest
+ *  per request too, but flipping it ON at runtime is only half a switch: `startTodosWatch` is
+ *  decided once at `createApp` (and latched by a module-global), so the endpoints and the nav
+ *  item come back while live inbox updates do not until a restart. Hence the UI's "set
+ *  CEZ_FOLLOWUPS=1 and restart cezar" wording — treat it as a boot-time flag. */
 export function resolveCapabilities(env: NodeJS.ProcessEnv = process.env, bindHost?: string): Capabilities {
   return {
     localHandoff: env.CEZ_REMOTE !== '1' && isLoopbackHost(bindHost),

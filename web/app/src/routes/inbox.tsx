@@ -95,10 +95,12 @@ export function InboxRoute() {
             />
           ) : null
         ) : todos.length === 0 ? (
-          // Not until health has spoken: an inbox-less server answers `[]` too, so claiming
-          // "empty" here would flash the very lie this route exists to avoid before settling on
-          // "off" a moment later.
-          health.data === undefined ? null : (
+          // Not while health is still in flight: an inbox-less server answers `[]` too, so
+          // claiming "empty" here would flash the very lie this route exists to avoid, then
+          // correct itself. Keyed on `isPending` rather than `data === undefined` so a health
+          // request that *fails* still falls through to the empty state — an unreachable
+          // /api/health must not leave this route blank forever.
+          health.isPending ? null : (
             <CenteredState
               icon={<InboxIcon />}
               tone="neutral"

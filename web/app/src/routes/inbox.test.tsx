@@ -369,6 +369,37 @@ describe('the inbox gate (#471)', () => {
     expect(screen.queryByText('The follow-up inbox is off')).toBeNull()
   })
 
+  it('never flashes "Inbox empty" before health says the inbox is off', async () => {
+    // An inbox-less server answers [] too, so the empty state must wait for health — otherwise
+    // the route flashes exactly the lie it exists to avoid, then corrects itself.
+    let releaseHealth = () => {}
+    const healthPending = new Promise<void>((resolve) => {
+      releaseHealth = resolve
+    })
+    stubFetch({
+      'GET /api/health': () => healthResponse(false),
+      'GET /api/todos': () => jsonResponse([]),
+    })
+    // Re-stub health as a deferred answer so the todos query can settle first.
+    const realFetch = globalThis.fetch as unknown as (i: RequestInfo | URL, x?: RequestInit) => Promise<Response>
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      if (String(input) === '/api/health') {
+        await healthPending
+        return healthResponse(false)
+      }
+      return realFetch(input, init)
+    })
+
+    renderInbox()
+    // Todos have answered [] and health has not: the honest answer is to render neither state.
+    await waitFor(() => expect(cards()).toHaveLength(0))
+    expect(screen.queryByText('Inbox empty')).toBeNull()
+
+    act(() => releaseHealth())
+    expect(await screen.findByText('The follow-up inbox is off')).toBeTruthy()
+    expect(screen.queryByText('Inbox empty')).toBeNull()
+  })
+
   it('does not park the list while health is still unknown', async () => {
     // health never answers 200 here (the stub 404s it) — an enabled server must not have its
     // inbox held hostage by a request the list does not depend on.
