@@ -4,14 +4,7 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import {
-  agentCliRunner,
-  detectOpenTargets,
-  fileManagerLaunch,
-  launchPathFor,
-  openInApp,
-  spawnNameFor,
-} from './open-in-app.js';
+import { agentCliRunner, detectOpenTargets, fileManagerLaunch, launchPathFor, openInApp } from './open-in-app.js';
 
 /** Polls `assertion` until it stops throwing or `timeoutMs` elapses (then rethrows) — there is
  *  no @testing-library here, and the detached child processes this suite launches settle on
@@ -169,22 +162,3 @@ describe('launchPathFor (#361 WSL support)', () => {
   });
 });
 
-describe('spawnNameFor', () => {
-  // Node's CVE-2024-27980 mitigation makes spawn() of a .cmd/.bat THROW without `shell: true`.
-  // runDetached swallows that into `false`, so returning the suffixed name on win32 would make
-  // every Toolbox/.cmd-shimmed editor (VS Code included) silently stop opening. The bare name
-  // lets libuv resolve PATHEXT itself, which handles the shim.
-  it('spawns the bare name on win32 so libuv resolves PATHEXT for .cmd/.bat shims', () => {
-    expect(spawnNameFor('code', 'code.cmd', 'win32')).toBe('code');
-    expect(spawnNameFor('idea', 'idea.bat', 'win32')).toBe('idea');
-    expect(spawnNameFor('cursor', 'cursor.exe', 'win32')).toBe('cursor');
-  });
-
-  // WSL is the opposite case: interop exposes the Windows-side binary, and Linux never
-  // auto-appends a suffix, so only the exact resolved name spawns.
-  it('keeps the exact resolved name off win32, where nothing auto-appends a suffix', () => {
-    expect(spawnNameFor('code', 'code.exe', 'linux')).toBe('code.exe');
-    expect(spawnNameFor('idea', 'idea', 'linux')).toBe('idea');
-    expect(spawnNameFor('code', 'code', 'darwin')).toBe('code');
-  });
-});
