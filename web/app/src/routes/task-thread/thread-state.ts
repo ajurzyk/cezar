@@ -175,7 +175,10 @@ function resultText(value: unknown): string {
 const isUiItem = (entry: ThreadEntry): entry is UiItem =>
   entry.kind === 'message' || entry.kind === 'reasoning' || entry.kind === 'tool'
 
-const PLAN_STATUSES: ReadonlySet<string> = new Set<PlanStatus>(['pending', 'in_progress', 'completed'])
+/** Every `PlanStatus`, so an unrecognized status is the only thing that falls back to
+ *  `pending` below. `Set<PlanStatus>` accepts a subset without complaint, so this list
+ *  has to be kept honest by hand when the union grows. */
+const PLAN_STATUSES: ReadonlySet<string> = new Set<PlanStatus>(['pending', 'in_progress', 'completed', 'cancelled'])
 
 /**
  * Pre-v2 transcripts carry the plan only as TodoWrite input (`{todos: [{content, status,
