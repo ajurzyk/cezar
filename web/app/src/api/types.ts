@@ -497,12 +497,17 @@ export interface UiState {
   /** Whether new runs should ask agents to append follow-up work. Absent → on. */
   lastGenerateFollowups?: boolean
   runsView?: 'list' | 'table'
+  /** The GitHub tab's last-selected sub-tab (#417) — issues or PRs. Absent → issues. */
+  githubView?: 'issues' | 'prs'
   /** Settings → Appearance (redesign R6): accent + density. Theme itself stays in
    *  localStorage (`cez-theme`) — it must pre-paint, and it is per-browser by design. */
   appearance?: { accent?: 'lime' | 'violet'; density?: 'comfortable' | 'compact' | 'ultra' }
   /** Settings → Notifications (redesign R6 1.7): the browser-notification toggle. Off unless
    *  literally `true`. Permission itself is per-browser and never persisted. */
   notifications?: { enabled?: boolean }
+  /** The open-mercato/skills promo banner (#391), dismissed for good. Set once true, never
+   *  unset — server-persisted rather than a cookie so "shown once" holds across browsers. */
+  dismissedSkillsBanner?: boolean
   [key: string]: unknown
 }
 

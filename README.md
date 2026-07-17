@@ -187,7 +187,7 @@ event live and parks the run at a review gate when there's a diff to inspect.
    ┌──────────────────────────────┐     ┌───────────────────────────────┐
    │  git worktree per task       │     │  agent CLI  (your login)      │
    │  (isolated branch, parallel) │◄───►│  claude · codex · opencode    │
-   └──────────────────────────────┘     │  default-deny · no prompts    │
+   └──────────────────────────────┘     │  Bash open · no prompts       │
         │                                 └───────────────────────────────┘
         │  agent text · tool calls · tool results · tokens · cost
         ▼
@@ -317,13 +317,16 @@ skills: [reproduce, root-cause, implement, self-review]
 
 cezar shells out to your locally installed, logged-in agent CLI —
 **your subscription, no API key**. With the default Claude Code backend that
-means headless `stream-json` mode, tool access default-deny via
-`--allowedTools`, with unapproved tools denied without prompting
-(`--permission-mode dontAsk`) inside the task's worktree. Set
-`CEZ_APPROVAL_GATE=1` to opt into Claude's interactive approval UI. Codex and
-OpenCode are driven through their own native protocols — see
-[Coding agent backends](#coding-agent-backends). Nothing runs on a server you
-don't own.
+means headless `stream-json` mode, tool access via `--allowedTools`, with
+unapproved tools denied without prompting (`--permission-mode dontAsk`) inside
+the task's worktree — but note the zero-config default list (`Read`, `Edit`,
+`Write`, `Grep`, `Glob`, `Bash`) grants unrestricted `Bash` unless a step sets
+`bashAllowlist`, so treat a run as having full shell access in its worktree,
+not a sandboxed allowlist. Set `CEZ_APPROVAL_GATE=1` to opt into Claude's
+interactive approval UI. Codex and OpenCode are driven through their own
+native protocols and don't honor `allowedTools` at all — see
+[Coding agent backends](#coding-agent-backends) for what each one actually
+locks down. Nothing runs on a server you don't own.
 
 Useful environment variables:
 
@@ -336,6 +339,7 @@ Useful environment variables:
 | `CEZ_CODEX_BIN=/path/to/codex` | Override which `codex` binary is used. |
 | `CEZ_OPENCODE_BIN=/path/to/opencode` | Override which `opencode` binary is used. |
 | `GITHUB_TOKEN` | Fallback for GitHub reads/PRs when `gh` isn't authenticated. |
+| `CEZ_NO_BANNER=1` | Skip the `open-mercato/skills` banner on `cezar serve` startup. Dismissing the same banner in the cockpit silences the terminal one too. |
 
 ---
 
@@ -344,11 +348,11 @@ Useful environment variables:
 cezar is not married to one vendor. Every agent step runs through a single
 `AgentRunner` seam with three built-in backends:
 
-| Backend | CLI | How cezar drives it |
-|---|---|---|
-| **Claude Code** (default) | [`claude`](https://github.com/anthropics/claude-code) | Headless `stream-json` mode. |
-| **Codex** | [`codex`](https://github.com/openai/codex) | `codex app-server` — JSON-RPC over stdio, the same transport the Codex IDE extensions use. |
-| **OpenCode** | [`opencode`](https://opencode.ai) | `opencode serve` — a local HTTP server with an SSE event stream. |
+| Backend | CLI | How cezar drives it | Tool access |
+|---|---|---|---|
+| **Claude Code** (default) | [`claude`](https://github.com/anthropics/claude-code) | Headless `stream-json` mode. | Per-tool `--allowedTools` (`bashAllowlist` scopes `Bash`); `dontAsk` denies unapproved tools without prompting (`CEZ_APPROVAL_GATE=1` → `acceptEdits` + approval UI). |
+| **Codex** | [`codex`](https://github.com/openai/codex) | `codex app-server` — JSON-RPC over stdio, the same transport the Codex IDE extensions use. | Ignores `allowedTools`; runs its own `workspace-write` sandbox with `approvalPolicy: never` and network access on. |
+| **OpenCode** | [`opencode`](https://opencode.ai) | `opencode serve` — a local HTTP server with an SSE event stream. | Ignores `allowedTools` entirely; every permission is auto-approved. |
 
 On startup cezar probes which CLIs are installed and the cockpit only offers
 the backends it found — install any one of the three and you're operational.

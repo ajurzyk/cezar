@@ -47,8 +47,10 @@ export interface ClaudeCliRunnerOptions {
 /**
  * `AgentRunner` over the Claude Code CLI in headless stream-json mode. Auth =
  * the host's logged-in Pro/Max subscription (no API key needed). Sandboxing is
- * `--allowedTools` (default-deny) + running inside the repo `cwd`; `Bash` is
- * narrowed to `Bash(<prefix>:*)` patterns when `bashAllowlist` is set.
+ * `--allowedTools` (default-deny for anything not listed) + running inside the
+ * repo `cwd`; `Bash` is narrowed to `Bash(<prefix>:*)` patterns only when
+ * `bashAllowlist` is set — the zero-config default has no allowlist, so `Bash`
+ * is unrestricted shell access (#430).
  *
  * Session mechanics (multi-turn stdin, EOF watchdog, reopen window) follow
  * github-janitor's `claudeRunner.ts`; the original single-turn adaptation
