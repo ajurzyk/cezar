@@ -22,7 +22,6 @@ import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff, worktreeS
 import { getRepoInfo } from '../server/git.js';
 import { loadWorkflows } from './load.js';
 import type { RunRecord, RunStore } from '../runs/store.js';
-import { deriveTitleSummary } from '../runs/title-summary.js';
 import { extractTaskRefs, refineTaskRefs, titleRefNumber } from '../runs/task-refs.js';
 import { generateRunName, liveTitleUpdatesEnabled } from '../runs/auto-name.js';
 import { UiEventSink } from '../runs/ui-event-sink.js';
@@ -1149,6 +1148,9 @@ export class RunManager {
     task: string,
     live?: { turnText?: string; diffStat?: string },
   ): Promise<void> {
+    // CEZ_AUTONAME=0 is the kill-switch for ALL LLM naming (creation + live
+    // refresh) — for tests, CI, and users who want heuristic titles only.
+    if (process.env.CEZ_AUTONAME === '0') return;
     try {
       let skillDescription: string | undefined;
       if (skillName) {
@@ -1174,10 +1176,8 @@ export class RunManager {
     try {
       const run = this.store.getRun(runId);
       if (!run) return;
-      if (run.titleSummary === undefined) {
-        const summary = deriveTitleSummary(turnText, run.task);
-        if (summary) this.store.updateRun(runId, { titleSummary: summary });
-      }
+      // Titles are the namer's job (task auto-naming spec) — turn text is
+      // deliberately NEVER a title source; see maybeRefreshTitle below.
       if (run.worktreePath && existsSync(run.worktreePath)) {
         const stat = await worktreeShortstat(run.worktreePath, run.baseBranch ?? 'HEAD');
         if (stat) this.store.updateRun(runId, { diffStat: stat });
