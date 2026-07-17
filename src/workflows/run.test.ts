@@ -178,15 +178,88 @@ describe('a chain of 2 selected skills runs BOTH steps, in order (#410)', () => 
 
     // The mock leaves a `notes.md` trace on its first turn, once per spawned
     // session (`scripts/mock-claude.mjs`) — one line per step that actually
-    // ran, in order, first 100 chars of that step's userText.
+    // ran, in order, holding the head of that step's userText.
+    //
+    // Assert only on the note's opening sentence: it proves the guard reached
+    // the right step's prompt with the right numbering, and stays inside the
+    // mock's fixed userText slice however the wording grows later. The note's
+    // full text is pinned in `test/unit/workflow-types.test.ts`.
     const notes = readFileSync(join(repoRoot, 'notes.md'), 'utf8').trim().split('\n');
     expect(notes.length).toBe(2);
-    expect(notes[0]).toContain('step 1 of 2');
-    expect(notes[0]).toContain('om-auto-review-pr');
-    expect(notes[1]).toContain('step 2 of 2');
-    expect(notes[1]).toContain('om-auto-verify-pr-ui');
-    // The whole point of the fix: the second step's prompt explicitly says an
-    // earlier step's own completion doesn't cover this step's work.
-    expect(notes[1]).toContain("An earlier step's completion does not mean your step's work is done");
+    expect(notes[0]).toContain('you are running step 1 of 2');
+    expect(notes[1]).toContain('you are running step 2 of 2');
+  }, 30_000);
+});
+
+/**
+ * The other half of #410's contract: the note exists to explain a step
+ * boundary, so a workflow with only ONE agent step must not get it — its
+ * prompt stays exactly what the author wrote. Check steps are shell commands,
+ * not sessions, so they don't make a chain no matter how many surround the
+ * agent step. This is the README's canonical `implement` + `verify` shape, the
+ * one most user workflows are built from, and the note's first cut fired on
+ * all of them (`steps.length` counted the check) — telling a lone step that
+ * "an earlier step" may have reported its work done, when there was none.
+ */
+describe('a single agent step plus a check step gets NO chain note (#410)', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  let manager: RunManager;
+  const savedEnv: Record<string, string | undefined> = {};
+
+  beforeAll(async () => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-410-single-'));
+    savedEnv.CEZ_DRY_RUN = process.env.CEZ_DRY_RUN;
+    process.env.CEZ_DRY_RUN = '1';
+    await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
+    writeFileSync(join(repoRoot, 'a.txt'), 'one\n');
+    await run('git', ['add', '-A'], { cwd: repoRoot });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repoRoot });
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot);
+  });
+
+  afterAll(() => {
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  it("leaves the lone agent step's prompt untouched", async () => {
+    // README.md's documented workflow, with a check that passes so the run
+    // reaches a terminal state without looping back.
+    const workflow: WorkflowDef = {
+      name: 'implement-verify',
+      source: 'file',
+      steps: [
+        { id: 'implement', skill: 'project-conventions', prompt: '{{task}}' },
+        { id: 'verify', command: 'true', onFail: { retry: 'implement', max: 2 } },
+      ],
+    };
+    const record = manager.startRun(workflow, { task: 'mock:done fix the login bug', worktree: false });
+
+    const terminal = new Set(['done', 'review', 'failed', 'cancelled']);
+    const deadline = Date.now() + 20_000;
+    while (!terminal.has(store.getRun(record.id)?.status ?? '')) {
+      if (Date.now() > deadline) throw new Error('run did not finish in time');
+      await new Promise((r) => setTimeout(r, 100));
+    }
+
+    expect(store.getRun(record.id)?.steps.map((s) => ({ id: s.id, status: s.status }))).toEqual([
+      { id: 'implement', status: 'done' },
+      { id: 'verify', status: 'done' },
+    ]);
+
+    // One session ran, and its userText is the task text alone — no chain
+    // note, no "an earlier step" premise, no skill named as the step's goal.
+    const notes = readFileSync(join(repoRoot, 'notes.md'), 'utf8').trim().split('\n');
+    expect(notes.length).toBe(1);
+    expect(notes[0]).toContain('mock:done fix the login bug');
+    expect(notes[0]).not.toContain('chain of');
+    expect(notes[0]).not.toContain('earlier step');
+    expect(notes[0]).not.toContain('project-conventions');
   }, 30_000);
 });

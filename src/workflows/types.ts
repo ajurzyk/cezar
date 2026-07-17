@@ -109,28 +109,47 @@ export function stepKind(step: WorkflowStepDef): 'agent' | 'check' {
 
 /**
  * A guard note prepended to an agent step's prompt when the workflow chains
- * 2+ steps (#410): every step gets the SAME `input.task` text and shares one
- * run-level handoff journal, so a later step's fresh session can read an
+ * 2+ AGENT steps (#410): every step gets the SAME `input.task` text and shares
+ * one run-level handoff journal, so a later step's fresh session can read an
  * earlier step's own "done" signal (its final report, its handoff Resume
  * notes) and — with nothing in its prompt saying otherwise — conclude the
  * OVERALL task is already achieved. Since only the chain's last step honors
  * `CEZ:DONE` as an early-completion signal (`run.ts`'s `interactive` gate),
  * this silently skipped exactly the last selected skill: it ended its first
- * turn with the marker instead of doing its own step's work. The note makes
- * the step boundary explicit so the agent knows an earlier step's completion
- * doesn't cover this one. Undefined when there's only one agent step in the
- * workflow — the common single-step case stays byte-for-byte unchanged.
+ * turn with the marker instead of doing its own step's work.
+ *
+ * `index` is the position in `steps`; both the gate and the "step N of M"
+ * numbering count agent steps only. Check steps are shell commands, not
+ * sessions the model reasons about, so a workflow with one agent step and any
+ * number of checks around it (the README's `implement` + `verify` shape) is
+ * not a chain and gets no note — that single-step case stays byte-for-byte
+ * unchanged. Returns undefined for check steps.
  */
-export function chainStepNote(step: WorkflowStepDef, index: number, total: number): string | undefined {
+export function chainStepNote(steps: WorkflowStepDef[], index: number): string | undefined {
+  const step = steps[index];
+  if (!step || stepKind(step) !== 'agent') return undefined;
+  const total = steps.filter((s) => stepKind(s) === 'agent').length;
   if (total <= 1) return undefined;
-  const label = step.skill ? `the "${step.skill}" skill` : step.name ? `"${step.name}"` : 'this step';
-  return (
-    `This run is a chain of ${total} steps; you are running step ${index + 1} of ${total}. ` +
-    `Your job in THIS step is ${label} — do its work in full, even if an earlier step in this ` +
-    `same run already reported its own work done (its report, or this run's handoff file, may ` +
-    `say so). An earlier step's completion does not mean your step's work is done. Only end this ` +
-    `turn with CEZ:DONE once step ${index + 1}'s own goal is achieved, not just the run's overall task.`
+  const position = steps.slice(0, index).filter((s) => stepKind(s) === 'agent').length + 1;
+  // `name` first: it is what the author called the step and what the GUI rail
+  // shows. A `skill` is only ever a support for the step's goal, so naming it
+  // as the goal would displace the task text the note sits above.
+  const label = step.name ? `"${step.name}"` : step.skill ? `the "${step.skill}" skill` : 'this step';
+  const sentences = [
+    `This run is a chain of ${total} agent steps; you are running step ${position} of ${total}.`,
+    `Your job in THIS step is ${label} — do its work in full.`,
+  ];
+  // Only steps that HAVE a predecessor; on step 1 the premise would be false.
+  if (position > 1) {
+    sentences.push(
+      `An earlier step in this same run may already have reported its own work done (in its ` +
+        `report, or in this run's handoff file); that does not mean step ${position}'s work is done.`,
+    );
+  }
+  sentences.push(
+    `Only end this turn with CEZ:DONE once step ${position}'s own goal is achieved, not just the run's overall task.`,
   );
+  return sentences.join(' ');
 }
 
 /**

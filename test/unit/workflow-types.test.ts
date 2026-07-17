@@ -7,6 +7,7 @@ import {
   skillsToSteps,
   stepsIssue,
   workflowFileSchema,
+  type WorkflowStepDef,
 } from '../../src/workflows/types.js';
 
 test('portable skill stacks normalize into unique agent steps', () => {
@@ -76,31 +77,63 @@ test('only plain agent skill steps compact back to a portable stack', () => {
 // on its first turn without doing its own step's work. `chainStepNote` is the
 // prompt-level guard against that; these pin its exact contract.
 test('chainStepNote is absent for a single-step run (the common case, unchanged)', () => {
-  const [step] = skillsToSteps(['implement']);
-  assert.equal(chainStepNote(step!, 0, 1), undefined);
+  assert.equal(chainStepNote(skillsToSteps(['implement']), 0), undefined);
+});
+
+test('chainStepNote counts AGENT steps only — a lone agent step plus checks is not a chain', () => {
+  // The README's canonical workflow (README.md): one agent step + one check
+  // that loops back to it. `steps.length` is 2, but there is no step boundary
+  // for an agent to misread, so the prompt must stay untouched.
+  const readmeShape: WorkflowStepDef[] = [
+    { id: 'implement', skill: 'project-conventions', prompt: '{{task}}' },
+    { id: 'verify', command: 'npm test', onFail: { retry: 'implement', max: 2 } },
+  ];
+  assert.equal(chainStepNote(readmeShape, 0), undefined);
+  // A check step never gets a note of its own — it has no prompt.
+  assert.equal(chainStepNote(readmeShape, 1), undefined);
+});
+
+test('chainStepNote numbers agent steps, skipping the checks between them', () => {
+  const withCheck: WorkflowStepDef[] = [
+    { id: 'review', skill: 'om-auto-review-pr', prompt: '{{task}}' },
+    { id: 'verify', command: 'npm test' },
+    { id: 'ui', skill: 'om-auto-verify-pr-ui', prompt: '{{task}}' },
+  ];
+  // The second AGENT step is "step 2 of 2", not "step 3 of 3".
+  assert.ok(chainStepNote(withCheck, 0)?.includes('step 1 of 2'));
+  assert.equal(chainStepNote(withCheck, 1), undefined);
+  assert.ok(chainStepNote(withCheck, 2)?.includes('step 2 of 2'));
 });
 
 test('chainStepNote names the step position, total, and skill for every step of a chain', () => {
   const steps = skillsToSteps(['om-auto-review-pr', 'om-auto-verify-pr-ui']);
-  const first = chainStepNote(steps[0]!, 0, steps.length);
-  const second = chainStepNote(steps[1]!, 1, steps.length);
+  const first = chainStepNote(steps, 0);
+  const second = chainStepNote(steps, 1);
 
   assert.ok(first?.includes('step 1 of 2'));
   assert.ok(first?.includes('om-auto-review-pr'));
   assert.ok(second?.includes('step 2 of 2'));
   assert.ok(second?.includes('om-auto-verify-pr-ui'));
-  // The whole point: tell the LATER step an earlier step's completion isn't
-  // its own — every note in a chain repeats this guard, not just the last one.
-  for (const note of [first, second]) {
-    assert.ok(note?.includes("does not mean your step's work is done"));
-    assert.ok(note?.includes('CEZ:DONE'));
-  }
+  for (const note of [first, second]) assert.ok(note?.includes('CEZ:DONE'));
+  // The whole point: tell a step that HAS a predecessor that the predecessor's
+  // completion isn't its own. On step 1 that premise is false, so it is left out.
+  assert.ok(second?.includes("does not mean step 2's work is done"));
+  assert.ok(!first?.includes('earlier step'));
 });
 
-test('chainStepNote falls back to the step name, then a generic label, when there is no skill', () => {
-  const named = chainStepNote({ id: 'verify', name: 'Run the test suite', prompt: '{{task}}' }, 0, 2);
-  assert.ok(named?.includes('"Run the test suite"'));
+test('chainStepNote labels a step by its name first, then its skill, then generically', () => {
+  // `name` is what the author called the step and what the GUI rail shows; a
+  // skill is a support for the step's goal, not the goal itself.
+  const named = chainStepNote(
+    [
+      { id: 'implement', name: 'Implement', skill: 'project-conventions', prompt: '{{task}}' },
+      { id: 'review', skill: 'code-review', prompt: '{{task}}' },
+    ],
+    0,
+  );
+  assert.ok(named?.includes('"Implement"'));
+  assert.ok(!named?.includes('project-conventions'));
 
-  const bare = chainStepNote({ id: 'step-1', prompt: '{{task}}' }, 0, 2);
+  const bare = chainStepNote([{ id: 'step-1', prompt: '{{task}}' }, { id: 'step-2', prompt: '{{task}}' }], 0);
   assert.ok(bare?.includes('this step'));
 });

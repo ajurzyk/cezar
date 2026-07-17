@@ -816,8 +816,7 @@ export class RunManager {
           startImages,
           taskBackend,
           extraSystemPrompt,
-          i,
-          workflow.steps.length,
+          chainStepNote(workflow.steps, i),
         );
         startImages = undefined;
         checkFailure = null;
@@ -903,11 +902,9 @@ export class RunManager {
     images: ContentBlock[] | undefined,
     taskBackend: RunnerId,
     extraSystemPrompt: string | undefined,
-    /** This step's position in `workflow.steps` (0-based) and the workflow's
-     *  total step count — used only to build the chain-boundary note below
-     *  (#410). */
-    stepIndex: number,
-    totalSteps: number,
+    /** The chain-boundary note for this step (#410), or undefined when the
+     *  workflow has a single agent step and there is no boundary to explain. */
+    chainNote: string | undefined,
   ): Promise<string | null> {
     let systemPrompt: string | undefined;
     if (step.skill) {
@@ -938,7 +935,6 @@ export class RunManager {
     }
 
     let userPrompt = applyTemplate(step.prompt ?? '{{task}}', input.task);
-    const chainNote = chainStepNote(step, stepIndex, totalSteps);
     if (chainNote) userPrompt = `${chainNote}\n\n---\n\n${userPrompt}`;
     if (checkFailure) {
       userPrompt += `\n\nA verification command failed after the previous attempt. Fix the cause. Failing output:\n\n${checkFailure}`;
