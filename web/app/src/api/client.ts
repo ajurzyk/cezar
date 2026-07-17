@@ -349,9 +349,15 @@ export function removeTodo(id: string): Promise<RemoveTodoResponse> {
 
 /** Inbox "Run" (spec 007): the server turns the entry into a task — a one-off single-step
  *  workflow around the suggested skill when it exists, plain quick-task otherwise — and
- *  answers 201 with the new run. 409 when the entry was already started. */
-export function startTodo(id: string): Promise<StartTodoResponse> {
-  return mutate<StartTodoResponse>('POST', `/api/todos/${encodeURIComponent(id)}/start`)
+ *  answers 201 with the new run. 409 when the entry was already started. `prompt` (#413) is
+ *  extra instructions appended to the suggested/summary task text — e.g. a template inserted in
+ *  the Inbox composer; omitted (the pre-#413 call shape) sends no body at all. */
+export function startTodo(id: string, prompt?: string): Promise<StartTodoResponse> {
+  return mutate<StartTodoResponse>(
+    'POST',
+    `/api/todos/${encodeURIComponent(id)}/start`,
+    prompt ? { prompt } : undefined,
+  )
 }
 
 /** "Pick this one" (spec 010): the winner rests at `review` for the gate; the losers are

@@ -4,6 +4,7 @@ import {
   BotIcon,
   GaugeIcon,
   KeyboardIcon,
+  NotebookPenIcon,
   PaletteIcon,
   PlugIcon,
 } from 'lucide-react'
@@ -14,6 +15,7 @@ import { AgentsSection } from './agents-section'
 import { AppearanceSection } from './appearance'
 import { BookmarkletsSection } from './bookmarklets-section'
 import { NotificationsSection } from './notifications-section'
+import { PromptTemplatesSection } from './prompt-templates-section'
 import { ResourcesSection } from './resources-section'
 
 /**
@@ -33,6 +35,7 @@ export type SettingsSectionId =
   | 'resources'
   | 'mcp'
   | 'notifications'
+  | 'prompt-templates'
   | 'keyboard'
 
 export interface SettingsSection {
@@ -104,6 +107,13 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
     description: 'Browser notifications when an agent needs you.',
     icon: BellIcon,
     component: NotificationsSection,
+  },
+  {
+    id: 'prompt-templates',
+    title: 'Prompt templates',
+    description: 'Reusable snippets for follow-up instructions.',
+    icon: NotebookPenIcon,
+    component: PromptTemplatesSection,
   },
   {
     id: 'keyboard',

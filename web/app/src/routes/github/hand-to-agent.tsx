@@ -9,11 +9,11 @@ import {
   XIcon,
   ZapIcon,
 } from 'lucide-react'
-import { useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router'
 
 import { createRun } from '@/api/client'
-import { queryKeys } from '@/api/queries'
+import { queryKeys, useUiState } from '@/api/queries'
 import type { GithubItem, Skill, WorkflowDef } from '@/api/types'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
@@ -27,8 +27,15 @@ import {
 } from '@/components/ui/command'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { toast } from '@/components/ui/toaster'
+import { PromptTemplateMenu } from '@/components/prompt-template-menu'
 import { SkillPreviewDialog } from '@/components/skill-detail'
 import { githubRunBody } from '@/lib/github-task'
+import {
+  autoApplyText,
+  insertTemplate,
+  normalizePromptTemplates,
+  resolveAutoApply,
+} from '@/lib/prompt-templates'
 import { isProjectSkill, multiWordFilter, skillKeywords } from '@/lib/skills'
 import { cn } from '@/lib/utils'
 
@@ -74,6 +81,45 @@ export function HandToAgent({
   // Optional custom prompt (#gh-custom-prompt): empty → the default "Fix GitHub issue #N …"
   // text. Local + reset per item (the route remounts this via key={item.url}).
   const [prompt, setPrompt] = useState('')
+  const promptRef = useRef<HTMLTextAreaElement>(null)
+
+  // Follow-up prompt templates (#413): built-in unless the user has edited them in Settings →
+  // Prompt templates (`ui-state.json`'s `promptTemplates`).
+  const uiState = useUiState()
+  const templates = useMemo(
+    () => normalizePromptTemplates(uiState.data?.promptTemplates),
+    [uiState.data?.promptTemplates],
+  )
+  const insertPromptTemplate = (snippet: string) => {
+    const el = promptRef.current
+    const caret = el?.selectionStart ?? prompt.length
+    const result = insertTemplate(prompt, caret, snippet)
+    setPrompt(result.text)
+    // Restore focus + caret after the state update repaints the textarea. The menu's Popover
+    // suppresses its own focus-return (`onCloseAutoFocus`), so this is the last word on focus.
+    requestAnimationFrame(() => {
+      promptRef.current?.focus()
+      promptRef.current?.setSelectionRange(result.caret, result.caret)
+    })
+  }
+
+  // Auto-apply (#413 follow-up): picking a skill fills the prompt with the templates assigned to
+  // it — but only while the box is untouched, per `resolveAutoApply`. Deselecting takes the
+  // auto-applied text back out again, so the box always reflects the current selection until the
+  // moment the user types, after which it is theirs.
+  const autoText = autoApplyText(templates, validSkills)
+  const promptRefValue = useRef(prompt)
+  promptRefValue.current = prompt
+  const autoAppliedRef = useRef('')
+  useEffect(() => {
+    // Reads/writes go through refs, never a setState updater: StrictMode double-invokes those in
+    // dev, which would double-apply the ref bookkeeping (the composer's #double-paste hazard).
+    const resolved = resolveAutoApply(promptRefValue.current, autoAppliedRef.current, autoText)
+    autoAppliedRef.current = resolved.applied
+    if (resolved.text !== promptRefValue.current) setPrompt(resolved.text)
+    // `autoText` is a derived STRING, so this fires only when the assigned set really changes —
+    // not on every render that rebuilds the skills array.
+  }, [autoText])
 
   const start = useMutation({
     mutationFn: () => createRun(githubRunBody(item, workflow, validSkills, prompt)),
@@ -103,6 +149,7 @@ export function HandToAgent({
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <WorkflowPicker workflows={workflows} value={workflow} onChange={onWorkflowChange} />
         <SkillsPicker skills={skills} selected={selectedSkills} onToggle={toggleSkill} />
+        <PromptTemplateMenu templates={templates} onInsert={insertPromptTemplate} />
       </div>
 
       {selectedSkills.length > 0 ? (
@@ -125,6 +172,7 @@ export function HandToAgent({
       ) : null}
 
       <Textarea
+        ref={promptRef}
         data-slot="gh-custom-prompt"
         aria-label="Custom prompt"
         value={prompt}
