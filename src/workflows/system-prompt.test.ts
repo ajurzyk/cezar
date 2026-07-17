@@ -266,10 +266,7 @@ describe('the global follow-up gate (dry run)', () => {
     const terminal = new Set(['done', 'review', 'failed', 'cancelled']);
     const deadline = Date.now() + 20_000;
     while (!terminal.has(store.getRun(record.id)?.status ?? '')) {
-      if (Date.now() > deadline)
-        throw new Error(
-          `run did not finish in time: ${JSON.stringify(store.getRun(record.id), null, 2)}`,
-        );
+      if (Date.now() > deadline) throw new Error('run did not finish in time');
       await new Promise((r) => setTimeout(r, 100));
     }
     return record.id;
@@ -286,7 +283,7 @@ describe('the global follow-up gate (dry run)', () => {
     rmSync(todosFile, { force: true });
     rmSync(inheritedTodos, { force: true });
 
-    const id = await runToEnd({ task: 'do the thing' });
+    const id = await runToEnd({ task: 'do the thing mock:done' });
 
     expect(capturedSystemPrompt()).toBe(composeSystemPrompt(CONFIG_PROMPT, HANDOFF_ONLY_INSTRUCTIONS));
     expect(capturedSystemPrompt()).not.toContain('CEZ_TODOS_FILE');
@@ -298,7 +295,7 @@ describe('the global follow-up gate (dry run)', () => {
   }, 30_000);
 
   it('keeps the per-task handoff journal — #471 turns off the inbox, not the notes', async () => {
-    const id = await runToEnd({ task: 'do the thing' });
+    const id = await runToEnd({ task: 'do the thing mock:done' });
     expect(capturedSystemPrompt()).toContain('CEZ_HANDOFF_FILE');
     expect(capturedSystemPrompt()).toContain('CEZ:DONE');
     expect(readFileSync(join(repoRoot, '.ai/cezar/runs', `${id}.handoff.md`), 'utf8')).toContain(
@@ -309,7 +306,7 @@ describe('the global follow-up gate (dry run)', () => {
   it('a client asking for follow-ups cannot override the gate', async () => {
     const todosFile = join(repoRoot, '.ai/cezar/todos.json');
     rmSync(todosFile, { force: true });
-    const id = await runToEnd({ task: 'do the thing', generateFollowups: true });
+    const id = await runToEnd({ task: 'do the thing mock:done', generateFollowups: true });
     expect(capturedSystemPrompt()).not.toContain('CEZ_TODOS_FILE');
     expect(existsSync(todosFile)).toBe(false);
     expect(store.getRun(id)?.generateFollowups).toBe(false);
@@ -320,7 +317,7 @@ describe('the global follow-up gate (dry run)', () => {
     rmSync(todosFile, { force: true });
     process.env.CEZ_FOLLOWUPS = '1';
     try {
-      await runToEnd({ task: 'do the thing with follow-ups' });
+      await runToEnd({ task: 'do the thing with follow-ups mock:done' });
       expect(capturedSystemPrompt()).toContain('CEZ_TODOS_FILE');
       expect(existsSync(todosFile)).toBe(true);
     } finally {
