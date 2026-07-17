@@ -42,7 +42,10 @@ export function repoChipOf(health: HealthResponse | undefined): RepoChip | null 
  */
 export function AppShellContainer({ children }: { children: ReactNode }) {
   const health = useHealth()
-  const todos = useTodos()
+  // The global inbox is opt-in (#471). With the capability off there is no Inbox nav item to
+  // badge and the endpoint can only answer [], so the query parks rather than polls.
+  const inboxAvailable = health.data?.capabilities.followups === true
+  const todos = useTodos(inboxAvailable)
 
   return (
     // The Active/Archived filter is shared by the quick-list below and the Tasks table (Step 3.4),
@@ -60,6 +63,9 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
         // the chips: the nav must not claim a GitHub tab it cannot back. The Tools menu's
         // forge note says why it is absent.
         forgeAvailable={health.data?.forge?.available === true}
+        // Hidden unless health reports the opt-in inbox (#471) — same honesty rule as above:
+        // the nav must not offer an Inbox this server will never fill.
+        inboxAvailable={inboxAvailable}
         taskQuickList={<TaskQuickListContainer />}
         toolsMenu={<ToolsMenu health={health.data} />}
         banner={<SkillsBanner />}

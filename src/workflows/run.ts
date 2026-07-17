@@ -10,6 +10,7 @@ import {
   HANDOFF_ONLY_INSTRUCTIONS,
   HANDOFF_INSTRUCTIONS,
   appendHandoffHeartbeat,
+  followupsEnabled,
   handoffPath,
   seedHandoffFile,
 } from '../handoff.js';
@@ -22,9 +23,10 @@ import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff, worktreeS
 import { getRepoInfo } from '../server/git.js';
 import { loadWorkflows } from './load.js';
 import type { RunRecord, RunStore } from '../runs/store.js';
-import { deriveTitleSummary } from '../runs/title-summary.js';
+import { extractTaskRefs, refineTaskRefs, titleRefNumber } from '../runs/task-refs.js';
+import { autoNamingActive, generateRunName, liveTitleUpdatesEnabled } from '../runs/auto-name.js';
 import { UiEventSink } from '../runs/ui-event-sink.js';
-import { DEFAULT_ALLOWED_TOOLS, stepKind, type WorkflowDef, type WorkflowStepDef } from './types.js';
+import { chainStepNote, DEFAULT_ALLOWED_TOOLS, stepKind, type WorkflowDef, type WorkflowStepDef } from './types.js';
 
 const CHECK_OUTPUT_CAP = 20_000;
 /** An interactive session that hears nothing from the user closes itself. */
@@ -46,6 +48,14 @@ function stripDoneMarker(text: string): string {
 /** Periodic "cezar autosave" commit in the task worktree (spec 006). */
 export const AUTOSAVE_INTERVAL_MS = 90_000;
 
+/** The periodic autosave timer is opt-in (#471): off, a task branch carries only the
+ *  agent's own commits plus the turn-end/pre-PR flushes — no mid-run "cezar autosave"
+ *  noise interleaving PR history. The flushes (`autosaveCommit` at turn end and before
+ *  a draft PR) are NOT gated: the branch must still end holding the finished state. */
+export function periodicAutosaveEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.CEZ_AUTOSAVE === '1';
+}
+
 interface ActiveRun {
   cancelled: boolean;
   interrupt: () => void;
@@ -62,6 +72,9 @@ interface ActiveRun {
    *  going until it signals done or the safety cap is hit. */
   autonomous?: boolean;
   autoContinues?: number;
+  /** Release for exclusive execution in the user's repository working tree.
+   *  Worktree-backed runs never need it; every degradation/opt-out path does. */
+  releaseRepoRoot?: () => void;
 }
 
 /** Safety cap on autonomous auto-continues per run — stops a stuck agent from nudging forever. */
@@ -140,8 +153,9 @@ const VARIANT_HINTS: Record<string, string | undefined> = {
  * checks with bounded retry loops, plus live sessions: the last agent step
  * stays open for follow-ups (`waiting`) until "finish", idle timeout, or
  * cancel. Runs queue behind `maxParallel` slots and each run executes in its
- * own git worktree on a `cez/<id8>` branch (spec 006), autosave-committed
- * every 90 s — the user's working tree is never touched.
+ * own git worktree on a `cez/<id8>` branch (spec 006), autosave-committed at
+ * turn end and before a draft PR — plus every 90 s when opted in via
+ * CEZ_AUTOSAVE=1 (#471). The user's working tree is never touched.
  */
 export class RunManager {
   private readonly active = new Map<string, ActiveRun>();
@@ -158,6 +172,12 @@ export class RunManager {
   private readonly waiting = new Set<string>();
   private readonly pendingJobs = new Map<string, { workflow: WorkflowDef; input: StartRunInput }>();
   private pumping = false;
+  /**
+   * Runs normally isolate in worktrees and may execute in parallel. When that
+   * isolation is unavailable (or explicitly disabled), serialize access to
+   * `repoRoot` so two agents can never edit/revert the same files (#438).
+   */
+  private repoRootTail: Promise<void> = Promise.resolve();
 
   /** `.ai/cezar` — where the per-task handoff files and todos.json live. */
   private readonly dataDir: string;
@@ -240,7 +260,10 @@ export class RunManager {
       task: input.task,
       model: input.model,
       runner: input.runner,
-      generateFollowups: input.generateFollowups,
+      // The global inbox is the ceiling on the per-run flag (#471). Enforced here rather than
+      // at the HTTP route because `cezar run`, the inbox's own "▶ Run" and variants all reach
+      // startRun directly — a route-level gate would leave those writing todos.json.
+      generateFollowups: followupsEnabled() ? input.generateFollowups : false,
       groupId: group?.groupId,
       variant: group?.variant,
       steps: workflow.steps.map((s) => ({ id: s.id, name: s.name ?? s.id, kind: stepKind(s) })),
@@ -248,6 +271,20 @@ export class RunManager {
     // Persist the full definition so a queued run survives a restart (#367) —
     // ad-hoc "(planned)" chains exist nowhere else to re-resolve from.
     this.store.updateRun(run.id, { workflowDef: workflow as unknown as Record<string, unknown> });
+    // Step-0 reference extraction (task auto-naming spec): the regex layer's
+    // numbers persist immediately; the namer may add the kind it verified later.
+    const skillHint = workflow.steps.find((s) => stepKind(s) === 'agent' && s.skill)?.skill?.trim();
+    const refs = refineTaskRefs(extractTaskRefs(input.task), skillHint);
+    if (refs.prNumber !== undefined || refs.issueNumber !== undefined) {
+      this.store.updateRun(run.id, {
+        ...(refs.prNumber !== undefined ? { prNumber: refs.prNumber } : {}),
+        ...(refs.issueNumber !== undefined ? { issueNumber: refs.issueNumber } : {}),
+      });
+    }
+    // Fire-and-forget LLM naming (task auto-naming spec): the heuristic title
+    // above shows instantly; the namer's short title replaces it when (and if)
+    // the model answers. Never awaited, never fails the run.
+    void this.autoNameRun(run.id, skillHint, input.task);
     this.pendingJobs.set(run.id, { workflow, input });
     this.queue.push(run.id);
     void this.pump();
@@ -336,13 +373,22 @@ export class RunManager {
       if (run.status === 'queued') {
         const workflow = await this.reviveWorkflow(run);
         if (workflow) {
+          // Re-apply the inbox ceiling (#471). `execute()` gates again at spawn time, so the
+          // agent is safe either way — but a run queued while the inbox was on and recovered
+          // after it was switched off would otherwise keep echoing `generateFollowups: true`
+          // on a run that demonstrably produced none. Normalize the record, the way startRun
+          // does, so the stored answer matches what actually happens.
+          const generateFollowups = followupsEnabled() ? run.generateFollowups : false;
+          if (generateFollowups !== run.generateFollowups) {
+            this.store.updateRun(run.id, { generateFollowups });
+          }
           this.pendingJobs.set(run.id, {
             workflow,
             input: {
               task: run.task,
               model: run.model,
               runner: run.runner,
-              generateFollowups: run.generateFollowups,
+              generateFollowups,
             },
           });
           this.queue.push(run.id);
@@ -413,9 +459,71 @@ export class RunManager {
 
   /** Remove a run from the live registries — keeps `waiting ⊆ active`. */
   private dropActive(runId: string): void {
+    const state = this.active.get(runId);
+    state?.releaseRepoRoot?.();
+    if (state) state.releaseRepoRoot = undefined;
     this.waiting.delete(runId);
     this.active.delete(runId);
     this.memoryPausing.delete(runId);
+    this.lastNamerKey.delete(runId);
+  }
+
+  /** Last live-refresh namer inputs per run — unchanged inputs skip the call. */
+  private lastNamerKey = new Map<string, string>();
+
+  /**
+   * Acquire the one-at-a-time lease for runs executing in `repoRoot`.
+   *
+   * A lease waiter is idle, so it parks in `waiting` and gives its
+   * `maxParallel` slot back (the #347 rule): isolated worktrees keep using
+   * every configured slot while root runs line up. The store status stays
+   * `running` — only the queue's busy count changes, so the GUI never shows a
+   * lease-blocked run as awaiting user input.
+   *
+   * The lease is held for the run's whole lifetime, including the idle
+   * `waiting` parks between agent turns. A parked session is still live and
+   * writes to the working tree the moment it resumes, so handing the tree to
+   * another run there would reintroduce the concurrent-edit bug (#438) this
+   * lease exists to prevent.
+   *
+   * Returns false when the run was cancelled while waiting: the lease was
+   * never granted and the caller must not touch the working tree.
+   */
+  private async acquireRepoRoot(runId: string, state: ActiveRun): Promise<boolean> {
+    // `cancel()` can land between the run going `running` and reaching here,
+    // while `interrupt` is still the default no-op — never enter the chain.
+    if (state.cancelled) return false;
+    const previous = this.repoRootTail;
+    let release: () => void = () => undefined;
+    this.repoRootTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // Until `previous` resolves this run does not own the tree yet, so a drop
+    // during the wait must not hand the tree to the next waiter — chain our
+    // release behind `previous` instead of resolving the tail early.
+    state.releaseRepoRoot = () => {
+      void previous.then(release);
+    };
+    let abort: () => void = () => undefined;
+    const cancelled = new Promise<void>((resolve) => {
+      abort = resolve;
+    });
+    const parked = state.interrupt;
+    state.interrupt = () => {
+      parked();
+      abort();
+    };
+    this.waiting.add(runId);
+    void this.pump();
+    try {
+      await Promise.race([previous, cancelled]);
+    } finally {
+      state.interrupt = parked;
+      this.waiting.delete(runId);
+    }
+    if (state.cancelled) return false;
+    state.releaseRepoRoot = release;
+    return true;
   }
 
   cancel(runId: string): boolean {
@@ -546,13 +654,32 @@ export class RunManager {
     // Continuation runs in the task's worktree when it still exists (spec
     // 006) — the resumed session sees exactly what the original run left.
     const record = this.store.getRun(runId);
-    const generateFollowups = record?.generateFollowups !== false;
+    // The env is a live ceiling: a run created while the inbox was on must not keep writing
+    // follow-ups after it is switched off.
+    const generateFollowups = followupsEnabled() && record?.generateFollowups !== false;
     const cwd =
       record?.worktreePath && existsSync(record.worktreePath)
         ? record.worktreePath
         : this.repoRoot;
     const state: ActiveRun = { cancelled: false, interrupt: () => undefined, cwd };
     this.active.set(runId, state);
+    if (state.cwd === this.repoRoot) {
+      this.store.appendEvent(runId, {
+        type: 'note',
+        message: 'waiting for exclusive access to the repository working tree',
+      });
+      if (!(await this.acquireRepoRoot(runId, state))) {
+        this.store.updateRun(runId, {
+          status: 'cancelled',
+          finishedAt: new Date().toISOString(),
+          currentStepId: undefined,
+        });
+        this.store.appendEvent(runId, { type: 'lifecycle', message: 'run cancelled' });
+        this.dropActive(runId);
+        void this.pump();
+        return;
+      }
+    }
     this.armAutosave(state);
     if (record) seedHandoffFile(this.dataDir, record); // idempotent — normally already there
 
@@ -737,8 +864,9 @@ export class RunManager {
     emit({ type: 'lifecycle', message: `run started — workflow "${workflow.name}" (runner: ${taskBackend})` });
 
     // Worktree per task (spec 006): the agent works on its own branch in
-    // `.ai/cezar/worktrees/<id>`, never in the user's working tree. Not a git
-    // repo, or worktree creation failed → degrade to running in place.
+    // `.ai/cezar/worktrees/<id>`, never in the user's working tree. A Git task
+    // that requests isolation fails closed if the worktree cannot be
+    // established; only explicit opt-out and non-Git modes run in place.
     const repo = await getRepoInfo(this.repoRoot);
     if (repo && input.worktree === false) {
       // Composer opt-out: run in the repo working tree, no branch/worktree
@@ -748,8 +876,14 @@ export class RunManager {
       // Fork from the configured base branch (config.json `baseBranch`, e.g.
       // `develop`) — also the target of the eventual draft PR. Unresolvable
       // (typo, not fetched) → note + the currently checked-out branch.
-      let base = repo.branch;
-      const configured = config.baseBranch;
+      //
+      // A task that already recorded a fork point keeps it: its worktree is
+      // reused as-is, and re-resolving against a since-changed config would
+      // silently re-anchor the `merge-base` every diff/shortstat is measured
+      // from, shifting "what did this task change" under an existing task.
+      const recorded = this.store.getRun(runId)?.baseBranch;
+      let base = recorded ?? repo.branch;
+      const configured = recorded ? undefined : config.baseBranch;
       if (configured) {
         const resolved = await resolveBaseRef(this.repoRoot, configured);
         if (resolved) {
@@ -773,10 +907,32 @@ export class RunManager {
         this.armAutosave(state);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        emit({ type: 'note', message: `worktree creation failed (${message}) — running in the repo working tree` });
+        const error = `worktree creation failed: ${message}`;
+        emit({ type: 'note', message: `${error} — task stopped before workflow execution` });
+        this.store.updateRun(runId, {
+          status: 'failed',
+          error,
+          finishedAt: new Date().toISOString(),
+          currentStepId: undefined,
+        });
+        emit({ type: 'lifecycle', message: `run failed — ${error}` });
+        this.dropActive(runId);
+        void this.pump();
+        return;
       }
     } else {
       emit({ type: 'note', message: 'not a git repository — running in place, one task at a time' });
+    }
+
+    if (state.cwd === this.repoRoot) {
+      emit({
+        type: 'note',
+        message: 'waiting for exclusive access to the repository working tree',
+      });
+      // A cancel during the wait leaves the lease ungranted; the step loop
+      // below breaks on `cancelled` before touching the tree and settles the
+      // run through the usual path.
+      await this.acquireRepoRoot(runId, state);
     }
 
     // Handoff journal (spec 007) — seeded after the worktree exists so the
@@ -837,6 +993,7 @@ export class RunManager {
           startImages,
           taskBackend,
           extraSystemPrompt,
+          chainStepNote(workflow.steps, i),
         );
         startImages = undefined;
         checkFailure = null;
@@ -922,6 +1079,9 @@ export class RunManager {
     images: ContentBlock[] | undefined,
     taskBackend: RunnerId,
     extraSystemPrompt: string | undefined,
+    /** The chain-boundary note for this step (#410), or undefined when the
+     *  workflow has a single agent step and there is no boundary to explain. */
+    chainNote: string | undefined,
   ): Promise<string | null> {
     let systemPrompt: string | undefined;
     if (step.skill) {
@@ -956,6 +1116,7 @@ export class RunManager {
     }
 
     let userPrompt = applyTemplate(step.prompt ?? '{{task}}', input.task);
+    if (chainNote) userPrompt = `${chainNote}\n\n---\n\n${userPrompt}`;
     if (checkFailure) {
       userPrompt += `\n\nA verification command failed after the previous attempt. Fix the cause. Failing output:\n\n${checkFailure}`;
     }
@@ -1040,7 +1201,9 @@ export class RunManager {
           systemPrompt: composeSystemPrompt(
             systemPrompt,
             extraSystemPrompt,
-            input.generateFollowups === false ? HANDOFF_ONLY_INSTRUCTIONS : HANDOFF_INSTRUCTIONS,
+            followupsEnabled() && input.generateFollowups !== false
+              ? HANDOFF_INSTRUCTIONS
+              : HANDOFF_ONLY_INSTRUCTIONS,
           ),
           userPrompt,
           images,
@@ -1049,7 +1212,7 @@ export class RunManager {
           bashAllowlist: step.bashAllowlist,
           // The handoff file lives outside the worktree — grant access.
           additionalDirectories: [join(this.dataDir, 'runs')],
-          env: this.agentEnv(runId, input.generateFollowups !== false),
+          env: this.agentEnv(runId, followupsEnabled() && input.generateFollowups !== false),
           model: step.model ?? input.model,
           sessionId,
           // Interactive sessions have no wall clock — the idle timer rules.
@@ -1117,21 +1280,79 @@ export class RunManager {
    * Not `private` so the integration tests can drive a turn-end directly —
    * a real agent session is the only other way to reach this path.
    */
+  /**
+   * The namer's apply path (task auto-naming spec). Fire-and-forget: called
+   * without await from `startRun` (creation) and `recordTurnEnd` (live
+   * refresh). A user-owned title (`titleOrigin: 'user'`) is never overwritten;
+   * namer-owned titles may be replaced by fresher namer results.
+   */
+  private async autoNameRun(
+    runId: string,
+    skillName: string | undefined,
+    task: string,
+    live?: { turnText?: string; diffStat?: string },
+  ): Promise<void> {
+    // CEZ_AUTONAME=0 kills all LLM naming; dry-run skips it too unless
+    // CEZ_AUTONAME=1 forces the mock path — see autoNamingActive.
+    if (!autoNamingActive()) return;
+    try {
+      let skillDescription: string | undefined;
+      if (skillName) {
+        const skills = await discoverSkills(this.repoRoot).catch(() => [] as Skill[]);
+        skillDescription = skills.find((s) => s.name === skillName)?.description;
+      }
+      const result = await generateRunName(this.repoRoot, { task, skillName, skillDescription, ...live });
+      if (!result) return;
+      const run = this.store.getRun(runId);
+      if (!run || run.titleOrigin === 'user') return;
+      this.store.updateRun(runId, {
+        titleSummary: result.titleSummary,
+        titleOrigin: 'auto',
+        ...(result.prNumber !== undefined ? { prNumber: result.prNumber } : {}),
+        ...(result.issueNumber !== undefined ? { issueNumber: result.issueNumber } : {}),
+      });
+    } catch {
+      // Naming is best-effort — nothing here may disturb the run.
+    }
+  }
+
   async recordTurnEnd(runId: string, turnText: string): Promise<void> {
     try {
       const run = this.store.getRun(runId);
       if (!run) return;
-      if (run.titleSummary === undefined) {
-        const summary = deriveTitleSummary(turnText, run.task);
-        if (summary) this.store.updateRun(runId, { titleSummary: summary });
+      // Titles are the namer's job (task auto-naming spec) — turn text is
+      // deliberately NEVER a title source; see maybeRefreshTitle below.
+      if (run.worktreePath && existsSync(run.worktreePath)) {
+        const stat = await worktreeShortstat(run.worktreePath, run.baseBranch ?? 'HEAD');
+        if (stat) this.store.updateRun(runId, { diffStat: stat });
+        else this.store.appendEvent(runId, { type: 'note', message: 'diff stat unavailable — git diff --shortstat failed in the worktree' });
       }
-      if (!run.worktreePath || !existsSync(run.worktreePath)) return;
-      const stat = await worktreeShortstat(run.worktreePath, run.baseBranch ?? 'HEAD');
-      if (stat) this.store.updateRun(runId, { diffStat: stat });
-      else this.store.appendEvent(runId, { type: 'note', message: 'diff stat unavailable — git diff --shortstat failed in the worktree' });
+      await this.maybeRefreshTitle(runId, turnText);
     } catch {
       // Bookkeeping only — nothing here may disturb the run.
     }
+  }
+
+  /**
+   * Live title refresh (task auto-naming spec, step 3): re-run the namer with
+   * the turn's context. Skips: toggle off (`liveTitleUpdates` config over
+   * `CEZ_TITLE_UPDATES` env, default ON), user-owned title, dry-run mocks
+   * (canned answers add nothing), empty turn text, unchanged namer inputs.
+   */
+  private async maybeRefreshTitle(runId: string, turnText: string): Promise<void> {
+    if (!autoNamingActive()) return;
+    if (!turnText.trim()) return;
+    const config = await loadConfig(this.repoRoot);
+    if (!liveTitleUpdatesEnabled(config)) return;
+    const run = this.store.getRun(runId);
+    if (!run || run.titleOrigin === 'user') return;
+    const statText = run.diffStat ? `${run.diffStat.files} files, +${run.diffStat.adds} -${run.diffStat.dels}` : undefined;
+    const key = `${turnText.slice(0, 200)}|${statText ?? ''}`;
+    if (this.lastNamerKey.get(runId) === key) return;
+    this.lastNamerKey.set(runId, key);
+    const workflow = await this.reviveWorkflow(run);
+    const skillName = workflow?.steps.find((s) => stepKind(s) === 'agent' && s.skill)?.skill?.trim();
+    void this.autoNameRun(runId, skillName, run.task, { turnText, diffStat: statText });
   }
 
   /**
@@ -1229,8 +1450,10 @@ export class RunManager {
     }
   }
 
-  /** Autosave-commit the worktree every 90 s while the run lives (spec 006). */
+  /** Autosave-commit the worktree every 90 s while the run lives (spec 006).
+   *  Opt-in via CEZ_AUTOSAVE=1 (#471) — see periodicAutosaveEnabled. */
   private armAutosave(state: ActiveRun): void {
+    if (!periodicAutosaveEnabled()) return;
     if (state.cwd === this.repoRoot || state.autosaveTimer) return;
     state.autosaveTimer = setInterval(() => {
       void autosaveCommit(state.cwd);
@@ -1311,9 +1534,10 @@ function applyTemplate(template: string, task: string): string {
 }
 
 /**
- * Immediate title shown while a run is queued. The LLM-derived
- * `titleSummary` still replaces it after the first informative turn; this is
- * only the honest fallback before any model has answered (#432).
+ * Immediate title shown while a run is queued. The namer's `titleSummary`
+ * replaces it once the model answers; this is the honest, permanent fallback
+ * when no model is available (#432, spec 2026-07-17-task-auto-naming). When
+ * the task references a PR/issue, the number leads: `469: /om-auto-review-pr`.
  */
 export function makeRunTitle(task: string, workflow: WorkflowDef): string {
   const firstLine = task.trim().split('\n')[0] ?? '';
@@ -1321,7 +1545,18 @@ export function makeRunTitle(task: string, workflow: WorkflowDef): string {
   const contextual = skill && !firstLine.startsWith(`/${skill}`)
     ? `/${skill}${firstLine ? ` ${firstLine}` : ''}`
     : firstLine;
-  const chars = [...(contextual || '(untitled task)')];
+  const refNumber = titleRefNumber(refineTaskRefs(extractTaskRefs(task), skill));
+  // `469` or `/om-auto-review-pr 469` reads as `469: /om-auto-review-pr` — the
+  // number leads so it survives the tasks table's narrow truncation.
+  const skillArg = skill && contextual.startsWith(`/${skill}`) ? contextual.slice(skill.length + 1).trim() : null;
+  const body = refNumber !== undefined && skill && (skillArg === '' || /^#?\d+$/.test(skillArg ?? ''))
+    ? `/${skill}`
+    : contextual;
+  const prefixed =
+    refNumber !== undefined && !body.trimStart().replace(/^#/, '').startsWith(String(refNumber))
+      ? `${refNumber}: ${body}`
+      : body;
+  const chars = [...(prefixed || '(untitled task)')];
   return chars.length > 80 ? `${chars.slice(0, 79).join('').trimEnd()}…` : chars.join('');
 }
 

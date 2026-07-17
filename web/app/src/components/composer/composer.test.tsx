@@ -328,12 +328,25 @@ describe('@ file mentions — the provider seam (R5 upgrades the source, not the
 
 describe('quick replies (legacy Alt+A / Alt+C)', () => {
   it('Alt+A sends "Yes, approved." and Alt+C sends "Continue." without touching the draft', async () => {
-    const { onSubmit, textarea } = renderComposer({ quickReplies: true })
+    let finishFirstDelivery = () => {}
+    const firstDelivery = new Promise<void>((resolve) => {
+      finishFirstDelivery = resolve
+    })
+    const onSubmit = vi
+      .fn()
+      .mockImplementationOnce(() => firstDelivery)
+      .mockResolvedValue(undefined)
+    const { textarea } = renderComposer({ quickReplies: true, onSubmit })
     type(textarea, 'draft in progress')
     fireEvent.keyDown(window, { code: 'KeyA', altKey: true })
     expect(onSubmit).toHaveBeenCalledWith('Yes, approved.', [])
     expect(textarea.value).toBe('draft in progress')
-    // One send at a time: wait until the first delivery settled (send re-enabled).
+    expect((screen.getByLabelText('Send') as HTMLButtonElement).disabled).toBe(true)
+
+    // One send at a time: settle the first delivery, then wait for send to re-enable before
+    // exercising the second shortcut. A resolved-by-default mock can make this wait pass before
+    // React ever commits the busy state, racing the second keydown against a stale closure.
+    finishFirstDelivery()
     await waitFor(() =>
       expect((screen.getByLabelText('Send') as HTMLButtonElement).disabled).toBe(false),
     )

@@ -110,7 +110,10 @@ function PaletteContent({ close }: { close: () => void }) {
         <CommandEmpty>Nothing matches.</CommandEmpty>
 
         <CommandGroup heading="Views">
-          {visibleNavItems(health.data?.forge?.available === true).map((item) => {
+          {visibleNavItems({
+            forge: health.data?.forge?.available === true,
+            inbox: health.data?.capabilities.followups === true,
+          }).map((item) => {
             const Icon = item.icon
             return (
               <CommandItem

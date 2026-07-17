@@ -194,10 +194,15 @@ export function useRunHandoff(id: string | undefined, enabled = true) {
 }
 
 /** The follow-up inbox. Drives the nav badge. */
-export function useTodos() {
+/** The follow-up inbox. `enabled: false` (the caller passing `false` while
+ *  `capabilities.followups` is off, #471) parks the query instead of polling an
+ *  endpoint that can only answer `[]` — `data` stays undefined, which the inbox
+ *  badge already reads as "no badge". */
+export function useTodos(enabled = true) {
   return useQuery({
     queryKey: queryKeys.todos,
     queryFn: ({ signal }) => getTodos({ signal }),
+    enabled,
   })
 }
 
