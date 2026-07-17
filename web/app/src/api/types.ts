@@ -72,6 +72,8 @@ export interface RunRecord {
   runner?: Runner
   /** Echo of the extra system prompt the run used (POST override or config default). */
   systemPrompt?: string
+  /** false when the run deliberately disabled follow-up todo generation. Absent means enabled. */
+  generateFollowups?: boolean
   status: RunStatus
   createdAt: string
   startedAt?: string
@@ -488,6 +490,8 @@ export interface UiState {
   lastWorktree?: boolean
   /** The last autonomous choice — remembered like lastWorktree. Absent → off. */
   lastAutonomous?: boolean
+  /** Whether new runs should ask agents to append follow-up work. Absent → on. */
+  lastGenerateFollowups?: boolean
   runsView?: 'list' | 'table'
   /** Settings → Appearance (redesign R6): accent + density. Theme itself stays in
    *  localStorage (`cez-theme`) — it must pre-paint, and it is per-browser by design. */
@@ -522,6 +526,9 @@ export interface CreateRunInput {
   worktree?: boolean
   /** true → autonomous run: never parks at "waiting" for the user; auto-continues until done. */
   autonomous?: boolean
+  /** false → keep the handoff journal but do not expose or request a follow-up todos file.
+   *  Omit for the default (enabled). */
+  generateFollowups?: boolean
 }
 
 export interface MessageInput {

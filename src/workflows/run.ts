@@ -7,6 +7,7 @@ import { onUsage, registerRunProcess, unregisterRunProcess, type ProcessUsage } 
 import { createRunner } from '../core/runner-factory.js';
 import type { RunnerId } from '../core/agent-runner.js';
 import {
+  HANDOFF_ONLY_INSTRUCTIONS,
   HANDOFF_INSTRUCTIONS,
   appendHandoffHeartbeat,
   handoffPath,
@@ -89,6 +90,9 @@ export interface StartRunInput {
    *  user — turn-ends auto-continue until the agent signals done or the safety
    *  cap is hit. No "needs you" is ever raised. */
   autonomous?: boolean;
+  /** Follow-up inbox generation (spec 007, #444). Omitted means enabled for
+   *  compatibility; the handoff journal runs either way. */
+  generateFollowups?: boolean;
 }
 
 /**
@@ -209,12 +213,19 @@ export class RunManager {
   }
 
   /** Env the spawned claude gets so the agent can find its handoff file and
-   *  the global inbox (spec 007). */
-  private agentEnv(runId: string): Record<string, string> {
+   *  the global inbox (spec 007; the inbox only when the run opted in).
+   *
+   *  `CEZ_TODOS_FILE` is set to `''` rather than omitted when follow-ups are
+   *  off: runners spawn with `{ ...process.env, ...spec.env }`, so omitting the
+   *  key would let a value inherited from *this* process through — a nested
+   *  cezar (an agent running `cez serve`/`cez run`/the test suite) would then
+   *  write follow-ups into the parent's inbox despite the opt-out. Empty is the
+   *  established "absent" spelling — consumers guard with `if (todosFile)`. */
+  private agentEnv(runId: string, generateFollowups = true): Record<string, string> {
     return {
       CEZ_HANDOFF_FILE: handoffPath(this.dataDir, runId),
-      CEZ_TODOS_FILE: todosPath(this.dataDir),
       CEZ_TASK_ID: runId,
+      CEZ_TODOS_FILE: generateFollowups ? todosPath(this.dataDir) : '',
     };
   }
 
@@ -229,6 +240,7 @@ export class RunManager {
       task: input.task,
       model: input.model,
       runner: input.runner,
+      generateFollowups: input.generateFollowups,
       groupId: group?.groupId,
       variant: group?.variant,
       steps: workflow.steps.map((s) => ({ id: s.id, name: s.name ?? s.id, kind: stepKind(s) })),
@@ -326,7 +338,12 @@ export class RunManager {
         if (workflow) {
           this.pendingJobs.set(run.id, {
             workflow,
-            input: { task: run.task, model: run.model, runner: run.runner },
+            input: {
+              task: run.task,
+              model: run.model,
+              runner: run.runner,
+              generateFollowups: run.generateFollowups,
+            },
           });
           this.queue.push(run.id);
           this.store.appendEvent(run.id, { type: 'lifecycle', message: 'cezar restarted — task re-queued' });
@@ -529,6 +546,7 @@ export class RunManager {
     // Continuation runs in the task's worktree when it still exists (spec
     // 006) — the resumed session sees exactly what the original run left.
     const record = this.store.getRun(runId);
+    const generateFollowups = record?.generateFollowups !== false;
     const cwd =
       record?.worktreePath && existsSync(record.worktreePath)
         ? record.worktreePath
@@ -630,12 +648,15 @@ export class RunManager {
         // The Continue step is a fresh agent session on the same run — the
         // run's extra system prompt (already resolved at execute time and
         // echoed on the record) rides along with the handoff contract.
-        systemPrompt: composeSystemPrompt(record?.systemPrompt, HANDOFF_INSTRUCTIONS),
+        systemPrompt: composeSystemPrompt(
+          record?.systemPrompt,
+          generateFollowups ? HANDOFF_INSTRUCTIONS : HANDOFF_ONLY_INSTRUCTIONS,
+        ),
         userPrompt: prompt,
         cwd: state.cwd,
         allowedTools: DEFAULT_ALLOWED_TOOLS,
         additionalDirectories: [join(this.dataDir, 'runs')],
-        env: this.agentEnv(runId),
+        env: this.agentEnv(runId, generateFollowups),
         sessionId,
         resume: true,
         timeoutMs: 0,
@@ -1012,7 +1033,11 @@ export class RunManager {
         {
           // Skill body, then the run's extra prompt (POST override or config
           // default), then the handoff/todos contract — every agent step.
-          systemPrompt: composeSystemPrompt(systemPrompt, extraSystemPrompt, HANDOFF_INSTRUCTIONS),
+          systemPrompt: composeSystemPrompt(
+            systemPrompt,
+            extraSystemPrompt,
+            input.generateFollowups === false ? HANDOFF_ONLY_INSTRUCTIONS : HANDOFF_INSTRUCTIONS,
+          ),
           userPrompt,
           images,
           cwd: state.cwd,
@@ -1020,7 +1045,7 @@ export class RunManager {
           bashAllowlist: step.bashAllowlist,
           // The handoff file lives outside the worktree — grant access.
           additionalDirectories: [join(this.dataDir, 'runs')],
-          env: this.agentEnv(runId),
+          env: this.agentEnv(runId, input.generateFollowups !== false),
           model: step.model ?? input.model,
           sessionId,
           // Interactive sessions have no wall clock — the idle timer rules.

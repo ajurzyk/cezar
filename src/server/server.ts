@@ -111,6 +111,9 @@ const startRunSchema = z
     // Autonomous mode (#autonomous): the run never parks at `waiting` — it
     // auto-continues until the agent signals done. No "needs you" is raised.
     autonomous: z.boolean().optional(),
+    // Generate follow-up inbox entries (spec 007, #444). Omitted means enabled
+    // for old clients — the handoff journal is unaffected either way.
+    generateFollowups: z.boolean().optional(),
     // Per-run system-prompt override (R2 2.3) — programmatic callers only
     // (bookmarklets, scripts); deliberately NOT a composer-UI control. Wins
     // over the config.json default; whitespace-only degrades to absent.
@@ -181,6 +184,7 @@ const uiStateSchema = z
       .optional(),
     lastWorktree: z.boolean().optional(),
     lastAutonomous: z.boolean().optional(),
+    lastGenerateFollowups: z.boolean().optional(),
     // Runs area presentation (#348): the sidebar-list + detail pane, or the
     // full-width table ("task manager") view.
     runsView: z.enum(['list', 'table']).optional(),
@@ -512,6 +516,7 @@ export function createApp(deps: ServerDeps): Hono {
       systemPrompt: parsed.data.systemPrompt,
       worktree: parsed.data.worktree,
       autonomous: parsed.data.autonomous,
+      generateFollowups: parsed.data.generateFollowups,
     };
     const variants = parsed.data.variants ?? 1;
     if (variants > 1) {

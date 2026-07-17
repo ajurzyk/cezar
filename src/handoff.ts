@@ -113,19 +113,26 @@ export function deleteHandoff(dataDir: string, runId: string): void {
 
 /**
  * Appended to every agent step's `--append-system-prompt` (spec 007). The
- * matching env vars (CEZ_HANDOFF_FILE / CEZ_TODOS_FILE / CEZ_TASK_ID) are set
- * on the spawned claude process.
+ * matching handoff/task env vars are set on every agent process;
+ * CEZ_TODOS_FILE carries a usable path only when follow-up generation is
+ * enabled (#444) — opted-out runs get it empty, never absent, so an inherited
+ * value from a parent cezar cannot shine through (`RunManager.agentEnv`).
  */
-export const HANDOFF_INSTRUCTIONS = `## Handoff & follow-ups (cezar)
+export const HANDOFF_ONLY_INSTRUCTIONS = `## Handoff (cezar)
 
 CEZ_HANDOFF_FILE (env) is the absolute path to this task's rolling handoff file. Treat it like a HANDOFF.md:
 1. At the start of work, read it — "Resume notes" left by a previous session is your starting context.
 2. After every meaningful milestone (passing tests, a commit, a PR, a scope decision), append one terse timestamped line under "## Progress log", newest at the top.
 3. Before finishing or pausing, update "## Resume notes" with what's done, what's next and any blockers. Leave it empty only when the task is truly complete.
 
-Task completion marker: when the task's goal is fully achieved and you have no question for the user, end your final message with a line containing exactly CEZ:DONE — cez then closes the session and marks the task finished. If you are waiting on the user (a question, a decision, missing input), just end your message normally; the session stays open for their reply. Never emit CEZ:DONE while anything is unfinished or unverified.
+Task completion marker: when the task's goal is fully achieved and you have no question for the user, end your final message with a line containing exactly CEZ:DONE — cez then closes the session and marks the task finished. If you are waiting on the user (a question, a decision, missing input), just end your message normally; the session stays open for their reply. Never emit CEZ:DONE while anything is unfinished or unverified.`;
+
+export const FOLLOWUP_INSTRUCTIONS = `## Follow-ups (cezar)
 
 CEZ_TODOS_FILE (env) is the absolute path to the user's follow-up inbox — a JSON array. When you finish the task and a concrete follow-up remains for the user or a next agent, read the file (treat a missing file as []), append ONE object and write the whole array back:
 { "ts": "<ISO 8601>", "taskId": "<value of CEZ_TASK_ID>", "summary": "<one sentence: what was done / what's next>", "action": "<imperative user action, optional>", "prUrl": "<optional>", "suggestedSkill": "<optional skill name for the follow-up>", "suggestedArgs": "<optional>", "suggestedPrompt": "<optional freeform prompt for the follow-up task>", "runnable": <true when an agent can execute this follow-up, false when it is a note> }
 Set "runnable": false for anything a human must do or merely read — manual QA, "remember to…", informational notes — and leave out suggestedSkill/suggestedPrompt for those; the inbox then offers "Acknowledge" instead of "Run". Set "runnable": true only when suggestedSkill or suggestedPrompt says what to actually execute.
 Never modify or remove existing entries — append only.`;
+
+/** Default-on combined contract retained for old callers and runs. */
+export const HANDOFF_INSTRUCTIONS = `${HANDOFF_ONLY_INSTRUCTIONS}\n\n${FOLLOWUP_INSTRUCTIONS}`;
