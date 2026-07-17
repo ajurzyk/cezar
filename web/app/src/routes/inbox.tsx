@@ -95,13 +95,18 @@ export function InboxRoute() {
             />
           ) : null
         ) : todos.length === 0 ? (
-          <CenteredState
-            icon={<InboxIcon />}
-            tone="neutral"
-            title="Inbox empty"
-            subtitle="Agents drop follow-up suggestions here when they finish a task."
-            heading="h2"
-          />
+          // Not until health has spoken: an inbox-less server answers `[]` too, so claiming
+          // "empty" here would flash the very lie this route exists to avoid before settling on
+          // "off" a moment later.
+          health.data === undefined ? null : (
+            <CenteredState
+              icon={<InboxIcon />}
+              tone="neutral"
+              title="Inbox empty"
+              subtitle="Agents drop follow-up suggestions here when they finish a task."
+              heading="h2"
+            />
+          )
         ) : (
           <ul data-slot="todo-list" className="mx-auto flex w-full max-w-3xl flex-col gap-2.5">
             {todos.map((todo) => (

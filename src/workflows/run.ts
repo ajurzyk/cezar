@@ -340,13 +340,22 @@ export class RunManager {
       if (run.status === 'queued') {
         const workflow = await this.reviveWorkflow(run);
         if (workflow) {
+          // Re-apply the inbox ceiling (#471). `execute()` gates again at spawn time, so the
+          // agent is safe either way — but a run queued while the inbox was on and recovered
+          // after it was switched off would otherwise keep echoing `generateFollowups: true`
+          // on a run that demonstrably produced none. Normalize the record, the way startRun
+          // does, so the stored answer matches what actually happens.
+          const generateFollowups = followupsEnabled() ? run.generateFollowups : false;
+          if (generateFollowups !== run.generateFollowups) {
+            this.store.updateRun(run.id, { generateFollowups });
+          }
           this.pendingJobs.set(run.id, {
             workflow,
             input: {
               task: run.task,
               model: run.model,
               runner: run.runner,
-              generateFollowups: run.generateFollowups,
+              generateFollowups,
             },
           });
           this.queue.push(run.id);
