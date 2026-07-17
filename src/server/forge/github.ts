@@ -52,25 +52,32 @@ const ghIssueSchema = z.object({
   body: z.string().nullish(),
   url: z.string(),
 });
+// One check run's `gh --json statusCheckRollup` entry — every field optional/nullish because
+// gh's shape varies by check provider (exported so #400's unit tests can build fixtures).
+export const ghCheckRunSchema = z.object({
+  state: z.string().nullish(),
+  status: z.string().nullish(),
+  conclusion: z.string().nullish(),
+});
+const ghStatusCheckRollup = z.array(ghCheckRunSchema).nullish();
+
 const ghPrSchema = ghIssueSchema.extend({
   isDraft: z.boolean().default(false),
   additions: z.number().default(0),
   deletions: z.number().default(0),
-  statusCheckRollup: z
-    .array(z.object({ state: z.string().nullish(), status: z.string().nullish(), conclusion: z.string().nullish() }))
-    .nullish(),
+  statusCheckRollup: ghStatusCheckRollup,
 });
 const ghPrViewSchema = z.object({
   number: z.number(),
   url: z.string(),
   state: z.string().default('OPEN'),
   isDraft: z.boolean().default(false),
-  statusCheckRollup: z
-    .array(z.object({ state: z.string().nullish(), status: z.string().nullish(), conclusion: z.string().nullish() }))
-    .nullish(),
+  statusCheckRollup: ghStatusCheckRollup,
 });
 
-function rollupToChecks(rollup: Array<{ state?: string | null; status?: string | null; conclusion?: string | null }> | null | undefined): GithubItem['checks'] {
+/** Exported for unit tests (#400) — collapses a zod-validated `statusCheckRollup` array down to
+ *  the single enum the GitHub tab (list rows + detail badge) renders. */
+export function rollupToChecks(rollup: z.infer<typeof ghStatusCheckRollup>): GithubItem['checks'] {
   if (!rollup || rollup.length === 0) return null;
   const states = rollup.map((r) => (r.conclusion || r.state || r.status || '').toUpperCase());
   if (states.some((s) => ['FAILURE', 'ERROR', 'TIMED_OUT', 'ACTION_REQUIRED'].includes(s))) return 'failing';

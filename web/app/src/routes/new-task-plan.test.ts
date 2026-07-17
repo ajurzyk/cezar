@@ -119,6 +119,7 @@ describe('buildPlannedRunBody — the POST /api/runs wire contract for approved 
       runner: undefined,
       variants: undefined,
       images: undefined,
+      generateFollowups: undefined,
     })
   })
 
@@ -146,5 +147,10 @@ describe('buildPlannedRunBody — the POST /api/runs wire contract for approved 
     const body = buildPlannedRunBody(base)
     expect(body.steps).toEqual(STEPS)
     expect(body.steps).not.toBe(STEPS)
+  })
+
+  it('sends only the opt-out value for follow-up generation', () => {
+    expect(buildPlannedRunBody({ ...base, generateFollowups: false }).generateFollowups).toBe(false)
+    expect(buildPlannedRunBody({ ...base, generateFollowups: true }).generateFollowups).toBeUndefined()
   })
 })

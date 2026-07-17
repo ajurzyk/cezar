@@ -7,7 +7,7 @@ import { createQueryClient } from '@/api/query-client'
 import type { RunRecord, TodoItem } from '@/api/types'
 import { Toaster, resetToasts } from '@/components/ui/toaster'
 
-import { InboxRoute, visibleTodos } from './inbox'
+import { InboxRoute, isTodoRunnable, visibleTodos } from './inbox'
 
 afterEach(() => {
   act(() => resetToasts())
@@ -94,6 +94,10 @@ function stubFetch(
         inbox = inbox.filter((item) => item.id !== 't1')
         return jsonResponse({ removed: true })
       }
+      if (method === 'DELETE' && path === '/api/todos/t2') {
+        inbox = inbox.filter((item) => item.id !== 't2')
+        return jsonResponse({ removed: true })
+      }
       if (method === 'POST' && path === '/api/todos/t1/start') {
         inbox = inbox.map((item) =>
           item.id === 't1' ? { ...item, startedTaskId: STARTED_RUN.id } : item,
@@ -128,6 +132,18 @@ const cards = () => [...document.querySelectorAll<HTMLElement>('[data-slot="todo
 describe('visibleTodos', () => {
   it('hides entries already turned into a task (the legacy audit-trail rule)', () => {
     expect(visibleTodos(TODOS).map((t) => t.id)).toEqual(['t1', 't2'])
+  })
+})
+
+describe('isTodoRunnable', () => {
+  it('infers legacy entries from their executable suggestion', () => {
+    expect(isTodoRunnable(TODO_FULL)).toBe(true)
+    expect(isTodoRunnable(TODO_ORPHAN)).toBe(false)
+  })
+
+  it('lets explicit intent override inference in either direction', () => {
+    expect(isTodoRunnable({ ...TODO_FULL, runnable: false })).toBe(false)
+    expect(isTodoRunnable({ ...TODO_ORPHAN, runnable: true })).toBe(true)
   })
 })
 
@@ -214,6 +230,29 @@ describe('Run', () => {
     expect(await screen.findByText('already started')).not.toBeNull()
     expect(document.querySelector('[data-slot="thread-probe"]')).toBeNull()
     expect(cards()).toHaveLength(2)
+  })
+})
+
+// ---- Acknowledge ------------------------------------------------------------------------------
+
+describe('Acknowledge', () => {
+  it('replaces Run for a note and DELETEs it without starting a task', async () => {
+    const sent = stubFetch()
+    renderInbox()
+
+    await waitFor(() => expect(cards()).toHaveLength(2))
+    const note = cards()[1]!
+    expect(note.querySelector('[data-action="todo-run"]')).toBeNull()
+    expect(note.querySelector('[data-action="todo-dismiss"]')).toBeNull()
+    expect(note.querySelector('[data-action="todo-acknowledge"]')?.textContent).toContain(
+      'Acknowledge',
+    )
+
+    fireEvent.click(note.querySelector('[data-action="todo-acknowledge"]')!)
+
+    await waitFor(() => expect(cards()).toHaveLength(1))
+    expect(sent).toContainEqual({ path: '/api/todos/t2', method: 'DELETE' })
+    expect(sent).not.toContainEqual({ path: '/api/todos/t2/start', method: 'POST' })
   })
 })
 

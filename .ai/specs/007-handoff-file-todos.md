@@ -13,8 +13,9 @@ jednego inboxa, z którego kolejny task odpala się jednym klikiem.
 - W szczegółach taska karta **„Notatki"** (render markdown `handoff.md`) —
   czytasz, co agent zrobił i co zostało, ludzkim językiem. Zero edycji w GUI.
 - Nowa zakładka **Inbox** (obok Runs/Repo/Skills): płaska lista follow-upów
-  ze wszystkich tasków. Każdy wpis ma **jeden przycisk**: „▶ Odpal"
-  (tworzy task z zasugerowanym skillem/promptem) i krzyżyk (odhacz = usuń).
+  ze wszystkich tasków. Wykonywalny wpis ma „▶ Odpal" (tworzy task z
+  zasugerowanym skillem/promptem) i odhaczenie; notatka bez akcji ma
+  „Acknowledge", które tylko ją usuwa.
 - Kropka z liczbą na zakładce Inbox, gdy coś czeka.
 
 ## Zakres
@@ -32,9 +33,24 @@ jednego inboxa, z którego kolejny task odpala się jednym klikiem.
    - `GET /api/runs/:id/handoff` (markdown) + karta w GUI.
 2. **Globalny inbox**: `.ai/cezar/todos.json`:
    - format wpisu: `{ id, ts, taskId, summary, action?, prUrl?,
-     suggestedSkill?, suggestedArgs?, suggestedPrompt? }`,
+     suggestedSkill?, suggestedArgs?, suggestedPrompt?, runnable? }`;
+     `runnable` jawnie zapisuje intencję, a stary wpis bez tego pola jest
+     wykonywalny tylko wtedy, gdy ma `suggestedSkill` lub `suggestedPrompt`,
    - agent dostaje env `CEZ_TODOS_FILE` + instrukcję: „po skończeniu dopisz
-     wpis JSON do tablicy; nigdy nie modyfikuj istniejących",
+     wpis JSON do tablicy; nigdy nie modyfikuj istniejących"; ta instrukcja
+     (`HANDOFF_INSTRUCTIONS`) jest jedynym producentem wpisów, więc opisuje
+     też `runnable`: notatka do przeczytania albo robota dla człowieka
+     (manual QA, „pamiętaj, żeby…") dostaje `runnable: false` i żadnego
+     `suggestedSkill`/`suggestedPrompt`,
+   - **poprawka (PR #444)**: generowanie follow-upów jest przełącznikiem per
+     task (`generateFollowups`, domyślnie ON; brak pola = ON, żeby stare runy
+     i starsi klienci nie zmienili zachowania). Gdy run się wypisze, agent nie
+     dostaje ani instrukcji follow-upów, ani użytecznego `CEZ_TODOS_FILE` —
+     dziennik `handoff.md` i marker `CEZ:DONE` działają bez zmian. Uwaga
+     implementacyjna: runnery startują z `{ ...process.env, ...spec.env }`,
+     więc przy wypisaniu `CEZ_TODOS_FILE` musi być **przesłonięty** pustą
+     wartością, a nie pominięty — inaczej zagnieżdżony cezar (agent odpalający
+     `cez serve`/testy) odziedziczy ścieżkę rodzica i dopisze do jego inboxa,
    - zapis serwerowy pod lockiem (nasz store ma już atomic write; dodajemy
      `withLock` — 15-liniowy port z janitorowego `storage.ts`),
    - watch pliku (fs.watch + debounce) → SSE → licznik na zakładce,
@@ -76,3 +92,7 @@ jednego inboxa, z którego kolejny task odpala się jednym klikiem.
   „▶ Odpal" tworzy poprawny task; odhaczenie usuwa wpis.
 - Ręcznie zepsuty JSON w todos.json nie wywala serwera (plik leczony:
   nieparsowalne wpisy pomijane, log ostrzeżenia).
+- (PR #444) Task z `generateFollowups: false` nie dopisuje nic do żadnego
+  inboxa — także wtedy, gdy proces cezara sam ma ustawione `CEZ_TODOS_FILE` —
+  a mimo to prowadzi `handoff.md` i kończy markerem `CEZ:DONE`. Task bez tego
+  pola (stary run, stary klient) zachowuje się jak dotychczas.

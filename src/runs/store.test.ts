@@ -57,6 +57,29 @@ describe('RunStore — titleSummary + diffStat (#389)', () => {
     expect(run?.title).toBe('fix the login bug');
     expect(run?.titleSummary).toBeUndefined();
     expect(run?.diffStat).toBeUndefined();
+    expect(run?.generateFollowups).toBeUndefined();
+  });
+
+  it('persists an explicit follow-up opt-out while omission stays compatible', () => {
+    const store = RunStore.open(dataDir);
+    const disabled = store.createRun({
+      title: 'quiet task',
+      workflow: 'quick-task',
+      task: 'quiet task',
+      generateFollowups: false,
+      steps: [],
+    });
+    const defaulted = store.createRun({
+      title: 'default task',
+      workflow: 'quick-task',
+      task: 'default task',
+      steps: [],
+    });
+    store.flush();
+
+    const reopened = RunStore.open(dataDir);
+    expect(reopened.getRun(disabled.id)?.generateFollowups).toBe(false);
+    expect(reopened.getRun(defaulted.id)?.generateFollowups).toBeUndefined();
   });
 
   it('updateRun fans the new fields out on the run channel (the SSE feed)', () => {

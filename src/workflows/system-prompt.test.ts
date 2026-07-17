@@ -1,10 +1,10 @@
 import { execFile } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { HANDOFF_INSTRUCTIONS } from '../handoff.js';
+import { HANDOFF_INSTRUCTIONS, HANDOFF_ONLY_INSTRUCTIONS } from '../handoff.js';
 import { RunStore } from '../runs/store.js';
 import type { WorkflowDef } from './types.js';
 import {
@@ -85,6 +85,7 @@ describe('systemPrompt end-to-end (dry run)', () => {
   const SKILL_BODY = 'Inspect the selected pull request and review its diff.';
   let repoRoot: string;
   let argsFile: string;
+  let inheritedTodos: string;
   let store: RunStore;
   let manager: RunManager;
   const savedEnv: Record<string, string | undefined> = {};
@@ -92,10 +93,18 @@ describe('systemPrompt end-to-end (dry run)', () => {
   beforeAll(async () => {
     repoRoot = mkdtempSync(join(tmpdir(), 'cez-sysprompt-'));
     argsFile = join(repoRoot, 'mock-args.ndjson');
+    inheritedTodos = join(repoRoot, 'inherited-todos.json');
     savedEnv.CEZ_DRY_RUN = process.env.CEZ_DRY_RUN;
     savedEnv.CEZ_MOCK_ARGS_FILE = process.env.CEZ_MOCK_ARGS_FILE;
+    savedEnv.CEZ_TODOS_FILE = process.env.CEZ_TODOS_FILE;
     process.env.CEZ_DRY_RUN = '1';
     process.env.CEZ_MOCK_ARGS_FILE = argsFile;
+    // Simulate a nested cezar (an agent running `cez serve` / the test suite):
+    // the parent process already carries CEZ_TODOS_FILE. Runners spawn with
+    // `{ ...process.env, ...spec.env }`, so `agentEnv` must *shadow* this for
+    // every run — never merely omit the key — or an opted-out agent writes
+    // follow-ups into the parent's inbox. Asserted per test below.
+    process.env.CEZ_TODOS_FILE = inheritedTodos;
     await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
     writeFileSync(join(repoRoot, 'a.txt'), 'one\n');
     await run('git', ['add', '-A'], { cwd: repoRoot });
@@ -147,7 +156,7 @@ describe('systemPrompt end-to-end (dry run)', () => {
   };
 
   async function runToEnd(
-    input: { task: string; systemPrompt?: string },
+    input: { task: string; systemPrompt?: string; generateFollowups?: boolean },
     selectedWorkflow: WorkflowDef = workflow,
   ): Promise<string> {
     writeFileSync(argsFile, '', 'utf8'); // fresh capture per run
@@ -161,10 +170,10 @@ describe('systemPrompt end-to-end (dry run)', () => {
     return record.id;
   }
 
-  function capturedSystemPrompt(): string {
+  function capturedSystemPrompt(index = 0): string {
     const lines = readFileSync(argsFile, 'utf8').trim().split('\n');
-    expect(lines.length).toBeGreaterThan(0);
-    const argv = JSON.parse(lines[0] as string) as string[];
+    expect(lines.length).toBeGreaterThan(index);
+    const argv = JSON.parse(lines[index] as string) as string[];
     const idx = argv.indexOf('--append-system-prompt');
     expect(idx).toBeGreaterThanOrEqual(0);
     return argv[idx + 1] as string;
@@ -214,5 +223,49 @@ describe('systemPrompt end-to-end (dry run)', () => {
     const worktreePath = record?.worktreePath;
     if (!worktreePath) throw new Error('run did not create its worktree');
     expect(readFileSync(join(worktreePath, 'notes.md'), 'utf8')).toContain(': 432\n');
+  }, 30_000);
+
+  // The positive control for the opt-out test below: without this, flipping the
+  // `generateFollowups` default or mistyping the `!== false` guard would stop
+  // every run from producing inbox entries with the whole suite still green.
+  it('by default the agent gets the run own inbox, never an inherited one', async () => {
+    const todosFile = join(repoRoot, '.ai/cezar/todos.json');
+    rmSync(todosFile, { force: true });
+    rmSync(inheritedTodos, { force: true });
+    await runToEnd({ task: 'do the thing with follow-ups' });
+    expect(capturedSystemPrompt()).toContain('CEZ_TODOS_FILE');
+    expect(existsSync(todosFile)).toBe(true);
+    expect(existsSync(inheritedTodos)).toBe(false);
+  }, 30_000);
+
+  it('explicit opt-out keeps handoff behavior but removes inbox prompt and environment', async () => {
+    const todosFile = join(repoRoot, '.ai/cezar/todos.json');
+    rmSync(todosFile, { force: true });
+    rmSync(inheritedTodos, { force: true });
+    const id = await runToEnd({ task: 'do the thing quietly', generateFollowups: false });
+    const record = store.getRun(id);
+    expect(record?.generateFollowups).toBe(false);
+    expect(capturedSystemPrompt()).toBe(composeSystemPrompt(CONFIG_PROMPT, HANDOFF_ONLY_INSTRUCTIONS));
+    expect(capturedSystemPrompt()).not.toContain('CEZ_TODOS_FILE');
+    expect(existsSync(todosFile)).toBe(false);
+    // The opt-out must survive an inherited CEZ_TODOS_FILE (nested cezar):
+    // omitting the key instead of shadowing it leaks into the parent's inbox.
+    expect(existsSync(inheritedTodos)).toBe(false);
+    expect(readFileSync(join(repoRoot, '.ai/cezar/runs', `${id}.handoff.md`), 'utf8')).toContain(
+      'mock: implemented the change',
+    );
+
+    expect(manager.continueRun(id, 'continue without generating follow-ups')).toEqual({ ok: true });
+    const deadline = Date.now() + 20_000;
+    while (readFileSync(argsFile, 'utf8').trim().split('\n').length < 2) {
+      if (Date.now() > deadline) throw new Error('continuation did not start in time');
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    expect(capturedSystemPrompt(1)).toBe(
+      composeSystemPrompt(CONFIG_PROMPT, HANDOFF_ONLY_INSTRUCTIONS),
+    );
+    expect(capturedSystemPrompt(1)).not.toContain('CEZ_TODOS_FILE');
+    expect(existsSync(todosFile)).toBe(false);
+    expect(existsSync(inheritedTodos)).toBe(false);
   }, 30_000);
 });

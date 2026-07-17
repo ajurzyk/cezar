@@ -78,7 +78,7 @@ export function UserBubble({
 /** An assistant message item, as markdown. */
 export function AssistantMessage({ text }: { text: string }) {
   return (
-    <div data-slot="assistant-message" className="min-w-0 text-[13.5px] leading-[1.6]">
+    <div data-slot="assistant-message" className="min-w-0 text-[15px] leading-[1.65]">
       <Markdown>{text}</Markdown>
     </div>
   )
@@ -310,22 +310,22 @@ export function ToolCard({
       open={open}
       onOpenChange={setUserOpen}
       className={cn(
-        'min-w-0 overflow-hidden rounded-lg border bg-card',
+        'min-w-0 overflow-hidden rounded-md border bg-card',
         item.status === 'failed' ? 'border-danger/40' : 'border-border',
       )}
     >
       <CollapsibleTrigger
         disabled={!hasDetail}
-        className="group flex min-h-[42px] w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] enabled:hover:bg-muted"
+        className="group flex min-h-[28px] w-full items-center gap-1.5 px-2.5 py-0.5 text-left text-[13px] enabled:hover:bg-muted"
       >
         <ChevronRightIcon
           aria-hidden
           className={cn(
-            'size-3.5 shrink-0 text-soft-foreground transition-transform group-data-[state=open]:rotate-90',
+            'size-3 shrink-0 text-soft-foreground transition-transform group-data-[state=open]:rotate-90',
             !hasDetail && 'invisible',
           )}
         />
-        <Icon aria-hidden className={cn('size-4 shrink-0', item.status === 'failed' ? 'text-danger' : 'text-muted-foreground')} />
+        <Icon aria-hidden className={cn('size-3.5 shrink-0', item.status === 'failed' ? 'text-danger' : 'text-muted-foreground')} />
         <span
           className={cn(
             'shrink-0 font-semibold',

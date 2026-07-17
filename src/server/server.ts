@@ -42,6 +42,7 @@ import {
   readWorktreePath,
 } from './git-changes.js';
 import { loadConfig, type CezConfig } from '../config.js';
+import { readUiState, uiStatePath } from '../ui-state.js';
 import { resolveCapabilities } from './capabilities.js';
 import { resolveForge } from './forge/index.js';
 import { fetchGithub } from './github.js';
@@ -111,6 +112,9 @@ const startRunSchema = z
     // Autonomous mode (#autonomous): the run never parks at `waiting` — it
     // auto-continues until the agent signals done. No "needs you" is raised.
     autonomous: z.boolean().optional(),
+    // Generate follow-up inbox entries (spec 007, #444). Omitted means enabled
+    // for old clients — the handoff journal is unaffected either way.
+    generateFollowups: z.boolean().optional(),
     // Per-run system-prompt override (R2 2.3) — programmatic callers only
     // (bookmarklets, scripts); deliberately NOT a composer-UI control. Wins
     // over the config.json default; whitespace-only degrades to absent.
@@ -181,9 +185,13 @@ const uiStateSchema = z
       .optional(),
     lastWorktree: z.boolean().optional(),
     lastAutonomous: z.boolean().optional(),
+    lastGenerateFollowups: z.boolean().optional(),
     // Runs area presentation (#348): the sidebar-list + detail pane, or the
     // full-width table ("task manager") view.
     runsView: z.enum(['list', 'table']).optional(),
+    // The GitHub tab's last-selected sub-tab (#417): issues or PRs. ADDITIVE — an old
+    // ui-state.json without the key behaves as the default (issues).
+    githubView: z.enum(['issues', 'prs']).optional(),
     // Settings → Appearance (redesign R6): accent + density. ADDITIVE — the theme itself
     // stays in the browser (`cez-theme` localStorage, pre-paint). The cockpit always PUTs
     // the whole object because the top-level merge below is shallow.
@@ -193,6 +201,9 @@ const uiStateSchema = z
         density: z.enum(['comfortable', 'compact', 'ultra']).optional(),
       })
       .optional(),
+    // Skills promo banner (#391): set once the cockpit banner is dismissed, never unset.
+    // Server-persisted (not a cookie) so the "shown once" promise holds across browsers.
+    dismissedSkillsBanner: z.boolean().optional(),
   })
   .passthrough();
 
@@ -326,25 +337,18 @@ export function createApp(deps: ServerDeps): Hono {
   app.get('/api/skills', async (c) => c.json(await discoverSkills(repoRoot)));
 
   // ---- GUI prefs (ui-state.json) --------------------------------------------
-  const uiStatePath = join(dataDir, 'ui-state.json');
-  const readUiState = async (): Promise<Record<string, unknown>> => {
-    try {
-      const parsed: unknown = JSON.parse(await readFile(uiStatePath, 'utf8'));
-      return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
-    } catch {
-      return {};
-    }
-  };
-  app.get('/api/ui-state', async (c) => c.json(await readUiState()));
+  // The read path is shared with the CLI (`src/ui-state.ts`) so `cezar serve` can honour a
+  // preference set here — #391's dismissed skills banner — from one notion of the file.
+  app.get('/api/ui-state', async (c) => c.json(await readUiState(repoRoot)));
   app.put('/api/ui-state', async (c) => {
     const parsed = uiStateSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
       return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
     }
-    const merged = { ...(await readUiState()), ...parsed.data };
+    const merged = { ...(await readUiState(repoRoot)), ...parsed.data };
     try {
       await mkdir(dataDir, { recursive: true });
-      await writeFile(uiStatePath, `${JSON.stringify(merged, null, 2)}\n`, 'utf8');
+      await writeFile(uiStatePath(repoRoot), `${JSON.stringify(merged, null, 2)}\n`, 'utf8');
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
     }
@@ -512,6 +516,7 @@ export function createApp(deps: ServerDeps): Hono {
       systemPrompt: parsed.data.systemPrompt,
       worktree: parsed.data.worktree,
       autonomous: parsed.data.autonomous,
+      generateFollowups: parsed.data.generateFollowups,
     };
     const variants = parsed.data.variants ?? 1;
     if (variants > 1) {

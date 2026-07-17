@@ -88,8 +88,9 @@ export function buildPlannedRunBody(opts: {
   runnerCount: number
   variants: number
   images: readonly ImageInput[]
+  generateFollowups?: boolean
 }): CreateRunInput {
-  const { task, steps, model, runner, runnerCount, variants, images } = opts
+  const { task, steps, model, runner, runnerCount, variants, images, generateFollowups } = opts
   return {
     task,
     steps: [...steps],
@@ -97,5 +98,6 @@ export function buildPlannedRunBody(opts: {
     runner: runnerCount > 1 ? runner : undefined,
     variants: variants > 1 ? variants : undefined,
     images: images.length > 0 ? [...images] : undefined,
+    generateFollowups: generateFollowups === false ? false : undefined,
   }
 }
