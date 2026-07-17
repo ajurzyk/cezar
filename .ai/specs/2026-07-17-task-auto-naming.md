@@ -74,16 +74,45 @@ New `src/runs/auto-name.ts`, mirroring `src/planner.ts` (spec 008) exactly:
   occurs in the task text or matches step 0; the regex always wins on disagreement.
   Post-validate the title: non-empty, ≤ ~40 code points, lowercase start, prepend `N: ` when a
   number is known and missing from the title.
-- Apply via `store.updateRun(runId, { titleSummary, prNumber, issueNumber })` **only while
-  `titleSummary` is still unset** — a user rename (PATCH writes `titleSummary` too) or an
-  earlier apply wins. SSE fan-out is free (`store.updateRun` → `run` event).
+- Apply via `store.updateRun(runId, { titleSummary, prNumber, issueNumber })`. A **user
+  rename always wins**: PATCH sets a user-owned marker (it already writes `titleSummary`;
+  track origin with a new optional `titleOrigin: 'user' | 'auto'`), and the namer never
+  overwrites a user-owned title. Namer-owned titles MAY be replaced by later namer results
+  (the live updates of Step 3). SSE fan-out is free (`store.updateRun` → `run` event).
 
-### Step 3 — retire turn-text titles
+### Step 3 — live title updates ("on the go"), switchable, default ON
 
-Remove the `titleSummary` assignment from `recordTurnEnd` and retire
+Owner change request (PR #479 review): the task name must keep **updating as the run
+progresses** — but through the namer, never through raw turn text.
+
+- **Trigger:** on each `turn-end` (the hook `recordTurnEnd` already owns), re-run the same
+  one-shot namer with richer context: skill + arguments + task prompt + the finished turn's
+  text + current `diffStat`. Same strict-JSON contract, same post-validation, same
+  cross-checked `pr`/`issue` numbers.
+- **Precedence:** a user rename always wins and permanently stops auto-updates for that run
+  (the existing `titleSummary`-set-by-PATCH rule). Otherwise the freshest namer result may
+  replace an earlier one — a run that started as `469: /om-auto-review-pr` becomes
+  `469: fixing sse watchdog races` once the work has a shape.
+- **The switch (settings-based, env default, default ON):** new `config.json` key
+  **`liveTitleUpdates: boolean`**, surfaced in Settings → Agents next to `plannerModel`/
+  `namerModel`. When the key is absent, the default comes from the env:
+  **`CEZ_TITLE_UPDATES`** (`'0'` → off, anything else/unset → **ON**). Config wins over env;
+  env wins over the built-in ON. Default-ON is an explicit owner decision recorded here — it
+  deviates from the "cost widens ⇒ opt-in" house rule; the cost is bounded below.
+- **Cost bounding:** one cheap-model call per turn end, skipped when the toggle is off, when
+  a user rename exists, when the run is `CEZ_DRY_RUN`-mocked (canned answer), or when the
+  namer inputs haven't changed since the last call (no new turn text and unchanged diffStat).
+  Off (`liveTitleUpdates: false` / `CEZ_TITLE_UPDATES=0`) the title is set once at creation
+  (Steps 0–2) and then only by the user.
+
+### Step 4 — retire raw turn-text titles
+
+Remove the `deriveTitleSummary` assignment from `recordTurnEnd` and retire
 `src/runs/title-summary.ts`. This is the single change that makes "Reading the handoff…"
-titles impossible. (One #442 dry-run test asserts turn-text `titleSummary` gets set — expected
-churn, update it in the same step.)
+titles impossible — the on-the-go updates of Step 3 replace it with namer-generated titles.
+When no LLM is available, the creation-time heuristic title simply stays; the raw
+first-words derivation does NOT return as a fallback. (One #442 dry-run test asserts
+turn-text `titleSummary` gets set — expected churn, update it in the same step.)
 
 ### Degradation (zero-config rules)
 
@@ -103,14 +132,20 @@ only if cezar adopts ACP `session_info_update` natively.
 1. Land #442 (rebase first — 2 test hunks).
 2. `task-refs.ts` + `RunRecord.prNumber/issueNumber` + number-prefixed heuristic title.
 3. `auto-name.ts` + mock branch + `startRun` wiring + `namerModel` config key.
-4. Remove turn-text derivation (`title-summary.ts` retired).
-5. Optional: "regenerate title" row action reusing the same call (Zed/opencode pattern).
+4. Live title updates: `recordTurnEnd` wiring + `liveTitleUpdates` config key +
+   `CEZ_TITLE_UPDATES` env default (ON) + the Settings → Agents toggle.
+5. Remove raw turn-text derivation (`title-summary.ts` retired).
+6. Optional: "regenerate title" row action reusing the same call (Zed/opencode pattern).
 
 ## Test plan
 
 Unit: `task-refs` regex matrix; namer prompt builder; JSON schema + retry; cross-check matrix
-(LLM agrees / disagrees / hallucinates / regex-only); title post-validation. Dry-run
-integration (pattern of `system-prompt.test.ts`): task `"437"` + skill → instant heuristic
-title, then async `titleSummary === "437: implementing cr fixes"`-shaped result + `prNumber`
-+ an SSE `run` event; runner-failure → heuristic stays; user renames first → LLM result
-discarded. UI: tasks-table tests pin the short-title rendering.
+(LLM agrees / disagrees / hallucinates / regex-only); title post-validation; the live-updates
+switch matrix (config `liveTitleUpdates` wins over `CEZ_TITLE_UPDATES` wins over built-in ON;
+`'0'` disables). Dry-run integration (pattern of `system-prompt.test.ts`): task `"437"` +
+skill → instant heuristic title, then async `titleSummary === "437: implementing cr fixes"`-
+shaped result + `prNumber` + an SSE `run` event; a later turn end refreshes the title through
+the namer (and does NOT when the toggle is off, when the user renamed first, or when namer
+inputs are unchanged); runner-failure → heuristic stays; user renames first → LLM result
+discarded. UI: tasks-table tests pin the short-title rendering; Settings tests pin the
+`liveTitleUpdates` toggle.
