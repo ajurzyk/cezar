@@ -51,9 +51,14 @@ export function InboxRoute() {
   // The nav item is inbox-gated in the shell, but the route stays reachable so an old
   // bookmark still resolves (the forge routes' rule). "Inbox empty" would be a lie here —
   // the inbox is switched off, not empty — so say that instead, and park the query.
+  //
+  // Parked only once health has actually said the inbox is off (#471). Keying it on
+  // `inboxAvailable` instead would park the query for as long as health is unknown, which on a
+  // perfectly enabled server means the list waits on a second request it doesn't need.
   const health = useHealth()
   const inboxAvailable = health.data?.capabilities.followups === true
-  const todosQuery = useTodos(inboxAvailable)
+  const inboxOff = health.data !== undefined && !inboxAvailable
+  const todosQuery = useTodos(!inboxOff)
   // Only to tell "source task" links from "source task deleted" — the legacy check against
   // its run map. The overview keeps this query warm, so revisits cost nothing.
   const runs = useRuns()
@@ -71,7 +76,7 @@ export function InboxRoute() {
       </header>
 
       <div className="flex flex-1 flex-col p-3 pb-[calc(90px+env(safe-area-inset-bottom))] md:p-5 md:pb-5">
-        {health.data !== undefined && !inboxAvailable ? (
+        {inboxOff ? (
           <CenteredState
             icon={<InboxIcon />}
             tone="neutral"

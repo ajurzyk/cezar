@@ -324,3 +324,52 @@ describe('empty and error states', () => {
     expect(state.textContent).toContain('disk exploded')
   })
 })
+
+// ---- the inbox gate (#471) --------------------------------------------------------------------
+
+/** The health payload the route reads `capabilities.followups` from. Only the fields the route
+ *  touches — this is a fixture, not a mirror of the real response. */
+const healthResponse = (followups: boolean) =>
+  jsonResponse({
+    version: '0.0.0-test',
+    repoRoot: '/repo',
+    repo: null,
+    checks: [],
+    forge: null,
+    capabilities: { localHandoff: true, followups },
+  })
+
+describe('the inbox gate (#471)', () => {
+  it('says the inbox is off — not "empty" — when the server has it disabled', async () => {
+    const sent = stubFetch({ 'GET /api/health': () => healthResponse(false) })
+    renderInbox()
+
+    expect(await screen.findByText('The follow-up inbox is off')).toBeTruthy()
+    // The distinction matters: "Inbox empty" would blame the agents for a switched-off feature.
+    expect(screen.queryByText('Inbox empty')).toBeNull()
+    // And it tells the user how to get it back.
+    expect(screen.getByText(/CEZ_FOLLOWUPS=1/)).toBeTruthy()
+    expect(cards()).toHaveLength(0)
+
+    // Parked, not polled: the endpoint could only answer [] anyway.
+    await waitFor(() => expect(sent.some((r) => r.path === '/api/health')).toBe(true))
+    expect(sent.filter((r) => r.path === '/api/todos')).toHaveLength(0)
+  })
+
+  it('renders the real inbox once the server reports the capability', async () => {
+    stubFetch({ 'GET /api/health': () => healthResponse(true) })
+    renderInbox()
+
+    await waitFor(() => expect(cards()).toHaveLength(2))
+    expect(screen.queryByText('The follow-up inbox is off')).toBeNull()
+  })
+
+  it('does not park the list while health is still unknown', async () => {
+    // health never answers 200 here (the stub 404s it) — an enabled server must not have its
+    // inbox held hostage by a request the list does not depend on.
+    stubFetch()
+    renderInbox()
+    await waitFor(() => expect(cards()).toHaveLength(2))
+    expect(screen.queryByText('The follow-up inbox is off')).toBeNull()
+  })
+})
