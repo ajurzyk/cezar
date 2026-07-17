@@ -16,9 +16,9 @@ import { isWsl, translateToWindowsPath } from './wsl.js';
  *
  * WSL (#361): when this process itself runs inside WSL, `process.platform` reads `linux` but the
  * user's GUI apps mostly live on the Windows side, reachable through interop. `resolveOnPath`
- * additionally probes `.exe`/`.cmd`/`.bat` suffixes there (Node's own PATH lookup only does that
- * under real win32), and `openInApp`/`openFileManager` translate the worktree path to its
- * `\\wsl$\…` (or `C:\…`) form before handing it to a resolved Windows-side binary — a WSL-native
+ * additionally probes directly-spawnable `.com`/`.exe` suffixes there (Node's own PATH lookup
+ * only does that under real win32), and `openInApp`/`openFileManager` translate the worktree path
+ * to its `\\wsl$\…` (or `C:\…`) form before handing it to a resolved Windows-side binary — a WSL-native
  * launcher (e.g. VS Code's Remote-WSL `code` shim) keeps the POSIX path unchanged.
  */
 
@@ -68,25 +68,23 @@ const EDITORS: EditorDef[] = [
 const FILE_MANAGER_LABEL =
   process.platform === 'darwin' ? 'Finder' : process.platform === 'win32' || isWsl() ? 'Explorer' : 'Files';
 
-/** Is `bin` (with a Windows suffix under win32/WSL interop) an executable somewhere on PATH?
+/** Is `bin` (with a directly-spawnable Windows suffix under win32/WSL interop) on PATH?
  *  Returns the exact resolved name (which may carry the suffix) — pure filesystem probe, no
- *  child process — or null. Windows-suffix probing also applies inside WSL: interop exposes
- *  `.exe`/`.cmd`/`.bat` binaries from the Windows side, but Linux doesn't auto-append them the
- *  way win32 does, so the caller must spawn the exact resolved name.
+ *  child process — or null. `.cmd`/`.bat` are intentionally excluded: modern Node refuses to
+ *  spawn them directly, while launching them through a shell would reintroduce the BatBadBut
+ *  command-injection surface fixed in #459. An unavailable target is safer than one the menu
+ *  offers and then silently fails to open (#469 review).
  *
- *  KNOWN GAP (#469 review): a `.cmd`/`.bat` resolved here cannot actually be launched by
- *  `runDetached`, on either platform, so a Toolbox/`.cmd`-shimmed editor (VS Code's `code.cmd`
- *  included) is detected and offered but silently fails to open. There is no bare-name escape
- *  hatch: libuv's PATH search tries only `.com` and `.exe` and deliberately ignores PATHEXT
- *  (see `path_search_walk_ext` in libuv's src/win/process.c), so spawning `code` is ENOENT while
- *  spawning `code.cmd` is EINVAL under Node's CVE-2024-27980 mitigation — `runDetached` swallows
- *  both into `false`. Launching a `.cmd` requires a shell in the chain (`shell: true` or an
- *  explicit `cmd.exe /d /s /c`), which is the exact BatBadBut surface #459 removed, so it needs
- *  a deliberate decision (and a real Windows host to verify) rather than a drive-by fix. */
-function resolveOnPath(bin: string): string | null {
-  const dirs = (process.env.PATH ?? '').split(process.platform === 'win32' ? ';' : ':');
-  const suffixed = process.platform === 'win32' || isWsl();
-  const names = suffixed ? [bin, `${bin}.exe`, `${bin}.cmd`, `${bin}.bat`] : [bin];
+ *  The optional environment arguments keep Windows/WSL suffix behavior testable on any host. */
+export function resolveOnPath(
+  bin: string,
+  platform: NodeJS.Platform = process.platform,
+  wsl: boolean = isWsl(),
+  searchPath: string = process.env.PATH ?? '',
+): string | null {
+  const dirs = searchPath.split(platform === 'win32' ? ';' : ':');
+  const suffixed = platform === 'win32' || wsl;
+  const names = suffixed ? [bin, `${bin}.com`, `${bin}.exe`] : [bin];
   for (const dir of dirs) {
     if (!dir) continue;
     for (const name of names) {
@@ -199,7 +197,7 @@ export async function openInApp(targetId: string, dir: string): Promise<boolean>
  *  like VS Code's Remote-WSL `code`) takes the POSIX path unchanged. `wsl` defaults to the real
  *  environment; tests pass it explicitly so this needs no global platform stubbing. */
 export function launchPathFor(resolvedBin: string, dir: string, wsl: boolean = isWsl()): string {
-  if (wsl && /\.(exe|cmd|bat)$/i.test(resolvedBin)) return translateToWindowsPath(dir);
+  if (wsl && /\.(com|exe)$/i.test(resolvedBin)) return translateToWindowsPath(dir);
   return dir;
 }
 

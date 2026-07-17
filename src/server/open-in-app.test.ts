@@ -4,7 +4,14 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { agentCliRunner, detectOpenTargets, fileManagerLaunch, launchPathFor, openInApp } from './open-in-app.js';
+import {
+  agentCliRunner,
+  detectOpenTargets,
+  fileManagerLaunch,
+  launchPathFor,
+  openInApp,
+  resolveOnPath,
+} from './open-in-app.js';
 
 /** Polls `assertion` until it stops throwing or `timeoutMs` elapses (then rethrows) — there is
  *  no @testing-library here, and the detached child processes this suite launches settle on
@@ -105,6 +112,46 @@ describe('openInApp', () => {
   });
 });
 
+describe('resolveOnPath (#469 Windows launcher safety)', () => {
+  let stubDir: string;
+
+  afterEach(() => {
+    if (stubDir) rmSync(stubDir, { recursive: true, force: true });
+    stubDir = '';
+  });
+
+  function addStub(name: string): void {
+    stubDir ||= mkdtempSync(join(tmpdir(), 'cez-open-in-path-test-'));
+    const stub = join(stubDir, name);
+    writeFileSync(stub, '', 'utf8');
+    chmodSync(stub, 0o755);
+  }
+
+  it('finds directly-spawnable .com and .exe launchers on native Windows and WSL', () => {
+    addStub('editor.com');
+    expect(resolveOnPath('editor', 'win32', false, stubDir)).toBe('editor.com');
+
+    rmSync(join(stubDir, 'editor.com'));
+    addStub('editor.exe');
+    expect(resolveOnPath('editor', 'win32', false, stubDir)).toBe('editor.exe');
+    expect(resolveOnPath('editor', 'linux', true, stubDir)).toBe('editor.exe');
+  });
+
+  it('does not offer .cmd or .bat shims that require a shell to execute', () => {
+    addStub('editor.cmd');
+    addStub('editor.bat');
+
+    expect(resolveOnPath('editor', 'win32', false, stubDir)).toBeNull();
+    expect(resolveOnPath('editor', 'linux', true, stubDir)).toBeNull();
+  });
+
+  it('prefers a WSL-native bare launcher over a Windows-side executable', () => {
+    addStub('editor');
+    addStub('editor.exe');
+    expect(resolveOnPath('editor', 'linux', true, stubDir)).toBe('editor');
+  });
+});
+
 describe('agentCliRunner', () => {
   it('maps cli:<runner> ids to the runner, and rejects everything else', () => {
     expect(agentCliRunner('cli:claude')).toBe('claude');
@@ -154,11 +201,10 @@ describe('launchPathFor (#361 WSL support)', () => {
 
   it('translates the path for a Windows-suffixed binary resolved through WSL interop', () => {
     expect(launchPathFor('idea.exe', '/home/pat/project', true)).toBe('\\\\wsl$\\Ubuntu\\home\\pat\\project');
-    expect(launchPathFor('pycharm.bat', '/mnt/c/repo', true)).toBe('C:\\repo');
+    expect(launchPathFor('pycharm.com', '/mnt/c/repo', true)).toBe('C:\\repo');
   });
 
   it('never translates when not running under WSL, even for a .exe name', () => {
     expect(launchPathFor('idea.exe', '/home/pat/project', false)).toBe('/home/pat/project');
   });
 });
-
