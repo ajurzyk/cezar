@@ -199,6 +199,66 @@ describe('systemPrompt end-to-end (dry run)', () => {
   }, 30_000);
 
 
+
+  it('live refresh: the namer applies turn context through the mock (direct drive)', async () => {
+    const record = manager.startRun(skillWorkflow, { task: '437' });
+    type NamerSeam = { autoNameRun(id: string, skill: string | undefined, task: string, live?: object): Promise<void> };
+    await (manager as unknown as NamerSeam).autoNameRun(record.id, 'om-auto-review-pr', '437', {
+      turnText: 'fixed the watchdog race',
+      diffStat: '2 files, +10 -3',
+    });
+    const after = store.getRun(record.id);
+    expect(after?.titleSummary).toBe('437: implementing cr fixes');
+    expect(after?.titleOrigin).toBe('auto');
+    expect(after?.prNumber).toBe(437);
+  }, 30_000);
+
+  it('turn-end refresh skips under CEZ_DRY_RUN and when the toggle or ownership forbids it', async () => {
+    type Seam = {
+      maybeRefreshTitle(id: string, text: string): Promise<void>;
+      lastNamerKey: Map<string, string>;
+    };
+    const seam = manager as unknown as Seam;
+    const record = manager.startRun(skillWorkflow, { task: '437' });
+
+    // Dry-run guard: no key is recorded, the namer is never consulted.
+    await seam.maybeRefreshTitle(record.id, 'made real progress on the fix');
+    expect(seam.lastNamerKey.has(record.id)).toBe(false);
+
+    // Outside dry-run, a fast-failing fake binary guards against real spawns.
+    const savedDry = process.env.CEZ_DRY_RUN;
+    const savedBin = process.env.CEZ_CLAUDE_BIN;
+    const savedToggle = process.env.CEZ_TITLE_UPDATES;
+    delete process.env.CEZ_DRY_RUN;
+    process.env.CEZ_CLAUDE_BIN = '/nonexistent/cez-test-claude';
+    try {
+      // Env default OFF → skip before any runner call.
+      process.env.CEZ_TITLE_UPDATES = '0';
+      await seam.maybeRefreshTitle(record.id, 'more progress');
+      expect(seam.lastNamerKey.has(record.id)).toBe(false);
+
+      // Toggle ON but the title is user-owned → skip.
+      process.env.CEZ_TITLE_UPDATES = '1';
+      store.updateRun(record.id, { title: 'Mine', titleSummary: 'Mine', titleOrigin: 'user' });
+      await seam.maybeRefreshTitle(record.id, 'even more progress');
+      expect(seam.lastNamerKey.has(record.id)).toBe(false);
+
+      // Namer-owned + toggle ON → the key is recorded (the call itself fails
+      // fast on the fake binary and leaves the title as-is), and the SAME
+      // inputs never record twice.
+      store.updateRun(record.id, { titleOrigin: 'auto' });
+      await seam.maybeRefreshTitle(record.id, 'progress worth naming');
+      expect(seam.lastNamerKey.get(record.id)).toContain('progress worth naming');
+    } finally {
+      if (savedDry === undefined) delete process.env.CEZ_DRY_RUN;
+      else process.env.CEZ_DRY_RUN = savedDry;
+      if (savedBin === undefined) delete process.env.CEZ_CLAUDE_BIN;
+      else process.env.CEZ_CLAUDE_BIN = savedBin;
+      if (savedToggle === undefined) delete process.env.CEZ_TITLE_UPDATES;
+      else process.env.CEZ_TITLE_UPDATES = savedToggle;
+    }
+  }, 30_000);
+
   it('a user rename made before the namer answers is never overwritten', async () => {
     writeFileSync(argsFile, '', 'utf8');
     const record = manager.startRun(skillWorkflow, { task: '437' });

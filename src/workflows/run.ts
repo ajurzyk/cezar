@@ -24,7 +24,7 @@ import { loadWorkflows } from './load.js';
 import type { RunRecord, RunStore } from '../runs/store.js';
 import { deriveTitleSummary } from '../runs/title-summary.js';
 import { extractTaskRefs, refineTaskRefs, titleRefNumber } from '../runs/task-refs.js';
-import { generateRunName } from '../runs/auto-name.js';
+import { generateRunName, liveTitleUpdatesEnabled } from '../runs/auto-name.js';
 import { UiEventSink } from '../runs/ui-event-sink.js';
 import { DEFAULT_ALLOWED_TOOLS, stepKind, type WorkflowDef, type WorkflowStepDef } from './types.js';
 
@@ -263,7 +263,7 @@ export class RunManager {
     // Fire-and-forget LLM naming (task auto-naming spec): the heuristic title
     // above shows instantly; the namer's short title replaces it when (and if)
     // the model answers. Never awaited, never fails the run.
-    void this.autoNameRun(run.id, workflow, input.task);
+    void this.autoNameRun(run.id, skillHint, input.task);
     this.pendingJobs.set(run.id, { workflow, input });
     this.queue.push(run.id);
     void this.pump();
@@ -432,7 +432,11 @@ export class RunManager {
     this.waiting.delete(runId);
     this.active.delete(runId);
     this.memoryPausing.delete(runId);
+    this.lastNamerKey.delete(runId);
   }
+
+  /** Last live-refresh namer inputs per run — unchanged inputs skip the call. */
+  private lastNamerKey = new Map<string, string>();
 
   cancel(runId: string): boolean {
     // Still waiting in the queue: just drop it there.
@@ -1141,12 +1145,11 @@ export class RunManager {
    */
   private async autoNameRun(
     runId: string,
-    workflow: WorkflowDef,
+    skillName: string | undefined,
     task: string,
     live?: { turnText?: string; diffStat?: string },
   ): Promise<void> {
     try {
-      const skillName = workflow.steps.find((s) => stepKind(s) === 'agent' && s.skill)?.skill?.trim();
       let skillDescription: string | undefined;
       if (skillName) {
         const skills = await discoverSkills(this.repoRoot).catch(() => [] as Skill[]);
@@ -1175,13 +1178,37 @@ export class RunManager {
         const summary = deriveTitleSummary(turnText, run.task);
         if (summary) this.store.updateRun(runId, { titleSummary: summary });
       }
-      if (!run.worktreePath || !existsSync(run.worktreePath)) return;
-      const stat = await worktreeShortstat(run.worktreePath, run.baseBranch ?? 'HEAD');
-      if (stat) this.store.updateRun(runId, { diffStat: stat });
-      else this.store.appendEvent(runId, { type: 'note', message: 'diff stat unavailable — git diff --shortstat failed in the worktree' });
+      if (run.worktreePath && existsSync(run.worktreePath)) {
+        const stat = await worktreeShortstat(run.worktreePath, run.baseBranch ?? 'HEAD');
+        if (stat) this.store.updateRun(runId, { diffStat: stat });
+        else this.store.appendEvent(runId, { type: 'note', message: 'diff stat unavailable — git diff --shortstat failed in the worktree' });
+      }
+      await this.maybeRefreshTitle(runId, turnText);
     } catch {
       // Bookkeeping only — nothing here may disturb the run.
     }
+  }
+
+  /**
+   * Live title refresh (task auto-naming spec, step 3): re-run the namer with
+   * the turn's context. Skips: toggle off (`liveTitleUpdates` config over
+   * `CEZ_TITLE_UPDATES` env, default ON), user-owned title, dry-run mocks
+   * (canned answers add nothing), empty turn text, unchanged namer inputs.
+   */
+  private async maybeRefreshTitle(runId: string, turnText: string): Promise<void> {
+    if (process.env.CEZ_DRY_RUN === '1') return;
+    if (!turnText.trim()) return;
+    const config = await loadConfig(this.repoRoot);
+    if (!liveTitleUpdatesEnabled(config)) return;
+    const run = this.store.getRun(runId);
+    if (!run || run.titleOrigin === 'user') return;
+    const statText = run.diffStat ? `${run.diffStat.files} files, +${run.diffStat.adds} -${run.diffStat.dels}` : undefined;
+    const key = `${turnText.slice(0, 200)}|${statText ?? ''}`;
+    if (this.lastNamerKey.get(runId) === key) return;
+    this.lastNamerKey.set(runId, key);
+    const workflow = await this.reviveWorkflow(run);
+    const skillName = workflow?.steps.find((s) => stepKind(s) === 'agent' && s.skill)?.skill?.trim();
+    void this.autoNameRun(runId, skillName, run.task, { turnText, diffStat: statText });
   }
 
   /**
