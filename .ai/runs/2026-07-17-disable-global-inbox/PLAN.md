@@ -13,6 +13,7 @@
 |-------|------|-------|--------|--------|
 | 1 | 1.1 | Add the `followups` capability behind `CEZ_FOLLOWUPS` (opt-in) | done | 5448d70 |
 | 1 | 1.2 | Force follow-up generation off and gate the inbox endpoints when the capability is off | done | a169dce |
+| 1 | 1.3 | Enforce the ceiling in RunManager so the `cezar run` CLI is gated too | done | e4fad38 |
 | 2 | 2.1 | Gate the Inbox nav item, badge and route on the capability | done | bf819b9 |
 | 2 | 2.2 | Hide the composer's follow-up toggle when the capability is off | done | 0a41323 |
 | 3 | 3.1 | Document the flag (.env.example, README, BACKWARD_COMPATIBILITY, spec 007) | todo | — |
@@ -78,6 +79,15 @@ None — no `--skill-url` passed.
 Extend `Capabilities` in `src/server/capabilities.ts` with `followups: boolean`, resolved as
 `env.CEZ_FOLLOWUPS === '1'`. Matches the house rule in `AGENTS.md:14` ("opt-in behind a `CEZ_*`
 flag, off by default") and the injectable-env shape of `resolveCapabilities`. Unit tests.
+
+**Step 1.3 — Enforce the ceiling in `RunManager` (added mid-run)**
+Not in the original plan. A route-level gate leaves `src/index.ts:252` (`cezar run "<task>"`), the
+inbox's own "▶ Run" and variants calling `manager.startRun` directly with no `generateFollowups`,
+which `!== false` reads as enabled — so a headless run would still be told to write `todos.json`
+with the flag off. `followupsEnabled()` moves to `src/handoff.ts` (neutral to both server and
+workflows, and the feature's own module) as the single source of truth; `resolveCapabilities`
+reports it, `RunManager` enforces it on start, on continue, and at each step. End-to-end tests
+through the real engine cover it.
 
 **Step 1.2 — Force follow-up generation off and gate the inbox endpoints**
 In `src/server/server.ts`: force `generateFollowups: false` at run creation when the capability is
