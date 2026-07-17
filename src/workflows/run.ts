@@ -148,8 +148,9 @@ const VARIANT_HINTS: Record<string, string | undefined> = {
  * checks with bounded retry loops, plus live sessions: the last agent step
  * stays open for follow-ups (`waiting`) until "finish", idle timeout, or
  * cancel. Runs queue behind `maxParallel` slots and each run executes in its
- * own git worktree on a `cez/<id8>` branch (spec 006), autosave-committed
- * every 90 s — the user's working tree is never touched.
+ * own git worktree on a `cez/<id8>` branch (spec 006), autosave-committed at
+ * turn end and before a draft PR — plus every 90 s when opted in via
+ * CEZ_AUTOSAVE=1 (#471). The user's working tree is never touched.
  */
 export class RunManager {
   private readonly active = new Map<string, ActiveRun>();
