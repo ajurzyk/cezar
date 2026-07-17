@@ -189,6 +189,45 @@ describe('AppShell', () => {
     })
   })
 
+  /** The global banner slot (#391). */
+  describe('banner slot', () => {
+    it('renders the banner when one is passed', () => {
+      renderShell('/', { banner: <p>banner content</p> })
+      const slot = document.querySelector('[data-slot="banner-slot"]') as HTMLElement
+      expect(slot).not.toBeNull()
+      expect(within(slot).getByText('banner content')).toBeTruthy()
+    })
+
+    it('renders nothing when absent — no empty slot to push the scroller down', () => {
+      renderShell()
+      expect(document.querySelector('[data-slot="banner-slot"]')).toBeNull()
+    })
+
+    // The regression the slot was born with: as the first child of <main>, a sticky banner sat in
+    // the same scrollport as every routed view's own `sticky top-0` header, which parked over it
+    // (opaque, later in DOM, equal-or-higher z-index) and swallowed the clicks on its dismiss X.
+    // Its own row instead — so the banner is chrome, above the scroller, not scrolled content.
+    it('sits outside the scrolling main region, not inside it', () => {
+      renderShell('/', { banner: <p>banner content</p> })
+      const slot = document.querySelector('[data-slot="banner-slot"]') as HTMLElement
+      expect(screen.getByRole('main').contains(slot)).toBe(false)
+      expect(slot.className).not.toContain('sticky')
+    })
+
+    it('is its own grid row, above the scroller and below the mobile bar', () => {
+      renderShell('/', { banner: <p>banner content</p> })
+      const slot = document.querySelector('[data-slot="banner-slot"]') as HTMLElement
+      const main = screen.getByRole('main')
+      const column = main.parentElement as HTMLElement
+      expect(column.className).toContain('grid-rows-[auto_auto_1fr_auto]')
+      expect(slot.parentElement).toBe(column)
+      expect(slot.className).toContain('row-start-2')
+      // The scroller keeps the 1fr row, so the banner's height comes out of the shell's own
+      // budget rather than making every `min-h-full` route overflow by exactly the banner.
+      expect(main.className).toContain('row-start-3')
+    })
+  })
+
   /** jsdom cannot evaluate `md:` — so assert the structure and the responsive classes that
    *  encode it, and leave "does it actually reflow at 390px" to the e2e iPhone screenshot. */
   describe('responsive skeleton', () => {
@@ -244,6 +283,39 @@ describe('AppShell', () => {
       // The composer row keeps the home-indicator gutter even while it is empty.
       const composer = document.querySelector('[data-slot="composer"]') as HTMLElement
       expect(composer.className).toContain('pb-[env(safe-area-inset-bottom)]')
+    })
+  })
+
+  describe('banner slot', () => {
+    const bannerSlot = () => document.querySelector('[data-slot="banner-slot"]')
+
+    it('renders nothing when no banner is passed', () => {
+      renderShell()
+      expect(bannerSlot()).toBeNull()
+    })
+
+    it('renders the banner above the routed view', () => {
+      renderShell('/', { banner: <p>promo</p> })
+      expect(screen.getByText('promo')).not.toBeNull()
+    })
+
+    // The regression guard for the #391 QA defect: the banner first shipped as `sticky top-0
+    // z-10` *inside* `main`, where routed views' own `sticky top-0` headers (z-10 and z-20) sit
+    // later in the DOM and painted over it — the banner vanished on scroll and its dismiss
+    // button stopped being clickable on every route. Keeping the slot a sibling of the scroller
+    // is what makes that unrepresentable; nesting it back inside `main` fails here.
+    it('is a peer of the scroller, not a child of it, so route headers cannot paint over it', () => {
+      renderShell('/', { banner: <p>promo</p> })
+      const slot = bannerSlot() as HTMLElement
+      const main = screen.getByRole('main')
+
+      expect(main.contains(slot)).toBe(false)
+      expect(slot.parentElement).toBe(main.parentElement)
+
+      // Its own grid row, so it holds its space instead of sticking to the scroller's edge.
+      expect(slot.className).toContain('row-start-2')
+      expect(main.className).toContain('row-start-3')
+      expect(slot.className).not.toContain('sticky')
     })
   })
 

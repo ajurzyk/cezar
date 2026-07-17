@@ -499,6 +499,9 @@ export interface UiState {
   /** Settings → Notifications (redesign R6 1.7): the browser-notification toggle. Off unless
    *  literally `true`. Permission itself is per-browser and never persisted. */
   notifications?: { enabled?: boolean }
+  /** The open-mercato/skills promo banner (#391), dismissed for good. Set once true, never
+   *  unset — server-persisted rather than a cookie so "shown once" holds across browsers. */
+  dismissedSkillsBanner?: boolean
   [key: string]: unknown
 }
 
