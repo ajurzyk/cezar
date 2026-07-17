@@ -25,20 +25,31 @@ let browser: AgentBrowser
 let baseUrl: string
 
 let forgeAvailable = false
+let followupsAvailable = false
 
 beforeAll(async () => {
   baseUrl = readTestEnv().baseUrl
   browser = AgentBrowser.open(runId)
   const health = (await fetch(`${baseUrl}/api/health`).then((r) => r.json())) as {
     forge: { available: boolean } | null
+    capabilities: { followups: boolean }
   }
   forgeAvailable = health.forge?.available === true
+  followupsAvailable = health.capabilities.followups
 })
 
-/** The nav the shell renders — the GitHub item gates on the live forge payload (R6 Step 1.1),
- *  so the expectation must too, same as github.e2e.ts. */
+/** The nav the shell renders — GitHub and Inbox both gate on live health capabilities, so the
+ *  expectation must too. */
 function expectedNavLabels(): string[] {
-  return ['Tasks', 'Inbox', 'Git', ...(forgeAvailable ? ['GitHub'] : []), 'Skills', 'Workflows', 'Settings']
+  return [
+    'Tasks',
+    ...(followupsAvailable ? ['Inbox'] : []),
+    'Git',
+    ...(forgeAvailable ? ['GitHub'] : []),
+    'Skills',
+    'Workflows',
+    'Settings',
+  ]
 }
 
 afterAll(() => {
@@ -106,9 +117,10 @@ describe('cockpit app shell', () => {
     )
     expect(labels).toEqual(expectedNavLabels())
 
-    // The "New task" CTA and its accelerator hint.
+    // The "New task" CTA and its browser-usable accelerator hint. The desktop shell also
+    // registers ⌘N, but browsers reserve that chord for opening a window.
     expect(browser.text('[data-slot="sidebar"] a[href="/new"]')).toContain('New task')
-    expect(browser.text('[data-slot="sidebar"] a[href="/new"] kbd')).toBe('⌘N')
+    expect(browser.text('[data-slot="sidebar"] a[href="/new"] kbd')).toBe('C')
 
     // The theme toggle lives in the footer.
     expect(browser.isVisible('[data-slot="sidebar-footer"] [data-slot="theme-toggle"]')).toBe(true)
@@ -429,7 +441,11 @@ describe('global SSE stream', () => {
     browser.evaluate(`window.__cezProbe.close(), delete window.__cezProbe, true`)
   })
 
-  it('live-updates the inbox badge from a server-side change, with no reload', () => {
+  it('live-updates the inbox badge from a server-side change, with no reload', ({ skip }) => {
+    skip(
+      !followupsAvailable,
+      'the shared environment has the opt-in inbox disabled; run CEZ_FOLLOWUPS=1 npm run test:e2e -- --force',
+    )
     writeTodos([])
     browser.goto(baseUrl + '/')
     // The shell is up and its queries have answered — so the app's stream effect has run too.

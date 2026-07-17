@@ -22,6 +22,10 @@ export type NavItem = {
   /** Forge-gated (R6 Step 1.1): the item exists only while `/api/health` reports the forge
    *  driver available — see `visibleNavItems`. */
   forge?: boolean
+  /** Inbox-gated (#471): the item exists only while `/api/health` reports
+   *  `capabilities.followups` — the global inbox is opt-in via `CEZ_FOLLOWUPS=1`.
+   *  See `visibleNavItems`. */
+  inbox?: boolean
 }
 
 /** The sidebar nav from the spec's "App shell & navigation" section, in mockup order.
@@ -32,7 +36,7 @@ export type NavItem = {
  */
 export const NAV_ITEMS: NavItem[] = [
   { to: '/', label: 'Tasks', icon: ListChecksIcon, match: ['/', '/tasks', '/compare'] },
-  { to: '/inbox', label: 'Inbox', icon: InboxIcon, match: ['/inbox'], badge: true },
+  { to: '/inbox', label: 'Inbox', icon: InboxIcon, match: ['/inbox'], badge: true, inbox: true },
   { to: '/git', label: 'Git', icon: GitBranchIcon, match: ['/git'] },
   { to: '/github', label: 'GitHub', icon: GithubIcon, match: ['/github'], forge: true },
   { to: '/skills', label: 'Skills', icon: SparklesIcon, match: ['/skills'] },
@@ -40,16 +44,27 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/settings', label: 'Settings', icon: SettingsIcon, match: ['/settings'] },
 ]
 
+/** What `/api/health` says exists. Both default to `false` — see `visibleNavItems`. */
+export type NavAvailability = {
+  /** `forge.available` (spec §"GitHub tab (forge tab)"). */
+  forge?: boolean
+  /** `capabilities.followups` — the opt-in global inbox (#471). */
+  inbox?: boolean
+}
+
 /**
- * The nav items a surface should actually render (spec §"GitHub tab (forge tab)"): the
- * forge-gated GitHub item drops out — nav item AND tab — unless the health payload reports
- * the driver available. `false` while health is still unknown, on the shell's honesty rule:
- * the nav must not claim a GitHub tab exists before the server has said so (the Tools menu's
- * forge note explains the absence). Both the sidebar and the ⌘K palette's Views group render
- * through this, so the two can never disagree.
+ * The nav items a surface should actually render: a gated item drops out — nav item AND tab —
+ * unless the health payload says its feature is there. The forge-gated GitHub item needs the
+ * forge driver (spec §"GitHub tab (forge tab)"); the Inbox item needs `capabilities.followups`,
+ * which is off unless `CEZ_FOLLOWUPS=1` (#471).
+ *
+ * Everything defaults to absent while health is still unknown, on the shell's honesty rule: the
+ * nav must not claim a tab exists before the server has said so (the Tools menu's forge note
+ * explains the GitHub absence). Both the sidebar and the ⌘K palette's Views group render through
+ * this, so the two can never disagree.
  */
-export function visibleNavItems(forgeAvailable: boolean): NavItem[] {
-  return forgeAvailable ? NAV_ITEMS : NAV_ITEMS.filter((item) => !item.forge)
+export function visibleNavItems({ forge = false, inbox = false }: NavAvailability = {}): NavItem[] {
+  return NAV_ITEMS.filter((item) => (item.forge ? forge : true) && (item.inbox ? inbox : true))
 }
 
 /** Does `pathname` sit inside the area rooted at `prefix`?

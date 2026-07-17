@@ -10,6 +10,7 @@ import {
   HANDOFF_ONLY_INSTRUCTIONS,
   HANDOFF_INSTRUCTIONS,
   appendHandoffHeartbeat,
+  followupsEnabled,
   handoffPath,
   seedHandoffFile,
 } from '../handoff.js';
@@ -259,7 +260,10 @@ export class RunManager {
       task: input.task,
       model: input.model,
       runner: input.runner,
-      generateFollowups: input.generateFollowups,
+      // The global inbox is the ceiling on the per-run flag (#471). Enforced here rather than
+      // at the HTTP route because `cezar run`, the inbox's own "▶ Run" and variants all reach
+      // startRun directly — a route-level gate would leave those writing todos.json.
+      generateFollowups: followupsEnabled() ? input.generateFollowups : false,
       groupId: group?.groupId,
       variant: group?.variant,
       steps: workflow.steps.map((s) => ({ id: s.id, name: s.name ?? s.id, kind: stepKind(s) })),
@@ -369,13 +373,22 @@ export class RunManager {
       if (run.status === 'queued') {
         const workflow = await this.reviveWorkflow(run);
         if (workflow) {
+          // Re-apply the inbox ceiling (#471). `execute()` gates again at spawn time, so the
+          // agent is safe either way — but a run queued while the inbox was on and recovered
+          // after it was switched off would otherwise keep echoing `generateFollowups: true`
+          // on a run that demonstrably produced none. Normalize the record, the way startRun
+          // does, so the stored answer matches what actually happens.
+          const generateFollowups = followupsEnabled() ? run.generateFollowups : false;
+          if (generateFollowups !== run.generateFollowups) {
+            this.store.updateRun(run.id, { generateFollowups });
+          }
           this.pendingJobs.set(run.id, {
             workflow,
             input: {
               task: run.task,
               model: run.model,
               runner: run.runner,
-              generateFollowups: run.generateFollowups,
+              generateFollowups,
             },
           });
           this.queue.push(run.id);
@@ -641,7 +654,9 @@ export class RunManager {
     // Continuation runs in the task's worktree when it still exists (spec
     // 006) — the resumed session sees exactly what the original run left.
     const record = this.store.getRun(runId);
-    const generateFollowups = record?.generateFollowups !== false;
+    // The env is a live ceiling: a run created while the inbox was on must not keep writing
+    // follow-ups after it is switched off.
+    const generateFollowups = followupsEnabled() && record?.generateFollowups !== false;
     const cwd =
       record?.worktreePath && existsSync(record.worktreePath)
         ? record.worktreePath
@@ -1186,7 +1201,9 @@ export class RunManager {
           systemPrompt: composeSystemPrompt(
             systemPrompt,
             extraSystemPrompt,
-            input.generateFollowups === false ? HANDOFF_ONLY_INSTRUCTIONS : HANDOFF_INSTRUCTIONS,
+            followupsEnabled() && input.generateFollowups !== false
+              ? HANDOFF_INSTRUCTIONS
+              : HANDOFF_ONLY_INSTRUCTIONS,
           ),
           userPrompt,
           images,
@@ -1195,7 +1212,7 @@ export class RunManager {
           bashAllowlist: step.bashAllowlist,
           // The handoff file lives outside the worktree — grant access.
           additionalDirectories: [join(this.dataDir, 'runs')],
-          env: this.agentEnv(runId, input.generateFollowups !== false),
+          env: this.agentEnv(runId, followupsEnabled() && input.generateFollowups !== false),
           model: step.model ?? input.model,
           sessionId,
           // Interactive sessions have no wall clock — the idle timer rules.

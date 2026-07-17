@@ -21,19 +21,23 @@ interface HealthBody {
   checks: unknown[];
   defaultRunner?: string;
   forge: { kind: string; available: boolean; reason?: string } | null;
-  capabilities: { localHandoff: boolean };
+  capabilities: { localHandoff: boolean; followups: boolean };
 }
 
 describe('GET /api/health — forge + capabilities', () => {
   let repoRoot: string;
   let store: RunStore;
   const savedRemote = process.env.CEZ_REMOTE;
+  const savedFollowups = process.env.CEZ_FOLLOWUPS;
   const savedDryRun = process.env.CEZ_DRY_RUN;
 
   beforeEach(() => {
     repoRoot = mkdtempSync(join(tmpdir(), 'cez-health-'));
     store = RunStore.open(join(repoRoot, '.ai/cezar'));
     delete process.env.CEZ_REMOTE;
+    // #471: the inbox is opt-in, so an ambient CEZ_FOLLOWUPS on the dev box
+    // must not decide what these assertions see.
+    delete process.env.CEZ_FOLLOWUPS;
     // Dry-run keeps the forge probe (and the claude check) off the network,
     // so the assertions are deterministic on any machine.
     process.env.CEZ_DRY_RUN = '1';
@@ -44,6 +48,8 @@ describe('GET /api/health — forge + capabilities', () => {
     rmSync(repoRoot, { recursive: true, force: true });
     if (savedRemote === undefined) delete process.env.CEZ_REMOTE;
     else process.env.CEZ_REMOTE = savedRemote;
+    if (savedFollowups === undefined) delete process.env.CEZ_FOLLOWUPS;
+    else process.env.CEZ_FOLLOWUPS = savedFollowups;
     if (savedDryRun === undefined) delete process.env.CEZ_DRY_RUN;
     else process.env.CEZ_DRY_RUN = savedDryRun;
   });
@@ -67,7 +73,7 @@ describe('GET /api/health — forge + capabilities', () => {
     expect(body).toHaveProperty('defaultRunner');
     // New additive fields.
     expect(body.forge).toBeNull(); // tmp dir — not a git repo, no remote
-    expect(body.capabilities).toEqual({ localHandoff: true });
+    expect(body.capabilities).toEqual({ localHandoff: true, followups: false });
   });
 
   // getRepoInfo needs a resolvable HEAD — an empty commit is enough.
@@ -108,17 +114,27 @@ describe('GET /api/health — forge + capabilities', () => {
   it('hosted mode via CEZ_REMOTE=1: localHandoff:false', async () => {
     process.env.CEZ_REMOTE = '1';
     const body = await health();
-    expect(body.capabilities).toEqual({ localHandoff: false });
+    expect(body.capabilities).toEqual({ localHandoff: false, followups: false });
   });
 
   it('hosted mode via a non-loopback bind host: localHandoff:false', async () => {
     const body = await health({ bindHost: '0.0.0.0' });
-    expect(body.capabilities).toEqual({ localHandoff: false });
+    expect(body.capabilities).toEqual({ localHandoff: false, followups: false });
   });
 
   it('a loopback bind host stays local', async () => {
     const body = await health({ bindHost: '127.0.0.1' });
-    expect(body.capabilities).toEqual({ localHandoff: true });
+    expect(body.capabilities).toEqual({ localHandoff: true, followups: false });
+  });
+
+  // #471 — the inbox capability rides the same payload the UI already reads.
+  it('reports followups:false by default — the global inbox is opt-in', async () => {
+    expect((await health()).capabilities.followups).toBe(false);
+  });
+
+  it('reports followups:true with CEZ_FOLLOWUPS=1', async () => {
+    process.env.CEZ_FOLLOWUPS = '1';
+    expect((await health()).capabilities).toEqual({ localHandoff: true, followups: true });
   });
 });
 

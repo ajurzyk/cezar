@@ -65,6 +65,10 @@ export interface ServerDeps {
   bindHost?: string;
 }
 
+/** 409 body for the inbox mutators while the follow-up inbox is off (#471). */
+const FOLLOWUPS_OFF =
+  'the follow-up inbox is disabled — set CEZ_FOLLOWUPS=1 to enable it';
+
 // ---- variant-compare response shapes (spec 010) ----------------------------
 // Named and exported so `api-types.test.ts` can drift-guard the cockpit's
 // hand-mirrored copies (`web/app/src/api/types.ts`) against the real thing.
@@ -125,8 +129,11 @@ const startRunSchema = z
     // Autonomous mode (#autonomous): the run never parks at `waiting` — it
     // auto-continues until the agent signals done. No "needs you" is raised.
     autonomous: z.boolean().optional(),
-    // Generate follow-up inbox entries (spec 007, #444). Omitted means enabled
-    // for old clients — the handoff journal is unaffected either way.
+    // Generate follow-up inbox entries (spec 007, #444). Honoured only while
+    // the `followups` capability is on (#471) — off, the server pins it to
+    // false whatever the client asked for. Omitted still means "enabled" for
+    // old clients, but only within an already-enabled server. The handoff
+    // journal is unaffected either way.
     generateFollowups: z.boolean().optional(),
     // Per-run system-prompt override (R2 2.3) — programmatic callers only
     // (bookmarklets, scripts); deliberately NOT a composer-UI control. Wins
@@ -254,7 +261,9 @@ export function createApp(deps: ServerDeps): Hono {
   // Hosted-mode gate (spec §"Deployment modes") — read per request so
   // CEZ_REMOTE flips take effect live (and tests can toggle it).
   const capabilities = () => resolveCapabilities(process.env, bindHost);
-  startTodosWatch(dataDir); // inbox live updates (spec 007)
+  // Inbox live updates (spec 007). Opt-in (#471): no capability, no watcher —
+  // nothing can write todos.json anyway, so a watch would only burn an fd.
+  if (capabilities().followups) startTodosWatch(dataDir);
   const launchKey = ensureLaunchKey(dataDir); // bookmarklet auto-start secret (spec 011)
   const app = new Hono();
 
@@ -529,7 +538,12 @@ export function createApp(deps: ServerDeps): Hono {
       systemPrompt: parsed.data.systemPrompt,
       worktree: parsed.data.worktree,
       autonomous: parsed.data.autonomous,
-      generateFollowups: parsed.data.generateFollowups,
+      // Opt-in inbox (#471): the capability is the ceiling, so a client asking
+      // for follow-ups on a server that has them off gets a plain `false`
+      // rather than an error — the run is still perfectly valid without them.
+      // One decision here feeds the run record, the system prompt and
+      // CEZ_TODOS_FILE alike (RunManager.agentEnv).
+      generateFollowups: capabilities().followups ? parsed.data.generateFollowups : false,
     };
     const variants = parsed.data.variants ?? 1;
     if (variants > 1) {
@@ -968,10 +982,16 @@ export function createApp(deps: ServerDeps): Hono {
   });
 
   // ---- inbox (spec 007) ------------------------------------------------------
-  app.get('/api/todos', async (c) => c.json(await readTodos(dataDir)));
+  // Opt-in via CEZ_FOLLOWUPS=1 (#471). Off, the reader degrades to an empty
+  // inbox (a 404 would make old clients surface an error for a feature that is
+  // merely switched off) and the mutators 409 as defense in depth — the shape
+  // the hosted-mode open-in-* handlers already use. Existing todos.json entries
+  // are never touched, so flipping the env back on restores them.
+  app.get('/api/todos', async (c) => c.json(capabilities().followups ? await readTodos(dataDir) : []));
 
   // Check off = delete the entry.
   app.delete('/api/todos/:id', async (c) => {
+    if (!capabilities().followups) return c.json({ error: FOLLOWUPS_OFF }, 409);
     const removed = await removeTodo(dataDir, c.req.param('id'));
     return removed ? c.json({ removed: true }) : c.json({ error: 'not found' }, 404);
   });
@@ -979,6 +999,7 @@ export function createApp(deps: ServerDeps): Hono {
   // "▶ Run": turn an inbox entry into a task — a one-off single-step workflow
   // around the suggested skill when it exists, plain quick-task otherwise.
   app.post('/api/todos/:id/start', async (c) => {
+    if (!capabilities().followups) return c.json({ error: FOLLOWUPS_OFF }, 409);
     const id = c.req.param('id');
     const todo = (await readTodos(dataDir)).find((t) => t.id === id);
     if (!todo) return c.json({ error: 'not found' }, 404);
@@ -1076,7 +1097,12 @@ export function createApp(deps: ServerDeps): Hono {
         const items: TodoItem[] = await readTodos(dataDir).catch(() => []);
         await stream.writeSSE({ event: 'todos', data: JSON.stringify(items) });
       };
-      const offTodos = onTodosChanged(() => void sendTodos());
+      // Opt-in inbox (#471): with the capability off the watcher never starts,
+      // so this would never fire anyway — but the emitter is module-global, so
+      // subscribe only when the inbox actually exists rather than lean on that.
+      const offTodos = capabilities().followups
+        ? onTodosChanged(() => void sendTodos())
+        : () => undefined;
       // Live resource telemetry (#348): the sampler ticks ~every 2 s only
       // while some run has a registered process; each tick is relayed as one
       // `usage` message (runId → {cpuPct, rssBytes, procCount}). Never
