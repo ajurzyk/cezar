@@ -15,6 +15,13 @@
  * the wire `tool_use` id; text/thinking blocks (which have no wire id) get
  * sequential `item_<n>` ids, turns get `turn_<n>` — so replaying a stored
  * transcript reproduces the exact event sequence.
+ *
+ * Plan/task rule: task ids are the harness's, and it only ever reports them in
+ * tool RESULT text (`Task #3 created successfully: …`, `#3 [pending] …`), never
+ * in the call. So a `TaskCreate` parks until its result lands. Inferring ids by
+ * counting creates looks equivalent and is not: `--resume` reopens a session
+ * whose list is already at 1..N while a fresh mapper state starts at zero, and
+ * the two id spaces then drift silently — updates land on the wrong row.
  */
 
 import type {
@@ -47,12 +54,13 @@ export interface ClaudeUiMapperState {
   readonly itemSeq: number;
   /** `tool_use` items awaiting their `tool_result`, keyed by tool_use id. */
   readonly openTools: ReadonlyMap<string, UiToolItem>;
-  /** The running plan built incrementally by Claude's task tools, keyed by
-   *  the sequential task ids used by TaskUpdate. */
+  /** The running plan built incrementally by Claude's task tools, keyed by the
+   *  task id the harness assigned — read from the `TaskCreate` result, never
+   *  guessed (see `applyTaskCreateResult`). */
   readonly tasks: ReadonlyMap<string, PlanEntry>;
-  /** Count of TaskCreate calls seen, so ids stay monotonic — deriving them from
-   *  `tasks.size` would re-mint a live id after a task is deleted. */
-  readonly taskSeq: number;
+  /** `TaskCreate` calls whose result has not arrived yet, keyed by tool_use id.
+   *  The entry parks here until the result reveals its real id. */
+  readonly pendingTaskCreates: ReadonlyMap<string, PlanEntry>;
 }
 
 export interface ClaudeUiMapping {
@@ -70,7 +78,7 @@ export function createClaudeUiState(opts: { fallbackSessionId?: string } = {}): 
     itemSeq: 0,
     openTools: new Map(),
     tasks: new Map(),
-    taskSeq: 0,
+    pendingTaskCreates: new Map(),
   };
 }
 
@@ -137,7 +145,7 @@ function mapAssistant(msg: Record<string, unknown>, state: ClaudeUiMapperState):
   let itemSeq = state.itemSeq;
   let openTools: Map<string, UiToolItem> | null = null;
   let tasks = state.tasks;
-  let taskSeq = state.taskSeq;
+  let pendingTaskCreates = state.pendingTaskCreates;
 
   for (const raw of content) {
     if (!isRecord(raw)) continue;
@@ -173,12 +181,25 @@ function mapAssistant(msg: Record<string, unknown>, state: ClaudeUiMapperState):
       if (raw.name === 'TodoWrite') {
         const entries = planEntries(raw.input);
         if (entries) events.push({ type: 'plan.updated', entries });
-      } else {
-        const folded = applyTaskTool(raw.name, raw.input, tasks, taskSeq);
-        if (folded) {
-          tasks = folded.tasks;
-          taskSeq = folded.taskSeq;
-          if (folded.emit) events.push({ type: 'plan.updated', entries: [...tasks.values()] });
+      } else if (parentItemId === undefined) {
+        // Task tools are main-agent-only: a subagent's tool list has no
+        // TaskCreate/TaskUpdate/TaskList at all (verified against the live
+        // harness). Should that change, its id space is its own, so folding a
+        // subagent's ids into this map would corrupt the main plan — ignore
+        // them until the shared-or-separate question is answered on the wire.
+        const pending = pendingTaskCreate(raw.name, raw.input);
+        if (pending) {
+          // The id is minted by the harness and only revealed in the result, so
+          // the entry parks here until then (`applyTaskCreateResult`). Counting
+          // creates to guess it desyncs the moment a create is rejected or the
+          // session resumes with a task list already at 1..N.
+          pendingTaskCreates = new Map(pendingTaskCreates).set(raw.id, pending);
+        } else {
+          const folded = applyTaskUpdate(raw.name, raw.input, tasks);
+          if (folded) {
+            tasks = folded;
+            events.push({ type: 'plan.updated', entries: [...tasks.values()] });
+          }
         }
       }
       openTools ??= new Map(state.openTools);
@@ -188,7 +209,10 @@ function mapAssistant(msg: Record<string, unknown>, state: ClaudeUiMapperState):
   }
 
   if (events.length === 0) return { events, state };
-  return { events, state: { ...state, itemSeq, openTools: openTools ?? state.openTools, tasks, taskSeq } };
+  return {
+    events,
+    state: { ...state, itemSeq, openTools: openTools ?? state.openTools, tasks, pendingTaskCreates },
+  };
 }
 
 /** claude `Edit`/`Write` inputs carry the diff inline (§7.1). */
@@ -223,80 +247,117 @@ function normalizePlanStatus(value: unknown): PlanStatus | undefined {
   return PLAN_STATUSES.find((status) => status === value);
 }
 
-interface TaskFold {
-  readonly tasks: Map<string, PlanEntry>;
-  readonly taskSeq: number;
-  /** False when only the id counter moved and the rendered plan did not. */
-  readonly emit: boolean;
+/** `TaskCreate` result: `Task #12 created successfully: Ship it`. The id here is
+ *  the harness's own, which is why it — not a count of creates — is the key. */
+const TASK_CREATED_RE = /^Task #(\d+) created successfully\b/;
+/** `TaskList` line: `#12 [in_progress] Ship it`. */
+const TASK_LIST_LINE_RE = /^#(\d+) \[([a-z_]+)\] (.*)$/;
+
+/** A `TaskCreate` call parked until its result reveals the harness id, or
+ *  `undefined` when this is not a renderable create. */
+function pendingTaskCreate(name: string, input: unknown): PlanEntry | undefined {
+  if (name.toLowerCase() !== 'taskcreate') return undefined;
+  // `subject` is required by the schema; without one there is nothing to render.
+  if (!isRecord(input) || typeof input.subject !== 'string') return undefined;
+  const content = input.subject.trim();
+  if (content === '') return undefined;
+  const entry: PlanEntry = { content, status: 'pending' };
+  if (typeof input.activeForm === 'string' && input.activeForm !== '') entry.activeForm = input.activeForm;
+  return entry;
 }
 
-/** Fold one Claude task-tool call into the session's incremental plan. */
-function applyTaskTool(
+/** Land a parked create under the id the harness reported. A result that does
+ *  not confirm creation (the tool errored, or the wording changed) drops the
+ *  entry rather than inventing an id for it. */
+function applyTaskCreateResult(
+  entry: PlanEntry,
+  resultText: string,
+  tasks: ReadonlyMap<string, PlanEntry>,
+): Map<string, PlanEntry> | undefined {
+  const id = TASK_CREATED_RE.exec(resultText.trim())?.[1];
+  if (id === undefined) return undefined;
+  return new Map(tasks).set(id, entry);
+}
+
+/** Rebuild the plan from a `TaskList` result — the only wire message carrying
+ *  the harness's whole task list, and so the one way a resumed session (whose
+ *  tasks were created before this mapper existed) recovers them.
+ *
+ *  Returns `undefined` unless every non-blank line parses: a partial parse of an
+ *  unrecognized format would silently drop live rows. `TaskList` omits
+ *  `activeForm`, so it is carried over from the entry already held for that id. */
+function applyTaskListResult(
+  resultText: string,
+  tasks: ReadonlyMap<string, PlanEntry>,
+): Map<string, PlanEntry> | undefined {
+  const lines = resultText.split('\n').map((line) => line.trim()).filter((line) => line !== '');
+  if (lines.length === 0) return undefined;
+  const next = new Map<string, PlanEntry>();
+  for (const line of lines) {
+    const match = TASK_LIST_LINE_RE.exec(line);
+    if (!match) return undefined;
+    const [, id, rawStatus, rawSubject] = match;
+    const status = normalizePlanStatus(rawStatus);
+    const content = (rawSubject ?? '').trim();
+    if (id === undefined || status === undefined || content === '') return undefined;
+    const entry: PlanEntry = { content, status };
+    const activeForm = tasks.get(id)?.activeForm;
+    if (activeForm !== undefined) entry.activeForm = activeForm;
+    next.set(id, entry);
+  }
+  return next;
+}
+
+/** Fold one `TaskUpdate` into the plan. Its `taskId` is already the harness's
+ *  own id, so it applies at call time; an id this mapper never saw created is
+ *  dropped (a resumed session's pre-existing tasks land via `TaskList`). */
+function applyTaskUpdate(
   name: string,
   input: unknown,
   tasks: ReadonlyMap<string, PlanEntry>,
-  taskSeq: number,
-): TaskFold | undefined {
-  const key = name.toLowerCase();
-  if (key === 'taskcreate') {
-    // `subject` is required, so a create without one is rejected and mints no id.
-    if (!isRecord(input) || typeof input.subject !== 'string') return undefined;
+): Map<string, PlanEntry> | undefined {
+  if (name.toLowerCase() !== 'taskupdate') return undefined;
+  if (!isRecord(input)) return undefined;
+  const id =
+    typeof input.taskId === 'string'
+      ? input.taskId
+      : typeof input.taskId === 'number'
+        ? String(input.taskId)
+        : undefined;
+  if (id === undefined) return undefined;
+  const existing = tasks.get(id);
+  if (existing === undefined) return undefined;
+
+  // `deleted` removes the task outright ("permanently removes the task"). The
+  // harness does not renumber what is left, so surviving ids stay valid.
+  if (input.status === 'deleted') {
+    const next = new Map(tasks);
+    next.delete(id);
+    return next;
+  }
+
+  const entry: PlanEntry = { ...existing };
+  let changed = false;
+  const status = normalizePlanStatus(input.status);
+  if (status !== undefined && status !== existing.status) {
+    entry.status = status;
+    changed = true;
+  }
+  if (typeof input.subject === 'string') {
     const content = input.subject.trim();
-    // A blank subject still passes the schema, so the id counter must advance
-    // even when there is nothing worth rendering — skipping it would offset
-    // every later id and silently misroute their updates.
-    if (content === '') return { tasks: new Map(tasks), taskSeq: taskSeq + 1, emit: false };
-    const entry: PlanEntry = { content, status: 'pending' };
-    if (typeof input.activeForm === 'string' && input.activeForm !== '') entry.activeForm = input.activeForm;
-    const next = new Map(tasks);
-    next.set(String(taskSeq + 1), entry);
-    return { tasks: next, taskSeq: taskSeq + 1, emit: true };
-  }
-  if (key === 'taskupdate') {
-    if (!isRecord(input)) return undefined;
-    const id =
-      typeof input.taskId === 'string'
-        ? input.taskId
-        : typeof input.taskId === 'number'
-          ? String(input.taskId)
-          : undefined;
-    if (id === undefined) return undefined;
-    const existing = tasks.get(id);
-    if (existing === undefined) return undefined;
-
-    // `deleted` removes the task outright ("permanently removes the task").
-    if (input.status === 'deleted') {
-      const next = new Map(tasks);
-      next.delete(id);
-      return { tasks: next, taskSeq, emit: true };
-    }
-
-    const entry: PlanEntry = { ...existing };
-    let changed = false;
-    const status = normalizePlanStatus(input.status);
-    if (status !== undefined && status !== existing.status) {
-      entry.status = status;
+    if (content !== '' && content !== existing.content) {
+      entry.content = content;
       changed = true;
     }
-    if (typeof input.subject === 'string') {
-      const content = input.subject.trim();
-      if (content !== '' && content !== existing.content) {
-        entry.content = content;
-        changed = true;
-      }
-    }
-    // An empty activeForm would blank the dock's label exactly while the row is
-    // in progress, so it is ignored like an empty subject.
-    if (typeof input.activeForm === 'string' && input.activeForm !== '' && input.activeForm !== existing.activeForm) {
-      entry.activeForm = input.activeForm;
-      changed = true;
-    }
-    if (!changed) return undefined;
-    const next = new Map(tasks);
-    next.set(id, entry);
-    return { tasks: next, taskSeq, emit: true };
   }
-  return undefined;
+  // An empty activeForm would blank the dock's label exactly while the row is
+  // in progress, so it is ignored like an empty subject.
+  if (typeof input.activeForm === 'string' && input.activeForm !== '' && input.activeForm !== existing.activeForm) {
+    entry.activeForm = input.activeForm;
+    changed = true;
+  }
+  if (!changed) return undefined;
+  return new Map(tasks).set(id, entry);
 }
 
 /** TodoWrite input `{todos:[{content,status,activeForm}]}` → plan entries
@@ -322,6 +383,8 @@ function mapToolResults(msg: Record<string, unknown>, state: ClaudeUiMapperState
   const parentItemId = str(msg.parent_tool_use_id);
   const events: UiEvent[] = [];
   let openTools: Map<string, UiToolItem> | null = null;
+  let tasks = state.tasks;
+  let pendingTaskCreates = state.pendingTaskCreates;
 
   for (const raw of content) {
     if (!isRecord(raw) || raw.type !== 'tool_result' || typeof raw.tool_use_id !== 'string') continue;
@@ -344,12 +407,60 @@ function mapToolResults(msg: Record<string, unknown>, state: ClaudeUiMapperState
     for (const img of toolResultImageBlocks(raw.content)) {
       events.push({ type: 'image', itemId: raw.tool_use_id, mediaType: img.media_type, data: img.data });
     }
+
+    // The task tools report their outcome only as result text — `is_error` stays
+    // unset even for a rejected update ("Task not found"), so the text is the
+    // only signal there is.
+    const parked = pendingTaskCreates.get(raw.tool_use_id);
+    if (parked !== undefined) {
+      const next = new Map(pendingTaskCreates);
+      next.delete(raw.tool_use_id);
+      pendingTaskCreates = next;
+      if (raw.is_error !== true) {
+        const landed = applyTaskCreateResult(parked, text, tasks);
+        if (landed) {
+          tasks = landed;
+          events.push({ type: 'plan.updated', entries: [...tasks.values()] });
+        }
+      }
+      // `parentItemId` here mirrors the call-side subagent guard: a subagent's
+      // list describes its own tasks, so it must not rewrite the main plan.
+    } else if (
+      open?.name.toLowerCase() === 'tasklist' &&
+      open.parentItemId === undefined &&
+      raw.is_error !== true
+    ) {
+      const resynced = applyTaskListResult(text, tasks);
+      if (resynced && !samePlan(resynced, tasks)) {
+        tasks = resynced;
+        events.push({ type: 'plan.updated', entries: [...tasks.values()] });
+      }
+    }
+
     openTools ??= new Map(state.openTools);
     openTools.delete(raw.tool_use_id);
   }
 
   if (events.length === 0) return { events, state };
-  return { events, state: { ...state, openTools: openTools ?? state.openTools } };
+  return { events, state: { ...state, openTools: openTools ?? state.openTools, tasks, pendingTaskCreates } };
+}
+
+/** Whether a `TaskList` resync would change the rendered plan — it usually just
+ *  restates what the mapper already has, and re-emitting is pure dock churn. */
+function samePlan(a: ReadonlyMap<string, PlanEntry>, b: ReadonlyMap<string, PlanEntry>): boolean {
+  if (a.size !== b.size) return false;
+  for (const [id, entry] of a) {
+    const other = b.get(id);
+    if (
+      other === undefined ||
+      other.content !== entry.content ||
+      other.status !== entry.status ||
+      other.activeForm !== entry.activeForm
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 // ---- result → declined tools + turn.completed + usage.updated --------------

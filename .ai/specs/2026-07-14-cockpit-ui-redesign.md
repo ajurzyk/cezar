@@ -115,7 +115,7 @@ Every UI capability in this spec MUST work with **all coding agents cezar suppor
 
 | UI capability | claude | codex | opencode |
 |---|---|---|---|
-| Plan/todo dock (#382) | `TodoWrite` input, or `TaskCreate`/`TaskUpdate` folded into a snapshot | `todoList`/`plan` items | `todowrite` tool |
+| Plan/todo dock (#382) | `TodoWrite` input, or `TaskCreate`/`TaskUpdate`/`TaskList` results folded into a snapshot | `todoList`/`plan` items | `todowrite` tool |
 | Tool cards + statuses (#381) | `tool_use`/`tool_result` | typed items + status | tool parts + state |
 | Reasoning line | `thinking` blocks | `reasoning` items/deltas | `reasoning` parts |
 | Live command output | — (result only; card fills on completion) | `outputDelta` | running-state `metadata` |
