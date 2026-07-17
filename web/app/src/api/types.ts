@@ -598,6 +598,9 @@ export type SetConfigResponse = ConfigResponse
 export interface OpenTarget {
   id: string
   label: string
+  /** A stable icon key (#361) the UI maps to a concrete icon — `openInIcon` in run-header.tsx.
+   *  Optional: an older server omitting it just renders the generic fallback icon. */
+  icon?: string
 }
 
 /** `GET /api/open-targets` — the detected local apps; empty in hosted mode (CEZ_REMOTE). */

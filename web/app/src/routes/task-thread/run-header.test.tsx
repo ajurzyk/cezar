@@ -334,6 +334,36 @@ describe('Terminal — the copy-command 409 fallback', () => {
   })
 })
 
+describe('Open in… menu per-target icons (#361)', () => {
+  it('renders a known target with its mapped icon, falls back for an unrecognized icon key, and POSTs the clicked id', async () => {
+    const sent = stubFetch({
+      '/api/open-targets': () =>
+        jsonResponse({
+          targets: [
+            { id: 'idea', label: 'IntelliJ IDEA', icon: 'idea' },
+            { id: 'mystery-app', label: 'Mystery App', icon: 'not-a-real-icon' },
+            { id: 'no-icon-app', label: 'No Icon App' },
+          ],
+        }),
+    })
+    renderHeader(run('done', { worktreePath: '/tmp/wt' }))
+    fireEvent.pointerDown(actionBar().getByRole('button', { name: 'Open in…' }))
+    const menu = await screen.findByRole('menu')
+
+    // The menu opens immediately; the worktree targets only appear once useOpenTargets resolves.
+    const ideaItem = await within(menu).findByRole('menuitem', { name: 'IntelliJ IDEA' })
+    expect(ideaItem.querySelector('svg')).not.toBeNull()
+    // Unknown/missing icon keys still render the generic fallback glyph — never bare text only.
+    expect(within(menu).getByRole('menuitem', { name: 'Mystery App' }).querySelector('svg')).not.toBeNull()
+    expect(within(menu).getByRole('menuitem', { name: 'No Icon App' }).querySelector('svg')).not.toBeNull()
+
+    fireEvent.click(ideaItem)
+    await waitFor(() => {
+      expect(sent.find((r) => r.path === '/api/runs/r1/open-in')?.body).toEqual({ target: 'idea' })
+    })
+  })
+})
+
 describe('notes panel', () => {
   it('toggles open, fetches the handoff and renders it as markdown', async () => {
     stubFetch({
