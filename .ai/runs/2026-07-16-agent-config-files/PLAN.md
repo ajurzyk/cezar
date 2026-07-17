@@ -34,7 +34,8 @@ Status: in-progress
 | 6 | 6.5 | Docs: README + AGENTS.md reflect the per-agent grouping | done | 4ef4ddc |
 | 6 | 6.6-review-fix | Sync package-lock.json (npm ci failed at head — QA finding) | done | 657f665 |
 | 6 | 6.7-review-fix | De-duplicate the tracked-file effect sentence (QA cosmetic finding) | done | a4dd697 |
-| 6 | 6.8-review-fix | Lock sync for npm 10 (CI): top-level @emnapi peer entries + oxide-wasm32-wasi bundled deps | done | 097d2f2 |
+| 6 | 6.8-review-fix | Lock sync for npm 10 (CI): top-level @emnapi peer entries + oxide-wasm32-wasi bundled deps | done | 52a65ef |
+| 6 | 6.9-review-fix | Remove unused `homeDir()` export from src/paths.ts (merge leftover) | done | (recorded in the docs commit) |
 
 > Phase 6 (2026-07-17): owner direction on PR #418 — settings grouped BY AGENT (selector
 > first, then that agent's Settings/MCP/Memory together), driven by an agent-descriptor

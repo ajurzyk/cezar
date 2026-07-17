@@ -36,11 +36,6 @@ export function serverLockPath(): string {
   return join(cezarHomeDir(), 'server.install.lock');
 }
 
-/** The user's home directory. A thin wrapper so callers depend on this module, not `node:os`. */
-export function homeDir(): string {
-  return homedir();
-}
-
 /**
  * Where each coding agent keeps its per-user config, honouring the env vars the
  * vendors document: `$CODEX_HOME` relocates Codex's home; `$XDG_CONFIG_HOME`
