@@ -634,7 +634,9 @@ export function createApp(deps: ServerDeps): Hono {
       return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
     }
     if (parsed.data.title !== undefined) {
-      store.updateRun(id, { title: parsed.data.title, titleSummary: parsed.data.title });
+      // titleOrigin 'user' permanently stops the namer's live updates for this run
+      // (spec 2026-07-17-task-auto-naming).
+      store.updateRun(id, { title: parsed.data.title, titleSummary: parsed.data.title, titleOrigin: 'user' });
     }
     return c.json(store.getRun(id));
   });

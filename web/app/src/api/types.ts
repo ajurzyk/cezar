@@ -85,6 +85,11 @@ export interface RunRecord {
    *  Display tier only: `pullRequestUrl` (the PR this task CREATED) wins, and the
    *  Draft-PR / Create-PR action gates ignore it. Read via `taskPrUrl()`. */
   referencedPullRequestUrl?: string
+  /** The PR/issue number this task is ABOUT (task auto-naming spec) — display tier only. */
+  prNumber?: number
+  issueNumber?: number
+  /** 'user' = renamed via PATCH, never auto-overwritten; 'auto' = namer-owned. */
+  titleOrigin?: 'user' | 'auto'
   /** The referenced tier's working set (distinct PR URLs spotted, capped server-side). */
   referencedPrCandidates?: string[]
   /** Absent when the run executed in the repo working tree rather than its own worktree. */

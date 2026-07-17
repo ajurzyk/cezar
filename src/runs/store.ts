@@ -73,6 +73,15 @@ const runRecordSchema = z.object({
    *  existing PR (review/continue/merge). Display-only tier — `pullRequestUrl`
    *  (the PR this task CREATED) always wins, and action gates ignore this. */
   referencedPullRequestUrl: z.string().optional(),
+  /** The PR/issue number this task is ABOUT (spec 2026-07-17-task-auto-naming):
+   *  regex-extracted from the task prompt, upgradable by the namer's
+   *  cross-checked output. Display tier — never gates actions. */
+  prNumber: z.number().optional(),
+  issueNumber: z.number().optional(),
+  /** Who owns the display title: `user` (PATCH rename — never auto-overwritten)
+   *  or `auto` (namer-owned — a later namer result may replace it). Missing on
+   *  old runs = legacy behavior (auto fills only an unset titleSummary). */
+  titleOrigin: z.enum(['user', 'auto']).optional(),
   /** Distinct PR URLs spotted so far — the referenced tier's working set,
    *  persisted so a resumed run keeps disambiguating against the full history
    *  instead of re-adopting the next URL as "the only one". Capped. */
