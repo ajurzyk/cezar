@@ -44,7 +44,7 @@ const HEALTH: HealthResponse = {
   checks: [],
   defaultRunner: 'claude',
   forge: { kind: 'github', available: true },
-  capabilities: { localHandoff: true },
+  capabilities: { localHandoff: true, followups: false },
 }
 
 const CHANGES: ChangesPayload = {

@@ -56,6 +56,7 @@ describe('the config API', () => {
       defaultModels: {},
       maxParallel: 2,
       memoryLimitMb: null,
+      liveTitleUpdates: null,
     });
   });
 
@@ -111,6 +112,7 @@ describe('the config API', () => {
       defaultModels: { claude: 'opus' },
       maxParallel: 5,
       memoryLimitMb: null,
+      liveTitleUpdates: null,
     });
   });
 
@@ -127,5 +129,42 @@ describe('the config API', () => {
     expect(((await tooLong.json()) as { error: string }).error).toContain('20000');
     const badModels = await put({ defaultModels: { claude: 42 } });
     expect(badModels.status).toBe(400);
+  });
+});
+
+describe('liveTitleUpdates round-trip (task auto-naming spec)', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  let app: Hono;
+
+  beforeEach(() => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-configapi-title-'));
+    mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    app = createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test' });
+  });
+
+  afterEach(() => {
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  const put = (body: unknown) =>
+    app.request('/api/config', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  const rawFile = () =>
+    JSON.parse(readFileSync(join(repoRoot, '.ai/cezar', 'config.json'), 'utf8')) as Record<string, unknown>;
+
+  it('sets, answers and clears the key (null → env default decides)', async () => {
+    const off = (await (await put({ liveTitleUpdates: false })).json()) as Record<string, unknown>;
+    expect(off.liveTitleUpdates).toBe(false);
+    expect(rawFile().liveTitleUpdates).toBe(false);
+
+    const cleared = (await (await put({ liveTitleUpdates: null })).json()) as Record<string, unknown>;
+    expect(cleared.liveTitleUpdates).toBeNull();
+    expect(rawFile().liveTitleUpdates).toBeUndefined();
   });
 });

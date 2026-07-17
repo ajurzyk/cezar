@@ -119,6 +119,34 @@ async function respond(userText, imageCount) {
     return;
   }
 
+  // Task auto-naming spec: a naming call (marked `[cez-namer]`) answers a
+  // deterministic short title + a PR classification of the sample number so
+  // dry-run tests can assert the full apply pipeline.
+  if (userText.includes('[cez-namer]')) {
+    const numbered = /(?:^|\D)(\d{1,7})(?:\D|$)/.exec(userText);
+    const name = JSON.stringify({
+      title: 'implementing cr fixes',
+      ...(numbered ? { pr: Number(numbered[1]) } : {}),
+    });
+    emit({
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: name }],
+        usage: { input_tokens: 200, output_tokens: 30 },
+      },
+    });
+    await sleep(50);
+    emit({
+      type: 'result',
+      subtype: 'success',
+      result: name,
+      usage: { input_tokens: 200, output_tokens: 30 },
+      total_cost_usd: 0.0002,
+    });
+    return;
+  }
+
   // Spec 008: a planning call (marked `[cez-planner]` in the user prompt)
   // gets a canned chain plan. The `code-review` skill is deliberately made up:
   // the planner's sanitizer strips unknown skills, and the step survives on
@@ -153,9 +181,12 @@ async function respond(userText, imageCount) {
 
   if (turn === 1) {
     // Leave a visible trace in the cwd (the task worktree under spec 006) so
-    // the Diff view has something real to show in dry runs.
+    // the Diff view has something real to show in dry runs. Exactly one line
+    // per spawned session: tests read this file back as a per-step trace, so
+    // a multi-line prompt must not become multiple lines here.
     try {
-      appendFileSync('notes.md', `mock notes — ${new Date().toISOString()}: ${userText.slice(0, 100)}\n`);
+      const head = userText.replace(/\s+/g, ' ').trim().slice(0, 400);
+      appendFileSync('notes.md', `mock notes — ${new Date().toISOString()}: ${head}\n`);
     } catch {
       // read-only cwd — the mock still works, just without a diff
     }

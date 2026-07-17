@@ -170,10 +170,17 @@ export function NewTaskRoute() {
     ? false
     : (draft.autonomous ?? (source.source === 'skill' ? true : (uiState.data?.lastAutonomous ?? false)))
 
-  // Follow-up generation is opt-out. A draft choice wins, then the remembered UI preference;
-  // absent state from older installs keeps the historical enabled behavior.
-  const generateFollowupsOn =
-    draft.generateFollowups ?? uiState.data?.lastGenerateFollowups ?? true
+  // Follow-up generation (#444) is offered only while the server has the global inbox on
+  // (#471, `CEZ_FOLLOWUPS=1`) — there is no inbox for the follow-ups to land in otherwise, and
+  // the server pins the flag to false regardless, so a toggle would be a lie. Hidden, the value
+  // is false, matching what the server will do. Health unknown → assume offered, the `hasGit`
+  // rule above: the composer must not flicker its controls while health is in flight.
+  const followupsToggleShown = health.data === undefined || health.data.capabilities.followups
+  // Within an enabled server it stays opt-out: a draft choice wins, then the remembered UI
+  // preference; absent state from older installs keeps the historical enabled behavior.
+  const generateFollowupsOn = followupsToggleShown
+    ? (draft.generateFollowups ?? uiState.data?.lastGenerateFollowups ?? true)
+    : false
 
   // ---- plan mode (#383 + spec 008) ----------------------------------------------------------
   const [plan, setPlan] = useState<PendingPlan | null>(null)
@@ -294,7 +301,7 @@ export function NewTaskRoute() {
       recentSources: pushRecentSource(recentSources, source),
       ...(worktreeToggleShown ? { lastWorktree: worktreeOn } : {}),
       lastAutonomous: autonomousOn,
-      lastGenerateFollowups: generateFollowupsOn,
+      ...(followupsToggleShown ? { lastGenerateFollowups: generateFollowupsOn } : {}),
     })
       .then(() => queryClient.invalidateQueries({ queryKey: queryKeys.uiState }))
       .catch(() => {})
@@ -321,9 +328,14 @@ export function NewTaskRoute() {
           generateFollowups: generateFollowupsOn,
         }),
       )
-      void putUiState({ lastGenerateFollowups: generateFollowupsOn })
-        .then(() => queryClient.invalidateQueries({ queryKey: queryKeys.uiState }))
-        .catch(() => {})
+      // Only remember a choice the user was actually offered (#471, the `lastWorktree` rule):
+      // persisting the forced `false` would overwrite their real preference, so turning
+      // CEZ_FOLLOWUPS back on later would silently come up off.
+      if (followupsToggleShown) {
+        void putUiState({ lastGenerateFollowups: generateFollowupsOn })
+          .then(() => queryClient.invalidateQueries({ queryKey: queryKeys.uiState }))
+          .catch(() => {})
+      }
       clearDraftText()
       setPlan(null)
       void queryClient.invalidateQueries({ queryKey: queryKeys.runs.all })
@@ -432,10 +444,12 @@ export function NewTaskRoute() {
                 disabled={draft.planFirst}
                 onChange={(on) => update({ autonomous: on })}
               />
-              <GenerateFollowupsToggle
-                on={generateFollowupsOn}
-                onChange={(on) => update({ generateFollowups: on })}
-              />
+              {followupsToggleShown ? (
+                <GenerateFollowupsToggle
+                  on={generateFollowupsOn}
+                  onChange={(on) => update({ generateFollowups: on })}
+                />
+              ) : null}
               {repo.data ? <BaseBranchPill repo={repo.data} /> : null}
             </>
           }
