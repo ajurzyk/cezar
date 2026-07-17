@@ -181,7 +181,9 @@ describe('systemPrompt end-to-end (dry run)', () => {
       'mock: implemented the change',
     );
 
-    expect(manager.continueRun(id, 'continue without generating follow-ups')).toEqual({ ok: true });
+    expect(manager.continueRun(id, { text: 'continue without generating follow-ups' })).toEqual({
+      ok: true,
+    });
     const deadline = Date.now() + 20_000;
     while (readFileSync(argsFile, 'utf8').trim().split('\n').length < 2) {
       if (Date.now() > deadline) throw new Error('continuation did not start in time');

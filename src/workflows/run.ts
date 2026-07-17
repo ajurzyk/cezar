@@ -6,6 +6,7 @@ import { type AgentSession } from '../core/claude-cli-runner.js';
 import { onUsage, registerRunProcess, unregisterRunProcess, type ProcessUsage } from '../core/process-usage.js';
 import { createRunner } from '../core/runner-factory.js';
 import type { RunnerId } from '../core/agent-runner.js';
+import { modelConflictsWithRunner } from '../core/model-presets.js';
 import {
   HANDOFF_ONLY_INSTRUCTIONS,
   HANDOFF_INSTRUCTIONS,
@@ -528,9 +529,19 @@ export class RunManager {
     // default to it, and the header reflects the active engine. An empty model ('') clears the
     // pin, letting the runner pick the model (auto).
     if (opts.runner !== undefined || opts.model !== undefined) {
+      // Guard the pairing before persisting anything: the model override applies to the runner
+      // this continuation will actually use (`opts.runner ?? record.runner ?? 'claude'` — the
+      // same resolution `runContinuation` reads off the record). A model that is recognizably
+      // another runner's preset would corrupt the run; free-form/custom ids pass untouched.
+      const targetRunner = opts.runner ?? run.runner ?? 'claude';
+      if (opts.model && modelConflictsWithRunner(opts.model, targetRunner)) {
+        return { ok: false, error: `model '${opts.model}' is not a ${targetRunner} model` };
+      }
       this.store.updateRun(runId, {
         ...(opts.runner !== undefined ? { runner: opts.runner } : {}),
-        ...(opts.model !== undefined ? { model: opts.model || undefined } : {}),
+        ...(opts.model !== undefined
+          ? { model: opts.model === '' ? undefined : opts.model }
+          : {}),
       });
     }
 

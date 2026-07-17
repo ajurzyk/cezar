@@ -160,6 +160,30 @@ describe('RunManager.continueRun override', () => {
     expect(store.getRun(id)?.runner).toBe('claude');
   });
 
+  it("rejects a model that is recognizably another runner's preset (no corruption persisted)", () => {
+    const id = resumableRun();
+    // The review's corruption case (#401): a codex preset landing on a claude continuation.
+    const result = manager.continueRun(id, { model: 'gpt-5.1-codex' });
+    expect(result).toEqual({ ok: false, error: "model 'gpt-5.1-codex' is not a claude model" });
+    expect(store.getRun(id)?.model).toBe('sonnet');
+    expect(store.getRun(id)?.runner).toBe('claude');
+  });
+
+  it('guards legacy records too — no persisted runner resolves to claude, like runContinuation', () => {
+    const record = store.createRun({ title: 't', workflow: 'quick-task', task: 't', steps: [{ id: 's1', name: 'Work', kind: 'agent' }] });
+    store.updateRun(record.id, { status: 'done', finishedAt: new Date().toISOString() });
+    store.updateStep(record.id, 's1', { sessionId: 'sess-1' });
+    const result = manager.continueRun(record.id, { model: 'gpt-5.1-codex' });
+    expect(result.ok).toBe(false);
+    expect(store.getRun(record.id)?.model).toBeUndefined();
+  });
+
+  it('keeps free-form model ids working — only cross-runner presets are rejected', () => {
+    const id = resumableRun();
+    expect(manager.continueRun(id, { model: 'my-custom-alias' })).toEqual({ ok: true });
+    expect(store.getRun(id)?.model).toBe('my-custom-alias');
+  });
+
   it('refuses to continue a run with no resumable session (no override persisted)', () => {
     const record = store.createRun({ title: 't', workflow: 'quick-task', task: 't', runner: 'claude', steps: [] });
     store.updateRun(record.id, { status: 'done' });
