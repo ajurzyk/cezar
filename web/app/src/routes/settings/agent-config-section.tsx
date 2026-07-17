@@ -11,20 +11,19 @@ import { Button } from '@/components/ui/button'
 import { toast } from '@/components/ui/toaster'
 import { availableRunners } from '@/routes/new-task-form'
 import { cn } from '@/lib/utils'
+import { AGENT_DESCRIPTORS, descriptorFor, type AgentDescriptor } from './agent-descriptors'
 
 /**
- * Settings → Agent config (spec #404): read and edit the coding agents' OWN
- * config files — Claude/Codex/OpenCode settings, MCP and memory — raw, per
- * scope, highlighted. cezar never re-serializes; it shows each scope's file and
- * the vendor's own documented precedence, and never claims a merge it does not
- * perform. Writing is a local-machine capability: in hosted mode the whole
- * section is read-only (the server refuses every write regardless).
+ * Settings → Agent config (spec #404, regrouped per
+ * 2026-07-17-agent-config-by-agent): read and edit the coding agents' OWN config
+ * files — raw, per scope, highlighted — grouped BY AGENT. An agent selector
+ * first; the selected agent's pane holds its Settings, MCP and Memory files
+ * together, driven by the per-agent descriptor table. cezar never re-serializes;
+ * it shows each scope's file and the vendor's own documented precedence, and
+ * never claims a merge it does not perform. Writing is a local-machine
+ * capability: in hosted mode the whole section is read-only (the server refuses
+ * every write regardless).
  */
-
-const RUNNER_ORDER: Runner[] = ['claude', 'codex', 'opencode']
-const RUNNER_LABEL: Record<Runner, string> = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode' }
-const KIND_ORDER = ['settings', 'mcp', 'memory'] as const
-const KIND_LABEL: Record<string, string> = { settings: 'Settings', mcp: 'MCP', memory: 'Memory & instructions' }
 
 /** What this file actually governs for a run — the honest label the spec insists on. */
 function effectLabel(file: AgentConfigFile): string {
@@ -38,7 +37,7 @@ export function AgentConfigSection() {
   const listing = useAgentConfig()
   const health = useHealth()
   const installed = useMemo<Runner[]>(
-    () => (health.data ? availableRunners(health.data.checks) : RUNNER_ORDER),
+    () => (health.data ? availableRunners(health.data.checks) : AGENT_DESCRIPTORS.map((d) => d.id)),
     [health.data],
   )
 
@@ -64,8 +63,15 @@ export function AgentConfigSection() {
 }
 
 function AgentConfigView({ listing, installed }: { listing: AgentConfigListing; installed: Runner[] }) {
+  const [agentId, setAgentId] = useState<Runner>('claude')
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const agent = descriptorFor(agentId)
   const selected = listing.files.find((f) => f.id === selectedId) ?? null
+
+  const pickAgent = (id: Runner) => {
+    setAgentId(id)
+    setSelectedId(null) // a file selection never survives an agent switch
+  }
 
   return (
     <div data-slot="agent-config" className="flex flex-col gap-4 p-4 md:p-6">
@@ -79,67 +85,46 @@ function AgentConfigView({ listing, installed }: { listing: AgentConfigListing; 
         </div>
       )}
 
+      <div data-slot="agent-config-agents" role="tablist" className="flex flex-wrap gap-1 rounded-md bg-muted/40 p-1">
+        {AGENT_DESCRIPTORS.map((d) => (
+          <button
+            key={d.id}
+            type="button"
+            role="tab"
+            aria-selected={d.id === agent.id}
+            data-slot="agent-config-agent"
+            data-agent={d.id}
+            data-selected={d.id === agent.id}
+            onClick={() => pickAgent(d.id)}
+            className={cn(
+              'flex items-center gap-2 rounded-md px-3 py-1.5 text-[13px] transition-colors',
+              d.id === agent.id ? 'bg-background font-semibold shadow-sm' : 'hover:bg-muted/60',
+            )}
+          >
+            {d.label}
+            {!installed.includes(d.id) && (
+              <Badge variant="outline" className="text-[10px] text-soft-foreground">
+                not installed
+              </Badge>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {agent.note && (
+        <p data-slot="agent-config-agent-note" className="text-[12px] text-soft-foreground">
+          {agent.note}
+        </p>
+      )}
+
       <div className="grid gap-4 lg:grid-cols-[minmax(0,20rem)_minmax(0,1fr)]">
         <nav data-slot="agent-config-nav" className="flex flex-col gap-5">
-          {RUNNER_ORDER.map((runner) => {
-            const files = listing.files.filter((f) => f.runners[0] === runner)
-            if (files.length === 0) return null
-            const isInstalled = installed.includes(runner)
-            return (
-              <section key={runner} data-slot="agent-config-runner" data-runner={runner}>
-                <header className="mb-2 flex items-center gap-2">
-                  <h3 className="text-[13px] font-semibold">{RUNNER_LABEL[runner]}</h3>
-                  {!isInstalled && (
-                    <Badge variant="outline" className="text-[11px] text-soft-foreground">
-                      not installed
-                    </Badge>
-                  )}
-                </header>
-                {runner !== 'claude' && (
-                  <p className="mb-2 text-[12px] text-soft-foreground">
-                    An editor-plus-commit: a saved change reaches a run after you commit it to the base branch.
-                  </p>
-                )}
-                {KIND_ORDER.map((kind) => {
-                  const ofKind = files.filter((f) => f.kind === kind)
-                  if (ofKind.length === 0) return null
-                  return (
-                    <div key={kind} className="mb-3">
-                      <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-soft-foreground">
-                        {KIND_LABEL[kind]}
-                      </p>
-                      <ul className="flex flex-col gap-1">
-                        {ofKind.map((file) => (
-                          <li key={file.id}>
-                            <button
-                              type="button"
-                              data-slot="agent-config-file"
-                              data-selected={file.id === selectedId}
-                              onClick={() => setSelectedId(file.id)}
-                              className={cn(
-                                'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] transition-colors',
-                                file.id === selectedId ? 'bg-primary/15 text-foreground' : 'hover:bg-muted/60',
-                              )}
-                            >
-                              <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{file.label}</span>
-                              {file.seeded && (
-                                <Badge variant="outline" className="shrink-0 text-[10px]">
-                                  seeded
-                                </Badge>
-                              )}
-                              {!file.exists && (
-                                <span className="shrink-0 text-[11px] text-soft-foreground">absent</span>
-                              )}
-                            </button>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )
-                })}
-              </section>
-            )
-          })}
+          <AgentPane
+            agent={agent}
+            listing={listing}
+            selectedId={selectedId}
+            onSelect={setSelectedId}
+          />
         </nav>
 
         <div data-slot="agent-config-editor-pane">
@@ -152,6 +137,92 @@ function AgentConfigView({ listing, installed }: { listing: AgentConfigListing; 
           )}
         </div>
       </div>
+    </div>
+  )
+}
+
+function AgentPane({
+  agent,
+  listing,
+  selectedId,
+  onSelect,
+}: {
+  agent: AgentDescriptor
+  listing: AgentConfigListing
+  selectedId: string | null
+  onSelect: (id: string) => void
+}) {
+  return (
+    <>
+      {agent.groups.map((g) => {
+        const files = listing.files.filter(g.files)
+        const isClaudeMcp = agent.id === 'claude' && g.id === 'mcp'
+        if (files.length === 0 && !(isClaudeMcp && listing.userMcp)) return null
+        return (
+          <section key={g.id} data-slot="agent-config-group" data-group={g.id} data-agent={agent.id}>
+            <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-soft-foreground">
+              {g.label}
+            </p>
+            {g.note && <p className="mb-2 text-[12px] text-soft-foreground">{g.note}</p>}
+            <ul className="flex flex-col gap-1">
+              {files.map((file) => (
+                <li key={file.id}>
+                  <button
+                    type="button"
+                    data-slot="agent-config-file"
+                    data-selected={file.id === selectedId}
+                    onClick={() => onSelect(file.id)}
+                    className={cn(
+                      'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] transition-colors',
+                      file.id === selectedId ? 'bg-primary/15 text-foreground' : 'hover:bg-muted/60',
+                    )}
+                  >
+                    <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{file.label}</span>
+                    {file.seeded && (
+                      <Badge variant="outline" className="shrink-0 text-[10px]">
+                        seeded
+                      </Badge>
+                    )}
+                    {!file.exists && <span className="shrink-0 text-[11px] text-soft-foreground">absent</span>}
+                  </button>
+                </li>
+              ))}
+            </ul>
+            {isClaudeMcp && listing.userMcp && <UserMcpBlock userMcp={listing.userMcp} />}
+          </section>
+        )
+      })}
+    </>
+  )
+}
+
+/** Claude's user/local MCP scopes live in ~/.claude.json (Claude's own state
+ *  file) — listed read-only; cezar never edits it. */
+function UserMcpBlock({ userMcp }: { userMcp: NonNullable<AgentConfigListing['userMcp']> }) {
+  return (
+    <div data-slot="agent-config-user-mcp" className="mt-3">
+      <h4 className="mb-1 text-[12px] font-semibold">User &amp; local scopes</h4>
+      <p className="mb-2 text-[12px] text-soft-foreground">
+        Managed by <code className="font-mono">claude mcp add</code> in {userMcp.path} — cezar does not edit
+        Claude’s state file.
+      </p>
+      {userMcp.readable ? (
+        userMcp.servers.length > 0 ? (
+          <ul className="flex flex-wrap gap-1">
+            {userMcp.servers.map((name) => (
+              <li key={name}>
+                <Badge variant="outline" className="font-mono text-[11px]">
+                  {name}
+                </Badge>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-[12px] text-soft-foreground">No user-scoped MCP servers.</p>
+        )
+      ) : (
+        <p className="text-[12px] text-soft-foreground">Could not read the file.</p>
+      )}
     </div>
   )
 }

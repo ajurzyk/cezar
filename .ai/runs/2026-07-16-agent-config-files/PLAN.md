@@ -28,8 +28,8 @@ Status: in-progress
 | 5 | 5.2-review-fix | Gate home-dir file READS in hosted mode (disclosure fix) | done | 31c6f09 |
 | 5 | 5.3-review-fix | Refuse empty-over-non-empty write; JSONC offset + tmp-name uniqueness | done | 3ed1ffb |
 | 6 | 6.1 | Spec: group settings by agent, descriptor-driven (amends #404) | done | 4210235 |
-| 6 | 6.2 | `agent-descriptors.ts` — per-agent descriptor table + tests | done | pending |
-| 6 | 6.3 | Rework `agent-config-section.tsx`: agent selector + per-agent pane | todo | — |
+| 6 | 6.2 | `agent-descriptors.ts` — per-agent descriptor table + tests | done | 8a4ff9e |
+| 6 | 6.3 | Rework `agent-config-section.tsx`: agent selector + per-agent pane | done | pending |
 | 6 | 6.4 | Fold MCP into the per-agent pane; remove the `mcp` section | todo | — |
 | 6 | 6.5 | Docs: README + AGENTS.md reflect the per-agent grouping | todo | — |
 
