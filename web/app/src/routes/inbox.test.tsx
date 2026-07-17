@@ -414,6 +414,37 @@ describe('Add instructions', () => {
     expect(posted?.body).toBeUndefined()
   })
 
+  it('an opened composer can be collapsed again, keeping the draft', async () => {
+    stubFetchCapturingBody()
+    renderInbox()
+    await openInstructions()
+
+    const input = cards()[0]!.querySelector<HTMLTextAreaElement>('[data-slot="todo-instructions-input"]')!
+    fireEvent.change(input, { target: { value: 'Keep me.' } })
+
+    fireEvent.click(cards()[0]!.querySelector('[data-slot="todo-instructions-hide"]')!)
+    expect(cards()[0]!.querySelector('[data-slot="todo-instructions-input"]')).toBeNull()
+    // A collapsed-but-non-empty composer says so — Run still carries the draft.
+    expect(cards()[0]!.querySelector('[data-slot="todo-instructions-toggle"]')?.textContent).toContain(
+      'added',
+    )
+
+    fireEvent.click(cards()[0]!.querySelector('[data-slot="todo-instructions-toggle"]')!)
+    expect(
+      cards()[0]!.querySelector<HTMLTextAreaElement>('[data-slot="todo-instructions-input"]')?.value,
+    ).toBe('Keep me.')
+  })
+
+  it('the instructions box caps at the 20k the server enforces on `prompt`', async () => {
+    stubFetchCapturingBody()
+    renderInbox()
+    await openInstructions()
+
+    expect(
+      cards()[0]!.querySelector<HTMLTextAreaElement>('[data-slot="todo-instructions-input"]')?.maxLength,
+    ).toBe(20_000)
+  })
+
   it('the template menu inserts a built-in snippet into the instructions box', async () => {
     stubFetchCapturingBody()
     renderInbox()

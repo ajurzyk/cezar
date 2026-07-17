@@ -283,10 +283,22 @@ function TodoCard({
               value={notes}
               onChange={(event) => setNotes(event.target.value)}
               placeholder="Add instructions for the agent… (appended to the suggestion above)"
+              // Same cap the server enforces on the `prompt` body field, so an over-long note is
+              // stopped at the keystroke rather than by a 400 on Run (the Settings inputs cap the
+              // same way).
+              maxLength={20_000}
               className="min-h-16 text-[13px]"
             />
             <div className="flex items-center gap-2">
               <PromptTemplateMenu templates={templates} onInsert={insertNotesTemplate} />
+              <button
+                type="button"
+                data-slot="todo-instructions-hide"
+                onClick={() => setNotesOpen(false)}
+                className="text-xs font-medium text-muted-foreground underline decoration-border underline-offset-2 hover:text-foreground"
+              >
+                Hide
+              </button>
             </div>
           </div>
         ) : (
@@ -296,7 +308,9 @@ function TodoCard({
             onClick={() => setNotesOpen(true)}
             className="self-start pl-5 text-xs font-medium text-muted-foreground underline decoration-border underline-offset-2 hover:text-foreground"
           >
-            + Add instructions
+            {/* A collapsed composer keeps its draft, and Run still carries it — so say so
+                rather than hiding instructions the next Run would silently send. */}
+            {notes.trim() ? 'Edit instructions (added)' : '+ Add instructions'}
           </button>
         )
       ) : null}

@@ -993,9 +993,21 @@ export function createApp(deps: ServerDeps): Hono {
     if (!todo) return c.json({ error: 'not found' }, 404);
     if (todo.startedTaskId) return c.json({ error: 'already started' }, 409);
 
-    // Body is optional — a request with none at all (the pre-#413 client) parses to
-    // `undefined` here, same as an empty `{}`.
-    const parsedBody = startTodoBodySchema.safeParse(await c.req.json().catch(() => undefined));
+    // Body is optional — a request with none at all (the pre-#413 client) stays `undefined`
+    // here, same as an empty `{}`. A body that IS present but is not valid JSON becomes `null`,
+    // which the schema rejects → 400 (the `.catch(() => null)` pattern every other mutating
+    // route uses); mapping it to `undefined` too would let a broken payload pass as "no body"
+    // and silently 201.
+    const rawBody = await c.req.text().catch(() => '');
+    let body: unknown;
+    if (rawBody.trim().length > 0) {
+      try {
+        body = JSON.parse(rawBody);
+      } catch {
+        body = null;
+      }
+    }
+    const parsedBody = startTodoBodySchema.safeParse(body);
     if (!parsedBody.success) {
       return c.json({ error: parsedBody.error.issues.map((i) => i.message).join('; ') }, 400);
     }

@@ -99,18 +99,68 @@ describe('insertTemplate', () => {
     expect(result.text).toBe('Fix the bug.\n\nAdd tests.')
   })
 
-  it('inserts mid-text, keeping the tail intact and reporting the caret right after the snippet', () => {
+  it('inserts mid-text separated on BOTH sides, keeping the tail intact', () => {
     const text = 'BeforeAfter'
     const caret = 'Before'.length
     const result = insertTemplate(text, caret, 'MID')
-    expect(result.text).toBe('Before\n\nMIDAfter')
+    // Not 'Before\n\nMIDAfter': the tail needs a separator too, or the snippet runs straight
+    // into the sentence the caret was parked in.
+    expect(result.text).toBe('Before\n\nMID\n\nAfter')
+    // The caret lands right after the snippet — the trailing separator belongs to the tail.
     expect(result.caret).toBe('Before\n\nMID'.length)
   })
 
   it('clamps an out-of-range caret instead of throwing', () => {
     expect(insertTemplate('hi', 999, 'x').text).toBe('hi\n\nx')
     // Clamped to 0: "before" is empty, so no separator is prepended (same rule as the
-    // empty-text case above).
-    expect(insertTemplate('hi', -5, 'x').text).toBe('xhi')
+    // empty-text case above) — but the tail still gets one.
+    expect(insertTemplate('hi', -5, 'x').text).toBe('x\n\nhi')
+  })
+
+  // The caret can be anywhere in the box when a template is picked; every position must come out
+  // cleanly separated on both sides, with no doubled blank lines and no trailing whitespace.
+  describe('separates cleanly at any caret position', () => {
+    const cases: { name: string; text: string; caret: number; expected: string }[] = [
+      { name: 'empty text', text: '', caret: 0, expected: 'SNIP' },
+      { name: 'start of text', text: 'Fix the bug', caret: 0, expected: 'SNIP\n\nFix the bug' },
+      { name: 'middle of a word', text: 'Fix the bug', caret: 3, expected: 'Fix\n\nSNIP\n\n the bug' },
+      { name: 'end of text', text: 'Fix the bug', caret: 11, expected: 'Fix the bug\n\nSNIP' },
+      {
+        name: 'existing blank line on both sides',
+        text: 'One.\n\nTwo.',
+        caret: 'One.\n\n'.length,
+        expected: 'One.\n\nSNIP\n\nTwo.',
+      },
+      {
+        name: 'single newline on both sides',
+        text: 'One.\nTwo.',
+        caret: 'One.'.length,
+        expected: 'One.\n\nSNIP\n\nTwo.',
+      },
+      {
+        name: 'blank line before, nothing after (caret at end of a padded box)',
+        text: 'One.\n\n',
+        caret: 'One.\n\n'.length,
+        expected: 'One.\n\nSNIP',
+      },
+    ]
+
+    for (const { name, text, caret, expected } of cases) {
+      it(name, () => {
+        const result = insertTemplate(text, caret, 'SNIP')
+        expect(result.text).toBe(expected)
+        expect(result.text).not.toMatch(/\n{3}/)
+        expect(result.text).toBe(result.text.trimEnd())
+        // The caret always sits immediately after the snippet the user just inserted.
+        expect(result.text.slice(result.caret - 'SNIP'.length, result.caret)).toBe('SNIP')
+      })
+    }
+  })
+
+  it('is idempotent about separators — stacking templates never doubles the blank line', () => {
+    const first = insertTemplate('', 0, 'One.')
+    const second = insertTemplate(first.text, first.caret, 'Two.')
+    const third = insertTemplate(second.text, second.caret, 'Three.')
+    expect(third.text).toBe('One.\n\nTwo.\n\nThree.')
   })
 })

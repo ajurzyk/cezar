@@ -93,6 +93,11 @@ export function makeTemplateId(): string {
  * line (so stacking a few templates reads as separate instructions, not a run-on sentence).
  * Empty text is a plain assignment — no leading blank line for the first template. Returns the
  * caret position right after the inserted snippet so the caller can restore focus there.
+ *
+ * BOTH sides are separated: a caret parked mid-text (the user clicked back into the box to fix a
+ * typo, then picked a template) would otherwise splice the snippet straight onto the tail —
+ * "Fix\n\nAlso add tests. the bug". Each side only gets what it is missing, so the result is
+ * idempotent and never grows more than one blank line or leaves trailing whitespace.
  */
 export function insertTemplate(
   text: string,
@@ -103,16 +108,24 @@ export function insertTemplate(
   const before = text.slice(0, safeCaret)
   const after = text.slice(safeCaret)
 
-  let separator = ''
+  let leading = ''
   if (before.length > 0) {
-    if (before.endsWith('\n\n')) separator = ''
-    else if (before.endsWith('\n')) separator = '\n'
-    else separator = '\n\n'
+    if (before.endsWith('\n\n')) leading = ''
+    else if (before.endsWith('\n')) leading = '\n'
+    else leading = '\n\n'
   }
 
-  const inserted = `${separator}${snippet}`
+  let trailing = ''
+  if (after.length > 0) {
+    if (after.startsWith('\n\n')) trailing = ''
+    else if (after.startsWith('\n')) trailing = '\n'
+    else trailing = '\n\n'
+  }
+
   return {
-    text: before + inserted + after,
-    caret: before.length + inserted.length,
+    text: before + leading + snippet + trailing + after,
+    // Right after the snippet itself — the trailing separator belongs to the tail, not to the
+    // text the user just inserted.
+    caret: before.length + leading.length + snippet.length,
   }
 }

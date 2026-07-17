@@ -126,6 +126,29 @@ describe('POST /api/todos/:id/start', () => {
     expect(store.listRuns()).toHaveLength(0);
   });
 
+  it('rejects a malformed JSON body with a 400 — it must not pass as "no body"', async () => {
+    writeTodos([{ id: 't1', summary: 'Ship it' }]);
+    const res = await app.request('/api/todos/t1/start', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{"prompt": "unterminated',
+    });
+    expect(res.status).toBe(400);
+    expect(captured).toBeUndefined();
+    expect(store.listRuns()).toHaveLength(0);
+  });
+
+  it('a zero-length body is still the body-less case, not a 400', async () => {
+    writeTodos([{ id: 't1', summary: 'Ship it' }]);
+    const res = await app.request('/api/todos/t1/start', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '',
+    });
+    expect(res.status).toBe(201);
+    expect(captured?.task).toBe('Ship it');
+  });
+
   it('rejects a non-string prompt with a 400', async () => {
     writeTodos([{ id: 't1', summary: 'Ship it' }]);
     const res = await start('t1', { prompt: 42 });
