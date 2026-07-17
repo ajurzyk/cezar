@@ -9,3 +9,6 @@ Append-only, UTC, newest at the bottom.
   (spec phase 1 says "land #442 first"; it is approved + merge-queue but QA-gated, so this
   branch vendors it rather than waiting). If #479 merges first, #442 must be closed with
   credit to its author per the Supersede Credit Rule.
+- 2026-07-17T09:44Z — **checkpoint 1.** Steps 1.1..2.3 (e925166..aaa5648) verified: typecheck
+  + 119 vitest tests green. UI portion skipped — no UI surface in the window (Settings toggle
+  arrives in 3.3).

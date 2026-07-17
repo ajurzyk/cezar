@@ -6,18 +6,19 @@
 
 ## State
 
-Run promoted from a docs-only spec PR to a spec-implementation run. Spec is final (incl. the
-owner's live-title-updates change request). No implementation Steps landed yet.
+Phases 1–2 done (checkpoint-1 green): heuristic layer (task-refs + number-first titles,
+#442 vendored), namer core + one-shot runner call + `[cez-namer]` mock, fire-and-forget
+apply on `startRun` with user-rename precedence (`titleOrigin`).
 
 ## The one thing to know
 
-The namer mirrors `src/planner.ts` (spec 008) exactly: one-shot `createRunner(...).run()`,
-`[cez-namer]` marker for the dry-run mock, strict JSON via `parseStructured` + zod, never
-blocks, degrades to the heuristic title. PR #442's branch is merged in as the heuristic base.
+The namer shadows `CEZ_MOCK_ARGS_FILE` (empty env) on its runner call so dry-run tests
+capturing the AGENT's argv never see the namer's bookkeeping call interleaved.
 
 ## Next concrete action
 
-Step 1.1 — merge `origin/fix/issue-432-include-skill-context-in-task-naming` (PR #442).
+Step 3.1 — `liveTitleUpdates` resolution helper (config wins over `CEZ_TITLE_UPDATES` env
+wins over built-in ON) with unit tests.
 
 ## Blockers
 
