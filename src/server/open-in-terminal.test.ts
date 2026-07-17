@@ -15,10 +15,12 @@ describe('wslTerminalLaunchers (#361 WSL support)', () => {
 
   // Regression guard for the BatBadBut class (CVE-2024-27980) that #459 fixed in the sibling
   // opener: an argument array does not save you when the binary itself is a shell, because libuv
-  // leaves space-free arguments unquoted. No launcher may route through one.
-  it('never routes a launcher through a shell', () => {
+  // leaves space-free arguments unquoted, so `distro` could carry a metacharacter into cmd.
+  // Scoped to the WSL launchers on purpose — openInTerminal's native win32 branch still builds a
+  // `cmd /c start` line, which this says nothing about.
+  it('routes no WSL launcher through a shell', () => {
     for (const [bin] of wslTerminalLaunchers('/tmp/script.sh', 'Ubuntu')) {
-      expect(bin).not.toMatch(/^(cmd|powershell|pwsh)\.exe$/i);
+      expect(bin).not.toMatch(/^(cmd|command|powershell|pwsh)(\.exe)?$/i);
     }
   });
 
