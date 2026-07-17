@@ -1,4 +1,4 @@
-import type { CreateRunInput, GithubItem, WorkflowStepDef } from '@/api/types'
+import type { CreateRunInput, GithubItem, Runner, WorkflowStepDef } from '@/api/types'
 
 /**
  * The GitHub tab's hand-to-agent contract, ported verbatim from the legacy tab
@@ -38,22 +38,43 @@ export function skillChainSteps(names: readonly string[]): WorkflowStepDef[] {
   return steps
 }
 
+/** Which backend runs the issue/PR (#401) — the composer's runner/model pills, resolved. */
+export interface GithubRunEngine {
+  /** `''` is auto: the pill's explicit "let the runner decide", sent as an omitted field. */
+  model: string
+  runner: Runner
+  /** How many backends the host offers; a single-backend host never sends a runner. */
+  runnerCount: number
+}
+
 /**
  * The `POST /api/runs` body for one issue/PR, given what the pickers hold:
  *  - a workflow selected → that workflow (skills ride along as a prompt hint);
  *  - no workflow but skills toggled → the skills ARE the chain (spec 008);
  *  - nothing selected → quick-task.
+ *
+ * `engine` (#401) picks the backend, following `buildCreateRunBody`'s two rules verbatim so the
+ * GitHub tab and the /new composer cannot drift: auto (`''`) stays implicit, and a runner is
+ * sent only on a multi-backend host. Omit it entirely and the body is the legacy one.
  */
 export function githubRunBody(
   item: GithubItem,
   workflow: string | null,
   skills: readonly string[],
   customPrompt?: string,
+  engine?: GithubRunEngine,
 ): CreateRunInput {
   // A non-empty custom prompt REPLACES the auto-generated task text (the user's words win); the
   // workflow/skill routing is unchanged. Empty → the default "Fix GitHub issue #N …" prompt.
   const custom = customPrompt?.trim()
-  if (workflow) return { workflow, task: custom || githubTaskPrompt(item, skills) }
-  if (skills.length) return { steps: skillChainSteps(skills), task: custom || githubTaskPrompt(item) }
-  return { workflow: 'quick-task', task: custom || githubTaskPrompt(item) }
+  const backend: Pick<CreateRunInput, 'model' | 'runner'> = engine
+    ? {
+        model: engine.model || undefined,
+        runner: engine.runnerCount > 1 ? engine.runner : undefined,
+      }
+    : {}
+  if (workflow) return { ...backend, workflow, task: custom || githubTaskPrompt(item, skills) }
+  if (skills.length)
+    return { ...backend, steps: skillChainSteps(skills), task: custom || githubTaskPrompt(item) }
+  return { ...backend, workflow: 'quick-task', task: custom || githubTaskPrompt(item) }
 }

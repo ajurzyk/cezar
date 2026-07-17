@@ -15,6 +15,8 @@ import { Link } from 'react-router'
 import { createRun } from '@/api/client'
 import { queryKeys } from '@/api/queries'
 import type { GithubItem, Skill, WorkflowDef } from '@/api/types'
+import { EnginePills, useResolvedEngine, type EnginePick } from '@/components/engine-pills'
+import { chipClass } from '@/components/picker-pill'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import {
@@ -40,7 +42,8 @@ import { cn } from '@/lib/utils'
  * the POST is exactly the legacy tab's.
  *
  * Picker state lives in the ROUTE, not here (legacy parity: your workflow/skill selection
- * survives switching between issues — it is a way of working, not a property of one item).
+ * survives switching between issues — it is a way of working, not a property of one item). The
+ * runner/model pills (#401) are route state for the same reason.
  *
  * The selected skills render as an always-visible chip row OUTSIDE the dropdown — the legacy
  * invariant "the filter can't hide your selection", carried over: cmdk may filter the list,
@@ -54,6 +57,8 @@ export function HandToAgent({
   onWorkflowChange,
   selectedSkills,
   onSkillsChange,
+  engine,
+  onEngineChange,
   queuedRunId,
   onQueued,
 }: {
@@ -64,6 +69,9 @@ export function HandToAgent({
   onWorkflowChange: (workflow: string | null) => void
   selectedSkills: readonly string[]
   onSkillsChange: (skills: readonly string[]) => void
+  /** Which backend runs it (#401) — route state, like the pickers above. */
+  engine: EnginePick
+  onEngineChange: (engine: EnginePick) => void
   /** The run already queued from this item, if any — renders the "✓ queued" affordance. */
   queuedRunId: string | null
   onQueued: (url: string, runId: string) => void
@@ -74,9 +82,10 @@ export function HandToAgent({
   // Optional custom prompt (#gh-custom-prompt): empty → the default "Fix GitHub issue #N …"
   // text. Local + reset per item (the route remounts this via key={item.url}).
   const [prompt, setPrompt] = useState('')
+  const resolved = useResolvedEngine(engine)
 
   const start = useMutation({
-    mutationFn: () => createRun(githubRunBody(item, workflow, validSkills, prompt)),
+    mutationFn: () => createRun(githubRunBody(item, workflow, validSkills, prompt, resolved)),
     onSuccess: (created) => {
       // The GitHub tab never starts variants, so the answer is a single record.
       const run = 'runs' in created ? created.runs[0] : created
@@ -103,6 +112,7 @@ export function HandToAgent({
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <WorkflowPicker workflows={workflows} value={workflow} onChange={onWorkflowChange} />
         <SkillsPicker skills={skills} selected={selectedSkills} onToggle={toggleSkill} />
+        <EnginePills pick={engine} onChange={onEngineChange} />
       </div>
 
       {selectedSkills.length > 0 ? (
@@ -163,9 +173,10 @@ export function HandToAgent({
   )
 }
 
-/** The pickers' shared trigger chip — the /new footer's pill grammar. */
-const triggerClass =
-  'inline-flex h-[26px] items-center gap-1.5 rounded-full border border-border bg-card px-2.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground'
+/** The pickers' shared trigger chip — the /new footer's pill grammar, now imported from the
+ *  pill component itself (#401) rather than hand-copied, since the runner/model pills render
+ *  on the same row and the two must not drift. */
+const triggerClass = chipClass
 
 /**
  * The workflow dropdown: single-select, and — legacy parity — selecting the chosen workflow

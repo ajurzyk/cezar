@@ -98,10 +98,12 @@ export function RunnerPill({
   runners,
   value,
   onPick,
+  disabled = false,
 }: {
   runners: readonly Runner[]
   value: Runner
   onPick: (runner: Runner) => void
+  disabled?: boolean
 }) {
   const options = RUNNERS.filter((r) => runners.includes(r.id))
   return (
@@ -110,6 +112,7 @@ export function RunnerPill({
       ariaLabel="Runner"
       label={value}
       value={value}
+      disabled={disabled}
       onPick={(next) => onPick(next as Runner)}
       options={options.map((r) => ({ value: r.id, label: r.label, desc: r.desc }))}
     />

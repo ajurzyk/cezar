@@ -165,6 +165,23 @@ describe('request shapes', () => {
     { name: 'removeTodo', call: () => removeTodo('todo/1'), path: '/api/todos/todo%2F1', method: 'DELETE' },
     { name: 'startTodo', call: () => startTodo('todo/1'), path: '/api/todos/todo%2F1/start', method: 'POST' },
     {
+      // #401: an Inbox card that picked a backend. No pick → the bodyless POST above, unchanged.
+      name: 'startTodo (runner + model override, #401)',
+      call: () => startTodo('todo/1', { runner: 'codex', model: 'gpt-5.1-codex' }),
+      path: '/api/todos/todo%2F1/start',
+      method: 'POST',
+      body: { runner: 'codex', model: 'gpt-5.1-codex' },
+    },
+    {
+      // Auto ('') and a single-backend host are filtered out by the caller, so a body that
+      // reaches the wire never carries an empty model or a redundant runner.
+      name: 'startTodo (model only, #401)',
+      call: () => startTodo('todo/1', { model: 'opus' }),
+      path: '/api/todos/todo%2F1/start',
+      method: 'POST',
+      body: { model: 'opus' },
+    },
+    {
       name: 'openRunInCli',
       call: () => openRunInCli('run-1'),
       path: '/api/runs/run-1/open-in-cli',

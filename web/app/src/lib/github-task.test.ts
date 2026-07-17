@@ -96,4 +96,56 @@ describe('githubRunBody', () => {
     // Empty/whitespace custom prompt → the default text.
     expect(githubRunBody(item(), null, [], '   ').task).toContain('Fix GitHub issue')
   })
+
+  // #401 — the engine arg follows buildCreateRunBody's rules so the GitHub tab and the /new
+  // composer send the same body for the same choice.
+  describe('engine (#401)', () => {
+    it('omitted → no runner/model at all (the pre-#401 body)', () => {
+      const body = githubRunBody(item(), null, [])
+      expect(body.runner).toBeUndefined()
+      expect(body.model).toBeUndefined()
+    })
+
+    it('a multi-backend host sends both the runner and the model', () => {
+      const body = githubRunBody(item(), 'ship-it', [], undefined, {
+        runner: 'codex',
+        model: 'gpt-5.1-codex',
+        runnerCount: 2,
+      })
+      expect(body.runner).toBe('codex')
+      expect(body.model).toBe('gpt-5.1-codex')
+      expect(body.workflow).toBe('ship-it')
+    })
+
+    it('a single-backend host never sends a runner (composer rule)', () => {
+      const body = githubRunBody(item(), null, [], undefined, {
+        runner: 'claude',
+        model: 'opus',
+        runnerCount: 1,
+      })
+      expect(body.runner).toBeUndefined()
+      expect(body.model).toBe('opus')
+    })
+
+    it("auto ('') stays implicit rather than shipping an empty model", () => {
+      const body = githubRunBody(item(), null, [], undefined, {
+        runner: 'codex',
+        model: '',
+        runnerCount: 2,
+      })
+      expect(body.model).toBeUndefined()
+      expect(body.runner).toBe('codex')
+    })
+
+    it('rides along on the skills-as-chain route too, without disturbing it', () => {
+      const body = githubRunBody(item(), null, ['om-fix', 'om-review'], undefined, {
+        runner: 'opencode',
+        model: 'anthropic/claude-sonnet-5',
+        runnerCount: 3,
+      })
+      expect(body.steps?.map((step) => step.skill)).toEqual(['om-fix', 'om-review'])
+      expect(body.runner).toBe('opencode')
+      expect(body.model).toBe('anthropic/claude-sonnet-5')
+    })
+  })
 })

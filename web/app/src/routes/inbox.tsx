@@ -1,11 +1,13 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { CheckIcon, InboxIcon, PlayIcon, TriangleAlertIcon } from 'lucide-react'
+import { useState } from 'react'
 import { Link, useNavigate } from 'react-router'
 
 import { removeTodo, startTodo } from '@/api/client'
 import { queryKeys, useRuns, useTodos } from '@/api/queries'
 import type { TodoItem } from '@/api/types'
 import { CenteredState } from '@/components/centered-state'
+import { EnginePills, useResolvedEngine, type EnginePick } from '@/components/engine-pills'
 import { StatusDot } from '@/components/status-dot'
 import { Button } from '@/components/ui/button'
 import { toast } from '@/components/ui/toaster'
@@ -114,9 +116,19 @@ function TodoCard({
 }) {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  // Per card, not per route (#401): each card starts its OWN run, so "run this one on codex"
+  // must not silently re-aim the card below it. Reset is free — a started card leaves the list.
+  const [engine, setEngine] = useState<EnginePick>({ runner: null, model: null })
+  const resolved = useResolvedEngine(engine)
 
   const start = useMutation({
-    mutationFn: () => startTodo(todo.id),
+    // A single-backend host sends no runner, and auto ('') stays implicit — the composer's
+    // two body rules, so an Inbox run and a /new run of the same thing reach the same server.
+    mutationFn: () =>
+      startTodo(todo.id, {
+        runner: resolved.runnerCount > 1 ? resolved.runner : undefined,
+        model: resolved.model || undefined,
+      }),
     onSuccess: ({ run }) => {
       // The server rewrote todos.json (SSE will confirm); the invalidations just refuse to
       // wait for the file watcher's debounce.
@@ -195,6 +207,12 @@ function TodoCard({
             </span>
           ) : null}
         </div>
+        {/* Only a runnable card gets pills — an acknowledge-only note has no run to aim. */}
+        {runnable ? (
+          <div data-slot="todo-engine" className="mt-2.5 flex flex-wrap items-center gap-2">
+            <EnginePills pick={engine} onChange={setEngine} disabled={busy} />
+          </div>
+        ) : null}
       </div>
       <div className="flex shrink-0 items-center gap-1.5 self-center">
         {runnable ? (

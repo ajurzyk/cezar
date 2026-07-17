@@ -244,6 +244,15 @@ const continueSchema = z.object({
   model: z.string().max(200).optional(),
 });
 
+// Inbox "▶ Run" body (spec 007 / #401): both fields optional, so an empty POST — every client
+// before the pills — starts on the host's `defaultRunner`, exactly as before. This is a START
+// path, not a continue: there is no prior backend to preserve, so an omitted field means "host
+// default" rather than "keep what the run had".
+const startTodoSchema = z.object({
+  runner: z.enum(['claude', 'codex', 'opencode']).optional(),
+  model: z.string().max(200).optional(),
+});
+
 export function createApp(deps: ServerDeps): Hono {
   const { repoRoot, store, manager, version, update, bindHost } = deps;
   const dataDir = join(repoRoot, '.ai/cezar');
@@ -983,6 +992,10 @@ export function createApp(deps: ServerDeps): Hono {
     const id = c.req.param('id');
     const todo = (await readTodos(dataDir)).find((t) => t.id === id);
     if (!todo) return c.json({ error: 'not found' }, 404);
+    const parsed = startTodoSchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) {
+      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
+    }
     if (todo.startedTaskId) return c.json({ error: 'already started' }, 409);
 
     let task = (todo.suggestedPrompt ?? todo.summary).trim() || todo.summary;
@@ -1005,7 +1018,11 @@ export function createApp(deps: ServerDeps): Hono {
       workflow = workflows.find((w) => w.name === 'quick-task') ?? QUICK_TASK_WORKFLOW;
     }
 
-    const run = manager.startRun(workflow, { task });
+    const run = manager.startRun(workflow, {
+      task,
+      runner: parsed.data.runner,
+      model: parsed.data.model,
+    });
     await markStarted(dataDir, id, run.id);
     return c.json({ run }, 201);
   });

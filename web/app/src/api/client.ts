@@ -362,11 +362,28 @@ export function removeTodo(id: string): Promise<RemoveTodoResponse> {
   return mutate<RemoveTodoResponse>('DELETE', `/api/todos/${encodeURIComponent(id)}`)
 }
 
+/** The Inbox card's optional backend choice for a Run (#401). Unlike `ContinueOptions` these
+ *  start a NEW run, so an omitted field means the host's `defaultRunner`, not "keep the run's". */
+export interface StartTodoOptions {
+  runner?: Runner
+  model?: string
+}
+
 /** Inbox "Run" (spec 007): the server turns the entry into a task — a one-off single-step
  *  workflow around the suggested skill when it exists, plain quick-task otherwise — and
- *  answers 201 with the new run. 409 when the entry was already started. */
-export function startTodo(id: string): Promise<StartTodoResponse> {
-  return mutate<StartTodoResponse>('POST', `/api/todos/${encodeURIComponent(id)}/start`)
+ *  answers 201 with the new run. 409 when the entry was already started. An optional
+ *  runner/model picks the engine; omitted starts on the host default (backward compat). */
+export function startTodo(id: string, opts: StartTodoOptions = {}): Promise<StartTodoResponse> {
+  const body: Record<string, unknown> = {}
+  if (opts.runner !== undefined) body.runner = opts.runner
+  if (opts.model !== undefined) body.model = opts.model
+  // No override → no body at all, exactly the bodyless POST this endpoint has always sent
+  // (`continueRun` posts `{}` because it always carried one). The server tolerates either.
+  return mutate<StartTodoResponse>(
+    'POST',
+    `/api/todos/${encodeURIComponent(id)}/start`,
+    Object.keys(body).length > 0 ? body : undefined,
+  )
 }
 
 /** "Pick this one" (spec 010): the winner rests at `review` for the gate; the losers are

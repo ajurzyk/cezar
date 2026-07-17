@@ -404,6 +404,105 @@ async function openDetail(entry = '/github/issues/142') {
   await waitFor(() => expect(document.querySelector('[data-slot="gh-hand"]')).not.toBeNull())
 }
 
+/** A host reporting more than one installed backend — the only state that shows the runner pill. */
+const MULTI_BACKEND = () =>
+  jsonResponse({
+    version: '0.0.0-test',
+    repo: '/repo',
+    branch: 'main',
+    defaultRunner: 'claude',
+    checks: [
+      { name: 'claude', available: true },
+      { name: 'codex', available: true },
+    ],
+  })
+
+/** Open a pill's dropdown and choose an option by label (Radix opens on pointerDown). */
+async function pickPill(slot: string, label: string) {
+  fireEvent.pointerDown(document.querySelector(`[data-slot="${slot}"]`)!)
+  const options = await screen.findAllByRole('menuitemradio')
+  fireEvent.click(options.find((o) => o.textContent?.includes(label)) as HTMLElement)
+}
+
+const postedRun = (sent: readonly SentRequest[]) =>
+  sent.find((request) => request.method === 'POST' && request.path === '/api/runs')?.body
+
+describe('the hand-to-agent backend pills (#401)', () => {
+  it('a single-backend host hides the runner pill but still offers the model', async () => {
+    stubFetch()
+    await openDetail()
+
+    await waitFor(() => expect(document.querySelector('[data-slot="model-pill"]')).not.toBeNull())
+    expect(document.querySelector('[data-slot="runner-pill"]')).toBeNull()
+  })
+
+  it('an untouched panel posts no runner/model — the pre-#401 body, unchanged', async () => {
+    const sent = stubFetch()
+    await openDetail()
+
+    fireEvent.click(screen.getByRole('button', { name: /Run agent on this issue/ }))
+
+    await waitFor(() => expect(postedRun(sent)).toBeDefined())
+    expect(postedRun(sent)).toMatchObject({ workflow: 'quick-task' })
+    expect((postedRun(sent) as { runner?: string }).runner).toBeUndefined()
+    expect((postedRun(sent) as { model?: string }).model).toBeUndefined()
+  })
+
+  it('a runner + model pick rides the POST alongside the workflow routing', async () => {
+    const sent = stubFetch({ 'GET /api/health': MULTI_BACKEND })
+    await openDetail()
+
+    await waitFor(() => expect(document.querySelector('[data-slot="runner-pill"]')).not.toBeNull())
+    await pickPill('runner-pill', 'codex')
+    await pickPill('model-pill', 'gpt-5.1-codex')
+
+    fireEvent.click(screen.getByRole('button', { name: /Run agent on this issue/ }))
+
+    await waitFor(() => expect(postedRun(sent)).toBeDefined())
+    expect(postedRun(sent)).toMatchObject({
+      workflow: 'quick-task',
+      runner: 'codex',
+      model: 'gpt-5.1-codex',
+    })
+  })
+
+  it('switching backend resets the model pick — the presets are per runner', async () => {
+    const sent = stubFetch({ 'GET /api/health': MULTI_BACKEND })
+    await openDetail()
+
+    await waitFor(() => expect(document.querySelector('[data-slot="runner-pill"]')).not.toBeNull())
+    // Pin a claude model, then move to codex: the claude id must not survive onto codex.
+    await pickPill('model-pill', 'opus')
+    await pickPill('runner-pill', 'codex')
+
+    fireEvent.click(screen.getByRole('button', { name: /Run agent on this issue/ }))
+
+    await waitFor(() => expect(postedRun(sent)).toBeDefined())
+    expect(postedRun(sent)).toMatchObject({ runner: 'codex' })
+    // Back to auto for the new runner, so no model at all.
+    expect((postedRun(sent) as { model?: string }).model).toBeUndefined()
+  })
+
+  it('the pick survives switching to another issue (it is a way of working, not a property of one item)', async () => {
+    const sent = stubFetch({ 'GET /api/health': MULTI_BACKEND })
+    await openDetail()
+
+    await waitFor(() => expect(document.querySelector('[data-slot="runner-pill"]')).not.toBeNull())
+    await pickPill('runner-pill', 'codex')
+
+    // Hop to the other issue — HandToAgent remounts (key={item.url}), the pick must not.
+    fireEvent.click(rows().find((row) => row.dataset.number === '139')!)
+    await waitFor(() =>
+      expect(document.querySelector('[data-slot="gh-hand"]')).not.toBeNull(),
+    )
+    expect(document.querySelector('[data-slot="runner-pill"]')?.textContent).toContain('codex')
+
+    fireEvent.click(screen.getByRole('button', { name: /Run agent on this issue/ }))
+    await waitFor(() => expect(postedRun(sent)).toBeDefined())
+    expect(postedRun(sent)).toMatchObject({ runner: 'codex' })
+  })
+})
+
 describe('the hand-to-agent pickers (#385)', () => {
   it('the workflow dropdown lists, filters, selects — and re-selecting deselects', async () => {
     stubFetch()
