@@ -12,8 +12,8 @@ Run folder: `.ai/runs/2026-07-17-task-auto-naming/`
 
 | Phase | Step | Title | Status | Commit |
 |-------|------|-------|--------|--------|
-| 1 | 1.1 | Merge PR #442's branch — skill-aware heuristic titles (credit: #442) | done | 2613199 |
-| 1 | 1.2 | `src/runs/task-refs.ts` — PR/issue-number extraction + tests | todo | — |
+| 1 | 1.1 | Merge PR #442's branch — skill-aware heuristic titles (credit: #442) | done | e925166 |
+| 1 | 1.2 | `src/runs/task-refs.ts` — PR/issue-number extraction + tests | done | pending |
 | 1 | 1.3 | `RunRecord.prNumber/issueNumber/titleOrigin` optional fields + PATCH marks user renames | todo | — |
 | 1 | 1.4 | Number-prefixed heuristic title at creation (task-refs into `makeRunTitle`) | todo | — |
 | 2 | 2.1 | `src/runs/auto-name.ts` — namer prompt, strict-JSON parse, cross-check, post-validation | todo | — |
