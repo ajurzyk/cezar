@@ -45,15 +45,12 @@ export type AppShellProps = {
    *  Defaults to shown so the presentational shell stays renderable alone; the container
    *  passes the health payload's truth. */
   forgeAvailable?: boolean
-<<<<<<< HEAD
   /** Inbox gating (#471): `false` drops the Inbox nav item and its badge — the global inbox is
    *  opt-in via `CEZ_FOLLOWUPS=1`. Defaults to shown for the same reason as `forgeAvailable`. */
   inboxAvailable?: boolean
-=======
   /** Global chrome banner (#391's `SkillsBanner`), rendered in its own row above the scroller.
    *  Absent renders nothing — the slot is generic, not skills-specific. */
   banner?: ReactNode
->>>>>>> origin/main
 }
 
 /**
@@ -86,11 +83,8 @@ export function AppShell({
   taskQuickList,
   toolsMenu,
   forgeAvailable = true,
-<<<<<<< HEAD
   inboxAvailable = true,
-=======
   banner,
->>>>>>> origin/main
 }: AppShellProps) {
   const { pathname } = useLocation()
   const activeTo = activeNavPath(pathname)
