@@ -1,5 +1,5 @@
 import { QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, renderHook, waitFor } from '@testing-library/react'
+import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -93,6 +93,25 @@ describe('useHealth', () => {
     expect(result.current.data).toBeUndefined()
     expect(result.current.error).toBeInstanceOf(ApiError)
     expect((result.current.error as ApiError).message).toBe('boom')
+  })
+
+  // #369: a `git checkout` in a foreground, connected tab fires none of reconnect/visibility/
+  // pageshow, so the branch chip needs its own poll rather than relying solely on those.
+  it('polls, so a branch switched outside the cockpit is caught without a reconnect', async () => {
+    vi.useFakeTimers()
+    try {
+      fetchMock.mockResolvedValue(json(HEALTH))
+      const { result } = renderHook(() => useHealth(), { wrapper: wrapper() })
+
+      await act(() => vi.advanceTimersByTimeAsync(0))
+      expect(result.current.isSuccess).toBe(true)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+
+      await act(() => vi.advanceTimersByTimeAsync(5000))
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

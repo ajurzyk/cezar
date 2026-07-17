@@ -69,11 +69,20 @@ export const queryKeys = {
 } as const
 
 /** Version + update check + repo/branch + tool probes. Feeds the sidebar's repo and version
- *  chips and (Step 4.2) the Tools menu. */
+ *  chips and (Step 4.2) the Tools menu.
+ *
+ * Polled on a `useRunChanges`-style interval rather than left to reconnect/visibility alone
+ * (#369): a `git checkout` in a terminal, in a foreground tab whose SSE connection never drops,
+ * fires none of those triggers, so the branch chip would sit stale until something else woke the
+ * query up. The stream still carries nothing for this — no server-side watcher on `.git/HEAD` —
+ * so a light poll is the honest fix, the same trade `useRunChanges` already makes for the
+ * Changes tab. `git rev-parse` is cheap enough that a few-second interval per open tab is not
+ * worth a heavier watch mechanism. */
 export function useHealth() {
   return useQuery({
     queryKey: queryKeys.health,
     queryFn: ({ signal }) => getHealth({ signal }),
+    refetchInterval: 5000,
   })
 }
 
