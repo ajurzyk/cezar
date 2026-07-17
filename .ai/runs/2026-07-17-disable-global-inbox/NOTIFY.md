@@ -43,3 +43,19 @@ Append-only, UTC, newest at the bottom.
   (45959a4..8b4ed98). Full gate green: `npm run typecheck` clean, 2106 tests pass across 125
   files (server + web projects). No UI screenshots: the checkpoint's UI changes are covered by
   the component suites, and no dev server was started for this run.
+- 2026-07-17T08:05Z — **blocker (found + fixed).** `om-code-review` caught conflict markers
+  committed in `web/app/src/components/app-shell.tsx`: cezar's autosaver committed the `main`
+  merge mid-resolution. Local `tsc`/`vitest` passed off the working tree, so a clean CI checkout
+  would have failed to build. Resolved in `5d92a7f` (both `inboxAvailable` and main's `banner`
+  kept — orthogonal additions). Zero markers on the pushed tip; verified with `git grep` against
+  the remote ref.
+- 2026-07-17T08:05Z — **review fixes (Step 4.2-review-fix, `a6a51c9`).** Three Low findings, all
+  real: `recover()` left the record echoing `generateFollowups:true` for a run that produces none
+  (normalized; first-ever test for `recover()`, verified to fail without the fix); `/inbox` flashed
+  "Inbox empty" before health landed (keyed on `isPending`, so a *failing* health request still
+  reaches the empty state instead of blanking the route forever); `capabilities.ts` claimed a live
+  env flip works, which is half-true for `followups` (watcher is boot-time).
+- 2026-07-17T08:05Z — **merge.** Six PRs landed on `main` mid-run (#448–#454); merged in, one
+  conflict, gate re-run green (2160 tests / 130 files).
+- 2026-07-17T08:10Z — **run end.** PR #476 opened, labelled (review/bug/needs-qa/priority-medium/
+  risk-medium), summary comment posted, lock released. Status: complete, awaiting human review+QA.
