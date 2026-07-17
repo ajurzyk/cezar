@@ -52,6 +52,7 @@ const GOLDEN_FIXTURES = [
   'command-lifecycle',
   'file-change-and-mcp',
   'todo-list',
+  'turn-plan-updated',
   'turn-failed',
   'review-mode',
 ] as const;
@@ -92,6 +93,11 @@ describe('mapCodexNotification edge cases', () => {
       { method: 'item/agentMessage/delta', params: { itemId: 'a', delta: '' } }, // empty delta
       { method: 'thread/tokenUsage/updated', params: {} }, // no tokenUsage.total
       { method: 'thread/started', params: {} }, // no thread id
+      // A garbled plan frame must not wipe a good plan — no `plan` array at all,
+      // or one that is not an array, maps to zero events (not an empty plan).
+      { method: 'turn/plan/updated', params: {} },
+      { method: 'turn/plan/updated', params: { plan: 'oops' } },
+      { method: 'turn/plan/updated', params: { plan: null } },
     ];
     for (const frame of frames) {
       const mapped = mapCodexNotification(frame, state);
@@ -356,6 +362,78 @@ describe('mapCodexNotification edge cases', () => {
       state,
     );
     expect(mapped.events).toEqual([]);
+  });
+
+  // `turn/plan/updated` is the ONLY channel codex's `update_plan` reaches the
+  // client on: the app-server v2 `ThreadItem` union has no todo variant, so a
+  // plan that is not read off this notification never renders at all.
+  describe('turn/plan/updated (the real update_plan channel)', () => {
+    const planFrame = (plan: unknown) => ({
+      method: 'turn/plan/updated',
+      params: { threadId: 'th_1', turnId: 'turn_1', explanation: null, plan },
+    });
+
+    it('normalizes the wire status vocabulary, which is camelCase on app-server', () => {
+      // `inProgress` is what the app-server layer re-serializes to, even though
+      // codex's core protocol type spells it `in_progress` — accept both.
+      const events = mapCodexNotification(
+        planFrame([
+          { step: 'a', status: 'pending' },
+          { step: 'b', status: 'inProgress' },
+          { step: 'c', status: 'in_progress' },
+          { step: 'd', status: 'completed' },
+        ]),
+        state,
+      ).events;
+      expect(events).toEqual([
+        {
+          type: 'plan.updated',
+          entries: [
+            { content: 'a', status: 'pending' },
+            { content: 'b', status: 'in_progress' },
+            { content: 'c', status: 'in_progress' },
+            { content: 'd', status: 'completed' },
+          ],
+        },
+      ]);
+    });
+
+    it('treats an unknown or missing status as pending rather than dropping the step', () => {
+      const events = mapCodexNotification(
+        planFrame([{ step: 'a', status: 'sideways' }, { step: 'b' }]),
+        state,
+      ).events;
+      expect(events).toEqual([
+        { type: 'plan.updated', entries: [{ content: 'a', status: 'pending' }, { content: 'b', status: 'pending' }] },
+      ]);
+    });
+
+    it('filters malformed steps but keeps the good ones', () => {
+      const events = mapCodexNotification(
+        planFrame(['oops', null, 42, { status: 'pending' }, { step: 5 }, { step: 'real', status: 'pending' }]),
+        state,
+      ).events;
+      expect(events).toEqual([{ type: 'plan.updated', entries: [{ content: 'real', status: 'pending' }] }]);
+    });
+
+    it('emits an empty plan for an empty list — a cleared plan is a real snapshot', () => {
+      expect(mapCodexNotification(planFrame([]), state).events).toEqual([{ type: 'plan.updated', entries: [] }]);
+    });
+
+    it('is full-replacement: the frame is the whole plan, and carries no state', () => {
+      const first = mapCodexNotification(planFrame([{ step: 'a', status: 'completed' }]), state);
+      expect(first.state).toBe(state); // nothing to accumulate — contrast claude's task map
+      const second = mapCodexNotification(planFrame([{ step: 'b', status: 'pending' }]), first.state);
+      expect(second.events).toEqual([{ type: 'plan.updated', entries: [{ content: 'b', status: 'pending' }] }]);
+    });
+
+    it('ignores the explanation prose (the dock renders entries only)', () => {
+      const events = mapCodexNotification(
+        { method: 'turn/plan/updated', params: { threadId: 'th_1', turnId: 'turn_1', explanation: 'why', plan: [{ step: 'a', status: 'pending' }] } },
+        state,
+      ).events;
+      expect(events).toEqual([{ type: 'plan.updated', entries: [{ content: 'a', status: 'pending' }] }]);
+    });
   });
 });
 

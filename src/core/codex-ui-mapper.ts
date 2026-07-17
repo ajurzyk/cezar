@@ -25,6 +25,7 @@
 import type {
   FileDiff,
   PlanEntry,
+  PlanStatus,
   StopReason,
   TokenUsage,
   ToolLocation,
@@ -98,6 +99,8 @@ export function mapCodexNotification(frame: unknown, state: CodexUiMapperState):
       return mapTurnEnd(params, state, /* failed */ false);
     case 'turn/failed':
       return mapTurnEnd(params, state, /* failed */ true);
+    case 'turn/plan/updated':
+      return mapTurnPlanUpdated(params, state);
     case 'item/started':
       return mapItemLifecycle(params, state, 'item.started');
     case 'item/updated':
@@ -154,6 +157,53 @@ function turnStopReason(params: Record<string, unknown>, failed: boolean): StopR
   return /interrupt/i.test(errorMessage(params.error) ?? '') ? 'cancelled' : 'error';
 }
 
+// ---- plan -------------------------------------------------------------------
+
+/**
+ * `turn/plan/updated` → the plan dock. This is the ONLY channel codex's
+ * `update_plan` tool reaches the client on: the app-server `ThreadItem` union
+ * has no todo/`todoList` variant, so the plan is a turn-level notification
+ * rather than an item (verified against
+ * `app-server-protocol/schema/typescript/v2/TurnPlanUpdatedNotification.ts`).
+ *
+ * Full replacement: `plan` carries the entire list on every notification and
+ * the steps have no wire ids, so the snapshot IS the plan — no accumulation
+ * (contrast the claude mapper's id-keyed TaskCreate/TaskUpdate fold).
+ *
+ * `explanation` (the model's prose rationale) is deliberately dropped: the dock
+ * renders entries only, and PlanEntry has nowhere to put it.
+ */
+function mapTurnPlanUpdated(params: Record<string, unknown>, state: CodexUiMapperState): CodexUiMapping {
+  const entries = turnPlanEntries(params.plan);
+  if (!entries) return { events: [], state };
+  return { events: [{ type: 'plan.updated', entries }], state };
+}
+
+/** `plan: [{step, status}]` → plan entries. An empty array is a legitimate
+ *  snapshot (the agent cleared its plan); a non-array is malformed and maps to
+ *  zero events so a garbled frame cannot wipe a good plan. */
+function turnPlanEntries(plan: unknown): PlanEntry[] | undefined {
+  if (!Array.isArray(plan)) return undefined;
+  const entries: PlanEntry[] = [];
+  for (const step of plan) {
+    if (!isRecord(step)) continue;
+    const content = str(step.step);
+    if (content === undefined) continue;
+    entries.push({ content, status: turnPlanStatus(step.status) });
+  }
+  return entries;
+}
+
+/** `TurnPlanStepStatus` is camelCase ON THE APP-SERVER WIRE (`inProgress`) even
+ *  though codex's core protocol type is snake_case — the app-server layer
+ *  re-serializes. Accept both spellings rather than depend on that detail, and
+ *  treat anything unknown as `pending` (a step the agent has not reached). */
+function turnPlanStatus(status: unknown): PlanStatus {
+  if (status === 'completed') return 'completed';
+  if (status === 'inProgress' || status === 'in_progress') return 'in_progress';
+  return 'pending';
+}
+
 // ---- item lifecycle ---------------------------------------------------------
 
 type ItemEventType = 'item.started' | 'item.updated' | 'item.completed';
@@ -167,9 +217,20 @@ function mapItemLifecycle(
   if (!raw || typeof raw.type !== 'string') return { events: [], state };
   const type = raw.type;
 
-  // todoList / plan items never render as items — they ARE the plan
+  // `plan` / `todoList` items never render as items — they ARE the plan
   // (full-replacement semantics on every lifecycle phase, §7.1).
-  if (type === 'todoList' || type === 'plan') {
+  //
+  // `plan` is the plan-MODE item (`{type:'plan', id, text}`, streamed via
+  // `item/plan/delta`) — prose, not a checklist, and mutually exclusive with
+  // `update_plan` (codex rejects that tool in plan mode). It becomes the single
+  // entry the agent is executing.
+  //
+  // `todoList` is NOT an app-server item type — the v2 `ThreadItem` union has no
+  // todo variant, so this arm is dead on the transport cezar spawns. It is kept
+  // as cheap tolerance: these types are marked EXPERIMENTAL upstream, codex's
+  // exec transport does emit a `todo_list` item, and a stray snapshot is better
+  // rendered than dropped. The real plan channel is `turn/plan/updated`.
+  if (type === 'todoList' || type === 'todo_list' || type === 'plan') {
     const entries = planEntriesOf(raw);
     if (!entries) return { events: [], state };
     return { events: [{ type: 'plan.updated', entries }], state };

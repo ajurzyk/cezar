@@ -13,8 +13,10 @@
  *  - claude:   Bash, Edit, Write, NotebookEdit, Read, Glob, Grep, WebFetch,
  *              WebSearch, Task, TodoWrite, TaskCreate, TaskUpdate, TaskList,
  *              mcp__server__tool
- *  - codex:    commandExecution, fileChange, mcpToolCall, webSearch,
- *              todoList, plan
+ *  - codex:    commandExecution, fileChange, mcpToolCall, webSearch, plan
+ *              (codex's checklist arrives as the `turn/plan/updated`
+ *              notification, not as a tool call — `todoList` is kept below only
+ *              as tolerance for its non-app-server transports)
  *  - opencode: bash, edit, write, read, grep, glob, webfetch, task, todowrite
  */
 

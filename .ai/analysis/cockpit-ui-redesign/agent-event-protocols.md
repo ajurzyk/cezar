@@ -164,7 +164,11 @@ The protocol behind the VS Code extension, desktop app, and partner integrations
 {"type":"plan","id":"…","text":"…"}
 ```
 
-Plus `enteredReviewMode` / `exitedReviewMode`, `contextCompaction`, and a **`todoList`** item (the agent's step checklist — items with text + completed flag, updated via `item/updated`). Delta notifications:
+Plus `enteredReviewMode` / `exitedReviewMode`, `contextCompaction`, and a **`plan`** item (`{type:'plan', id, text}` — plan-MODE prose, streamed via `item/plan/delta`).
+
+> **Correction (2026-07-17, verified against `openai/codex@main`).** An earlier revision of this section listed a **`todoList`** item updated via `item/updated`. Neither exists: the app-server v2 `ThreadItem` union has no todo variant, and `ServerNotification` has no `item/updated` method (only `item/started` and `item/completed`). The agent's step checklist (the `update_plan` tool) arrives as the turn-level notification **`turn/plan/updated`** → `{threadId, turnId, explanation: string|null, plan: [{step, status}]}`, where `status` is **camelCase** `pending|inProgress|completed` on the app-server wire (codex's core type is snake_case; the app-server layer re-serializes). It is full-replacement and the steps carry no ids. Plan-mode prose and `update_plan` are mutually exclusive — codex rejects `update_plan` in plan mode. Sources: `app-server-protocol/schema/typescript/v2/{ThreadItem,TurnPlanUpdatedNotification,TurnPlanStep,TurnPlanStepStatus}.ts`, `schema/typescript/ServerNotification.ts`. (codex's *exec* transport — which cezar does not spawn — does have a `todo_list` item on dot-named methods.)
+
+Delta notifications:
 
 - `item/agentMessage/delta` — `{threadId, turnId, itemId, delta}` streamed assistant text
 - `item/reasoning/textDelta` (and summary deltas) — streamed reasoning
@@ -270,7 +274,7 @@ Per-backend mapping as implemented:
 | Tool status enum | none (2 implicit states) | `inProgress/completed/failed/declined` | `pending/running/completed/error` | `pending/in_progress/completed/failed` |
 | Tool semantic kind | tool name (Read/Bash/Edit…) | item type | tool name (bash/edit/read…) | **`kind`: read/edit/delete/move/search/execute/think/fetch/other** |
 | Live command output | no (result only) | `item/commandExecution/outputDelta` | tool `metadata` while running | `terminal` content type |
-| Plan/todo | `TodoWrite` tool input `{todos:[{content,status,activeForm}]}` | `todoList` / `plan` items | `todowrite` tool `{todos:[{content,status,priority}]}` | `plan` update `{entries:[{content,priority,status}]}` — full replace |
+| Plan/todo | `TodoWrite` tool input `{todos:[{content,status,activeForm}]}`, or the incremental `TaskCreate`/`TaskUpdate` calls | `turn/plan/updated` notification `{plan:[{step,status}]}` (NOT an item) | `todowrite` tool `{todos:[{content,status,priority}]}` — `status` is free-form, incl. `cancelled` | `plan` update `{entries:[{content,priority,status}]}` — full replace |
 | Diffs | `Edit` tool input (old/new string); `toolUseResult` | `fileChange.changes[{path,kind,diff}]` | `patch` part; edit tool metadata | `diff` content `{path,oldText,newText}` |
 | Permissions | `control_request` `can_use_tool` (allow/deny+updatedInput) | `item/*/requestApproval` (accept/acceptForSession/decline/cancel) | `permission.updated` + POST reply (once/always/reject) | `session/request_permission` with option list |
 | Turn end | `result` message | `turn/completed` / `turn/failed` | `session.idle` | prompt response `stopReason: end_turn/max_tokens/max_turn_requests/refusal/cancelled` |
@@ -373,7 +377,8 @@ type UiItem =
 
 **Codex (app-server):**
 - `thread/started`/`thread/start` result → `session.started`; `turn/started`/`turn/completed`/`turn/failed` → turn events (failed → stopReason `error`; interrupt → `cancelled`).
-- `item/started|updated|completed` → same-named item events. Type map: `agentMessage`→message (`phase` from item.phase), `reasoning`→reasoning, `commandExecution`→tool(kind execute, title from `command`, exitCode), `fileChange`→tool(kind edit, `changes[]`→`diffs[]` unified), `mcpToolCall`→tool(kind other, name `server.tool`), `webSearch`→tool(kind fetch), `todoList`/`plan`→**`plan.updated`**, review mode items → tool(kind task).
+- `item/started|completed` → same-named item events (`item/updated` is accepted defensively but codex does not send it). Type map: `agentMessage`→message (`phase` from item.phase), `reasoning`→reasoning, `commandExecution`→tool(kind execute, title from `command`, exitCode), `fileChange`→tool(kind edit, `changes[]`→`diffs[]` unified), `mcpToolCall`→tool(kind other, name `server.tool`), `webSearch`→tool(kind fetch), `plan`(prose)/`todoList`(non-app-server tolerance)→**`plan.updated`**, review mode items → tool(kind task).
+- `turn/plan/updated` → **`plan.updated`** — the real `update_plan` checklist channel (see the correction above). `plan[].step`→`content`, `plan[].status` `pending|inProgress|completed`→`pending|in_progress|completed`; `explanation` is dropped (no field on `PlanEntry`).
 - Status map: `inProgress→running`, `completed→completed`, `failed→failed`, `declined→declined` (kills the current regex-on-status hack).
 - `item/agentMessage/delta` → `item.delta{field:'text'}`; `item/reasoning/textDelta` → `item.delta{field:'reasoning'}`; `item/commandExecution/outputDelta` → `item.delta{field:'output'}` (live terminal!).
 - `thread/tokenUsage/updated` → `usage.updated` (raw totals; keep cost absent).
