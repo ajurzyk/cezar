@@ -661,7 +661,9 @@ export function createApp(deps: ServerDeps): Hono {
       return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
     }
     if (parsed.data.title !== undefined) {
-      store.updateRun(id, { title: parsed.data.title, titleSummary: parsed.data.title });
+      // titleOrigin 'user' permanently stops the namer's live updates for this run
+      // (spec 2026-07-17-task-auto-naming).
+      store.updateRun(id, { title: parsed.data.title, titleSummary: parsed.data.title, titleOrigin: 'user' });
     }
     return c.json(store.getRun(id));
   });
@@ -1156,6 +1158,9 @@ export function createApp(deps: ServerDeps): Hono {
     defaultModels: config.defaultModels ?? {},
     maxParallel: config.maxParallel,
     memoryLimitMb: config.memoryLimitMb ?? null,
+    // Live title updates (task auto-naming spec): tri-state — null means "no
+    // config key, the CEZ_TITLE_UPDATES env default (ON) decides".
+    liveTitleUpdates: config.liveTitleUpdates ?? null,
   });
   app.get('/api/config', async (c) => c.json(configAnswer(await loadConfig(repoRoot))));
 
@@ -1181,6 +1186,9 @@ export function createApp(deps: ServerDeps): Hono {
     // the schema's 1–16; memoryLimitMb null/0 clears the ceiling.
     maxParallel: z.number().int().min(1).max(16).optional(),
     memoryLimitMb: z.number().int().min(0).max(1_048_576).nullable().optional(),
+    // Live title updates toggle (Settings → Agents): null clears the key back
+    // to the env-default behavior.
+    liveTitleUpdates: z.boolean().nullable().optional(),
   });
   app.put('/api/config', async (c) => {
     const parsed = setConfigSchema.safeParse(await c.req.json().catch(() => null));
@@ -1209,6 +1217,10 @@ export function createApp(deps: ServerDeps): Hono {
       }
     }
     if (parsed.data.maxParallel !== undefined) raw.maxParallel = parsed.data.maxParallel;
+    if (parsed.data.liveTitleUpdates !== undefined) {
+      if (parsed.data.liveTitleUpdates === null) delete raw.liveTitleUpdates;
+      else raw.liveTitleUpdates = parsed.data.liveTitleUpdates;
+    }
     if (parsed.data.memoryLimitMb !== undefined) {
       // null or 0 both mean "no ceiling" — drop the key back to the default.
       if (parsed.data.memoryLimitMb === null || parsed.data.memoryLimitMb === 0) {

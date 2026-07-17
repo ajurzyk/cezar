@@ -54,12 +54,16 @@ describe('skill-aware task naming (#432)', () => {
     steps: [{ id: 'task', name: 'om-auto-review-pr', skill: 'om-auto-review-pr', prompt: '{{task}}' }],
   };
 
-  it('uses the selected skill as the queued fallback for argument-only tasks', () => {
-    expect(makeRunTitle('432', skillWorkflow)).toBe('/om-auto-review-pr 432');
+  it('leads with the number for argument-only tasks (task auto-naming spec)', () => {
+    expect(makeRunTitle('432', skillWorkflow)).toBe('432: /om-auto-review-pr');
   });
 
-  it('does not duplicate a skill command the user already supplied', () => {
-    expect(makeRunTitle('/om-auto-review-pr 432', skillWorkflow)).toBe('/om-auto-review-pr 432');
+  it('rewrites a user-supplied skill command with a numeric argument to number-first', () => {
+    expect(makeRunTitle('/om-auto-review-pr 432', skillWorkflow)).toBe('432: /om-auto-review-pr');
+    // A non-numeric argument keeps the full command, number still leads.
+    expect(makeRunTitle('/om-auto-review-pr 432 and check CI', skillWorkflow)).toBe(
+      '432: /om-auto-review-pr 432 and check CI',
+    );
   });
 
   it('keeps the legacy task-only fallback when no skill is selected', () => {
@@ -69,6 +73,11 @@ describe('skill-aware task naming (#432)', () => {
       steps: [{ id: 'task', prompt: '{{task}}' }],
     };
     expect(makeRunTitle('Fix the login bug', workflow)).toBe('Fix the login bug');
+    // A referenced PR/issue leads the title even without a skill.
+    expect(makeRunTitle('review pr 437 with autofix', workflow)).toBe('437: review pr 437 with autofix');
+    // A bare number without a skill stays bare — no `469: 469`.
+    expect(makeRunTitle('469', workflow)).toBe('469');
+    expect(makeRunTitle('#469', workflow)).toBe('#469');
   });
 });
 
@@ -98,11 +107,15 @@ describe('systemPrompt end-to-end (dry run)', () => {
     savedEnv.CEZ_MOCK_ARGS_FILE = process.env.CEZ_MOCK_ARGS_FILE;
     savedEnv.CEZ_TODOS_FILE = process.env.CEZ_TODOS_FILE;
     savedEnv.CEZ_FOLLOWUPS = process.env.CEZ_FOLLOWUPS;
+    savedEnv.CEZ_AUTONAME = process.env.CEZ_AUTONAME;
     process.env.CEZ_DRY_RUN = '1';
     // The global inbox is opt-in (#471). These assertions are about prompt composition and the
     // per-run opt-out, so they run on an inbox-enabled server; the gate itself is covered by
     // the suite below.
     process.env.CEZ_FOLLOWUPS = '1';
+    // Dry-run skips naming by default (canned titles would clobber honest
+    // heuristics in demos/e2e); '1' forces the mock path for these tests.
+    process.env.CEZ_AUTONAME = '1';
     process.env.CEZ_MOCK_ARGS_FILE = argsFile;
     // Simulate a nested cezar (an agent running `cez serve` / the test suite):
     // the parent process already carries CEZ_TODOS_FILE. Runners spawn with
@@ -194,6 +207,90 @@ describe('systemPrompt end-to-end (dry run)', () => {
     expect(prompt).toBe(composeSystemPrompt(CONFIG_PROMPT, HANDOFF_INSTRUCTIONS));
   }, 30_000);
 
+
+
+  it('live refresh: the namer applies turn context through the mock (direct drive)', async () => {
+    const record = manager.startRun(skillWorkflow, { task: '437' });
+    type NamerSeam = { autoNameRun(id: string, skill: string | undefined, task: string, live?: object): Promise<void> };
+    await (manager as unknown as NamerSeam).autoNameRun(record.id, 'om-auto-review-pr', '437', {
+      turnText: 'fixed the watchdog race',
+      diffStat: '2 files, +10 -3',
+    });
+    const after = store.getRun(record.id);
+    expect(after?.titleSummary).toBe('437: implementing cr fixes');
+    expect(after?.titleOrigin).toBe('auto');
+    expect(after?.prNumber).toBe(437);
+  }, 30_000);
+
+  it('turn-end refresh skips under CEZ_DRY_RUN and when the toggle or ownership forbids it', async () => {
+    type Seam = {
+      maybeRefreshTitle(id: string, text: string): Promise<void>;
+      lastNamerKey: Map<string, string>;
+    };
+    const seam = manager as unknown as Seam;
+    const record = manager.startRun(skillWorkflow, { task: '437' });
+
+    // Dry-run guard (without the CEZ_AUTONAME=1 force): no key is recorded,
+    // the namer is never consulted.
+    const forced = process.env.CEZ_AUTONAME;
+    delete process.env.CEZ_AUTONAME;
+    await seam.maybeRefreshTitle(record.id, 'made real progress on the fix');
+    expect(seam.lastNamerKey.has(record.id)).toBe(false);
+    process.env.CEZ_AUTONAME = forced;
+
+    // Outside dry-run, a fast-failing fake binary guards against real spawns.
+    const savedDry = process.env.CEZ_DRY_RUN;
+    const savedBin = process.env.CEZ_CLAUDE_BIN;
+    const savedToggle = process.env.CEZ_TITLE_UPDATES;
+    delete process.env.CEZ_DRY_RUN;
+    process.env.CEZ_CLAUDE_BIN = '/nonexistent/cez-test-claude';
+    try {
+      // Env default OFF → skip before any runner call.
+      process.env.CEZ_TITLE_UPDATES = '0';
+      await seam.maybeRefreshTitle(record.id, 'more progress');
+      expect(seam.lastNamerKey.has(record.id)).toBe(false);
+
+      // Toggle ON but the title is user-owned → skip.
+      process.env.CEZ_TITLE_UPDATES = '1';
+      store.updateRun(record.id, { title: 'Mine', titleSummary: 'Mine', titleOrigin: 'user' });
+      await seam.maybeRefreshTitle(record.id, 'even more progress');
+      expect(seam.lastNamerKey.has(record.id)).toBe(false);
+
+      // Namer-owned + toggle ON → the key is recorded (the call itself fails
+      // fast on the fake binary and leaves the title as-is), and the SAME
+      // inputs never record twice.
+      store.updateRun(record.id, { titleOrigin: 'auto' });
+      await seam.maybeRefreshTitle(record.id, 'progress worth naming');
+      expect(seam.lastNamerKey.get(record.id)).toContain('progress worth naming');
+    } finally {
+      if (savedDry === undefined) delete process.env.CEZ_DRY_RUN;
+      else process.env.CEZ_DRY_RUN = savedDry;
+      if (savedBin === undefined) delete process.env.CEZ_CLAUDE_BIN;
+      else process.env.CEZ_CLAUDE_BIN = savedBin;
+      if (savedToggle === undefined) delete process.env.CEZ_TITLE_UPDATES;
+      else process.env.CEZ_TITLE_UPDATES = savedToggle;
+    }
+  }, 30_000);
+
+  it('a user rename made before the namer answers is never overwritten', async () => {
+    writeFileSync(argsFile, '', 'utf8');
+    const record = manager.startRun(skillWorkflow, { task: '437' });
+    // What PATCH /api/runs/:id does, synchronously after creation:
+    store.updateRun(record.id, { title: 'My name', titleSummary: 'My name', titleOrigin: 'user' });
+
+    const terminal = new Set(['done', 'review', 'failed', 'cancelled']);
+    const deadline = Date.now() + 20_000;
+    while (!terminal.has(store.getRun(record.id)?.status ?? '')) {
+      if (Date.now() > deadline) throw new Error('run did not finish in time');
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    // Settle window for the async namer to (not) apply.
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    const after = store.getRun(record.id);
+    expect(after?.titleSummary).toBe('My name');
+    expect(after?.titleOrigin).toBe('user');
+  }, 30_000);
+
   it('override: replaces the config default in argv and in the record echo', async () => {
     const id = await runToEnd({ task: 'do the thing', systemPrompt: OVERRIDE_PROMPT });
     const record = store.getRun(id);
@@ -207,11 +304,19 @@ describe('systemPrompt end-to-end (dry run)', () => {
     const id = await runToEnd({ task: '432' }, skillWorkflow);
     const record = store.getRun(id);
 
-    expect(record?.title).toBe('/om-auto-review-pr 432');
-    // The display title remains LLM-derived after a turn; the skill-aware
-    // title above is only the queued fallback.
-    expect(record?.titleSummary).toBeDefined();
-    expect(record?.titleSummary).not.toBe(record?.title);
+    expect(record?.title).toBe('432: /om-auto-review-pr');
+    // Step-0 extraction persisted the reference (skill-hint → PR).
+    expect(record?.prNumber).toBe(432);
+    // The fire-and-forget namer replaces the heuristic with the mock's short
+    // title (task auto-naming spec) — async, so poll for it.
+    const deadline = Date.now() + 15_000;
+    while (store.getRun(id)?.titleSummary !== '432: implementing cr fixes') {
+      if (Date.now() > deadline) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    const named = store.getRun(id);
+    expect(named?.titleSummary).toBe('432: implementing cr fixes');
+    expect(named?.titleOrigin).toBe('auto');
 
     const skillPrompt = skillSystemPrompt({
       name: 'om-auto-review-pr',

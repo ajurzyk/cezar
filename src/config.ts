@@ -39,6 +39,13 @@ const configSchema = z.object({
   defaultRunner: z.enum(['claude', 'codex', 'opencode']).default('claude'),
   /** Model for the chain planner (spec 008) — cheap but reliable at JSON. */
   plannerModel: z.string().min(1).default('sonnet'),
+  /** Model for the task namer (spec 2026-07-17-task-auto-naming) — the cheapest
+   *  alias that answers strict JSON; naming is fire-and-forget and never blocks. */
+  namerModel: z.string().min(1).default('haiku'),
+  /** Live title updates: refresh the display title through the namer on each
+   *  turn end. Absent = the `CEZ_TITLE_UPDATES` env decides (default ON — owner
+   *  decision on PR #479). */
+  liveTitleUpdates: z.boolean().optional(),
   /**
    * Branch task worktrees fork from and draft PRs target (e.g. `develop`).
    * Unset = the branch currently checked out. Settable from the Repo tab.
