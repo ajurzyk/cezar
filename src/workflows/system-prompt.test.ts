@@ -266,7 +266,10 @@ describe('the global follow-up gate (dry run)', () => {
     const terminal = new Set(['done', 'review', 'failed', 'cancelled']);
     const deadline = Date.now() + 20_000;
     while (!terminal.has(store.getRun(record.id)?.status ?? '')) {
-      if (Date.now() > deadline) throw new Error('run did not finish in time');
+      if (Date.now() > deadline)
+        throw new Error(
+          `run did not finish in time: ${JSON.stringify(store.getRun(record.id), null, 2)}`,
+        );
       await new Promise((r) => setTimeout(r, 100));
     }
     return record.id;
