@@ -34,6 +34,11 @@ pracę ("agent robi, ja dalej koduję u siebie").
    `git add -A && git commit --no-verify -m "cez autosave"` w worktree —
    postęp agenta zawsze odzyskiwalny z historii. Commity autosave squashuje
    krok PR (009) — na razie zostają w branchu.
+   *Aneks (2026-07-17, #471):* okresowy timer 90 s jest **opt-in** przez
+   `CEZ_AUTOSAVE=1` (domyślnie wyłączony — commity autosave w środku runa
+   zaśmiecały historię PR-ów). Flushe na końcu tury i przed draft-PR zostają
+   bez zmian, więc branch nadal kończy z pełnym stanem, a diff/review/PR
+   działają jak dotąd.
 3. **Kolejka + `maxParallel`**: `RunManager` dostaje prostą kolejkę
    (`queue: runId[]`, `pump()` po każdym starcie/końcu); limit z config.json
    (`maxParallel`, default **2**); zbiór `starting` łatający race przy
