@@ -34,7 +34,10 @@ export function ContinueAction({ run }: { run: ApiRun }) {
   const [pickedModel, setPickedModel] = useState<string | null>(null)
 
   const runners = availableRunners(health.data?.checks ?? [])
-  const currentRunner = (run.runner ?? health.data?.defaultRunner ?? 'claude') as Runner
+  // Mirrors the server's continue-path resolution (`record?.runner ?? 'claude'`): a run
+  // without a persisted runner predates the choice and continues on claude — NOT on the
+  // host's defaultRunner, which only applies to brand-new tasks.
+  const currentRunner = (run.runner ?? 'claude') as Runner
   const runner = resolveRunner(pickedRunner, runners, currentRunner)
   const models = modelsForRunner(runner)
   // While the runner is unchanged, the model pill starts on the run's own pin; switching the

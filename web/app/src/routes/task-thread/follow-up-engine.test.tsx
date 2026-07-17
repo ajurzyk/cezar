@@ -145,6 +145,33 @@ describe('follow-up ContinueAction runner/model selection (#401)', () => {
     expect(continueBody()).toEqual({ runner: 'codex', model: 'gpt-5.1-codex' })
   })
 
+  it('a legacy run (no persisted runner) shows claude — the server continues it on claude, not defaultRunner', async () => {
+    serve({ ...HEALTH_MULTI, defaultRunner: 'codex' })
+    renderAction(makeRun({ runner: undefined }))
+    const pill = await screen.findByRole('button', { name: 'Runner' })
+    expect(pill.textContent).toContain('claude')
+  })
+
+  it('a model-only pick on a legacy run can only send a claude model — never a codex one', async () => {
+    serve({ ...HEALTH_MULTI, defaultRunner: 'codex' })
+    renderAction(makeRun({ runner: undefined }))
+    fireEvent.pointerDown(await screen.findByRole('button', { name: 'Model' }))
+    const options = await screen.findAllByRole('menuitemradio')
+    // The menu lists claude presets, so a codex model id cannot even be picked.
+    expect(options.some((o) => o.textContent?.includes('gpt-5.1-codex'))).toBe(false)
+    fireEvent.click(options.find((o) => o.textContent?.includes('opus')) as HTMLElement)
+    fireEvent.click(screen.getByRole('button', { name: /continue/i }))
+    await waitFor(() => expect(continueBody()).toBeDefined())
+    expect(continueBody()).toEqual({ model: 'opus' })
+  })
+
+  it("a legacy run's pinned model stays the pill default — keyed under claude, not defaultRunner", async () => {
+    serve({ ...HEALTH_MULTI, defaultRunner: 'codex' })
+    renderAction(makeRun({ runner: undefined, model: 'opus' }))
+    const pill = await screen.findByRole('button', { name: 'Model' })
+    expect(pill.textContent).toContain('opus')
+  })
+
   it('hides the runner pill on a single-backend host — the model pill stays', async () => {
     serve({
       ...HEALTH_MULTI,
