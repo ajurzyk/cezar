@@ -11,11 +11,11 @@ import {
   TriangleAlertIcon,
 } from 'lucide-react'
 import { useState, type DragEvent, type ReactNode } from 'react'
-import { Link, useParams } from 'react-router'
+import { Link, Navigate, useParams } from 'react-router'
 
-import { getGithub } from '@/api/client'
-import { queryKeys, useGithub, useSkills, useWorkflows } from '@/api/queries'
-import type { GithubItem } from '@/api/types'
+import { getGithub, putUiState } from '@/api/client'
+import { queryKeys, useGithub, useSkills, useUiState, useWorkflows } from '@/api/queries'
+import type { GithubItem, UiState } from '@/api/types'
 import { CenteredState } from '@/components/centered-state'
 import { GithubIcon } from '@/components/icons'
 import { TabLink } from '@/components/tab-link'
@@ -37,7 +37,8 @@ import { HandToAgent } from './hand-to-agent'
  * functionally the legacy tab — issues/PRs lists, a detail pane with markdown body + label
  * chips + checks badge, drag-to-composer, hand-to-agent — with the chip walls replaced by
  * searchable cmdk dropdowns (#385) and every surface a URL: `/github` (issues),
- * `/github/prs`, `/github/issues/:n`, `/github/prs/:n`.
+ * `/github/prs`, `/github/issues/:n`, `/github/prs/:n`. PR rows also carry a compact checks
+ * glyph (#400) — the same tones as the detail pane's `ChecksBadge`, just the symbol.
  *
  * Data keeps the legacy two-shot load (feedback 2026-07-11: the 30-item `gh` default hid the
  * rest): the fast default batch paints the tab, then a background everything-open fetch
@@ -58,6 +59,23 @@ const FULL_LIMIT = 1000
 
 export type GithubView = 'issues' | 'prs'
 
+/**
+ * `/github`'s index (#417): restores the last-selected sub-tab instead of always defaulting
+ * to Issues. Only the bare path redirects — `/github/prs` and the `:n` deep links always
+ * render exactly what their URL says, memory or not, so a pasted link never surprises.
+ *
+ * A one-way check, not a live sync: it reads `ui-state.json` once per mount and either renders
+ * Issues or hands off to `/github/prs`. It never redirects back to Issues from `/github/prs` —
+ * that URL is authoritative on its own.
+ */
+export function GithubIndexRoute() {
+  const uiState = useUiState()
+  if (uiState.data?.githubView === 'prs') {
+    return <Navigate to="/github/prs" replace />
+  }
+  return <GithubRoute view="issues" />
+}
+
 export function GithubRoute({ view }: { view: GithubView }) {
   const { n } = useParams()
   const fast = useGithub()
@@ -69,6 +87,24 @@ export function GithubRoute({ view }: { view: GithubView }) {
   const isFull = full.data?.available === true
 
   const queryClient = useQueryClient()
+
+  // Persist the tab choice (#417), mirroring the appearance provider's read-then-write
+  // pattern. The cache is patched BEFORE the PUT resolves — not just for optimism, but so
+  // `GithubIndexRoute`'s check (which reads the same cache) sees the new choice immediately
+  // if the click just navigated `/github/prs` → `/github`: without the eager patch it would
+  // still read the stale "prs" and bounce the Issues tab straight back.
+  const saveGithubView = (next: GithubView) => {
+    queryClient.setQueryData<UiState>(queryKeys.uiState, (prev) => ({ ...prev, githubView: next }))
+    putUiState({ githubView: next })
+      .then((merged) => queryClient.setQueryData(queryKeys.uiState, merged))
+      .catch((error: unknown) => {
+        toast(error instanceof Error ? error.message : String(error), { tone: 'danger' })
+        // The write failed — fall back to the server's truth rather than keep the tab
+        // claiming a persistence it never got.
+        void queryClient.invalidateQueries({ queryKey: queryKeys.uiState })
+      })
+  }
+
   const refresh = useMutation({
     mutationFn: () => getGithub({ refresh: true }),
     onSuccess: (data) => {
@@ -187,10 +223,10 @@ export function GithubRoute({ view }: { view: GithubView }) {
             </button>
           </div>
           <div data-slot="gh-tabs" className="mt-2.5 flex items-end gap-1">
-            <TabLink to="/github" active={view === 'issues'}>
+            <TabLink to="/github" active={view === 'issues'} onClick={() => saveGithubView('issues')}>
               Issues · {countLabel(gh.issues.length, isFull)}
             </TabLink>
-            <TabLink to="/github/prs" active={view === 'prs'}>
+            <TabLink to="/github/prs" active={view === 'prs'} onClick={() => saveGithubView('prs')}>
               Pull requests · {countLabel(gh.prs.length, isFull)}
             </TabLink>
           </div>
@@ -341,6 +377,7 @@ function GithubRow({
           <span>#{item.number}</span>
           <span className="min-w-0 truncate">{item.author}</span>
           <span>{shortAge(item.createdAt)}</span>
+          {item.checks ? <ChecksGlyph checks={item.checks} /> : null}
           {queued ? (
             <span data-slot="gh-queued-flag" className="font-sans font-medium text-violet">
               ↗ run queued
@@ -497,7 +534,7 @@ function GithubDetail({
           {item.labels.map((label) => (
             <LabelChip key={label} label={label} color={colors[label]} />
           ))}
-          {item.checks ? <ChecksBadge checks={item.checks} /> : null}
+          {item.checks ? <ChecksBadge checks={item.checks} url={item.url} /> : null}
         </div>
       ) : null}
 
@@ -514,20 +551,57 @@ function GithubDetail({
   )
 }
 
-/** The checks badge — the legacy tab's three phrases, tinted by outcome. */
-function ChecksBadge({ checks }: { checks: NonNullable<GithubItem['checks']> }) {
+/** Glyph + tone shared by the list row's compact indicator and the detail pane's full badge
+ *  (#400) — one source of truth so the two surfaces can't drift out of sync. */
+type Checks = NonNullable<GithubItem['checks']>
+const CHECKS_GLYPH: Record<Checks, string> = { passing: '✓', failing: '✗', pending: '○' }
+const CHECKS_TONE: Record<Checks, string> = {
+  passing: 'text-success',
+  failing: 'text-danger',
+  pending: 'text-muted-foreground',
+}
+
+/** The checks badge — the legacy tab's three phrases, tinted by outcome. Links out
+ *  to the PR's checks tab on GitHub (issue #415) when a URL is available. */
+function ChecksBadge({ checks, url }: { checks: Checks; url?: string }) {
+  const className = cn('text-[11px] font-medium', CHECKS_TONE[checks], url && 'hover:underline')
+  const label = `${CHECKS_GLYPH[checks]} checks ${checks}`
+
+  if (!url) {
+    return (
+      <span data-slot="gh-checks" data-checks={checks} className={className}>
+        {label}
+      </span>
+    )
+  }
+
   return (
-    <span
+    <a
+      href={`${url}/checks`}
+      target="_blank"
+      rel="noopener noreferrer"
       data-slot="gh-checks"
       data-checks={checks}
-      className={cn(
-        'text-[11px] font-medium',
-        checks === 'passing' && 'text-success',
-        checks === 'failing' && 'text-danger',
-        checks === 'pending' && 'text-muted-foreground',
-      )}
+      className={className}
     >
-      {checks === 'passing' ? '✓ checks passing' : checks === 'failing' ? '✗ checks failing' : '○ checks pending'}
+      {label}
+    </a>
+  )
+}
+
+/** The PR row's compact checks indicator (#400) — same tones as `ChecksBadge`, just the glyph
+ *  (the row is too narrow for the full phrase). Issues never have `checks`, so this only ever
+ *  shows up on PR rows. */
+function ChecksGlyph({ checks }: { checks: Checks }) {
+  return (
+    <span
+      data-slot="gh-row-checks"
+      data-checks={checks}
+      title={`checks ${checks}`}
+      aria-label={`checks ${checks}`}
+      className={cn('shrink-0 font-sans text-[11px] font-semibold', CHECKS_TONE[checks])}
+    >
+      {CHECKS_GLYPH[checks]}
     </span>
   )
 }

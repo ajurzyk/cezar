@@ -45,6 +45,9 @@ export type AppShellProps = {
    *  Defaults to shown so the presentational shell stays renderable alone; the container
    *  passes the health payload's truth. */
   forgeAvailable?: boolean
+  /** Global chrome banner (#391's `SkillsBanner`), rendered in its own row above the scroller.
+   *  Absent renders nothing — the slot is generic, not skills-specific. */
+  banner?: ReactNode
 }
 
 /**
@@ -52,9 +55,14 @@ export type AppShellProps = {
  *
  * Layout contract (spec, "App shell & navigation"):
  *  - `h-dvh` (never `100vh` — that ignores mobile browser chrome and clips the composer).
- *  - The main column is a `auto 1fr auto` grid — top bar / scroller / composer dock. Rows are
- *    placed explicitly (`row-start-*`) so hiding the mobile bar at `md` leaves its row empty
- *    instead of promoting the scroller into the `auto` row and collapsing it.
+ *  - The main column is a `auto auto 1fr auto` grid — top bar / banner / scroller / composer
+ *    dock. Rows are placed explicitly (`row-start-*`) so hiding the mobile bar at `md`, or
+ *    passing no `banner`, leaves that row empty instead of promoting the scroller into the
+ *    `auto` row and collapsing it.
+ *  - The banner is a peer row of the scroller, never a child of it: routed views own
+ *    `sticky top-0` headers (at both `z-10` and `z-20`), so a banner sticking to the same edge
+ *    inside `main` would tie with them in the stacking order and be painted over. Its own row
+ *    keeps it visible while the view scrolls under it, with no z-index coupling to any route.
  *  - `overflow-hidden` here and on `body` means the document never scrolls; only the main
  *    region does, with `overscroll-contain` so a thread at its end doesn't rubber-band the page.
  *  - Safe-area insets are the shell's job, not each view's: left/right on the root, top on the
@@ -72,6 +80,7 @@ export function AppShell({
   taskQuickList,
   toolsMenu,
   forgeAvailable = true,
+  banner,
 }: AppShellProps) {
   const { pathname } = useLocation()
   const activeTo = activeNavPath(pathname)
@@ -120,18 +129,24 @@ export function AppShell({
         <Sidebar {...nav} />
         <MobileNavDrawer {...nav} onNavigate={() => setMenuOpen(false)} />
 
-        <div className="grid min-w-0 flex-1 grid-rows-[auto_1fr_auto] overflow-hidden">
+        <div className="grid min-w-0 flex-1 grid-rows-[auto_auto_1fr_auto] overflow-hidden">
           <MobileTopBar title={current?.label ?? 'cezar'} />
 
-          <main data-slot="main" className="row-start-2 min-h-0 overflow-y-auto overscroll-contain">
+          {banner ? (
+            <div data-slot="banner-slot" className="row-start-2">
+              {banner}
+            </div>
+          ) : null}
+
+          <main data-slot="main" className="row-start-3 min-h-0 overflow-y-auto overscroll-contain">
             {children}
           </main>
 
-          {/* Row 3: the composer dock (thread reply, Step R3). Empty today, but it still carries
+          {/* Row 4: the composer dock (thread reply, Step R3). Empty today, but it still carries
               the bottom safe-area gutter so the scroller never runs under the home indicator. */}
           <div
             data-slot="composer"
-            className="row-start-3 pb-[env(safe-area-inset-bottom)]"
+            className="row-start-4 pb-[env(safe-area-inset-bottom)]"
           />
         </div>
       </div>

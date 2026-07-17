@@ -50,11 +50,11 @@ const EVENT_NAMES = ['run', 'run-deleted', 'todos', 'usage', 'ping'] as const
  * - runs: the summaries the stream patches (`invalidate(['runs'])` covers the list and every
  *   single-run query under it — that is what the hierarchical keys in queries.ts are for);
  * - todos: the inbox the `todos` event replaces;
- * - health: the repo/branch chip. Health is deliberately *not* on the stream — nothing server-side
- *   watches for a branch switch — so a chip read once at boot goes stale the moment the reader
- *   checks out another branch (#369, the legacy UI's bug). Refetching it here is the honest
- *   mechanism: one local request when we already know we were away, rather than a poll that asks
- *   a question nobody has, forever.
+ * - health: the repo/branch chip. Health is not on the stream — nothing server-side watches for a
+ *   branch switch — so this reconcile alone only catches a switch across a reconnect or a tab
+ *   coming back; a checkout in a foreground, connected tab is covered by `useHealth`'s own poll
+ *   instead (#369). Invalidating it here too costs nothing extra and keeps this list a complete
+ *   "everything the stream can leave stale" note.
  *
  * `invalidateQueries` and not `refetchQueries`: it refetches what is actually rendered and marks
  * the rest stale for whenever it next mounts. A background tab with fifty cached runs should not

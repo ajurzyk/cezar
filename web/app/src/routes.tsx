@@ -52,6 +52,11 @@ const RepoGitRoute = lazy(() =>
 const GithubRoute = lazy(() =>
   import('./routes/github/github').then((m) => ({ default: m.GithubRoute })),
 )
+/** `/github`'s index (#417) — restores the last-selected tab. Same chunk as `GithubRoute`,
+ *  just a second named export off the same lazy import. */
+const GithubIndexRoute = lazy(() =>
+  import('./routes/github/github').then((m) => ({ default: m.GithubIndexRoute })),
+)
 
 /** Lazy because the builder carries dnd-kit (R6 Step 1.6) — drag machinery only this surface
  *  uses, so only this surface pays for it. */
@@ -171,12 +176,14 @@ export function AppRoutes() {
       />
       {/* The GitHub tab (R6 Step 1.1): issues and PRs are separate list URLs, each item a
           deep link. The nav item is forge-gated in the shell; the routes stay reachable so a
-          pasted link renders the honest unavailable explainer instead of a 404. */}
+          pasted link renders the honest unavailable explainer instead of a 404. The bare
+          `/github` is the one URL that restores the last-selected tab (#417) — `/github/prs`
+          and the `:n` deep links are always exactly what they say. */}
       <Route
         path="/github"
         element={
           <Suspense fallback={<GithubLoading />}>
-            <GithubRoute view="issues" />
+            <GithubIndexRoute />
           </Suspense>
         }
       />
