@@ -201,6 +201,35 @@ describe('the GitHub tab lists', () => {
     expect(rows()[0]?.getAttribute('href')).toBe('/github/prs/137')
   })
 
+  it('a PR row shows a checks glyph tinted by outcome (#400); an issue row shows none', async () => {
+    const passing: GithubItem = { ...PR_137, number: 201, url: 'u201', checks: 'passing' }
+    const pending: GithubItem = { ...PR_137, number: 202, url: 'u202', checks: 'pending' }
+    const none: GithubItem = { ...PR_137, number: 203, url: 'u203', checks: null }
+    stubFetch({
+      'GET /api/github': () => jsonResponse({ ...GITHUB, prs: [PR_137, passing, pending, none] }),
+    })
+    renderAt('/github/prs')
+
+    await waitFor(() => expect(rows()).toHaveLength(4))
+    const glyph = (number: string) =>
+      document.querySelector(`[data-slot="gh-row"][data-number="${number}"] [data-slot="gh-row-checks"]`)
+
+    expect(glyph('137')?.getAttribute('data-checks')).toBe('failing')
+    expect(glyph('137')?.textContent).toBe('✗')
+    expect(glyph('201')?.getAttribute('data-checks')).toBe('passing')
+    expect(glyph('201')?.textContent).toBe('✓')
+    expect(glyph('202')?.getAttribute('data-checks')).toBe('pending')
+    expect(glyph('202')?.textContent).toBe('○')
+    expect(glyph('203')).toBeNull()
+
+    // Issues never carry `checks` — no glyph on their rows either.
+    cleanup()
+    stubFetch()
+    renderAt('/github')
+    await waitFor(() => expect(rows().length).toBeGreaterThan(0))
+    expect(document.querySelector('[data-slot="gh-row-checks"]')).toBeNull()
+  })
+
   it('counts at the fast-batch cap render as 30+ until the full fetch lands', async () => {
     const many: GithubData = {
       ...GITHUB,

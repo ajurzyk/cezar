@@ -37,7 +37,8 @@ import { HandToAgent } from './hand-to-agent'
  * functionally the legacy tab — issues/PRs lists, a detail pane with markdown body + label
  * chips + checks badge, drag-to-composer, hand-to-agent — with the chip walls replaced by
  * searchable cmdk dropdowns (#385) and every surface a URL: `/github` (issues),
- * `/github/prs`, `/github/issues/:n`, `/github/prs/:n`.
+ * `/github/prs`, `/github/issues/:n`, `/github/prs/:n`. PR rows also carry a compact checks
+ * glyph (#400) — the same tones as the detail pane's `ChecksBadge`, just the symbol.
  *
  * Data keeps the legacy two-shot load (feedback 2026-07-11: the 30-item `gh` default hid the
  * rest): the fast default batch paints the tab, then a background everything-open fetch
@@ -376,6 +377,7 @@ function GithubRow({
           <span>#{item.number}</span>
           <span className="min-w-0 truncate">{item.author}</span>
           <span>{shortAge(item.createdAt)}</span>
+          {item.checks ? <ChecksGlyph checks={item.checks} /> : null}
           {queued ? (
             <span data-slot="gh-queued-flag" className="font-sans font-medium text-violet">
               ↗ run queued
@@ -549,17 +551,21 @@ function GithubDetail({
   )
 }
 
+/** Glyph + tone shared by the list row's compact indicator and the detail pane's full badge
+ *  (#400) — one source of truth so the two surfaces can't drift out of sync. */
+type Checks = NonNullable<GithubItem['checks']>
+const CHECKS_GLYPH: Record<Checks, string> = { passing: '✓', failing: '✗', pending: '○' }
+const CHECKS_TONE: Record<Checks, string> = {
+  passing: 'text-success',
+  failing: 'text-danger',
+  pending: 'text-muted-foreground',
+}
+
 /** The checks badge — the legacy tab's three phrases, tinted by outcome. Links out
  *  to the PR's checks tab on GitHub (issue #415) when a URL is available. */
-function ChecksBadge({ checks, url }: { checks: NonNullable<GithubItem['checks']>; url?: string }) {
-  const className = cn(
-    'text-[11px] font-medium',
-    checks === 'passing' && 'text-success',
-    checks === 'failing' && 'text-danger',
-    checks === 'pending' && 'text-muted-foreground',
-    url && 'hover:underline',
-  )
-  const label = checks === 'passing' ? '✓ checks passing' : checks === 'failing' ? '✗ checks failing' : '○ checks pending'
+function ChecksBadge({ checks, url }: { checks: Checks; url?: string }) {
+  const className = cn('text-[11px] font-medium', CHECKS_TONE[checks], url && 'hover:underline')
+  const label = `${CHECKS_GLYPH[checks]} checks ${checks}`
 
   if (!url) {
     return (
@@ -580,5 +586,22 @@ function ChecksBadge({ checks, url }: { checks: NonNullable<GithubItem['checks']
     >
       {label}
     </a>
+  )
+}
+
+/** The PR row's compact checks indicator (#400) — same tones as `ChecksBadge`, just the glyph
+ *  (the row is too narrow for the full phrase). Issues never have `checks`, so this only ever
+ *  shows up on PR rows. */
+function ChecksGlyph({ checks }: { checks: Checks }) {
+  return (
+    <span
+      data-slot="gh-row-checks"
+      data-checks={checks}
+      title={`checks ${checks}`}
+      aria-label={`checks ${checks}`}
+      className={cn('shrink-0 font-sans text-[11px] font-semibold', CHECKS_TONE[checks])}
+    >
+      {CHECKS_GLYPH[checks]}
+    </span>
   )
 }
