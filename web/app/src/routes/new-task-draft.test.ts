@@ -15,6 +15,7 @@ describe('the new-task draft store', () => {
       planFirst: false,
       worktree: null,
       autonomous: null,
+      generateFollowups: null,
     })
   })
 
@@ -28,10 +29,12 @@ describe('the new-task draft store', () => {
       planFirst: false,
       worktree: false,
       autonomous: null,
+      generateFollowups: false,
     })
     const first = readDraft()
     expect(first.text).toBe('fix it')
     expect(first.worktree).toBe(false)
+    expect(first.generateFollowups).toBe(false)
     first.text = 'mutated'
     expect(readDraft().text).toBe('fix it')
   })
@@ -46,6 +49,7 @@ describe('the new-task draft store', () => {
       planFirst: true,
       worktree: null,
       autonomous: null,
+      generateFollowups: true,
     })
     clearDraftText()
     expect(readDraft()).toEqual({
@@ -57,6 +61,7 @@ describe('the new-task draft store', () => {
       planFirst: true,
       worktree: null,
       autonomous: null,
+      generateFollowups: true,
     })
   })
 
@@ -70,6 +75,7 @@ describe('the new-task draft store', () => {
       planFirst: true,
       worktree: false,
       autonomous: null,
+      generateFollowups: false,
     })
     // A fresh page has no in-memory cache but keeps localStorage: resetDraft removes storage, so
     // instead drop only the cache by round-tripping through a raw storage read.
@@ -79,6 +85,7 @@ describe('the new-task draft store', () => {
       variants: 2,
       worktree: false,
       autonomous: null,
+      generateFollowups: false,
       planFirst: true,
     })
   })
@@ -96,6 +103,7 @@ describe('the new-task draft store', () => {
       planFirst: false,
       worktree: null,
       autonomous: null,
+      generateFollowups: null,
     })
 
     resetDraft()
@@ -109,6 +117,7 @@ describe('the new-task draft store', () => {
       planFirst: false,
       worktree: null,
       autonomous: null,
+      generateFollowups: null,
     })
   })
 })

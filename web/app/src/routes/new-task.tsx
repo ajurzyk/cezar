@@ -33,7 +33,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { toast } from '@/components/ui/toaster'
-import { isProjectSkill, orderSkillsByRecency } from '@/lib/skills'
+import { isProjectSkill, multiWordFilter, orderSkillsByRecency, skillKeywords } from '@/lib/skills'
 import { submitShortcutHint } from '@/lib/use-submit-shortcut'
 import { cn } from '@/lib/utils'
 
@@ -139,6 +139,11 @@ export function NewTaskRoute() {
   const autonomousOn = draft.planFirst
     ? false
     : (draft.autonomous ?? (source.source === 'skill' ? true : (uiState.data?.lastAutonomous ?? false)))
+
+  // Follow-up generation is opt-out. A draft choice wins, then the remembered UI preference;
+  // absent state from older installs keeps the historical enabled behavior.
+  const generateFollowupsOn =
+    draft.generateFollowups ?? uiState.data?.lastGenerateFollowups ?? true
 
   // ---- plan mode (#383 + spec 008) ----------------------------------------------------------
   const [plan, setPlan] = useState<PendingPlan | null>(null)
@@ -248,6 +253,7 @@ export function NewTaskRoute() {
         images,
         worktree: worktreeOn,
         autonomous: autonomousOn,
+        generateFollowups: generateFollowupsOn,
       }),
     )
     // Remember what was actually run so the next visit preselects it (legacy
@@ -258,6 +264,7 @@ export function NewTaskRoute() {
       recentSources: pushRecentSource(recentSources, source),
       ...(worktreeToggleShown ? { lastWorktree: worktreeOn } : {}),
       lastAutonomous: autonomousOn,
+      lastGenerateFollowups: generateFollowupsOn,
     })
       .then(() => queryClient.invalidateQueries({ queryKey: queryKeys.uiState }))
       .catch(() => {})
@@ -281,8 +288,12 @@ export function NewTaskRoute() {
           runnerCount: runners.length,
           variants,
           images: plan.images,
+          generateFollowups: generateFollowupsOn,
         }),
       )
+      void putUiState({ lastGenerateFollowups: generateFollowupsOn })
+        .then(() => queryClient.invalidateQueries({ queryKey: queryKeys.uiState }))
+        .catch(() => {})
       clearDraftText()
       setPlan(null)
       void queryClient.invalidateQueries({ queryKey: queryKeys.runs.all })
@@ -382,6 +393,10 @@ export function NewTaskRoute() {
                 on={autonomousOn}
                 disabled={draft.planFirst}
                 onChange={(on) => update({ autonomous: on })}
+              />
+              <GenerateFollowupsToggle
+                on={generateFollowupsOn}
+                onChange={(on) => update({ generateFollowups: on })}
               />
               {repo.data ? <BaseBranchPill repo={repo.data} /> : null}
             </>
@@ -484,6 +499,39 @@ function AutonomousToggle({
   )
 }
 
+/** Follow-up toggle: checked lets agents append newly discovered work to the task inbox.
+ *  Handoff journaling remains active either way. */
+function GenerateFollowupsToggle({
+  on,
+  onChange,
+}: {
+  on: boolean
+  onChange: (on: boolean) => void
+}) {
+  return (
+    <button
+      type="button"
+      role="checkbox"
+      aria-checked={on}
+      data-slot="generate-followups-toggle"
+      onClick={() => onChange(!on)}
+      title={
+        on
+          ? 'Agents can add newly discovered follow-up work to the task inbox'
+          : 'Follow-up generation is off; agents still maintain the handoff journal'
+      }
+      className={cn(chipClass, on && 'border-primary/60 text-foreground')}
+    >
+      {on ? (
+        <CheckIcon aria-hidden="true" className="size-3 shrink-0 text-primary" />
+      ) : (
+        <SquareIcon aria-hidden="true" className="size-3 shrink-0 text-soft-foreground" />
+      )}
+      Follow-ups
+    </button>
+  )
+}
+
 /** The mockup's `.chip`: a quiet bordered pill that darkens on hover. */
 const chipClass =
   'inline-flex h-[26px] items-center gap-1.5 rounded-full border border-border bg-card px-2.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-55'
@@ -510,6 +558,7 @@ function SourcePill({
 }) {
   const [open, setOpen] = useState(false)
   const [preview, setPreview] = useState<Skill | null>(null)
+  const listRef = useRef<HTMLDivElement>(null)
   const project = skills.filter(isProjectSkill)
   const global = skills.filter((skill) => !isProjectSkill(skill))
   const pick = (next: TaskSource) => {
@@ -524,7 +573,7 @@ function SourcePill({
         key={skill.path}
         // The path suffix keeps values unique when a project skill shadows a global one.
         value={`skill ${skill.name} ${skill.path}`}
-        keywords={skill.description ? [skill.description] : undefined}
+        keywords={skillKeywords(skill.name, skill.description)}
         data-slot="source-option"
         data-source-kind="skill"
         data-source-ref={skill.name}
@@ -585,9 +634,9 @@ function SourcePill({
           sideOffset={8}
           className="w-[336px] max-w-[calc(100vw-2rem)] p-0"
         >
-          <Command>
-            <CommandInput placeholder="search skills & workflows…" />
-            <CommandList data-slot="source-menu" className="max-h-72">
+          <Command filter={multiWordFilter}>
+            <CommandInput placeholder="search skills & workflows…" onInput={() => listRef.current?.scrollTo(0, 0)} />
+            <CommandList ref={listRef} data-slot="source-menu" className="max-h-72">
               <CommandEmpty>Nothing matches.</CommandEmpty>
               {/* Project skills lead, Global trails everything — the closer a skill lives
                   to the repo, the more likely it's the one being picked. */}
@@ -604,7 +653,7 @@ function SourcePill({
                       <CommandItem
                         key={workflow.name}
                         value={`workflow ${workflow.name}`}
-                        keywords={workflow.description ? [workflow.description] : undefined}
+                        keywords={skillKeywords(workflow.name, workflow.description)}
                         data-slot="source-option"
                         data-source-kind="workflow"
                         data-source-ref={workflow.name}

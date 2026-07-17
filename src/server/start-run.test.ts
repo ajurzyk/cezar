@@ -60,6 +60,18 @@ describe('POST /api/runs systemPrompt', () => {
     expect(captured?.systemPrompt).toBeUndefined();
   });
 
+  it('forwards an explicit generateFollowups=false choice', async () => {
+    const res = await post({ ...base, generateFollowups: false });
+    expect(res.status).toBe(201);
+    expect(captured?.generateFollowups).toBe(false);
+  });
+
+  it('keeps generateFollowups absent for old clients (enabled by default)', async () => {
+    const res = await post(base);
+    expect(res.status).toBe(201);
+    expect(captured?.generateFollowups).toBeUndefined();
+  });
+
   it('a whitespace-only systemPrompt degrades to absent (not a 400, not an empty string)', async () => {
     const res = await post({ ...base, systemPrompt: '   ' });
     expect(res.status).toBe(201);

@@ -6,8 +6,10 @@ import {
   filterSkills,
   fuzzyMatch,
   isProjectSkill,
+  multiWordFilter,
   orderSkills,
   orderSkillsByRecency,
+  skillKeywords,
   skillUsedBy,
 } from './skills'
 
@@ -106,6 +108,45 @@ describe('filterSkills (#380: filter without re-sorting — project-first surviv
 
   it('no match → empty, never a throw', () => {
     expect(filterSkills(skills, 'zzz')).toEqual([])
+  })
+})
+
+describe('multiWordFilter (#411: multi-keyword search for cmdk)', () => {
+  it('empty search matches everything (score 1)', () => {
+    expect(multiWordFilter('skill om-auto-review-pr', '')).toBe(1)
+    expect(multiWordFilter('skill om-auto-review-pr', '   ')).toBe(1)
+  })
+
+  it('"auto review" matches "om-auto-review-pr" in the value', () => {
+    expect(multiWordFilter('skill om-auto-review-pr /path', 'auto review')).toBeGreaterThan(0)
+  })
+
+  it('"verify ui" matches via keywords (name parts)', () => {
+    expect(
+      multiWordFilter('skill om-auto-verify-pr-ui', 'verify ui', ['om', 'auto', 'verify', 'pr', 'ui']),
+    ).toBeGreaterThan(0)
+  })
+
+  it('every word must match — partial hits return 0', () => {
+    expect(multiWordFilter('skill om-fix /path', 'fix deploy')).toBe(0)
+  })
+
+  it('matching is case-insensitive', () => {
+    expect(multiWordFilter('skill Deploy /path', 'DEPLOY')).toBeGreaterThan(0)
+  })
+})
+
+describe('skillKeywords', () => {
+  it('splits hyphenated names into parts', () => {
+    expect(skillKeywords('om-auto-review-pr')).toEqual(['om', 'auto', 'review', 'pr'])
+  })
+
+  it('includes the description when provided', () => {
+    expect(skillKeywords('om-fix', 'Fix an issue')).toEqual(['om', 'fix', 'Fix an issue'])
+  })
+
+  it('works with a single-word name', () => {
+    expect(skillKeywords('deploy', null)).toEqual(['deploy'])
   })
 })
 

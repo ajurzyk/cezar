@@ -29,7 +29,10 @@ export interface AgentRunSpec {
   images?: ContentBlock[];
   /** The directory the agent runs in — also the only writable root. */
   cwd: string;
-  /** Tool allowlist; the CLI is default-deny for anything not listed. */
+  /** Tool allowlist; the CLI is default-deny for anything not listed — but
+   *  the zero-config default (`DEFAULT_ALLOWED_TOOLS`) includes `Bash`
+   *  unrestricted unless `bashAllowlist` is set, so treat the default as
+   *  full shell access in `cwd`, not a sandboxed allowlist (#430). */
   allowedTools?: string[];
   /** When `Bash` is allowed, restrict it to commands starting with one of these. */
   bashAllowlist?: string[];

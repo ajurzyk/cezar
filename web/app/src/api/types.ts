@@ -72,6 +72,8 @@ export interface RunRecord {
   runner?: Runner
   /** Echo of the extra system prompt the run used (POST override or config default). */
   systemPrompt?: string
+  /** false when the run deliberately disabled follow-up todo generation. Absent means enabled. */
+  generateFollowups?: boolean
   status: RunStatus
   createdAt: string
   startedAt?: string
@@ -79,6 +81,12 @@ export interface RunRecord {
   tokensUsed: number
   costUsd?: number
   pullRequestUrl?: string
+  /** The PR this task is ABOUT (#407) — auto-discovered from conversation references.
+   *  Display tier only: `pullRequestUrl` (the PR this task CREATED) wins, and the
+   *  Draft-PR / Create-PR action gates ignore it. Read via `taskPrUrl()`. */
+  referencedPullRequestUrl?: string
+  /** The referenced tier's working set (distinct PR URLs spotted, capped server-side). */
+  referencedPrCandidates?: string[]
   /** Absent when the run executed in the repo working tree rather than its own worktree. */
   worktreePath?: string
   branch?: string
@@ -420,6 +428,8 @@ export interface TodoItem {
   suggestedSkill?: string
   suggestedArgs?: string
   suggestedPrompt?: string
+  /** Explicit intent; missing infers from suggestedSkill/suggestedPrompt for old files. */
+  runnable?: boolean
   /** Set by the server when "▶ Run" turned this entry into a task. */
   startedTaskId?: string
 }
@@ -480,13 +490,20 @@ export interface UiState {
   lastWorktree?: boolean
   /** The last autonomous choice — remembered like lastWorktree. Absent → off. */
   lastAutonomous?: boolean
+  /** Whether new runs should ask agents to append follow-up work. Absent → on. */
+  lastGenerateFollowups?: boolean
   runsView?: 'list' | 'table'
+  /** The GitHub tab's last-selected sub-tab (#417) — issues or PRs. Absent → issues. */
+  githubView?: 'issues' | 'prs'
   /** Settings → Appearance (redesign R6): accent + density. Theme itself stays in
    *  localStorage (`cez-theme`) — it must pre-paint, and it is per-browser by design. */
   appearance?: { accent?: 'lime' | 'violet'; density?: 'comfortable' | 'compact' | 'ultra' }
   /** Settings → Notifications (redesign R6 1.7): the browser-notification toggle. Off unless
    *  literally `true`. Permission itself is per-browser and never persisted. */
   notifications?: { enabled?: boolean }
+  /** The open-mercato/skills promo banner (#391), dismissed for good. Set once true, never
+   *  unset — server-persisted rather than a cookie so "shown once" holds across browsers. */
+  dismissedSkillsBanner?: boolean
   [key: string]: unknown
 }
 
@@ -514,6 +531,9 @@ export interface CreateRunInput {
   worktree?: boolean
   /** true → autonomous run: never parks at "waiting" for the user; auto-continues until done. */
   autonomous?: boolean
+  /** false → keep the handoff journal but do not expose or request a follow-up todos file.
+   *  Omit for the default (enabled). */
+  generateFollowups?: boolean
 }
 
 export interface MessageInput {

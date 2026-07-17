@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { BOOKMARKLET_PORTS, bookmarkletUrl } from './bookmarklet'
+import { DEFAULT_COCKPIT_ORIGIN, bookmarkletUrl } from './bookmarklet'
 
 /** The program text a browser would actually execute when the bookmarklet is clicked. */
 const program = (url: string) => decodeURIComponent(url.replace(/^javascript:/, ''))
@@ -22,7 +22,21 @@ describe('bookmarkletUrl (spec 011, protected /new deep-link contract)', () => {
   it('a per-skill launcher bakes skill=, the auto flag and the launch key into /new', () => {
     const code = program(bookmarkletUrl('om-fix', true, 'sekret'))
     expect(code).toContain(`q='skill=om-fix&auto=1&key=sekret&ref='`)
-    expect(code).toContain(`'/new?'+q`)
+    expect(code).toContain(`/new?'+q`)
+  })
+
+  it('opens the baked cockpit origin directly — no CSP-blocked localhost fetch', () => {
+    // GitHub's CSP blocks fetch/XHR to localhost, so the launcher must NAVIGATE, not probe.
+    const code = program(bookmarkletUrl('om-fix', true, 'sekret', 'http://localhost:4327'))
+    expect(code).toContain(`open('http://localhost:4327/new?'+q,'_blank')`)
+    expect(code).not.toContain('/api/health')
+    expect(code).not.toContain('fetch(')
+  })
+
+  it('defaults to the cockpit default origin when a caller supplies none', () => {
+    const code = program(bookmarkletUrl('', false, ''))
+    expect(code).toContain(`open('${DEFAULT_COCKPIT_ORIGIN}/new?'+q,'_blank')`)
+    expect(DEFAULT_COCKPIT_ORIGIN).toBe('http://localhost:4321')
   })
 
   it('the page URL rides along as ref= at click time', () => {
@@ -38,18 +52,9 @@ describe('bookmarkletUrl (spec 011, protected /new deep-link contract)', () => {
     expect(code).toContain(`q='skill=bob%27s-skill&auto=0&key=k%27ey&ref='`)
   })
 
-  it('probes the documented cockpit port range via the CORS-open /api/health', () => {
-    const code = program(bookmarkletUrl('', false, ''))
-    expect(code).toContain(`[${BOOKMARKLET_PORTS.join(',')}]`)
-    expect(BOOKMARKLET_PORTS[0]).toBe(4321)
-    expect(BOOKMARKLET_PORTS).toHaveLength(10)
-    expect(code).toContain(`'/api/health'`)
-  })
-
-  it('only fires on GitHub PR/issue pages and matches the repo by remote', () => {
+  it('only fires on GitHub PR/issue pages', () => {
     const code = program(bookmarkletUrl('', false, ''))
     expect(code).toContain('github\\.com')
     expect(code).toContain('(pull|issues)')
-    expect(code).toContain('r.remote.includes(m[1]+') // repo-matching cockpit wins
   })
 })

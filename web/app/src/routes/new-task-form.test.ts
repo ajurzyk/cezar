@@ -196,6 +196,16 @@ describe('buildCreateRunBody — the exact POST /api/runs payloads legacy sends'
     expect(variant.worktree).toBeUndefined()
   })
 
+  it('generateFollowups=false is sent only when follow-up generation is disabled', () => {
+    const base = {
+      task: 't', source: { source: 'skill' as const, ref: 'om-review' }, model: '',
+      runner: 'claude' as const, runnerCount: 1, variants: 1, images: [],
+    }
+    expect(buildCreateRunBody({ ...base, generateFollowups: false }).generateFollowups).toBe(false)
+    expect(buildCreateRunBody({ ...base, generateFollowups: true }).generateFollowups).toBeUndefined()
+    expect(buildCreateRunBody(base).generateFollowups).toBeUndefined()
+  })
+
   it('variants > 1 and images ride along; ×1 and no images are omitted', () => {
     const body = buildCreateRunBody({
       task: 't', source: { source: 'workflow', ref: 'quick-task' }, model: '',

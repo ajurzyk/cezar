@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { createServer } from 'node:net';
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -13,6 +13,7 @@ import { RunManager } from './workflows/run.js';
 import { loadWorkflows } from './workflows/load.js';
 import { startServer } from './server/server.js';
 import { checkForUpdate } from './update-check.js';
+import { printSkillsBanner } from './skills-banner.js';
 
 const HELP = `cezar — local cockpit for AI agent tasks in your repo
 
@@ -20,6 +21,9 @@ Usage:
   cezar                     start the cockpit (server + GUI) for the current repo
   cezar run "<task>"        run a task headless in the terminal
   cezar init                scaffold .ai/cezar/ (example workflow + skill)
+  cezar server-install      interactive wizard to host cezar on a server
+  cezar server-deploy       redeploy a new version (reload the service) + verify
+  cezar server-uninstall    reverse a server-install
 
 Options:
   -p, --port <n>              cockpit port (default 4321)
@@ -27,6 +31,10 @@ Options:
       --workflow <name>       workflow for \`run\` (default: quick-task)
       --model <model>         model override for \`run\`
       --no-open               don't open the browser
+      --platform <id>         server-install target (ubuntu-vps | macosx-ngrok)
+      --yes                   server-install: accept safe defaults (never auto-sudo)
+      --reconfigure <ids>     server-install: force re-run of step id(s), comma-separated
+      --reinstall             server-install: force re-run of every step (full reinstall)
   -h, --help                  show this help
 
 Zero config: uses your logged-in \`claude\` CLI (and \`gh\` for GitHub bits).
@@ -42,6 +50,10 @@ async function main(): Promise<void> {
       workflow: { type: 'string' },
       model: { type: 'string' },
       'no-open': { type: 'boolean', default: false },
+      platform: { type: 'string' },
+      yes: { type: 'boolean', default: false },
+      reconfigure: { type: 'string' },
+      reinstall: { type: 'boolean', default: false },
       help: { type: 'boolean', short: 'h', default: false },
     },
     allowPositionals: true,
@@ -66,6 +78,19 @@ async function main(): Promise<void> {
       return;
     case 'init':
       initCommand(repoRoot);
+      return;
+    case 'server-install':
+      await serverCommand('install', repoRoot, values.platform, {
+        yes: Boolean(values.yes),
+        reconfigure: values.reconfigure,
+        reinstall: Boolean(values.reinstall),
+      });
+      return;
+    case 'server-deploy':
+      await serverCommand('deploy', repoRoot, values.platform, { yes: Boolean(values.yes) });
+      return;
+    case 'server-uninstall':
+      await serverCommand('uninstall', repoRoot, values.platform, { yes: Boolean(values.yes) });
       return;
     default:
       console.error(`unknown command: ${command}\n`);
@@ -125,6 +150,8 @@ async function serveCommand(repoRoot: string, preferredPort: number, openBrowser
   }
   if (port !== preferredPort) console.log(`  (port ${preferredPort} was busy — using ${port})`);
   console.log(`\n  cockpit → ${url}\n`);
+  // Silenced by CEZ_NO_BANNER=1 or by dismissing the cockpit's banner (#391).
+  await printSkillsBanner(repoRoot);
 
   const shutdown = () => {
     store.flush();
@@ -240,6 +267,98 @@ async function runCommand(
   }
   console.log(`\nrun ${final} — ${record?.tokensUsed ?? 0} tokens — details in the cockpit: npx cezar`);
   process.exitCode = final === 'done' || final === 'review' ? 0 : 1;
+}
+
+// ---- server-install / server-uninstall --------------------------------------
+// The whole server-install module (and its @clack/prompts dependency) is loaded
+// lazily here so it never enters the `serve`/`run`/`init` import graph — the
+// runtime server stack stays tiny (AGENTS.md).
+
+/**
+ * Prepend the operator's login-shell PATH to this process's PATH so tool
+ * detection and installs find things in ~/.local/bin, nvm, and other
+ * profile-added dirs even when the installer was launched non-interactively.
+ * Best-effort: a shell that errors or hangs leaves PATH untouched.
+ */
+function augmentPathFromLoginShell(): void {
+  try {
+    const out = execFileSync('bash', ['-lc', 'printf %s "$PATH"'], { timeout: 5000, encoding: 'utf8' });
+    const loginPath = out.split('\n').map((s) => s.trim()).filter(Boolean).pop() ?? '';
+    if (!loginPath) return;
+    const seen = new Set<string>();
+    process.env.PATH = [...loginPath.split(':'), ...(process.env.PATH ?? '').split(':')]
+      .filter((d) => d && !seen.has(d) && seen.add(d))
+      .join(':');
+  } catch {
+    // best effort — keep the existing PATH
+  }
+}
+
+async function serverCommand(
+  mode: 'install' | 'uninstall' | 'deploy',
+  repoRoot: string,
+  platform: string | undefined,
+  flags: { yes: boolean; reconfigure?: string; reinstall?: boolean },
+): Promise<void> {
+  // Detection (claude/gh/codex) and tool installs resolve executables off the
+  // process PATH. When the installer is launched from a non-login shell (an
+  // `ssh host cmd`, a script, a fresh service context), ~/.local/bin and nvm's
+  // bin are absent, so tools the user actually has look "not installed". Merge
+  // the login shell's PATH first so we see exactly what the operator sees.
+  augmentPathFromLoginShell();
+
+  const { getStrategy, availablePlatformIds } = await import('./server-install/strategies.js');
+  const { runInstall, runUninstall, runDeploy } = await import('./server-install/engine.js');
+
+  const ids = availablePlatformIds();
+  // Uninstall and deploy can read the platform from the recorded state when omitted.
+  let chosen = platform;
+  if ((mode === 'uninstall' || mode === 'deploy') && !chosen) {
+    const { loadServerState } = await import('./server-install/state.js');
+    chosen = loadServerState().platform;
+  }
+  if (!chosen) {
+    console.error(`--platform is required. Valid platforms: ${ids.join(', ')}`);
+    process.exitCode = 1;
+    return;
+  }
+  const strategy = getStrategy(chosen);
+  if (!strategy) {
+    console.error(`unknown platform: ${chosen} (valid: ${ids.join(', ')})`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const runOpts = {
+    dryRun: process.env.CEZ_DRY_RUN === '1',
+    assumeYes: flags.yes,
+    reconfigure: new Set((flags.reconfigure ?? '').split(',').map((s) => s.trim()).filter(Boolean)),
+    reinstall: Boolean(flags.reinstall),
+    repoRoot,
+    now: new Date().toISOString(),
+  };
+
+  try {
+    const result =
+      mode === 'install'
+        ? await runInstall(strategy, runOpts)
+        : mode === 'deploy'
+          ? await runDeploy(strategy, runOpts)
+          : await runUninstall(strategy, runOpts);
+    if (mode === 'install' && result.status === 'complete') {
+      console.log(`\n  cezar server-install (${chosen}) complete.`);
+      console.log(`  Redeploy a new version any time with: cezar server-deploy --platform ${chosen}\n`);
+    } else if (mode === 'deploy' && result.status === 'complete') {
+      console.log(`\n  cezar server-deploy (${chosen}) complete — the service was reloaded and verified.\n`);
+    } else if (mode === 'uninstall' && result.status === 'complete') {
+      console.log(`\n  cezar server-uninstall (${chosen}) complete — the changes it made were reversed.\n`);
+    }
+    // complete + cancelled (resumable) exit 0; failed exits 1.
+    process.exitCode = result.status === 'failed' ? 1 : 0;
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exitCode = 1;
+  }
 }
 
 // ---- init --------------------------------------------------------------------

@@ -47,8 +47,10 @@ export interface ClaudeCliRunnerOptions {
 /**
  * `AgentRunner` over the Claude Code CLI in headless stream-json mode. Auth =
  * the host's logged-in Pro/Max subscription (no API key needed). Sandboxing is
- * `--allowedTools` (default-deny) + running inside the repo `cwd`; `Bash` is
- * narrowed to `Bash(<prefix>:*)` patterns when `bashAllowlist` is set.
+ * `--allowedTools` (default-deny for anything not listed) + running inside the
+ * repo `cwd`; `Bash` is narrowed to `Bash(<prefix>:*)` patterns only when
+ * `bashAllowlist` is set — the zero-config default has no allowlist, so `Bash`
+ * is unrestricted shell access (#430).
  *
  * Session mechanics (multi-turn stdin, EOF watchdog, reopen window) follow
  * github-janitor's `claudeRunner.ts`; the original single-turn adaptation
@@ -298,9 +300,14 @@ export class ClaudeCliRunner implements AgentRunner {
 /**
  * Build the headless argv. `--input-format stream-json` reads user messages
  * from stdin; `--output-format stream-json --verbose` gives per-event NDJSON;
- * `--permission-mode acceptEdits` lets edits through without a TTY prompt.
+ * `--permission-mode dontAsk` keeps headless runs non-interactive: tools in
+ * `--allowedTools` proceed and everything else is denied instead of prompting.
+ * `CEZ_APPROVAL_GATE=1` opts back into Claude's approval UI (#435).
  */
-export function buildClaudeArgs(spec: AgentRunSpec): string[] {
+export function buildClaudeArgs(
+  spec: AgentRunSpec,
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
   const args: string[] = [
     '--input-format',
     'stream-json',
@@ -308,7 +315,7 @@ export function buildClaudeArgs(spec: AgentRunSpec): string[] {
     'stream-json',
     '--verbose',
     '--permission-mode',
-    'acceptEdits',
+    env.CEZ_APPROVAL_GATE === '1' ? 'acceptEdits' : 'dontAsk',
   ];
   if (spec.systemPrompt) {
     args.push('--append-system-prompt', spec.systemPrompt);

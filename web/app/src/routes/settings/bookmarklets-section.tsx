@@ -1,8 +1,9 @@
 import { TriangleAlertIcon, ZapIcon } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 
-import { useLaunchKey, useSkills } from '@/api/queries'
+import { useHealth, useLaunchKey, useSkills } from '@/api/queries'
 import type { Skill } from '@/api/types'
+import { repoChipOf } from '@/components/app-shell-container'
 import { CenteredState } from '@/components/centered-state'
 import { Input } from '@/components/ui/input'
 import { toast } from '@/components/ui/toaster'
@@ -53,9 +54,18 @@ export function BookmarkletsSection() {
  */
 export function BookmarkletPanel({ skills }: { skills: readonly Skill[] }) {
   const launchKey = useLaunchKey()
+  const health = useHealth()
   const [auto, setAuto] = useState(false)
   const [filter, setFilter] = useState('')
   const key = launchKey.data?.key ?? ''
+  // Bake THIS cockpit's origin into the bookmarklets so a click opens the very instance that
+  // generated them — no localhost port-scan (GitHub's CSP blocks that fetch). See bookmarklet.ts.
+  const origin = window.location.origin
+  // Same repo name the sidebar chip shows (the repo root's basename) — stamped into the
+  // bookmark's visible label so a person with several cezar projects open can tell their
+  // bookmarks apart in the bookmarks bar (#422). Null outside a git repo: the label falls
+  // back to the plain, repo-less text rather than guessing a name.
+  const repoName = repoChipOf(health.data)?.name ?? null
   const needle = filter.trim().toLowerCase()
   const shown = skills.filter((skill) => skill.name.toLowerCase().includes(needle))
 
@@ -63,9 +73,8 @@ export function BookmarkletPanel({ skills }: { skills: readonly Skill[] }) {
     <div data-slot="bookmarklet-panel" className="mx-auto w-full max-w-2xl">
       <h2 className="text-base font-semibold">Run from GitHub</h2>
       <p className="mt-2 text-[13px] leading-relaxed text-muted-foreground">
-        Drag a button below to your browser&apos;s bookmarks bar. On any GitHub PR or issue, click it —
-        it finds your running cockpit on localhost (ports 4321–4330) and picks the one serving that
-        repo. The cockpit must be running: <span className="font-mono">npx cezar</span>.
+        Drag a button below to your browser&apos;s bookmarks bar. On any GitHub PR or issue, click it
+        to open this cockpit directly. The cockpit must be running: <span className="font-mono">npx cezar</span>.
       </p>
 
       <label className="mt-4 flex items-center gap-2 text-[13px] font-medium">
@@ -83,8 +92,8 @@ export function BookmarkletPanel({ skills }: { skills: readonly Skill[] }) {
       <div data-slot="bm-generic" className="mt-4">
         {/* Generic launcher: no skill, auto forced off — it only prefills the form. */}
         <BookmarkletRow
-          label="cezar: this PR/issue"
-          url={bookmarkletUrl('', false, key)}
+          label={repoName ? `cezar (${repoName}): this PR/issue` : 'cezar: this PR/issue'}
+          url={bookmarkletUrl('', false, key, origin)}
           hint="prefills the form — nothing starts by itself"
         />
       </div>
@@ -102,8 +111,8 @@ export function BookmarkletPanel({ skills }: { skills: readonly Skill[] }) {
           shown.map((skill) => (
             <BookmarkletRow
               key={skill.path}
-              label={`/${skill.name}`}
-              url={bookmarkletUrl(skill.name, auto, key)}
+              label={repoName ? `/${skill.name} (${repoName})` : `/${skill.name}`}
+              url={bookmarkletUrl(skill.name, auto, key, origin)}
               hint={skill.source}
             />
           ))

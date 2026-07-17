@@ -10,7 +10,7 @@ cezar is a published npm CLI (`@pat-lewczuk/cezar`, currently 0.x) whose state l
 - **Commands:** bare invocation = `serve` (cockpit); `cezar run "<task>"`; `cezar init`.
 - **Flags:** `-p/--port` (default 4321, auto-picks the next free port), `--repo <dir>`, `--workflow <name>` (default `quick-task`), `--model <model>`, `--no-open`, `-h/--help`.
 - **Exit codes:** `run` exits 0 on `done` **and** `review` (spec 009 — headless runs must not hang on the review gate), 1 on `failed`/`cancelled`/unknown workflow. CI scripts depend on this.
-- **Env vars:** `CEZ_DRY_RUN`, `CEZ_CLAUDE_BIN`, `CEZ_CODEX_BIN`, `CEZ_OPENCODE_BIN`, `GITHUB_TOKEN`.
+- **Env vars:** `CEZ_DRY_RUN`, `CEZ_APPROVAL_GATE`, `CEZ_CLAUDE_BIN`, `CEZ_CODEX_BIN`, `CEZ_OPENCODE_BIN`, `GITHUB_TOKEN`.
 
 Breaking: renaming/removing a command, flag, alias or env var; changing a default (port, workflow); changing `run` exit-code semantics. Required path: keep the old spelling as a deprecated alias for at least one minor release, print a one-line deprecation warning, document the replacement.
 

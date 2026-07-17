@@ -10,7 +10,14 @@ or a mix of them per step** — and watch it work live: steps, tool calls,
 tokens, diffs, in a browser cockpit that runs entirely on your machine.
 Your CLI logins, your `gh`, your files. No accounts, no database, no cloud.
 
-[A look inside](#a-look-inside) · [What it solves](#what-it-solves) · [Who it's for](#who-its-for) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Core concepts](#core-concepts) · [Cockpit tour](#cockpit-tour) · [Agent backends](#coding-agent-backends)
+🔥 **Fire and forget.** Queue a stack of autonomous coding and maintenance
+tasks and let them run — cezar orchestrates them across isolated worktrees,
+in parallel, and picks up follow-ups on its own. Flip the **Autonomous** flag
+and a run never stops to ask; it just finishes. Leave it on a VPS and you get
+a dev team that's *always on* — a mobile-friendly cockpit you can check from
+your phone, working your backlog while you're away.
+
+[A look inside](#a-look-inside) · [What cezar does best](#what-cezar-does-best) · [What it solves](#what-it-solves) · [Who it's for](#who-its-for) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Core concepts](#core-concepts) · [Cockpit tour](#cockpit-tour) · [Agent backends](#coding-agent-backends) · [Remote access](#remote-access-host-cezar-on-a-server)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](#license)
 ![Node 20+](https://img.shields.io/badge/Node-20%2B-339933)
@@ -35,13 +42,35 @@ inside your repo — plain JSON, NDJSON and Markdown you can `cat` and fix by ha
 
 Click any thumbnail for the full-size screenshot.
 
-| Watch a run live | The review gate | Parallel variants |
+| Orchestrate parallel agents | Watch a run live | Parallel variants |
 |:--:|:--:|:--:|
-| [![A running task streaming agent text, tool calls and screenshots live](docs/screenshots/live-run.png)](docs/screenshots/live-run.png) | [![A finished run parked at the review gate — read the diff, send notes back, open the PR, or accept](docs/screenshots/review-gate.png)](docs/screenshots/review-gate.png) | [![Two competing variants of the same task compared side by side — pick the winner](docs/screenshots/variants-compare.png)](docs/screenshots/variants-compare.png) |
-| *Every step, tool call, token and screenshot — streamed as it happens.* | *Nothing auto-merges: inspect the diff, send notes into the same session, or push a draft PR.* | *Run a task ×2/×3 in isolated worktrees, compare the diffs, keep one.* |
-| **Plan before you run** | **Workflow builder** | **GitHub, one click away** |
-| [![The Plan overlay — an AI-drafted chain of steps you approve before anything runs](docs/screenshots/plan-chain.png)](docs/screenshots/plan-chain.png) | [![The workflow builder — drag skills into an ordered chain of agent steps and shell checks](docs/screenshots/workflow-builder.png)](docs/screenshots/workflow-builder.png) | [![The GitHub tab — hand an open issue to the agent with a workflow and skills](docs/screenshots/github-issues.png)](docs/screenshots/github-issues.png) |
-| *Press **Plan first** and review the proposed chain — trim, reorder, then start.* | *Stitch skills and shell checks into a reusable YAML chain, no code.* | *Open issues and PRs via your `gh` — run the agent straight on an issue.* |
+| [![The Tasks view — parallel runs, a queue with positions, per-run cost and peak memory, and a variants compare card](docs/screenshots/task-view.png)](docs/screenshots/task-view.png) | [![A running task streaming agent text, tool calls and screenshots live](docs/screenshots/live-run.png)](docs/screenshots/live-run.png) | [![Two competing variants of the same task compared side by side — pick the winner](docs/screenshots/variants-compare.png)](docs/screenshots/variants-compare.png) |
+| *Run and queue many tasks at once — each in its own worktree — with live status, cost and peak memory per run.* | *Every step, tool call, token and screenshot — streamed as it happens.* | *Run a task ×2/×3 in isolated worktrees, compare the diffs, keep one.* |
+| **Workflow builder** | **GitHub, one click away** | **Skills + fire-and-forget** |
+| [![The workflow builder — drag skills into an ordered chain of agent steps and shell checks](docs/screenshots/workflow-builder.png)](docs/screenshots/workflow-builder.png) | [![The GitHub tab — hand an open issue to the agent with a workflow and skills](docs/screenshots/github-issues.png)](docs/screenshots/github-issues.png) | [![The task composer — pick a skill playbook and flip the Autonomous flag to run unattended](docs/screenshots/skills-autonomous.png)](docs/screenshots/skills-autonomous.png) |
+| *Stitch skills and shell checks into a reusable YAML chain, no code.* | *Open issues and PRs via your `gh` — run the agent straight on an issue.* | *Pick a Markdown skill and flip **Autonomous** — the run never stops to ask, so you can walk away.* |
+
+---
+
+## What cezar does best 🏆
+
+Plenty of tools wrap a single coding agent in a nicer window — a "Codex GUI", a
+conductor-style app, one-agent front-ends. cezar's bet is different. Three things
+it does better than any of them:
+
+- 🪶 **Genuinely zero config.** `npx cezar-cli` in your repo and you're running —
+  no wizard, no API keys, no env vars, no schema, no database. It rides the
+  `claude` / `codex` / `opencode` logins and the `gh` you already have, and every
+  missing piece degrades gracefully instead of blocking you.
+- 🖥️ **Built for a server (VPS mode).** cezar is made to live on a **VPS, cloud,
+  or dedicated box** as an always-on janitor for your repo — headless-first, with
+  a mobile-friendly cockpit you drive from anywhere. It's a coding server you can
+  actually watch, not a desktop app bolted onto one machine.
+- 🔀 **Parallel + autonomous orchestration.** The real edge: cezar runs **many
+  agents at once** in isolated worktrees, **queues** the overflow, and pushes each
+  one **autonomously** through skill playbooks — fire-and-forget. This is exactly
+  what single-agent GUIs don't do well: they babysit one agent, while cezar
+  orchestrates a whole team and drains your backlog while you're away.
 
 ---
 
@@ -49,27 +78,44 @@ Click any thumbnail for the full-size screenshot.
 
 Most "AI coding agent" tooling makes you choose between a **terminal** you can't
 see into once it's running, and a **cloud product** that wants your API key, your
-code on their servers, and an account. cezar is the third option: the agent runs
-locally under *your* subscription, and a cockpit shows you exactly what it's doing.
+code on their servers, and an account. cezar is the third option: the agents run
+locally under *your* subscription, a cockpit shows you exactly what they're doing,
+and an orchestrator keeps a whole queue of them moving.
 
-- **No visibility into a running agent.** A headless `claude` run is a black box
+- 👀 **No visibility into a running agent.** A headless `claude` run is a black box
   until it finishes. cezar streams every step — agent text, each tool call and
   its result, tokens and cost per step — live, and keeps the full replay.
-- **One agent, one working tree, one thing at a time.** Kick off a second task and
+- 🧩 **One agent, one working tree, one thing at a time.** Kick off a second task and
   it fights the first over your files. cezar runs each task in its **own git
   worktree**, so two (or three) agents work in parallel without stepping on
   each other — or on the branch you're editing.
-- **The agent finishes and you have to trust it.** cezar ends non-trivial runs at
+- 🗂️ **A backlog that needs babysitting.** Queue a stack of tasks and cezar
+  **orchestrates** them: it runs up to your parallel limit, holds the rest in an
+  ordered queue, and turns an agent's leftover follow-ups into the next tasks
+  from the **Inbox** — one click each. Point it at a GitHub issue and it runs
+  straight on that, so working the tracker down stops being a manual chore.
+- 🤖 **"Autonomous" means you still have to sit there.** Flip the **Autonomous**
+  flag and a run never parks to ask — it keeps going until the task is done. Pair
+  it with a **skill** (a Markdown playbook) and you've got fire-and-forget
+  automation: hand off "fix this", "upgrade that", "triage these" and walk away.
+- ✅ **The agent finishes and you have to trust it.** cezar ends non-trivial runs at
   a **review gate**: inspect the diff, send notes back into the same session, or
   push a **draft PR** — never an auto-merge.
-- **Losing a session when it fails.** Every run records its `claude` session id.
+- ♻️ **Losing a session when it fails.** Every run records its `claude` session id.
   Take it over interactively in one click (`claude --resume <id>`), or continue it
   in-process from the cockpit.
-- **Locked into one agent vendor.** Most tools wed you to a single CLI. cezar
+- 🔀 **Locked into one agent vendor.** Most tools wed you to a single CLI. cezar
   drives **Claude Code, Codex and OpenCode** through one runner seam — set a
   default, pick a backend per task, or mix them inside one workflow (implement
-  with one agent, review with another). See [Agent backends](#coding-agent-backends).
-- **Setup tax.** No wizard, no env vars, no schema. Skills are Markdown, workflows
+  with one agent, review with another) — and through **OpenCode** you can point
+  a run at **open-source or local models**, not just the big vendors. See
+  [Agent backends](#coding-agent-backends).
+- 🖥️ **Close the laptop and the work stops.** A local agent only runs while your
+  machine is on and awake. Put cezar on a **VPS, cloud box, or dedicated server**
+  and the cockpit becomes the GUI for an **always-on AI coding team** — kick off,
+  watch and steer tasks from your laptop or **phone**, on the train or between
+  meetings, while the agents keep grinding through the backlog back on the server.
+- ⚡ **Setup tax.** No wizard, no env vars, no schema. Skills are Markdown, workflows
   are short YAML, and everything degrades: no `gh` → works without PRs, no network
   → local skills still load, no `.ai/skills` → the bare prompt still runs.
 
@@ -140,7 +186,7 @@ event live and parks the run at a review gate when there's a diff to inspect.
    ┌──────────────────────────────┐     ┌───────────────────────────────┐
    │  git worktree per task       │     │  agent CLI  (your login)      │
    │  (isolated branch, parallel) │◄───►│  claude · codex · opencode    │
-   └──────────────────────────────┘     │  default-deny · acceptEdits   │
+   └──────────────────────────────┘     │  Bash open · no prompts       │
         │                                 └───────────────────────────────┘
         │  agent text · tool calls · tool results · tokens · cost
         ▼
@@ -164,30 +210,47 @@ auto-merges: a run with changes rests in `review` until you act on it.
 
 Three words, no jargon — **task**, **skill**, **chain**:
 
-- **Tasks** are the unit of work. Every task is a **run**: `queued → running →
+- 📋 **Tasks** are the unit of work. Every task is a **run**: `queued → running →
   review / done / failed / cancelled`, with a live event log, per-step token and
   cost usage, cancel/delete, and — for anything with a diff — a review gate. Paste
   screenshots into the task, or send follow-up messages into the live session
   while it works.
-- **Skills** are Markdown playbooks. Drop them in `.ai/skills/` or
+- 📖 **Skills** are Markdown playbooks. Drop them in `.ai/skills/` or
   `.ai/cezar/skills/`, or pull them from a shared **team skills repo** (a bare
   git clone cached globally in `~/.cache/cez/`). A workflow step references one by
   `skill: <name>` and its body becomes the agent's extra system prompt — so you
   shape *how* the agent reasons without touching code.
-- **Chains (workflows)** stitch steps into a pipeline: agent steps plus shell
+- 🔗 **Chains (workflows)** stitch steps into a pipeline: agent steps plus shell
   checks, with bounded `onFail` retry loops. Write the YAML yourself, build one by
   drag-ordering skills in the **Workflows** tab, or press **Plan first** and let the
   AI draft a chain for your task that you review, trim and start. The built-in
   `quick-task` (one agent step) works with zero setup.
 
-Two moves that make the cockpit worth the browser tab:
+Five moves that make the cockpit worth the browser tab:
 
-- **Parallel variants (×2 / ×3).** Run the same task as competing agents in
+- 🗃️ **Queue + orchestration.** Start as many tasks as you like: cezar runs up to
+  `maxParallel` at once (default **2**; a non-git directory always runs one) and
+  holds the rest in a FIFO queue with visible positions (`#1`, `#2`, …). Cancel a
+  queued task before it starts; the queue even survives a cockpit restart —
+  everything still `queued` is re-enqueued in order. It's the orchestration layer
+  that turns "one agent at a time" into a backlog that drains itself.
+- 🧠 **Memory-aware runs.** Each run's whole process tree is sampled (~2 s) for CPU
+  and RSS, and its **peak memory** is recorded and shown in the task table. Set an
+  optional per-task **memory ceiling** (`memoryLimitMb`) and a run that crosses it
+  is *paused* — freeing its tree so the queue keeps advancing — and resumes on
+  demand. Event logs are append-only NDJSON and streamed rather than re-serialized,
+  and live UI deltas are coalesced so they never hit disk.
+- 🪞 **Parallel variants (×2 / ×3).** Run the same task as competing agents in
   separate worktrees, then compare their diffs side by side and **pick** one —
   the losers are archived and their worktrees cleaned up.
-- **Review gate.** A finished run with changes waits in `review`. Read the diff,
+- 🛡️ **Review gate.** A finished run with changes waits in `review`. Read the diff,
   type notes that go straight back into the agent's session, or push a
   `gh pr create --draft`. You stay the merge button.
+- 📱 **Runs on your coding server, drives from your pocket.** The cockpit is a
+  responsive web app streaming over SSE, so the box running cezar can be a
+  **VPS, cloud, or dedicated server** you never sit in front of. Point a browser
+  — laptop or **phone** — at it and run an **always-on coding team** on the move:
+  start tasks, watch them live, and hit the review gate from anywhere.
 
 ---
 
@@ -253,21 +316,28 @@ skills: [reproduce, root-cause, implement, self-review]
 
 cezar shells out to your locally installed, logged-in agent CLI —
 **your subscription, no API key**. With the default Claude Code backend that
-means headless `stream-json` mode, tool access default-deny via
-`--allowedTools`, and edits auto-accepted (`--permission-mode acceptEdits`)
-inside the task's worktree. Codex and OpenCode are driven through their own
-native protocols — see [Coding agent backends](#coding-agent-backends).
-Nothing runs on a server you don't own.
+means headless `stream-json` mode, tool access via `--allowedTools`, with
+unapproved tools denied without prompting (`--permission-mode dontAsk`) inside
+the task's worktree — but note the zero-config default list (`Read`, `Edit`,
+`Write`, `Grep`, `Glob`, `Bash`) grants unrestricted `Bash` unless a step sets
+`bashAllowlist`, so treat a run as having full shell access in its worktree,
+not a sandboxed allowlist. Set `CEZ_APPROVAL_GATE=1` to opt into Claude's
+interactive approval UI. Codex and OpenCode are driven through their own
+native protocols and don't honor `allowedTools` at all — see
+[Coding agent backends](#coding-agent-backends) for what each one actually
+locks down. Nothing runs on a server you don't own.
 
 Useful environment variables:
 
 | Var | Effect |
 |---|---|
 | `CEZ_DRY_RUN=1` | Use the bundled mock instead of the real `claude` CLI — the entire cockpit works offline, for demos and development. |
+| `CEZ_APPROVAL_GATE=1` | Opt into Claude's interactive approval UI; by default, unapproved tools are denied without interrupting the run. |
 | `CEZ_CLAUDE_BIN=/path/to/claude` | Override which `claude` binary is used. |
 | `CEZ_CODEX_BIN=/path/to/codex` | Override which `codex` binary is used. |
 | `CEZ_OPENCODE_BIN=/path/to/opencode` | Override which `opencode` binary is used. |
 | `GITHUB_TOKEN` | Fallback for GitHub reads/PRs when `gh` isn't authenticated. |
+| `CEZ_NO_BANNER=1` | Skip the `open-mercato/skills` banner on `cezar serve` startup. Dismissing the same banner in the cockpit silences the terminal one too. |
 
 ---
 
@@ -276,11 +346,11 @@ Useful environment variables:
 cezar is not married to one vendor. Every agent step runs through a single
 `AgentRunner` seam with three built-in backends:
 
-| Backend | CLI | How cezar drives it |
-|---|---|---|
-| **Claude Code** (default) | [`claude`](https://github.com/anthropics/claude-code) | Headless `stream-json` mode. |
-| **Codex** | [`codex`](https://github.com/openai/codex) | `codex app-server` — JSON-RPC over stdio, the same transport the Codex IDE extensions use. |
-| **OpenCode** | [`opencode`](https://opencode.ai) | `opencode serve` — a local HTTP server with an SSE event stream. |
+| Backend | CLI | How cezar drives it | Tool access |
+|---|---|---|---|
+| **Claude Code** (default) | [`claude`](https://github.com/anthropics/claude-code) | Headless `stream-json` mode. | Per-tool `--allowedTools` (`bashAllowlist` scopes `Bash`); `dontAsk` denies unapproved tools without prompting (`CEZ_APPROVAL_GATE=1` → `acceptEdits` + approval UI). |
+| **Codex** | [`codex`](https://github.com/openai/codex) | `codex app-server` — JSON-RPC over stdio, the same transport the Codex IDE extensions use. | Ignores `allowedTools`; runs its own `workspace-write` sandbox with `approvalPolicy: never` and network access on. |
+| **OpenCode** | [`opencode`](https://opencode.ai) | `opencode serve` — a local HTTP server with an SSE event stream. | Ignores `allowedTools` entirely; every permission is auto-approved. |
 
 On startup cezar probes which CLIs are installed and the cockpit only offers
 the backends it found — install any one of the three and you're operational.
@@ -318,6 +388,30 @@ The seam is deliberately small: a backend is one class implementing the
 `AgentRunner` interface (`src/core/agent-runner.ts`) that turns a prompt into
 a stream of normalized events. Other CLIs — pi, aider, whatever ships next —
 can slot in the same way.
+
+---
+
+## Remote access (host cezar on a server)
+
+cezar runs on `localhost` by default. To reach the cockpit from another machine —
+a shared team box, a VPS, your phone — put an **authenticated public front** in
+front of it. The built-in installer does this interactively, per **platform
+strategy**, and never escalates silently: every privileged command is printed
+and verified, and it ends with a real authenticated end-to-end check.
+
+```bash
+npx cezar-cli server-install   --platform ubuntu-vps   # stand it up
+npx cezar-cli server-deploy    --platform ubuntu-vps   # roll out a new version (reload the service)
+npx cezar-cli server-uninstall --platform ubuntu-vps   # reverse it
+```
+
+| Provider | `--platform` | Public front | Guide |
+|----------|--------------|--------------|-------|
+| Ubuntu / Debian VPS | `ubuntu-vps` | nginx + Let's Encrypt HTTPS, htpasswd login, systemd | [Step-by-step →](docs/server-install/ubuntu-vps.md) |
+| macOS + ngrok | `macosx-ngrok` | ngrok tunnel + `--basic-auth`, launchd | [Step-by-step →](docs/server-install/macosx-ngrok.md) |
+
+See the **[Remote access overview](docs/server-install/README.md)** for how it
+works and how to redeploy new versions.
 
 ---
 

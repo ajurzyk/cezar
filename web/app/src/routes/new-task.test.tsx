@@ -347,6 +347,37 @@ describe('picker data flows', () => {
     const headings = [...document.querySelectorAll('[cmdk-group-heading]')].map((h) => h.textContent)
     expect(headings).toEqual(['Project skills', 'Workflows', 'Global'])
   })
+
+  it('multi-keyword search: "fix issue" matches om-fix via hyphen-split keywords (#411)', async () => {
+    serve()
+    renderNewTask()
+    await pillReady()
+    fireEvent.click(sourcePill())
+    const input = await screen.findByPlaceholderText('search skills & workflows…')
+
+    // "fix issue" should match "om-fix" because both "fix" and "issue" appear in the
+    // combined value+keywords text (name splits: "om","fix" + description "Fix an issue end to end").
+    fireEvent.change(input, { target: { value: 'fix issue' } })
+    await waitFor(() => {
+      const visible = [...document.querySelectorAll('[data-slot="source-option"]')]
+      expect(visible.some((o) => o.getAttribute('data-source-ref') === 'om-fix')).toBe(true)
+    })
+  })
+
+  it('multi-keyword search hides items that do not match all words (#411)', async () => {
+    serve()
+    renderNewTask()
+    await pillReady()
+    fireEvent.click(sourcePill())
+    const input = await screen.findByPlaceholderText('search skills & workflows…')
+
+    fireEvent.change(input, { target: { value: 'deploy fix' } })
+    await waitFor(() => {
+      // "deploy" does not have "fix" in its name/description, and "om-fix" does not have "deploy"
+      const visible = [...document.querySelectorAll('[data-slot="source-option"]')]
+      expect(visible).toHaveLength(0)
+    })
+  })
 })
 
 // ---- submit bodies (the wire contract) ---------------------------------------------------------
@@ -375,6 +406,7 @@ describe('submit', () => {
         // (skills default autonomous on).
         lastWorktree: true,
         lastAutonomous: true,
+        lastGenerateFollowups: true,
       }),
     )
   })
@@ -426,6 +458,39 @@ describe('submit', () => {
     fireEvent.change(textarea(), { target: { value: 'no runner key' } })
     await startTask()
     expect((postedBody() as Record<string, unknown>).runner).toBeUndefined()
+  })
+
+  it('defaults follow-up generation on, but posts and remembers an explicit opt-out', async () => {
+    serve()
+    renderNewTask()
+    await pillReady()
+    const toggle = document.querySelector(
+      '[data-slot="generate-followups-toggle"]',
+    ) as HTMLButtonElement
+    expect(toggle.getAttribute('aria-checked')).toBe('true')
+
+    fireEvent.click(toggle)
+    expect(toggle.getAttribute('aria-checked')).toBe('false')
+    fireEvent.change(textarea(), { target: { value: 'No follow-up inbox items' } })
+    await startTask()
+
+    expect((postedBody() as Record<string, unknown>).generateFollowups).toBe(false)
+    await waitFor(() =>
+      expect(requests.find((r) => r.method === 'PUT' && r.url === '/api/ui-state')?.body).toMatchObject({
+        lastGenerateFollowups: false,
+      }),
+    )
+  })
+
+  it('uses the remembered follow-up preference when the draft has no choice', async () => {
+    serve({ uiState: { lastGenerateFollowups: false } })
+    renderNewTask()
+    await pillReady()
+    expect(
+      document
+        .querySelector('[data-slot="generate-followups-toggle"]')
+        ?.getAttribute('aria-checked'),
+    ).toBe('false')
   })
 })
 
@@ -776,6 +841,24 @@ describe('the plan flow', () => {
       ],
     })
     await waitFor(() => expect(location()).toBe('/tasks/planned-1'))
+  })
+
+  it('▶ Start carries the follow-up opt-out from the composer and remembers it', async () => {
+    serve({ createRun: { id: 'planned-no-followups' } })
+    renderNewTask()
+    await pillReady()
+    fireEvent.click(
+      document.querySelector('[data-slot="generate-followups-toggle"]') as HTMLElement,
+    )
+    await planTask('Plan without follow-ups')
+    fireEvent.click(document.querySelector('[data-slot="plan-start"]') as HTMLElement)
+
+    await waitFor(() => expect((postedBody() as Record<string, unknown>).generateFollowups).toBe(false))
+    await waitFor(() =>
+      expect(requests.find((r) => r.method === 'PUT' && r.url === '/api/ui-state')?.body).toEqual({
+        lastGenerateFollowups: false,
+      }),
+    )
   })
 
   it('Discard closes the overlay and hands back the draft untouched', async () => {

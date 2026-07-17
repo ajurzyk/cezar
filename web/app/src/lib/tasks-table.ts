@@ -74,6 +74,14 @@ export function finishedRunCount(runs: readonly RunRecord[]): number {
   return runs.filter((run) => !run.archived && FINISHED_STATUSES.has(run.status)).length
 }
 
+/** The URL a PR *display* chip shows: the PR the task created, else the PR the conversation
+ *  is about (#407 — review/continue tasks reference an existing PR instead of opening one).
+ *  Action gates (Draft PR, Create PR→View PR) must keep reading `pullRequestUrl` directly:
+ *  a task that reviewed PR X must still be able to open its own PR from its branch. */
+export function taskPrUrl(run: RunRecord): string | undefined {
+  return run.pullRequestUrl ?? run.referencedPullRequestUrl
+}
+
 /** The PR chip's `#402`. Null when the URL's last segment is not a number — a forge we don't
  *  recognize still gets a working chip, just without a number we'd be inventing. */
 export function prNumber(url: string): string | null {
