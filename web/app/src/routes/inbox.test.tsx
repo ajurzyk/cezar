@@ -351,9 +351,14 @@ describe('the inbox gate (#471)', () => {
     expect(screen.getByText(/CEZ_FOLLOWUPS=1/)).toBeTruthy()
     expect(cards()).toHaveLength(0)
 
-    // Parked, not polled: the endpoint could only answer [] anyway.
+    // The query parks once health lands. It may already have fired one speculative request
+    // before that — the deliberate trade in `InboxRoute` (an enabled server must not wait on
+    // health) — but it must not keep polling an endpoint that can only answer [].
     await waitFor(() => expect(sent.some((r) => r.path === '/api/health')).toBe(true))
-    expect(sent.filter((r) => r.path === '/api/todos')).toHaveLength(0)
+    const afterGate = sent.filter((r) => r.path === '/api/todos').length
+    expect(afterGate).toBeLessThanOrEqual(1)
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)))
+    expect(sent.filter((r) => r.path === '/api/todos')).toHaveLength(afterGate)
   })
 
   it('renders the real inbox once the server reports the capability', async () => {

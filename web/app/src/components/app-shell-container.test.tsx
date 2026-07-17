@@ -108,6 +108,36 @@ describe('sidebar wiring', () => {
     expect(screen.getByRole('link', { name: /Inbox/ })).toBeTruthy()
   })
 
+  // #471 — the global inbox is opt-in; the shell must not offer what the server cannot fill.
+  it('drops the Inbox nav item and its badge when the server has follow-ups off', async () => {
+    serve({
+      '/api/health': { ...HEALTH, capabilities: { localHandoff: true, followups: false } },
+      '/api/todos': TODOS,
+    })
+    renderShell()
+
+    await waitFor(() => expect(versionChip()).not.toBeNull())
+    expect(screen.queryByRole('link', { name: /Inbox/ })).toBeNull()
+    expect(navBadge()).toBeNull()
+    // Every other view is untouched — the gate owns exactly one item.
+    expect(screen.getByRole('link', { name: /Tasks/ })).toBeTruthy()
+    expect(screen.getByRole('link', { name: /Settings/ })).toBeTruthy()
+  })
+
+  it('never asks for todos on a server with the inbox off', async () => {
+    serve({
+      '/api/health': { ...HEALTH, capabilities: { localHandoff: true, followups: false } },
+      '/api/todos': TODOS,
+    })
+    renderShell()
+
+    await waitFor(() => expect(versionChip()).not.toBeNull())
+    // The badge query is keyed on the capability, so it never runs — unlike the /inbox route,
+    // nothing here needs the list before health has spoken.
+    const asked = fetchMock.mock.calls.map((call) => String(call[0]))
+    expect(asked).not.toContain('/api/todos')
+  })
+
   it('renders no badge for an empty inbox', async () => {
     serve({ '/api/health': HEALTH, '/api/todos': [] })
     renderShell()
