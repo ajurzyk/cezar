@@ -11,11 +11,11 @@ import {
   TriangleAlertIcon,
 } from 'lucide-react'
 import { useState, type DragEvent, type ReactNode } from 'react'
-import { Link, useParams } from 'react-router'
+import { Link, Navigate, useParams } from 'react-router'
 
-import { getGithub } from '@/api/client'
-import { queryKeys, useGithub, useSkills, useWorkflows } from '@/api/queries'
-import type { GithubItem } from '@/api/types'
+import { getGithub, putUiState } from '@/api/client'
+import { queryKeys, useGithub, useSkills, useUiState, useWorkflows } from '@/api/queries'
+import type { GithubItem, UiState } from '@/api/types'
 import { CenteredState } from '@/components/centered-state'
 import { GithubIcon } from '@/components/icons'
 import { TabLink } from '@/components/tab-link'
@@ -58,6 +58,23 @@ const FULL_LIMIT = 1000
 
 export type GithubView = 'issues' | 'prs'
 
+/**
+ * `/github`'s index (#417): restores the last-selected sub-tab instead of always defaulting
+ * to Issues. Only the bare path redirects — `/github/prs` and the `:n` deep links always
+ * render exactly what their URL says, memory or not, so a pasted link never surprises.
+ *
+ * A one-way check, not a live sync: it reads `ui-state.json` once per mount and either renders
+ * Issues or hands off to `/github/prs`. It never redirects back to Issues from `/github/prs` —
+ * that URL is authoritative on its own.
+ */
+export function GithubIndexRoute() {
+  const uiState = useUiState()
+  if (uiState.data?.githubView === 'prs') {
+    return <Navigate to="/github/prs" replace />
+  }
+  return <GithubRoute view="issues" />
+}
+
 export function GithubRoute({ view }: { view: GithubView }) {
   const { n } = useParams()
   const fast = useGithub()
@@ -69,6 +86,24 @@ export function GithubRoute({ view }: { view: GithubView }) {
   const isFull = full.data?.available === true
 
   const queryClient = useQueryClient()
+
+  // Persist the tab choice (#417), mirroring the appearance provider's read-then-write
+  // pattern. The cache is patched BEFORE the PUT resolves — not just for optimism, but so
+  // `GithubIndexRoute`'s check (which reads the same cache) sees the new choice immediately
+  // if the click just navigated `/github/prs` → `/github`: without the eager patch it would
+  // still read the stale "prs" and bounce the Issues tab straight back.
+  const saveGithubView = (next: GithubView) => {
+    queryClient.setQueryData<UiState>(queryKeys.uiState, (prev) => ({ ...prev, githubView: next }))
+    putUiState({ githubView: next })
+      .then((merged) => queryClient.setQueryData(queryKeys.uiState, merged))
+      .catch((error: unknown) => {
+        toast(error instanceof Error ? error.message : String(error), { tone: 'danger' })
+        // The write failed — fall back to the server's truth rather than keep the tab
+        // claiming a persistence it never got.
+        void queryClient.invalidateQueries({ queryKey: queryKeys.uiState })
+      })
+  }
+
   const refresh = useMutation({
     mutationFn: () => getGithub({ refresh: true }),
     onSuccess: (data) => {
@@ -187,10 +222,10 @@ export function GithubRoute({ view }: { view: GithubView }) {
             </button>
           </div>
           <div data-slot="gh-tabs" className="mt-2.5 flex items-end gap-1">
-            <TabLink to="/github" active={view === 'issues'}>
+            <TabLink to="/github" active={view === 'issues'} onClick={() => saveGithubView('issues')}>
               Issues · {countLabel(gh.issues.length, isFull)}
             </TabLink>
-            <TabLink to="/github/prs" active={view === 'prs'}>
+            <TabLink to="/github/prs" active={view === 'prs'} onClick={() => saveGithubView('prs')}>
               Pull requests · {countLabel(gh.prs.length, isFull)}
             </TabLink>
           </div>

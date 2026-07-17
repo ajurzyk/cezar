@@ -493,6 +493,8 @@ export interface UiState {
   /** Whether new runs should ask agents to append follow-up work. Absent → on. */
   lastGenerateFollowups?: boolean
   runsView?: 'list' | 'table'
+  /** The GitHub tab's last-selected sub-tab (#417) — issues or PRs. Absent → issues. */
+  githubView?: 'issues' | 'prs'
   /** Settings → Appearance (redesign R6): accent + density. Theme itself stays in
    *  localStorage (`cez-theme`) — it must pre-paint, and it is per-browser by design. */
   appearance?: { accent?: 'lime' | 'violet'; density?: 'comfortable' | 'compact' | 'ultra' }

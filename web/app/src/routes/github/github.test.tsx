@@ -7,7 +7,7 @@ import { createQueryClient } from '@/api/query-client'
 import type { GithubData, GithubItem, Skill, WorkflowsResponse } from '@/api/types'
 import { Toaster, resetToasts } from '@/components/ui/toaster'
 
-import { GithubRoute } from './github'
+import { GithubIndexRoute, GithubRoute } from './github'
 
 beforeAll(() => {
   // cmdk scrolls the selected item into view; jsdom has no scrollIntoView.
@@ -140,13 +140,15 @@ function stubFetch(overrides: Record<string, () => Response> = {}): SentRequest[
   return sent
 }
 
-/** Cold-load the tab at a URL, with the same route map routes.tsx registers. */
+/** Cold-load the tab at a URL, with the same route map routes.tsx registers — `/github` goes
+ *  through `GithubIndexRoute` (#417) exactly like production, so the remembered-tab redirect
+ *  is exercised the same way a real navigation would hit it. */
 function renderAt(entry: string) {
   render(
     <QueryClientProvider client={createQueryClient()}>
       <MemoryRouter initialEntries={[entry]}>
         <Routes>
-          <Route path="/github" element={<GithubRoute view="issues" />} />
+          <Route path="/github" element={<GithubIndexRoute />} />
           <Route path="/github/prs" element={<GithubRoute view="prs" />} />
           <Route path="/github/issues/:n" element={<GithubRoute view="issues" />} />
           <Route path="/github/prs/:n" element={<GithubRoute view="prs" />} />
@@ -246,6 +248,54 @@ describe('the GitHub tab lists', () => {
       expect.stringContaining('Fix GitHub issue #142: Login form drops session on refresh'),
     )
     expect(setData.mock.calls[0]?.[1]).toContain(ISSUE_142.url)
+  })
+})
+
+describe('remembering the last-selected tab (#417)', () => {
+  it('clicking Pull requests persists the choice via PUT /api/ui-state', async () => {
+    const sent = stubFetch()
+    renderAt('/github')
+    await waitFor(() => expect(rows()).toHaveLength(2))
+
+    fireEvent.click(screen.getByRole('link', { name: /Pull requests/ }))
+
+    await waitFor(() =>
+      expect(sent.some((request) => request.method === 'PUT' && request.path === '/api/ui-state')).toBe(
+        true,
+      ),
+    )
+    const put = sent.find((request) => request.method === 'PUT' && request.path === '/api/ui-state')
+    expect(put?.body).toEqual({ githubView: 'prs' })
+  })
+
+  it('opening /github restores "prs" when that was the last-selected tab', async () => {
+    stubFetch({ 'GET /api/ui-state': () => jsonResponse({ githubView: 'prs' }) })
+    renderAt('/github')
+
+    await waitFor(() => expect(rows()).toHaveLength(1))
+    expect(rows()[0]?.getAttribute('href')).toBe('/github/prs/137')
+  })
+
+  it('opening /github falls back to Issues when nothing was ever remembered', async () => {
+    stubFetch({ 'GET /api/ui-state': () => jsonResponse({}) })
+    renderAt('/github')
+
+    await waitFor(() => expect(rows()).toHaveLength(2))
+    expect(rows()[0]?.getAttribute('href')).toBe('/github/issues/142')
+  })
+
+  it('clicking Issues while "prs" is remembered switches to Issues instead of bouncing back', async () => {
+    // The regression this guards: without eagerly patching the query cache on click, the
+    // index route would still read the stale "prs" remembered choice and redirect the click
+    // straight back to /github/prs, making the Issues tab unclickable.
+    stubFetch({ 'GET /api/ui-state': () => jsonResponse({ githubView: 'prs' }) })
+    renderAt('/github/prs')
+    await waitFor(() => expect(rows()).toHaveLength(1))
+
+    fireEvent.click(screen.getByRole('link', { name: /^Issues/ }))
+
+    await waitFor(() => expect(rows()).toHaveLength(2))
+    expect(rows().map((row) => row.dataset.number)).toEqual(['142', '139'])
   })
 })
 

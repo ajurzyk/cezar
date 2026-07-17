@@ -189,6 +189,9 @@ const uiStateSchema = z
     // Runs area presentation (#348): the sidebar-list + detail pane, or the
     // full-width table ("task manager") view.
     runsView: z.enum(['list', 'table']).optional(),
+    // The GitHub tab's last-selected sub-tab (#417): issues or PRs. ADDITIVE — an old
+    // ui-state.json without the key behaves as the default (issues).
+    githubView: z.enum(['issues', 'prs']).optional(),
     // Settings → Appearance (redesign R6): accent + density. ADDITIVE — the theme itself
     // stays in the browser (`cez-theme` localStorage, pre-paint). The cockpit always PUTs
     // the whole object because the top-level merge below is shallow.
