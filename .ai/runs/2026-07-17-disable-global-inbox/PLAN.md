@@ -11,8 +11,8 @@
 
 | Phase | Step | Title | Status | Commit |
 |-------|------|-------|--------|--------|
-| 1 | 1.1 | Add the `followups` capability behind `CEZ_FOLLOWUPS` (opt-in) | done | 5300b99 |
-| 1 | 1.2 | Force follow-up generation off and gate the inbox endpoints when the capability is off | todo | — |
+| 1 | 1.1 | Add the `followups` capability behind `CEZ_FOLLOWUPS` (opt-in) | done | 5448d70 |
+| 1 | 1.2 | Force follow-up generation off and gate the inbox endpoints when the capability is off | done | a169dce |
 | 2 | 2.1 | Gate the Inbox nav item, badge and route on the capability | todo | — |
 | 2 | 2.2 | Hide the composer's follow-up toggle when the capability is off | todo | — |
 | 3 | 3.1 | Document the flag (.env.example, README, BACKWARD_COMPATIBILITY, spec 007) | todo | — |
