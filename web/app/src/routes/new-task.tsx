@@ -298,9 +298,14 @@ export function NewTaskRoute() {
           generateFollowups: generateFollowupsOn,
         }),
       )
-      void putUiState({ lastGenerateFollowups: generateFollowupsOn })
-        .then(() => queryClient.invalidateQueries({ queryKey: queryKeys.uiState }))
-        .catch(() => {})
+      // Only remember a choice the user was actually offered (#471, the `lastWorktree` rule):
+      // persisting the forced `false` would overwrite their real preference, so turning
+      // CEZ_FOLLOWUPS back on later would silently come up off.
+      if (followupsToggleShown) {
+        void putUiState({ lastGenerateFollowups: generateFollowupsOn })
+          .then(() => queryClient.invalidateQueries({ queryKey: queryKeys.uiState }))
+          .catch(() => {})
+      }
       clearDraftText()
       setPlan(null)
       void queryClient.invalidateQueries({ queryKey: queryKeys.runs.all })

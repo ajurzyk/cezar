@@ -492,6 +492,56 @@ describe('submit', () => {
         ?.getAttribute('aria-checked'),
     ).toBe('false')
   })
+
+  // #471 — the composer must not offer a switch the server overrides anyway.
+  const inboxOffHealth: HealthResponse = {
+    ...HEALTH,
+    capabilities: { localHandoff: true, followups: false },
+  }
+  const followupsToggle = () =>
+    document.querySelector('[data-slot="generate-followups-toggle"]')
+
+  it('hides the follow-up toggle when the server has the inbox off', async () => {
+    serve({ health: inboxOffHealth })
+    renderNewTask()
+    await pillReady()
+    await waitFor(() => expect(followupsToggle()).toBeNull())
+    // The neighbouring toggles are untouched — the gate owns exactly one control.
+    expect(document.querySelector('[data-slot="autonomous-toggle"]')).not.toBeNull()
+  })
+
+  it('posts generateFollowups:false from an inbox-less server', async () => {
+    serve({ health: inboxOffHealth })
+    renderNewTask()
+    await pillReady()
+    await waitFor(() => expect(followupsToggle()).toBeNull())
+
+    fireEvent.change(textarea(), { target: { value: 'No inbox on this server' } })
+    await startTask()
+
+    expect((postedBody() as Record<string, unknown>).generateFollowups).toBe(false)
+  })
+
+  it('does not overwrite the remembered preference it never offered', async () => {
+    // The user last chose "on". With the inbox off there is no toggle, so persisting the
+    // forced `false` would silently flip their choice for when CEZ_FOLLOWUPS comes back.
+    serve({ health: inboxOffHealth, uiState: { lastGenerateFollowups: true } })
+    renderNewTask()
+    await pillReady()
+    await waitFor(() => expect(followupsToggle()).toBeNull())
+
+    fireEvent.change(textarea(), { target: { value: 'Leave my preference alone' } })
+    await startTask()
+
+    await waitFor(() =>
+      expect(requests.some((r) => r.method === 'PUT' && r.url === '/api/ui-state')).toBe(true),
+    )
+    const persisted = requests
+      .filter((r) => r.method === 'PUT' && r.url === '/api/ui-state')
+      .map((r) => r.body as Record<string, unknown>)
+    for (const body of persisted) expect(body).not.toHaveProperty('lastGenerateFollowups')
+  })
+
 })
 
 // ---- drafts & prefill ---------------------------------------------------------------------------
