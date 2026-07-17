@@ -209,6 +209,7 @@ describe('systemPrompt end-to-end (dry run)', () => {
  * off.
  */
 describe('the global follow-up gate (dry run)', () => {
+  const CONFIG_PROMPT = 'CONFIG-DEFAULT: always write tests first.';
   let repoRoot: string;
   let argsFile: string;
   let inheritedTodos: string;
