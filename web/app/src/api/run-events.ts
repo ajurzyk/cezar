@@ -71,11 +71,32 @@ export function useRunEvents(runId: string | undefined): RunEvent[] {
     const CLOSED = 2 // EventSource.CLOSED, spelled literally like global-events.tsx
     const REOPEN_DELAY_MS = 1_500
 
+    // Liveness watchdog (#424): a backgrounded tab or the app's iframe can leave the socket
+    // half-open — TCP dead, but `readyState` stuck at OPEN/CONNECTING so no `error` ever fires and
+    // none of the reopen paths below match. The transcript then freezes until a full reload, with
+    // "no further SSE updates coming through" (exactly the reported symptom). The server pings every
+    // 15 s (server.ts); we treat a long silence across BOTH data and pings as a dead socket and
+    // force a reopen. `maxSeq` swallows the replay, same as every other reconnect here.
+    const STALE_MS = 40_000 // ~2.5× the 15 s server ping — one dropped ping must not trip it
+    const LIVENESS_CHECK_MS = 10_000
+    let lastFrameAt = Date.now()
+    let livenessTimer: ReturnType<typeof setInterval> | undefined
+
     const onFrame = (event: Event) => {
+      // Any frame proves the socket is alive — bump the watchdog before the dedup drop, so a
+      // replayed prefix (which is dropped below) still counts as liveness.
+      lastFrameAt = Date.now()
       const parsed = parseRunEvent((event as MessageEvent<string>).data)
       if (!parsed || !(parsed.seq > maxSeq)) return
       maxSeq = parsed.seq
       setEvents((current) => [...current, parsed])
+    }
+
+    // The keepalive carries no payload we accumulate — it exists only to prove the socket is
+    // alive during quiet stretches (a run that is thinking emits nothing for seconds), so it
+    // feeds the watchdog and nothing else.
+    const onPing = (): void => {
+      lastFrameAt = Date.now()
     }
 
     const reopenLater = (): void => {
@@ -88,8 +109,12 @@ export function useRunEvents(runId: string | undefined): RunEvent[] {
 
     const open = (): void => {
       source?.close()
+      // A fresh socket resets the clock: replay is about to arrive, so it must not be judged
+      // stale before its first frame lands.
+      lastFrameAt = Date.now()
       source = new Source(`/api/runs/${encodeURIComponent(runId)}/events`)
       for (const name of RUN_EVENT_NAMES) source.addEventListener(name, onFrame)
+      source.addEventListener('ping', onPing)
       source.addEventListener('error', () => {
         // Ordinary drops leave the socket CONNECTING and the browser retries on its own; CLOSED
         // means it gave up for good (what a restarting server produces), so nothing would reopen
@@ -124,6 +149,18 @@ export function useRunEvents(runId: string | undefined): RunEvent[] {
       if (event.persisted) open()
     }
 
+    // The watchdog only acts while the tab is visible: a hidden tab legitimately receives
+    // nothing (the browser throttles it), and `onVisibilityChange` already reopens a CLOSED
+    // socket on return. This catches the case that one cannot — a socket still reported OPEN
+    // that has silently stopped delivering.
+    livenessTimer = setInterval(() => {
+      if (disposed || document.visibilityState !== 'visible') return
+      if (Date.now() - lastFrameAt <= STALE_MS) return
+      clearTimeout(reopenTimer)
+      reopenTimer = undefined
+      open()
+    }, LIVENESS_CHECK_MS)
+
     document.addEventListener('visibilitychange', onVisibilityChange)
     window.addEventListener('pagehide', onPageHide)
     window.addEventListener('pageshow', onPageShow)
@@ -132,6 +169,7 @@ export function useRunEvents(runId: string | undefined): RunEvent[] {
     return () => {
       disposed = true
       clearTimeout(reopenTimer)
+      clearInterval(livenessTimer)
       document.removeEventListener('visibilitychange', onVisibilityChange)
       window.removeEventListener('pagehide', onPageHide)
       window.removeEventListener('pageshow', onPageShow)

@@ -57,6 +57,9 @@ const runRecordSchema = z.object({
    *  contract are derivable from the persisted workflow and would bloat the
    *  index. Resolved at execute time (a queued run picks up config edits). */
   systemPrompt: z.string().optional(),
+  /** Per-task follow-up inbox contract (spec 007, #444). Missing on old runs
+   *  means enabled — the historical behavior. */
+  generateFollowups: z.boolean().optional(),
   status: z.enum(['queued', 'running', 'waiting', 'review', 'done', 'failed', 'cancelled']),
   createdAt: z.string(),
   startedAt: z.string().optional(),
@@ -248,6 +251,7 @@ export class RunStore extends EventEmitter {
     task: string;
     model?: string;
     runner?: 'claude' | 'codex' | 'opencode';
+    generateFollowups?: boolean;
     groupId?: string;
     variant?: string;
     steps: Array<Pick<StepState, 'id' | 'name' | 'kind'>>;
@@ -259,6 +263,7 @@ export class RunStore extends EventEmitter {
       task: input.task,
       model: input.model,
       runner: input.runner,
+      generateFollowups: input.generateFollowups,
       groupId: input.groupId,
       variant: input.variant,
       status: 'queued',
@@ -442,9 +447,22 @@ export class RunStore extends EventEmitter {
   private seqs = new Map<string, number>();
 
   private nextSeq(runId: string): number {
-    const next = (this.seqs.get(runId) ?? 0) + 1;
+    const next = (this.seqs.get(runId) ?? this.rehydrateSeq(runId)) + 1;
     this.seqs.set(runId, next);
     return next;
+  }
+
+  /** After a restart the in-memory counter is empty while the run's NDJSON file
+   *  keeps the history. Restarting from 1 would collide with the seqs a client
+   *  already replayed — its `seq > maxSeq` dedup then silently drops every
+   *  resumed event, even across a reload (the frozen-transcript symptom class
+   *  of #424). One file read on the first post-restart append per run. */
+  private rehydrateSeq(runId: string): number {
+    let max = 0;
+    for (const event of this.readEvents(runId)) {
+      if (typeof event.seq === 'number' && event.seq > max) max = event.seq;
+    }
+    return max;
   }
 
   private eventsPath(runId: string): string {

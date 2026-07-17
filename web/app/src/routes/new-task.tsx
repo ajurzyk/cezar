@@ -170,6 +170,11 @@ export function NewTaskRoute() {
     ? false
     : (draft.autonomous ?? (source.source === 'skill' ? true : (uiState.data?.lastAutonomous ?? false)))
 
+  // Follow-up generation is opt-out. A draft choice wins, then the remembered UI preference;
+  // absent state from older installs keeps the historical enabled behavior.
+  const generateFollowupsOn =
+    draft.generateFollowups ?? uiState.data?.lastGenerateFollowups ?? true
+
   // ---- plan mode (#383 + spec 008) ----------------------------------------------------------
   const [plan, setPlan] = useState<PendingPlan | null>(null)
   const [planning, setPlanning] = useState(false)
@@ -278,6 +283,7 @@ export function NewTaskRoute() {
         images,
         worktree: worktreeOn,
         autonomous: autonomousOn,
+        generateFollowups: generateFollowupsOn,
       }),
     )
     // Remember what was actually run so the next visit preselects it (legacy
@@ -288,6 +294,7 @@ export function NewTaskRoute() {
       recentSources: pushRecentSource(recentSources, source),
       ...(worktreeToggleShown ? { lastWorktree: worktreeOn } : {}),
       lastAutonomous: autonomousOn,
+      lastGenerateFollowups: generateFollowupsOn,
     })
       .then(() => queryClient.invalidateQueries({ queryKey: queryKeys.uiState }))
       .catch(() => {})
@@ -311,8 +318,12 @@ export function NewTaskRoute() {
           runnerCount: runners.length,
           variants,
           images: plan.images,
+          generateFollowups: generateFollowupsOn,
         }),
       )
+      void putUiState({ lastGenerateFollowups: generateFollowupsOn })
+        .then(() => queryClient.invalidateQueries({ queryKey: queryKeys.uiState }))
+        .catch(() => {})
       clearDraftText()
       setPlan(null)
       void queryClient.invalidateQueries({ queryKey: queryKeys.runs.all })
@@ -421,6 +432,10 @@ export function NewTaskRoute() {
                 disabled={draft.planFirst}
                 onChange={(on) => update({ autonomous: on })}
               />
+              <GenerateFollowupsToggle
+                on={generateFollowupsOn}
+                onChange={(on) => update({ generateFollowups: on })}
+              />
               {repo.data ? <BaseBranchPill repo={repo.data} /> : null}
             </>
           }
@@ -518,6 +533,39 @@ function AutonomousToggle({
         <SquareIcon aria-hidden="true" className="size-3 shrink-0 text-soft-foreground" />
       )}
       Autonomous
+    </button>
+  )
+}
+
+/** Follow-up toggle: checked lets agents append newly discovered work to the task inbox.
+ *  Handoff journaling remains active either way. */
+function GenerateFollowupsToggle({
+  on,
+  onChange,
+}: {
+  on: boolean
+  onChange: (on: boolean) => void
+}) {
+  return (
+    <button
+      type="button"
+      role="checkbox"
+      aria-checked={on}
+      data-slot="generate-followups-toggle"
+      onClick={() => onChange(!on)}
+      title={
+        on
+          ? 'Agents can add newly discovered follow-up work to the task inbox'
+          : 'Follow-up generation is off; agents still maintain the handoff journal'
+      }
+      className={cn(chipClass, on && 'border-primary/60 text-foreground')}
+    >
+      {on ? (
+        <CheckIcon aria-hidden="true" className="size-3 shrink-0 text-primary" />
+      ) : (
+        <SquareIcon aria-hidden="true" className="size-3 shrink-0 text-soft-foreground" />
+      )}
+      Follow-ups
     </button>
   )
 }
