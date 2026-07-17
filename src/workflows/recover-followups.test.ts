@@ -51,25 +51,30 @@ describe('recover() and the follow-up ceiling (#471)', () => {
     else process.env.CEZ_FOLLOWUPS = savedFollowups;
   });
 
-  /** A run left `queued` by a crash, with follow-ups on — what a pre-#471 install looks like. */
-  const queuedRunWithFollowups = (): string =>
-    store.createRun({
+  const WORKFLOW_DEF = {
+    name: 'quick-task',
+    description: 'x',
+    source: 'built-in',
+    steps: [{ id: 'work', name: 'Work', prompt: '{{task}}' }],
+  };
+
+  /** A run left `queued` by a crash. `workflowDef` is persisted by a follow-up updateRun, the
+   *  way startRun does it (run.ts:254) — recover() revives the workflow from it. */
+  const queuedRun = (generateFollowups: boolean): string => {
+    const { id } = store.createRun({
       title: 't',
       workflow: 'quick-task',
       task: 'do it',
-      generateFollowups: true,
+      generateFollowups,
       steps: [{ id: 'work', name: 'Work', kind: 'agent' }],
-      workflowDef: {
-        name: 'quick-task',
-        description: 'x',
-        source: 'built-in',
-        steps: [{ id: 'work', name: 'Work', prompt: '{{task}}' }],
-      },
-    }).id;
+    });
+    store.updateRun(id, { workflowDef: WORKFLOW_DEF as unknown as Record<string, unknown> });
+    return id;
+  };
 
   it('normalizes a recovered record to false when the inbox is off', async () => {
     delete process.env.CEZ_FOLLOWUPS;
-    const id = queuedRunWithFollowups();
+    const id = queuedRun(true);
     expect(store.getRun(id)?.generateFollowups).toBe(true); // the pre-restart truth
 
     await new RunManager(store, repoRoot).recover();
@@ -81,7 +86,7 @@ describe('recover() and the follow-up ceiling (#471)', () => {
 
   it('leaves the record alone when the inbox is on', async () => {
     process.env.CEZ_FOLLOWUPS = '1';
-    const id = queuedRunWithFollowups();
+    const id = queuedRun(true);
 
     await new RunManager(store, repoRoot).recover();
 
@@ -90,19 +95,7 @@ describe('recover() and the follow-up ceiling (#471)', () => {
 
   it('does not resurrect an explicit per-run opt-out', async () => {
     process.env.CEZ_FOLLOWUPS = '1';
-    const id = store.createRun({
-      title: 't',
-      workflow: 'quick-task',
-      task: 'do it quietly',
-      generateFollowups: false,
-      steps: [{ id: 'work', name: 'Work', kind: 'agent' }],
-      workflowDef: {
-        name: 'quick-task',
-        description: 'x',
-        source: 'built-in',
-        steps: [{ id: 'work', name: 'Work', prompt: '{{task}}' }],
-      },
-    }).id;
+    const id = queuedRun(false);
 
     await new RunManager(store, repoRoot).recover();
 
