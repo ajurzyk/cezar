@@ -16,7 +16,7 @@
 | 1 | 1.3 | Enforce the ceiling in RunManager so the `cezar run` CLI is gated too | done | e4fad38 |
 | 2 | 2.1 | Gate the Inbox nav item, badge and route on the capability | done | bf819b9 |
 | 2 | 2.2 | Hide the composer's follow-up toggle when the capability is off | done | 0a41323 |
-| 3 | 3.1 | Document the flag (.env.example, README, BACKWARD_COMPATIBILITY, spec 007) | todo | — |
+| 3 | 3.1 | Document the flag (.env.example, README, BACKWARD_COMPATIBILITY, spec 007) | done | 328dbb7 |
 
 ## Goal
 

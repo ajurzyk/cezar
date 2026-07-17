@@ -23,3 +23,23 @@ Append-only, UTC, newest at the bottom.
   endpoints (line 28) and `todos.json` (line 44). Default-off breaks that contract as written;
   the issue is an explicit owner instruction, so the BC doc is updated in the same PR (Step 3.1)
   and the break is called out in the PR summary.
+- 2026-07-17T07:55Z — **finding (process, worth the user's attention).** cezar's own
+  `autosaveCommit` (`src/git-worktree.ts:105`) has been committing this worktree in the
+  background throughout the run: 13 `cezar autosave` commits are interleaved with the Step
+  commits and absorbed most of the code, so each Step's commit ended up holding little more
+  than its PLAN.md row. The branch content is correct and the gate is green — but the
+  **1:1 step↔commit contract this skill mandates is not achievable while the autosaver runs**,
+  and per-Step bisectability is lost. Not rewritten: the history is honest, no one else is on
+  this branch, and the repo squash-merges PRs, so the noise disappears on merge. Rewriting
+  pushed commits to chase tidiness is the riskier move.
+  This is also direct evidence for the open question in #471: the repo's own meaning of
+  "autosaves" is exactly this, and it does interfere. Reported to the user rather than acted on
+  — disabling it was explicitly put in Non-goals (it is the crash-recovery point).
+- 2026-07-17T07:55Z — **scope addition (Step 1.3).** The route-level gate left `cezar run`,
+  the inbox's "▶ Run" and variants ungated — they call `startRun` directly and `!== false` read
+  the absent flag as enabled. Ceiling moved into `RunManager` with `followupsEnabled()` in
+  `handoff.ts` as the single source of truth. Covered end-to-end through the real engine.
+- 2026-07-17T07:55Z — **checkpoint 1.** Steps 1.1, 1.2, 1.3, 2.1, 2.2, 3.1 landed
+  (45959a4..8b4ed98). Full gate green: `npm run typecheck` clean, 2106 tests pass across 125
+  files (server + web projects). No UI screenshots: the checkpoint's UI changes are covered by
+  the component suites, and no dev server was started for this run.
