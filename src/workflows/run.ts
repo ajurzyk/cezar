@@ -23,6 +23,7 @@ import { getRepoInfo } from '../server/git.js';
 import { loadWorkflows } from './load.js';
 import type { RunRecord, RunStore } from '../runs/store.js';
 import { deriveTitleSummary } from '../runs/title-summary.js';
+import { extractTaskRefs, refineTaskRefs, titleRefNumber } from '../runs/task-refs.js';
 import { UiEventSink } from '../runs/ui-event-sink.js';
 import { DEFAULT_ALLOWED_TOOLS, stepKind, type WorkflowDef, type WorkflowStepDef } from './types.js';
 
@@ -248,6 +249,16 @@ export class RunManager {
     // Persist the full definition so a queued run survives a restart (#367) —
     // ad-hoc "(planned)" chains exist nowhere else to re-resolve from.
     this.store.updateRun(run.id, { workflowDef: workflow as unknown as Record<string, unknown> });
+    // Step-0 reference extraction (task auto-naming spec): the regex layer's
+    // numbers persist immediately; the namer may add the kind it verified later.
+    const skillHint = workflow.steps.find((s) => stepKind(s) === 'agent' && s.skill)?.skill?.trim();
+    const refs = refineTaskRefs(extractTaskRefs(input.task), skillHint);
+    if (refs.prNumber !== undefined || refs.issueNumber !== undefined) {
+      this.store.updateRun(run.id, {
+        ...(refs.prNumber !== undefined ? { prNumber: refs.prNumber } : {}),
+        ...(refs.issueNumber !== undefined ? { issueNumber: refs.issueNumber } : {}),
+      });
+    }
     this.pendingJobs.set(run.id, { workflow, input });
     this.queue.push(run.id);
     void this.pump();
@@ -1311,9 +1322,10 @@ function applyTemplate(template: string, task: string): string {
 }
 
 /**
- * Immediate title shown while a run is queued. The LLM-derived
- * `titleSummary` still replaces it after the first informative turn; this is
- * only the honest fallback before any model has answered (#432).
+ * Immediate title shown while a run is queued. The namer's `titleSummary`
+ * replaces it once the model answers; this is the honest, permanent fallback
+ * when no model is available (#432, spec 2026-07-17-task-auto-naming). When
+ * the task references a PR/issue, the number leads: `469: /om-auto-review-pr`.
  */
 export function makeRunTitle(task: string, workflow: WorkflowDef): string {
   const firstLine = task.trim().split('\n')[0] ?? '';
@@ -1321,7 +1333,18 @@ export function makeRunTitle(task: string, workflow: WorkflowDef): string {
   const contextual = skill && !firstLine.startsWith(`/${skill}`)
     ? `/${skill}${firstLine ? ` ${firstLine}` : ''}`
     : firstLine;
-  const chars = [...(contextual || '(untitled task)')];
+  const refNumber = titleRefNumber(refineTaskRefs(extractTaskRefs(task), skill));
+  // `469` or `/om-auto-review-pr 469` reads as `469: /om-auto-review-pr` — the
+  // number leads so it survives the tasks table's narrow truncation.
+  const skillArg = skill && contextual.startsWith(`/${skill}`) ? contextual.slice(skill.length + 1).trim() : null;
+  const body = refNumber !== undefined && skill && (skillArg === '' || /^#?\d+$/.test(skillArg ?? ''))
+    ? `/${skill}`
+    : contextual;
+  const prefixed =
+    refNumber !== undefined && !body.trimStart().replace(/^#/, '').startsWith(String(refNumber))
+      ? `${refNumber}: ${body}`
+      : body;
+  const chars = [...(prefixed || '(untitled task)')];
   return chars.length > 80 ? `${chars.slice(0, 79).join('').trimEnd()}…` : chars.join('');
 }
 

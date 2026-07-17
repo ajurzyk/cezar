@@ -54,12 +54,16 @@ describe('skill-aware task naming (#432)', () => {
     steps: [{ id: 'task', name: 'om-auto-review-pr', skill: 'om-auto-review-pr', prompt: '{{task}}' }],
   };
 
-  it('uses the selected skill as the queued fallback for argument-only tasks', () => {
-    expect(makeRunTitle('432', skillWorkflow)).toBe('/om-auto-review-pr 432');
+  it('leads with the number for argument-only tasks (task auto-naming spec)', () => {
+    expect(makeRunTitle('432', skillWorkflow)).toBe('432: /om-auto-review-pr');
   });
 
-  it('does not duplicate a skill command the user already supplied', () => {
-    expect(makeRunTitle('/om-auto-review-pr 432', skillWorkflow)).toBe('/om-auto-review-pr 432');
+  it('rewrites a user-supplied skill command with a numeric argument to number-first', () => {
+    expect(makeRunTitle('/om-auto-review-pr 432', skillWorkflow)).toBe('432: /om-auto-review-pr');
+    // A non-numeric argument keeps the full command, number still leads.
+    expect(makeRunTitle('/om-auto-review-pr 432 and check CI', skillWorkflow)).toBe(
+      '432: /om-auto-review-pr 432 and check CI',
+    );
   });
 
   it('keeps the legacy task-only fallback when no skill is selected', () => {
@@ -69,6 +73,11 @@ describe('skill-aware task naming (#432)', () => {
       steps: [{ id: 'task', prompt: '{{task}}' }],
     };
     expect(makeRunTitle('Fix the login bug', workflow)).toBe('Fix the login bug');
+    // A referenced PR/issue leads the title even without a skill.
+    expect(makeRunTitle('review pr 437 with autofix', workflow)).toBe('437: review pr 437 with autofix');
+    // A bare number without a skill stays bare — no `469: 469`.
+    expect(makeRunTitle('469', workflow)).toBe('469');
+    expect(makeRunTitle('#469', workflow)).toBe('#469');
   });
 });
 
@@ -202,7 +211,9 @@ describe('systemPrompt end-to-end (dry run)', () => {
     const id = await runToEnd({ task: '432' }, skillWorkflow);
     const record = store.getRun(id);
 
-    expect(record?.title).toBe('/om-auto-review-pr 432');
+    expect(record?.title).toBe('432: /om-auto-review-pr');
+    // Step-0 extraction persisted the reference (skill-hint → PR).
+    expect(record?.prNumber).toBe(432);
     // The display title remains LLM-derived after a turn; the skill-aware
     // title above is only the queued fallback.
     expect(record?.titleSummary).toBeDefined();

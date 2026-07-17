@@ -14,8 +14,8 @@ Run folder: `.ai/runs/2026-07-17-task-auto-naming/`
 |-------|------|-------|--------|--------|
 | 1 | 1.1 | Merge PR #442's branch — skill-aware heuristic titles (credit: #442) | done | e925166 |
 | 1 | 1.2 | `src/runs/task-refs.ts` — PR/issue-number extraction + tests | done | 5c56731 |
-| 1 | 1.3 | `RunRecord.prNumber/issueNumber/titleOrigin` optional fields + PATCH marks user renames | done | pending |
-| 1 | 1.4 | Number-prefixed heuristic title at creation (task-refs into `makeRunTitle`) | todo | — |
+| 1 | 1.3 | `RunRecord.prNumber/issueNumber/titleOrigin` optional fields + PATCH marks user renames | done | 00d7f42 |
+| 1 | 1.4 | Number-prefixed heuristic title at creation (task-refs into `makeRunTitle`) | done | pending |
 | 2 | 2.1 | `src/runs/auto-name.ts` — namer prompt, strict-JSON parse, cross-check, post-validation | todo | — |
 | 2 | 2.2 | `[cez-namer]` mock branch + one-shot runner call + `namerModel` config key | todo | — |
 | 2 | 2.3 | Fire-and-forget wiring in `startRun` — apply rules, SSE, degradation | todo | — |
