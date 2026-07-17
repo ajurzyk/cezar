@@ -3,7 +3,7 @@ import { CheckIcon, InboxIcon, PlayIcon, TriangleAlertIcon } from 'lucide-react'
 import { Link, useNavigate } from 'react-router'
 
 import { removeTodo, startTodo } from '@/api/client'
-import { queryKeys, useRuns, useTodos } from '@/api/queries'
+import { queryKeys, useHealth, useRuns, useTodos } from '@/api/queries'
 import type { TodoItem } from '@/api/types'
 import { CenteredState } from '@/components/centered-state'
 import { StatusDot } from '@/components/status-dot'
@@ -48,7 +48,12 @@ export function isTodoRunnable(todo: TodoItem): boolean {
 }
 
 export function InboxRoute() {
-  const todosQuery = useTodos()
+  // The nav item is inbox-gated in the shell, but the route stays reachable so an old
+  // bookmark still resolves (the forge routes' rule). "Inbox empty" would be a lie here —
+  // the inbox is switched off, not empty — so say that instead, and park the query.
+  const health = useHealth()
+  const inboxAvailable = health.data?.capabilities.followups === true
+  const todosQuery = useTodos(inboxAvailable)
   // Only to tell "source task" links from "source task deleted" — the legacy check against
   // its run map. The overview keeps this query warm, so revisits cost nothing.
   const runs = useRuns()
@@ -66,7 +71,15 @@ export function InboxRoute() {
       </header>
 
       <div className="flex flex-1 flex-col p-3 pb-[calc(90px+env(safe-area-inset-bottom))] md:p-5 md:pb-5">
-        {todos === undefined ? (
+        {health.data !== undefined && !inboxAvailable ? (
+          <CenteredState
+            icon={<InboxIcon />}
+            tone="neutral"
+            title="The follow-up inbox is off"
+            subtitle="Agents are not asked to leave follow-ups. Set CEZ_FOLLOWUPS=1 and restart cezar to turn the inbox on."
+            heading="h2"
+          />
+        ) : todos === undefined ? (
           todosQuery.isError ? (
             <CenteredState
               icon={<TriangleAlertIcon />}

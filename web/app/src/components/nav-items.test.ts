@@ -84,15 +84,59 @@ describe('NAV_ITEMS', () => {
   })
 })
 
-/** The forge gate (R6 Step 1.1): the GitHub item — and ONLY the GitHub item — exists exactly
- *  while health reports the forge driver available. */
+/** The gates: the GitHub item exists exactly while health reports the forge driver (R6 Step 1.1),
+ *  and the Inbox item exactly while it reports the opt-in `capabilities.followups` (#471). Each
+ *  gate owns ONLY its own item, and both default to absent while health is unknown. */
 describe('visibleNavItems', () => {
-  it('with the forge available, the full nav renders', () => {
-    expect(visibleNavItems(true)).toEqual(NAV_ITEMS)
+  const labelsOf = (opts?: Parameters<typeof visibleNavItems>[0]) =>
+    visibleNavItems(opts).map((item) => item.label)
+
+  it('with everything available, the full nav renders', () => {
+    expect(visibleNavItems({ forge: true, inbox: true })).toEqual(NAV_ITEMS)
   })
 
   it('without a forge, exactly the GitHub item drops out', () => {
-    const labels = visibleNavItems(false).map((item) => item.label)
-    expect(labels).toEqual(['Tasks', 'Inbox', 'Git', 'Skills', 'Workflows', 'Settings'])
+    expect(labelsOf({ forge: false, inbox: true })).toEqual([
+      'Tasks',
+      'Inbox',
+      'Git',
+      'Skills',
+      'Workflows',
+      'Settings',
+    ])
+  })
+
+  it('without the inbox, exactly the Inbox item drops out (#471)', () => {
+    expect(labelsOf({ forge: true, inbox: false })).toEqual([
+      'Tasks',
+      'Git',
+      'GitHub',
+      'Skills',
+      'Workflows',
+      'Settings',
+    ])
+  })
+
+  it('drops both when neither is available', () => {
+    expect(labelsOf({ forge: false, inbox: false })).toEqual([
+      'Tasks',
+      'Git',
+      'Skills',
+      'Workflows',
+      'Settings',
+    ])
+  })
+
+  it('defaults to absent — the nav claims nothing before health answers', () => {
+    expect(labelsOf()).toEqual(labelsOf({ forge: false, inbox: false }))
+  })
+
+  it('never invents an item — the result is always a subset of NAV_ITEMS, in order', () => {
+    for (const forge of [true, false]) {
+      for (const inbox of [true, false]) {
+        const items = visibleNavItems({ forge, inbox })
+        expect(NAV_ITEMS.filter((i) => items.includes(i))).toEqual(items)
+      }
+    }
   })
 })
