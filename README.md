@@ -338,6 +338,8 @@ Useful environment variables:
 | `CEZ_CODEX_BIN=/path/to/codex` | Override which `codex` binary is used. |
 | `CEZ_OPENCODE_BIN=/path/to/opencode` | Override which `opencode` binary is used. |
 | `GITHUB_TOKEN` | Fallback for GitHub reads/PRs when `gh` isn't authenticated. |
+| `CEZ_TITLE_UPDATES=0` | Turn off the live task-title refresh (namer re-runs on each turn end). The Settings → Agents toggle overrides this default. |
+| `CEZ_AUTONAME=0` | Disable ALL LLM task naming (creation + live) — titles stay heuristic (`437: /om-auto-review-pr`). Under `CEZ_DRY_RUN=1` naming is already off unless forced with `CEZ_AUTONAME=1`. |
 | `CEZ_NO_BANNER=1` | Skip the `open-mercato/skills` banner on `cezar serve` startup. Dismissing the same banner in the cockpit silences the terminal one too. |
 
 ---

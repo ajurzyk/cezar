@@ -119,6 +119,34 @@ async function respond(userText, imageCount) {
     return;
   }
 
+  // Task auto-naming spec: a naming call (marked `[cez-namer]`) answers a
+  // deterministic short title + a PR classification of the sample number so
+  // dry-run tests can assert the full apply pipeline.
+  if (userText.includes('[cez-namer]')) {
+    const numbered = /(?:^|\D)(\d{1,7})(?:\D|$)/.exec(userText);
+    const name = JSON.stringify({
+      title: 'implementing cr fixes',
+      ...(numbered ? { pr: Number(numbered[1]) } : {}),
+    });
+    emit({
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: name }],
+        usage: { input_tokens: 200, output_tokens: 30 },
+      },
+    });
+    await sleep(50);
+    emit({
+      type: 'result',
+      subtype: 'success',
+      result: name,
+      usage: { input_tokens: 200, output_tokens: 30 },
+      total_cost_usd: 0.0002,
+    });
+    return;
+  }
+
   // Spec 008: a planning call (marked `[cez-planner]` in the user prompt)
   // gets a canned chain plan. The `code-review` skill is deliberately made up:
   // the planner's sanitizer strips unknown skills, and the step survives on

@@ -85,6 +85,11 @@ export interface RunRecord {
    *  Display tier only: `pullRequestUrl` (the PR this task CREATED) wins, and the
    *  Draft-PR / Create-PR action gates ignore it. Read via `taskPrUrl()`. */
   referencedPullRequestUrl?: string
+  /** The PR/issue number this task is ABOUT (task auto-naming spec) — display tier only. */
+  prNumber?: number
+  issueNumber?: number
+  /** 'user' = renamed via PATCH, never auto-overwritten; 'auto' = namer-owned. */
+  titleOrigin?: 'user' | 'auto'
   /** The referenced tier's working set (distinct PR URLs spotted, capped server-side). */
   referencedPrCandidates?: string[]
   /** Absent when the run executed in the repo working tree rather than its own worktree. */
@@ -561,6 +566,9 @@ export interface ConfigResponse {
   maxParallel: number
   /** Per-task memory ceiling in MiB (whole process tree); null = no limit. */
   memoryLimitMb: number | null
+  /** Live title updates (task auto-naming): null = no config key, the
+   *  CEZ_TITLE_UPDATES env default (ON) decides. */
+  liveTitleUpdates: boolean | null
 }
 
 /** `PUT /api/config` (Settings → Agents; the Repo tab's base-branch picker). `baseBranch: null`
@@ -575,6 +583,8 @@ export interface SetConfigInput {
   maxParallel?: number
   /** null or 0 clears the ceiling back to "no limit". */
   memoryLimitMb?: number | null
+  /** null clears the key back to the env-default behavior. */
+  liveTitleUpdates?: boolean | null
 }
 
 /** The PUT answer: the same shape GET serves (the pre-R6 fields stayed, the rest is additive). */

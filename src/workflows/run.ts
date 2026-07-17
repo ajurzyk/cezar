@@ -22,7 +22,8 @@ import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff, worktreeS
 import { getRepoInfo } from '../server/git.js';
 import { loadWorkflows } from './load.js';
 import type { RunRecord, RunStore } from '../runs/store.js';
-import { deriveTitleSummary } from '../runs/title-summary.js';
+import { extractTaskRefs, refineTaskRefs, titleRefNumber } from '../runs/task-refs.js';
+import { autoNamingActive, generateRunName, liveTitleUpdatesEnabled } from '../runs/auto-name.js';
 import { UiEventSink } from '../runs/ui-event-sink.js';
 import { DEFAULT_ALLOWED_TOOLS, stepKind, type WorkflowDef, type WorkflowStepDef } from './types.js';
 
@@ -266,6 +267,20 @@ export class RunManager {
     // Persist the full definition so a queued run survives a restart (#367) —
     // ad-hoc "(planned)" chains exist nowhere else to re-resolve from.
     this.store.updateRun(run.id, { workflowDef: workflow as unknown as Record<string, unknown> });
+    // Step-0 reference extraction (task auto-naming spec): the regex layer's
+    // numbers persist immediately; the namer may add the kind it verified later.
+    const skillHint = workflow.steps.find((s) => stepKind(s) === 'agent' && s.skill)?.skill?.trim();
+    const refs = refineTaskRefs(extractTaskRefs(input.task), skillHint);
+    if (refs.prNumber !== undefined || refs.issueNumber !== undefined) {
+      this.store.updateRun(run.id, {
+        ...(refs.prNumber !== undefined ? { prNumber: refs.prNumber } : {}),
+        ...(refs.issueNumber !== undefined ? { issueNumber: refs.issueNumber } : {}),
+      });
+    }
+    // Fire-and-forget LLM naming (task auto-naming spec): the heuristic title
+    // above shows instantly; the namer's short title replaces it when (and if)
+    // the model answers. Never awaited, never fails the run.
+    void this.autoNameRun(run.id, skillHint, input.task);
     this.pendingJobs.set(run.id, { workflow, input });
     this.queue.push(run.id);
     void this.pump();
@@ -437,7 +452,11 @@ export class RunManager {
     this.waiting.delete(runId);
     this.active.delete(runId);
     this.memoryPausing.delete(runId);
+    this.lastNamerKey.delete(runId);
   }
+
+  /** Last live-refresh namer inputs per run — unchanged inputs skip the call. */
+  private lastNamerKey = new Map<string, string>();
 
   /**
    * Acquire the one-at-a-time lease for runs executing in `repoRoot`.
@@ -1239,21 +1258,79 @@ export class RunManager {
    * Not `private` so the integration tests can drive a turn-end directly —
    * a real agent session is the only other way to reach this path.
    */
+  /**
+   * The namer's apply path (task auto-naming spec). Fire-and-forget: called
+   * without await from `startRun` (creation) and `recordTurnEnd` (live
+   * refresh). A user-owned title (`titleOrigin: 'user'`) is never overwritten;
+   * namer-owned titles may be replaced by fresher namer results.
+   */
+  private async autoNameRun(
+    runId: string,
+    skillName: string | undefined,
+    task: string,
+    live?: { turnText?: string; diffStat?: string },
+  ): Promise<void> {
+    // CEZ_AUTONAME=0 kills all LLM naming; dry-run skips it too unless
+    // CEZ_AUTONAME=1 forces the mock path — see autoNamingActive.
+    if (!autoNamingActive()) return;
+    try {
+      let skillDescription: string | undefined;
+      if (skillName) {
+        const skills = await discoverSkills(this.repoRoot).catch(() => [] as Skill[]);
+        skillDescription = skills.find((s) => s.name === skillName)?.description;
+      }
+      const result = await generateRunName(this.repoRoot, { task, skillName, skillDescription, ...live });
+      if (!result) return;
+      const run = this.store.getRun(runId);
+      if (!run || run.titleOrigin === 'user') return;
+      this.store.updateRun(runId, {
+        titleSummary: result.titleSummary,
+        titleOrigin: 'auto',
+        ...(result.prNumber !== undefined ? { prNumber: result.prNumber } : {}),
+        ...(result.issueNumber !== undefined ? { issueNumber: result.issueNumber } : {}),
+      });
+    } catch {
+      // Naming is best-effort — nothing here may disturb the run.
+    }
+  }
+
   async recordTurnEnd(runId: string, turnText: string): Promise<void> {
     try {
       const run = this.store.getRun(runId);
       if (!run) return;
-      if (run.titleSummary === undefined) {
-        const summary = deriveTitleSummary(turnText, run.task);
-        if (summary) this.store.updateRun(runId, { titleSummary: summary });
+      // Titles are the namer's job (task auto-naming spec) — turn text is
+      // deliberately NEVER a title source; see maybeRefreshTitle below.
+      if (run.worktreePath && existsSync(run.worktreePath)) {
+        const stat = await worktreeShortstat(run.worktreePath, run.baseBranch ?? 'HEAD');
+        if (stat) this.store.updateRun(runId, { diffStat: stat });
+        else this.store.appendEvent(runId, { type: 'note', message: 'diff stat unavailable — git diff --shortstat failed in the worktree' });
       }
-      if (!run.worktreePath || !existsSync(run.worktreePath)) return;
-      const stat = await worktreeShortstat(run.worktreePath, run.baseBranch ?? 'HEAD');
-      if (stat) this.store.updateRun(runId, { diffStat: stat });
-      else this.store.appendEvent(runId, { type: 'note', message: 'diff stat unavailable — git diff --shortstat failed in the worktree' });
+      await this.maybeRefreshTitle(runId, turnText);
     } catch {
       // Bookkeeping only — nothing here may disturb the run.
     }
+  }
+
+  /**
+   * Live title refresh (task auto-naming spec, step 3): re-run the namer with
+   * the turn's context. Skips: toggle off (`liveTitleUpdates` config over
+   * `CEZ_TITLE_UPDATES` env, default ON), user-owned title, dry-run mocks
+   * (canned answers add nothing), empty turn text, unchanged namer inputs.
+   */
+  private async maybeRefreshTitle(runId: string, turnText: string): Promise<void> {
+    if (!autoNamingActive()) return;
+    if (!turnText.trim()) return;
+    const config = await loadConfig(this.repoRoot);
+    if (!liveTitleUpdatesEnabled(config)) return;
+    const run = this.store.getRun(runId);
+    if (!run || run.titleOrigin === 'user') return;
+    const statText = run.diffStat ? `${run.diffStat.files} files, +${run.diffStat.adds} -${run.diffStat.dels}` : undefined;
+    const key = `${turnText.slice(0, 200)}|${statText ?? ''}`;
+    if (this.lastNamerKey.get(runId) === key) return;
+    this.lastNamerKey.set(runId, key);
+    const workflow = await this.reviveWorkflow(run);
+    const skillName = workflow?.steps.find((s) => stepKind(s) === 'agent' && s.skill)?.skill?.trim();
+    void this.autoNameRun(runId, skillName, run.task, { turnText, diffStat: statText });
   }
 
   /**
@@ -1435,9 +1512,10 @@ function applyTemplate(template: string, task: string): string {
 }
 
 /**
- * Immediate title shown while a run is queued. The LLM-derived
- * `titleSummary` still replaces it after the first informative turn; this is
- * only the honest fallback before any model has answered (#432).
+ * Immediate title shown while a run is queued. The namer's `titleSummary`
+ * replaces it once the model answers; this is the honest, permanent fallback
+ * when no model is available (#432, spec 2026-07-17-task-auto-naming). When
+ * the task references a PR/issue, the number leads: `469: /om-auto-review-pr`.
  */
 export function makeRunTitle(task: string, workflow: WorkflowDef): string {
   const firstLine = task.trim().split('\n')[0] ?? '';
@@ -1445,7 +1523,18 @@ export function makeRunTitle(task: string, workflow: WorkflowDef): string {
   const contextual = skill && !firstLine.startsWith(`/${skill}`)
     ? `/${skill}${firstLine ? ` ${firstLine}` : ''}`
     : firstLine;
-  const chars = [...(contextual || '(untitled task)')];
+  const refNumber = titleRefNumber(refineTaskRefs(extractTaskRefs(task), skill));
+  // `469` or `/om-auto-review-pr 469` reads as `469: /om-auto-review-pr` — the
+  // number leads so it survives the tasks table's narrow truncation.
+  const skillArg = skill && contextual.startsWith(`/${skill}`) ? contextual.slice(skill.length + 1).trim() : null;
+  const body = refNumber !== undefined && skill && (skillArg === '' || /^#?\d+$/.test(skillArg ?? ''))
+    ? `/${skill}`
+    : contextual;
+  const prefixed =
+    refNumber !== undefined && !body.trimStart().replace(/^#/, '').startsWith(String(refNumber))
+      ? `${refNumber}: ${body}`
+      : body;
+  const chars = [...(prefixed || '(untitled task)')];
   return chars.length > 80 ? `${chars.slice(0, 79).join('').trimEnd()}…` : chars.join('');
 }
 
