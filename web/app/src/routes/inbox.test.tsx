@@ -349,6 +349,9 @@ describe('the inbox gate (#471)', () => {
     expect(screen.queryByText('Inbox empty')).toBeNull()
     // And it tells the user how to get it back.
     expect(screen.getByText(/CEZ_FOLLOWUPS=1/)).toBeTruthy()
+    const header = document.querySelector('[data-route="inbox"] header')
+    expect(header?.textContent).toContain('Disabled for this server; per-task Notes still run.')
+    expect(header?.textContent).not.toContain('Follow-ups agents suggested')
     expect(cards()).toHaveLength(0)
 
     // The query parks once health lands. It may already have fired one speculative request

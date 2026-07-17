@@ -71,7 +71,9 @@ export function InboxRoute() {
       <header className="sticky top-0 z-10 hidden h-14 shrink-0 items-center gap-3 border-b border-border bg-background px-5 md:flex">
         <h1 className="text-base font-semibold">Inbox</h1>
         <p className="text-[13px] text-soft-foreground">
-          Follow-ups agents suggested when they finished a task.
+          {inboxOff
+            ? 'Disabled for this server; per-task Notes still run.'
+            : 'Follow-ups agents suggested when they finished a task.'}
         </p>
       </header>
 
