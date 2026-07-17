@@ -133,6 +133,10 @@ export async function generateRunName(repoRoot: string, ctx: NamerContext): Prom
         allowedTools: [],
         model,
         timeoutMs: NAMER_TIMEOUT_MS,
+        // Shadow the argv-capture hook: dry-run tests capture the AGENT's argv
+        // through CEZ_MOCK_ARGS_FILE; the namer's bookkeeping call must not
+        // interleave lines into that file.
+        env: { CEZ_MOCK_ARGS_FILE: '' },
       });
       const composed = composeNameResult(result.text, ctx);
       if (composed) return composed;

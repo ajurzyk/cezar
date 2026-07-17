@@ -198,6 +198,26 @@ describe('systemPrompt end-to-end (dry run)', () => {
     expect(prompt).toBe(composeSystemPrompt(CONFIG_PROMPT, HANDOFF_INSTRUCTIONS));
   }, 30_000);
 
+
+  it('a user rename made before the namer answers is never overwritten', async () => {
+    writeFileSync(argsFile, '', 'utf8');
+    const record = manager.startRun(skillWorkflow, { task: '437' });
+    // What PATCH /api/runs/:id does, synchronously after creation:
+    store.updateRun(record.id, { title: 'My name', titleSummary: 'My name', titleOrigin: 'user' });
+
+    const terminal = new Set(['done', 'review', 'failed', 'cancelled']);
+    const deadline = Date.now() + 20_000;
+    while (!terminal.has(store.getRun(record.id)?.status ?? '')) {
+      if (Date.now() > deadline) throw new Error('run did not finish in time');
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    // Settle window for the async namer to (not) apply.
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    const after = store.getRun(record.id);
+    expect(after?.titleSummary).toBe('My name');
+    expect(after?.titleOrigin).toBe('user');
+  }, 30_000);
+
   it('override: replaces the config default in argv and in the record echo', async () => {
     const id = await runToEnd({ task: 'do the thing', systemPrompt: OVERRIDE_PROMPT });
     const record = store.getRun(id);
@@ -214,10 +234,16 @@ describe('systemPrompt end-to-end (dry run)', () => {
     expect(record?.title).toBe('432: /om-auto-review-pr');
     // Step-0 extraction persisted the reference (skill-hint → PR).
     expect(record?.prNumber).toBe(432);
-    // The display title remains LLM-derived after a turn; the skill-aware
-    // title above is only the queued fallback.
-    expect(record?.titleSummary).toBeDefined();
-    expect(record?.titleSummary).not.toBe(record?.title);
+    // The fire-and-forget namer replaces the heuristic with the mock's short
+    // title (task auto-naming spec) — async, so poll for it.
+    const deadline = Date.now() + 15_000;
+    while (store.getRun(id)?.titleSummary !== '432: implementing cr fixes') {
+      if (Date.now() > deadline) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    const named = store.getRun(id);
+    expect(named?.titleSummary).toBe('432: implementing cr fixes');
+    expect(named?.titleOrigin).toBe('auto');
 
     const skillPrompt = skillSystemPrompt({
       name: 'om-auto-review-pr',
@@ -280,3 +306,4 @@ describe('systemPrompt end-to-end (dry run)', () => {
     expect(existsSync(inheritedTodos)).toBe(false);
   }, 30_000);
 });
+

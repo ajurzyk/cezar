@@ -24,6 +24,7 @@ import { loadWorkflows } from './load.js';
 import type { RunRecord, RunStore } from '../runs/store.js';
 import { deriveTitleSummary } from '../runs/title-summary.js';
 import { extractTaskRefs, refineTaskRefs, titleRefNumber } from '../runs/task-refs.js';
+import { generateRunName } from '../runs/auto-name.js';
 import { UiEventSink } from '../runs/ui-event-sink.js';
 import { DEFAULT_ALLOWED_TOOLS, stepKind, type WorkflowDef, type WorkflowStepDef } from './types.js';
 
@@ -259,6 +260,10 @@ export class RunManager {
         ...(refs.issueNumber !== undefined ? { issueNumber: refs.issueNumber } : {}),
       });
     }
+    // Fire-and-forget LLM naming (task auto-naming spec): the heuristic title
+    // above shows instantly; the namer's short title replaces it when (and if)
+    // the model answers. Never awaited, never fails the run.
+    void this.autoNameRun(run.id, workflow, input.task);
     this.pendingJobs.set(run.id, { workflow, input });
     this.queue.push(run.id);
     void this.pump();
@@ -1128,6 +1133,40 @@ export class RunManager {
    * Not `private` so the integration tests can drive a turn-end directly —
    * a real agent session is the only other way to reach this path.
    */
+  /**
+   * The namer's apply path (task auto-naming spec). Fire-and-forget: called
+   * without await from `startRun` (creation) and `recordTurnEnd` (live
+   * refresh). A user-owned title (`titleOrigin: 'user'`) is never overwritten;
+   * namer-owned titles may be replaced by fresher namer results.
+   */
+  private async autoNameRun(
+    runId: string,
+    workflow: WorkflowDef,
+    task: string,
+    live?: { turnText?: string; diffStat?: string },
+  ): Promise<void> {
+    try {
+      const skillName = workflow.steps.find((s) => stepKind(s) === 'agent' && s.skill)?.skill?.trim();
+      let skillDescription: string | undefined;
+      if (skillName) {
+        const skills = await discoverSkills(this.repoRoot).catch(() => [] as Skill[]);
+        skillDescription = skills.find((s) => s.name === skillName)?.description;
+      }
+      const result = await generateRunName(this.repoRoot, { task, skillName, skillDescription, ...live });
+      if (!result) return;
+      const run = this.store.getRun(runId);
+      if (!run || run.titleOrigin === 'user') return;
+      this.store.updateRun(runId, {
+        titleSummary: result.titleSummary,
+        titleOrigin: 'auto',
+        ...(result.prNumber !== undefined ? { prNumber: result.prNumber } : {}),
+        ...(result.issueNumber !== undefined ? { issueNumber: result.issueNumber } : {}),
+      });
+    } catch {
+      // Naming is best-effort — nothing here may disturb the run.
+    }
+  }
+
   async recordTurnEnd(runId: string, turnText: string): Promise<void> {
     try {
       const run = this.store.getRun(runId);
