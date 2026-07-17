@@ -97,7 +97,7 @@ export const CONFIG_FILES: ConfigFileDef[] = [
     format: 'json',
     tracked: 'tracked',
     precedence:
-      'Overrides user settings key by key (permission rules merge). Local settings override this. Runs read the committed copy — an edit applies after you commit it.',
+      'Overrides user settings key by key (permission rules merge). Local settings override this.',
     hotReload: 'Edits to most keys — including permissions and hooks — apply to a running session without a restart.',
     docsUrl: CLAUDE_SETTINGS_DOCS,
   },
