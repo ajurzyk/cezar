@@ -12,7 +12,7 @@ Your CLI logins, your `gh`, your files. No accounts, no database, no cloud.
 
 🔥 **Fire and forget.** Queue a stack of autonomous coding and maintenance
 tasks and let them run — cezar orchestrates them across isolated worktrees,
-in parallel, and picks up follow-ups on its own. Flip the **Autonomous** flag
+in parallel. Flip the **Autonomous** flag
 and a run never stops to ask; it just finishes. Leave it on a VPS and you get
 a dev team that's *always on* — a mobile-friendly cockpit you can check from
 your phone, working your backlog while you're away.
@@ -90,10 +90,11 @@ and an orchestrator keeps a whole queue of them moving.
   worktree**, so two (or three) agents work in parallel without stepping on
   each other — or on the branch you're editing.
 - 🗂️ **A backlog that needs babysitting.** Queue a stack of tasks and cezar
-  **orchestrates** them: it runs up to your parallel limit, holds the rest in an
-  ordered queue, and turns an agent's leftover follow-ups into the next tasks
-  from the **Inbox** — one click each. Point it at a GitHub issue and it runs
-  straight on that, so working the tracker down stops being a manual chore.
+  **orchestrates** them: it runs up to your parallel limit and holds the rest in
+  an ordered queue. Point it at a GitHub issue and it runs straight on that, so
+  working the tracker down stops being a manual chore. Turn on the opt-in
+  **Inbox** (`CEZ_FOLLOWUPS=1`) and an agent's leftover follow-ups become the
+  next tasks too — one click each.
 - 🤖 **"Autonomous" means you still have to sit there.** Flip the **Autonomous**
   flag and a run never parks to ask — it keeps going until the task is done. Pair
   it with a **skill** (a Markdown playbook) and you've got fire-and-forget
@@ -256,12 +257,12 @@ Five moves that make the cockpit worth the browser tab:
 
 ## Cockpit tour
 
-Seven views, one browser window, all live over Server-Sent Events:
+Seven views, one browser window, all live over Server-Sent Events (six until you opt into the Inbox):
 
 | View | What's in it |
 |---|---|
 | **Tasks** | Every task with its status, live event stream (agent text · tool calls · tool results · pasted/generated screenshots), tokens and cost. Continue, cancel, open in terminal (`claude --resume`), review the diff, or push a draft PR. |
-| **Inbox** | Follow-ups an agent left behind (`todos.json`) — one click turns a suggestion into the next task, pre-wired to its suggested skill. |
+| **Inbox** | **Opt-in** (`CEZ_FOLLOWUPS=1`; hidden by default). Follow-ups an agent left behind (`todos.json`) — one click turns a suggestion into the next task, pre-wired to its suggested skill. Off, agents are never asked to leave follow-ups; each task's own **Notes** handoff journal is unaffected. |
 | **Git** | Branch, working-tree status, diff vs HEAD, recent commits (click one for its inline patch + GitHub link), and the configurable base branch that worktrees fork from and PRs target. |
 | **GitHub** | Open issues and PRs of the repo's origin, read through your logged-in `gh`. Hand an issue straight to the agent — pick a workflow and skills, one click runs it. |
 | **Skills** | Local skills plus the team skills repo, with a rendered body + prompt preview. Refresh pulls the latest from the remote. |
@@ -330,6 +331,7 @@ Useful environment variables:
 |---|---|
 | `CEZ_DRY_RUN=1` | Use the bundled mock instead of the real `claude` CLI — the entire cockpit works offline, for demos and development. |
 | `CEZ_APPROVAL_GATE=1` | Opt into Claude's interactive approval UI; by default, unapproved tools are denied without interrupting the run. |
+| `CEZ_FOLLOWUPS=1` | Turn on the global follow-up **Inbox**: agents are asked to leave follow-ups in `todos.json` when they finish, and the Inbox view appears. Off by default — each task's own **Notes** handoff journal runs either way. |
 | `CEZ_CLAUDE_BIN=/path/to/claude` | Override which `claude` binary is used. |
 | `CEZ_CODEX_BIN=/path/to/codex` | Override which `codex` binary is used. |
 | `CEZ_OPENCODE_BIN=/path/to/opencode` | Override which `opencode` binary is used. |

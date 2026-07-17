@@ -10,7 +10,7 @@ cezar is a published npm CLI (`@pat-lewczuk/cezar`, currently 0.x) whose state l
 - **Commands:** bare invocation = `serve` (cockpit); `cezar run "<task>"`; `cezar init`.
 - **Flags:** `-p/--port` (default 4321, auto-picks the next free port), `--repo <dir>`, `--workflow <name>` (default `quick-task`), `--model <model>`, `--no-open`, `-h/--help`.
 - **Exit codes:** `run` exits 0 on `done` **and** `review` (spec 009 — headless runs must not hang on the review gate), 1 on `failed`/`cancelled`/unknown workflow. CI scripts depend on this.
-- **Env vars:** `CEZ_DRY_RUN`, `CEZ_APPROVAL_GATE`, `CEZ_CLAUDE_BIN`, `CEZ_CODEX_BIN`, `CEZ_OPENCODE_BIN`, `GITHUB_TOKEN`.
+- **Env vars:** `CEZ_DRY_RUN`, `CEZ_APPROVAL_GATE`, `CEZ_FOLLOWUPS`, `CEZ_CLAUDE_BIN`, `CEZ_CODEX_BIN`, `CEZ_OPENCODE_BIN`, `GITHUB_TOKEN`.
 
 Breaking: renaming/removing a command, flag, alias or env var; changing a default (port, workflow); changing `run` exit-code semantics. Required path: keep the old spelling as a deprecated alias for at least one minor release, print a one-line deprecation warning, document the replacement.
 
@@ -25,7 +25,7 @@ Consumed by the bundled React cockpit (`web/dist`, shipped in lockstep — low r
 - Runs: `GET/POST /api/runs`, `GET /api/runs/:id`, `PATCH /api/runs/:id`, `POST /api/runs/:id/{cancel,messages,finish,continue,open-in-cli,open-in,pr,archive,remove-worktree,git/commit,git/push}`, `POST /api/runs/archive-finished`, `DELETE /api/runs/:id`, `GET /api/runs/:id/{handoff,diff,changes,files,commits,events}`, `GET /api/runs/:id/commit/:sha`, `GET /api/runs/:id/images/:file`
 - Open-in: `GET /api/open-targets`
 - Variants: `GET /api/groups/:groupId`, `POST /api/groups/:groupId/pick`
-- Inbox: `GET /api/todos`, `DELETE /api/todos/:id`, `POST /api/todos/:id/start`
+- Inbox: `GET /api/todos`, `DELETE /api/todos/:id`, `POST /api/todos/:id/start` — present always, but **gated** on `CEZ_FOLLOWUPS=1` (#471, off by default): the GET degrades to `200 []` and the two mutators answer `409`. The routes themselves must keep existing and must behave exactly as before once the flag is on.
 - SSE: `GET /api/events` (global), `GET /api/runs/:id/events` (replay + live, dedup by `seq`)
 - Repo/GitHub: `GET /api/github`, `GET /api/repo`, `GET /api/repo/{diff,changes}`, `GET /api/repo/commit/:sha`, `POST /api/repo/branch`, `GET/PUT /api/config`, `GET/PUT /api/ui-state`
 - SSE event names: `run-event` (v1), `ui-event` (v2 dotted types)
@@ -41,7 +41,7 @@ Written by one version, read by the next, and hand-editable by design:
 - **`runs/<id>.handoff.md`**, **`runs/<id>-images/`** — Markdown journal and screenshots; deleted with the run.
 - **`ui-state.json`** — GUI prefs; schema is `.passthrough()` so unknown keys survive round-trips. Keep it that way — never strip keys you don't know.
 - **`config.json`** — user-owned (`src/config.ts`): missing/invalid degrades to defaults; the `PUT /api/config` handler merges into the raw file so user keys survive and defaults are never materialized. Renaming a key (`skillsRepos`, `maxParallel`, `defaultRunner`, `plannerModel`, `baseBranch`) or changing a default is breaking; accept the old key as an alias during migration.
-- **`todos.json`**, **`launch-key`** — inbox entries (spec 007) and the bookmarklet secret.
+- **`todos.json`**, **`launch-key`** — inbox entries (spec 007) and the bookmarklet secret. The inbox is opt-in since #471, but the file's format is unchanged and its entries are **never** deleted by the gate: turning `CEZ_FOLLOWUPS=1` back on must surface exactly what was there before.
 - **`.gitignore`** — maintained by `ensureDataGitignore` in `src/index.ts`; any new run-data file must be added there in the same PR.
 
 Breaking: any change that makes an existing file unparseable, silently discarded, or rewritten into a new shape without reading the old one. Required path: read old + new shapes for at least one minor release (a lazy upgrade-on-read is fine since writes go through the schema), or ship an explicit migration; never require the user to delete `.ai/cezar/`.
@@ -78,6 +78,26 @@ The UI redesign was a deliberate generational change (approved 2026-07-14): whil
 - **Required path for each waived break**: called out in the phase PR body under "Breaking changes", release-notes entry, minor version bump (pre-1.0). No deprecation window required.
 
 The waiver expired when phase R7 landed; this document is back in full force with the then-current surfaces described above.
+
+## Follow-up inbox default flip (#471) — deliberate, 2026-07-17
+
+The global follow-up inbox shipped enabled (spec 007; #444 added the per-run `generateFollowups`
+opt-out). Issue #471 turns it **off by default**, re-enabled with `CEZ_FOLLOWUPS=1`: agents kept
+hanging on stale, pre-saved follow-ups, which made skill behavior unpredictable — the feature is a
+carry-over from the `GitHub janitor` era and is not wanted as a default.
+
+This is a deliberate break of section 2's endpoint list and of the "changing a default is breaking"
+rule in section 1, taken on the repo owner's explicit instruction rather than silently:
+
+- **Broken**: the *default* answers of `GET /api/todos` (now `200 []`), `DELETE /api/todos/:id` and
+  `POST /api/todos/:id/start` (now `409`); the default value of `POST /api/runs`
+  `generateFollowups` (now `false`, and the capability is a hard ceiling on it).
+- **Not broken**: every route still exists and behaves exactly as before under `CEZ_FOLLOWUPS=1`;
+  `todos.json`'s format is unchanged and its entries are never deleted by the gate; the per-task
+  handoff journal (`runs/<id>.handoff.md`, the "Notes" card) and the `CEZ:DONE` marker are
+  untouched — #471 keeps those explicitly.
+- **No deprecation alias**: the flag *is* the migration path — one env var restores the old
+  behavior wholesale, which the "keep the old spelling for a minor release" rule exists to provide.
 
 ## When in doubt
 
