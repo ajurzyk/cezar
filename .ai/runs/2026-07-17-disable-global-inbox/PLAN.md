@@ -19,6 +19,7 @@
 | 3 | 3.1 | Document the flag (.env.example, README, BACKWARD_COMPATIBILITY, spec 007) | done | 328dbb7 |
 | 4 | 4.3 | Repair the UI QA regressions and disabled-inbox copy from PR review | done | b693aca |
 | 4 | 4.4 | Resolve the latest main conflicts during automated re-review | done | ee8aed2 |
+| 4 | 4.5 | Stabilize the sequential quick-reply test exposed by the merged full gate | done | c42b3b5 |
 
 > **Review fixes (appended after `om-code-review`).** `4.1-review-fix` — merge `main` (six PRs
 > landed mid-run; `app-shell.tsx` conflicted and cezar's autosaver committed it mid-resolution,
@@ -28,6 +29,8 @@
 > disabled route's contradictory header, and complete the public env-var examples.
 > `4.4-review-fix` — merge the latest `main`, preserving both the new `CEZ_AUTOSAVE` work and
 > this PR's `CEZ_FOLLOWUPS` behavior in the overlapping docs and system-prompt coverage.
+> `4.5-review-fix` — replace a racy immediately-resolved quick-reply mock with a controlled
+> first delivery so the test proves the busy-state transition deterministically.
 
 ## Goal
 
