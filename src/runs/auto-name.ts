@@ -19,6 +19,19 @@ export const NAMER_TIMEOUT_MS = 20_000;
 export const TITLE_MAX = 40;
 
 /**
+ * Master switch for ALL LLM naming (creation-time and live refresh):
+ * `CEZ_AUTONAME=0` kills it outright; under `CEZ_DRY_RUN=1` naming is off by
+ * default too (the mock's canned title would REPLACE honest heuristic titles
+ * in demos and e2e) unless `CEZ_AUTONAME=1` forces it — the hook the dry-run
+ * naming tests use.
+ */
+export function autoNamingActive(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (env.CEZ_AUTONAME === '0') return false;
+  if (env.CEZ_DRY_RUN === '1' && env.CEZ_AUTONAME !== '1') return false;
+  return true;
+}
+
+/**
  * Live title updates switch (owner decision on PR #479 — deliberately ON by
  * default, deviating from the cost-opt-in house rule; cost is bounded by the
  * cheap `namerModel`, one call per turn end, and the skip conditions in

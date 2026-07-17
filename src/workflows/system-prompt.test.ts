@@ -106,7 +106,11 @@ describe('systemPrompt end-to-end (dry run)', () => {
     savedEnv.CEZ_DRY_RUN = process.env.CEZ_DRY_RUN;
     savedEnv.CEZ_MOCK_ARGS_FILE = process.env.CEZ_MOCK_ARGS_FILE;
     savedEnv.CEZ_TODOS_FILE = process.env.CEZ_TODOS_FILE;
+    savedEnv.CEZ_AUTONAME = process.env.CEZ_AUTONAME;
     process.env.CEZ_DRY_RUN = '1';
+    // Dry-run skips naming by default (canned titles would clobber honest
+    // heuristics in demos/e2e); '1' forces the mock path for these tests.
+    process.env.CEZ_AUTONAME = '1';
     process.env.CEZ_MOCK_ARGS_FILE = argsFile;
     // Simulate a nested cezar (an agent running `cez serve` / the test suite):
     // the parent process already carries CEZ_TODOS_FILE. Runners spawn with
@@ -221,9 +225,13 @@ describe('systemPrompt end-to-end (dry run)', () => {
     const seam = manager as unknown as Seam;
     const record = manager.startRun(skillWorkflow, { task: '437' });
 
-    // Dry-run guard: no key is recorded, the namer is never consulted.
+    // Dry-run guard (without the CEZ_AUTONAME=1 force): no key is recorded,
+    // the namer is never consulted.
+    const forced = process.env.CEZ_AUTONAME;
+    delete process.env.CEZ_AUTONAME;
     await seam.maybeRefreshTitle(record.id, 'made real progress on the fix');
     expect(seam.lastNamerKey.has(record.id)).toBe(false);
+    process.env.CEZ_AUTONAME = forced;
 
     // Outside dry-run, a fast-failing fake binary guards against real spawns.
     const savedDry = process.env.CEZ_DRY_RUN;

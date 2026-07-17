@@ -23,7 +23,7 @@ import { getRepoInfo } from '../server/git.js';
 import { loadWorkflows } from './load.js';
 import type { RunRecord, RunStore } from '../runs/store.js';
 import { extractTaskRefs, refineTaskRefs, titleRefNumber } from '../runs/task-refs.js';
-import { generateRunName, liveTitleUpdatesEnabled } from '../runs/auto-name.js';
+import { autoNamingActive, generateRunName, liveTitleUpdatesEnabled } from '../runs/auto-name.js';
 import { UiEventSink } from '../runs/ui-event-sink.js';
 import { DEFAULT_ALLOWED_TOOLS, stepKind, type WorkflowDef, type WorkflowStepDef } from './types.js';
 
@@ -1270,9 +1270,9 @@ export class RunManager {
     task: string,
     live?: { turnText?: string; diffStat?: string },
   ): Promise<void> {
-    // CEZ_AUTONAME=0 is the kill-switch for ALL LLM naming (creation + live
-    // refresh) — for tests, CI, and users who want heuristic titles only.
-    if (process.env.CEZ_AUTONAME === '0') return;
+    // CEZ_AUTONAME=0 kills all LLM naming; dry-run skips it too unless
+    // CEZ_AUTONAME=1 forces the mock path — see autoNamingActive.
+    if (!autoNamingActive()) return;
     try {
       let skillDescription: string | undefined;
       if (skillName) {
@@ -1318,7 +1318,7 @@ export class RunManager {
    * (canned answers add nothing), empty turn text, unchanged namer inputs.
    */
   private async maybeRefreshTitle(runId: string, turnText: string): Promise<void> {
-    if (process.env.CEZ_DRY_RUN === '1') return;
+    if (!autoNamingActive()) return;
     if (!turnText.trim()) return;
     const config = await loadConfig(this.repoRoot);
     if (!liveTitleUpdatesEnabled(config)) return;

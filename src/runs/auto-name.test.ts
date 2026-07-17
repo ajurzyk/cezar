@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  autoNamingActive,
   buildNamerPrompt,
   composeNameResult,
   crossCheckRefs,
@@ -147,5 +148,15 @@ describe('liveTitleUpdatesEnabled', () => {
     expect(liveTitleUpdatesEnabled({ liveTitleUpdates: false }, {})).toBe(false);
     expect(liveTitleUpdatesEnabled({ liveTitleUpdates: true }, { CEZ_TITLE_UPDATES: '0' })).toBe(true);
     expect(liveTitleUpdatesEnabled({ liveTitleUpdates: false }, { CEZ_TITLE_UPDATES: '1' })).toBe(false);
+  });
+});
+
+describe('autoNamingActive', () => {
+  it('on by default; CEZ_AUTONAME=0 kills it; dry-run is off unless forced', () => {
+    expect(autoNamingActive({})).toBe(true);
+    expect(autoNamingActive({ CEZ_AUTONAME: '0' })).toBe(false);
+    expect(autoNamingActive({ CEZ_DRY_RUN: '1' })).toBe(false);
+    expect(autoNamingActive({ CEZ_DRY_RUN: '1', CEZ_AUTONAME: '1' })).toBe(true);
+    expect(autoNamingActive({ CEZ_DRY_RUN: '1', CEZ_AUTONAME: '0' })).toBe(false);
   });
 });
