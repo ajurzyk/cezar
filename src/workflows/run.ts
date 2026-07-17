@@ -47,6 +47,14 @@ function stripDoneMarker(text: string): string {
 /** Periodic "cezar autosave" commit in the task worktree (spec 006). */
 export const AUTOSAVE_INTERVAL_MS = 90_000;
 
+/** The periodic autosave timer is opt-in (#471): off, a task branch carries only the
+ *  agent's own commits plus the turn-end/pre-PR flushes — no mid-run "cezar autosave"
+ *  noise interleaving PR history. The flushes (`autosaveCommit` at turn end and before
+ *  a draft PR) are NOT gated: the branch must still end holding the finished state. */
+export function periodicAutosaveEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.CEZ_AUTOSAVE === '1';
+}
+
 interface ActiveRun {
   cancelled: boolean;
   interrupt: () => void;
@@ -63,6 +71,9 @@ interface ActiveRun {
    *  going until it signals done or the safety cap is hit. */
   autonomous?: boolean;
   autoContinues?: number;
+  /** Release for exclusive execution in the user's repository working tree.
+   *  Worktree-backed runs never need it; every degradation/opt-out path does. */
+  releaseRepoRoot?: () => void;
 }
 
 /** Safety cap on autonomous auto-continues per run — stops a stuck agent from nudging forever. */
@@ -141,8 +152,9 @@ const VARIANT_HINTS: Record<string, string | undefined> = {
  * checks with bounded retry loops, plus live sessions: the last agent step
  * stays open for follow-ups (`waiting`) until "finish", idle timeout, or
  * cancel. Runs queue behind `maxParallel` slots and each run executes in its
- * own git worktree on a `cez/<id8>` branch (spec 006), autosave-committed
- * every 90 s — the user's working tree is never touched.
+ * own git worktree on a `cez/<id8>` branch (spec 006), autosave-committed at
+ * turn end and before a draft PR — plus every 90 s when opted in via
+ * CEZ_AUTOSAVE=1 (#471). The user's working tree is never touched.
  */
 export class RunManager {
   private readonly active = new Map<string, ActiveRun>();
@@ -159,6 +171,12 @@ export class RunManager {
   private readonly waiting = new Set<string>();
   private readonly pendingJobs = new Map<string, { workflow: WorkflowDef; input: StartRunInput }>();
   private pumping = false;
+  /**
+   * Runs normally isolate in worktrees and may execute in parallel. When that
+   * isolation is unavailable (or explicitly disabled), serialize access to
+   * `repoRoot` so two agents can never edit/revert the same files (#438).
+   */
+  private repoRootTail: Promise<void> = Promise.resolve();
 
   /** `.ai/cezar` — where the per-task handoff files and todos.json live. */
   private readonly dataDir: string;
@@ -428,6 +446,9 @@ export class RunManager {
 
   /** Remove a run from the live registries — keeps `waiting ⊆ active`. */
   private dropActive(runId: string): void {
+    const state = this.active.get(runId);
+    state?.releaseRepoRoot?.();
+    if (state) state.releaseRepoRoot = undefined;
     this.waiting.delete(runId);
     this.active.delete(runId);
     this.memoryPausing.delete(runId);
@@ -436,6 +457,61 @@ export class RunManager {
 
   /** Last live-refresh namer inputs per run — unchanged inputs skip the call. */
   private lastNamerKey = new Map<string, string>();
+
+  /**
+   * Acquire the one-at-a-time lease for runs executing in `repoRoot`.
+   *
+   * A lease waiter is idle, so it parks in `waiting` and gives its
+   * `maxParallel` slot back (the #347 rule): isolated worktrees keep using
+   * every configured slot while root runs line up. The store status stays
+   * `running` — only the queue's busy count changes, so the GUI never shows a
+   * lease-blocked run as awaiting user input.
+   *
+   * The lease is held for the run's whole lifetime, including the idle
+   * `waiting` parks between agent turns. A parked session is still live and
+   * writes to the working tree the moment it resumes, so handing the tree to
+   * another run there would reintroduce the concurrent-edit bug (#438) this
+   * lease exists to prevent.
+   *
+   * Returns false when the run was cancelled while waiting: the lease was
+   * never granted and the caller must not touch the working tree.
+   */
+  private async acquireRepoRoot(runId: string, state: ActiveRun): Promise<boolean> {
+    // `cancel()` can land between the run going `running` and reaching here,
+    // while `interrupt` is still the default no-op — never enter the chain.
+    if (state.cancelled) return false;
+    const previous = this.repoRootTail;
+    let release: () => void = () => undefined;
+    this.repoRootTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // Until `previous` resolves this run does not own the tree yet, so a drop
+    // during the wait must not hand the tree to the next waiter — chain our
+    // release behind `previous` instead of resolving the tail early.
+    state.releaseRepoRoot = () => {
+      void previous.then(release);
+    };
+    let abort: () => void = () => undefined;
+    const cancelled = new Promise<void>((resolve) => {
+      abort = resolve;
+    });
+    const parked = state.interrupt;
+    state.interrupt = () => {
+      parked();
+      abort();
+    };
+    this.waiting.add(runId);
+    void this.pump();
+    try {
+      await Promise.race([previous, cancelled]);
+    } finally {
+      state.interrupt = parked;
+      this.waiting.delete(runId);
+    }
+    if (state.cancelled) return false;
+    state.releaseRepoRoot = release;
+    return true;
+  }
 
   cancel(runId: string): boolean {
     // Still waiting in the queue: just drop it there.
@@ -572,6 +648,23 @@ export class RunManager {
         : this.repoRoot;
     const state: ActiveRun = { cancelled: false, interrupt: () => undefined, cwd };
     this.active.set(runId, state);
+    if (state.cwd === this.repoRoot) {
+      this.store.appendEvent(runId, {
+        type: 'note',
+        message: 'waiting for exclusive access to the repository working tree',
+      });
+      if (!(await this.acquireRepoRoot(runId, state))) {
+        this.store.updateRun(runId, {
+          status: 'cancelled',
+          finishedAt: new Date().toISOString(),
+          currentStepId: undefined,
+        });
+        this.store.appendEvent(runId, { type: 'lifecycle', message: 'run cancelled' });
+        this.dropActive(runId);
+        void this.pump();
+        return;
+      }
+    }
     this.armAutosave(state);
     if (record) seedHandoffFile(this.dataDir, record); // idempotent — normally already there
 
@@ -756,8 +849,9 @@ export class RunManager {
     emit({ type: 'lifecycle', message: `run started — workflow "${workflow.name}" (runner: ${taskBackend})` });
 
     // Worktree per task (spec 006): the agent works on its own branch in
-    // `.ai/cezar/worktrees/<id>`, never in the user's working tree. Not a git
-    // repo, or worktree creation failed → degrade to running in place.
+    // `.ai/cezar/worktrees/<id>`, never in the user's working tree. A Git task
+    // that requests isolation fails closed if the worktree cannot be
+    // established; only explicit opt-out and non-Git modes run in place.
     const repo = await getRepoInfo(this.repoRoot);
     if (repo && input.worktree === false) {
       // Composer opt-out: run in the repo working tree, no branch/worktree
@@ -767,8 +861,14 @@ export class RunManager {
       // Fork from the configured base branch (config.json `baseBranch`, e.g.
       // `develop`) — also the target of the eventual draft PR. Unresolvable
       // (typo, not fetched) → note + the currently checked-out branch.
-      let base = repo.branch;
-      const configured = config.baseBranch;
+      //
+      // A task that already recorded a fork point keeps it: its worktree is
+      // reused as-is, and re-resolving against a since-changed config would
+      // silently re-anchor the `merge-base` every diff/shortstat is measured
+      // from, shifting "what did this task change" under an existing task.
+      const recorded = this.store.getRun(runId)?.baseBranch;
+      let base = recorded ?? repo.branch;
+      const configured = recorded ? undefined : config.baseBranch;
       if (configured) {
         const resolved = await resolveBaseRef(this.repoRoot, configured);
         if (resolved) {
@@ -792,10 +892,32 @@ export class RunManager {
         this.armAutosave(state);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        emit({ type: 'note', message: `worktree creation failed (${message}) — running in the repo working tree` });
+        const error = `worktree creation failed: ${message}`;
+        emit({ type: 'note', message: `${error} — task stopped before workflow execution` });
+        this.store.updateRun(runId, {
+          status: 'failed',
+          error,
+          finishedAt: new Date().toISOString(),
+          currentStepId: undefined,
+        });
+        emit({ type: 'lifecycle', message: `run failed — ${error}` });
+        this.dropActive(runId);
+        void this.pump();
+        return;
       }
     } else {
       emit({ type: 'note', message: 'not a git repository — running in place, one task at a time' });
+    }
+
+    if (state.cwd === this.repoRoot) {
+      emit({
+        type: 'note',
+        message: 'waiting for exclusive access to the repository working tree',
+      });
+      // A cancel during the wait leaves the lease ungranted; the step loop
+      // below breaks on `cancelled` before touching the tree and settles the
+      // run through the usual path.
+      await this.acquireRepoRoot(runId, state);
     }
 
     // Handoff journal (spec 007) — seeded after the worktree exists so the
@@ -1306,8 +1428,10 @@ export class RunManager {
     }
   }
 
-  /** Autosave-commit the worktree every 90 s while the run lives (spec 006). */
+  /** Autosave-commit the worktree every 90 s while the run lives (spec 006).
+   *  Opt-in via CEZ_AUTOSAVE=1 (#471) — see periodicAutosaveEnabled. */
   private armAutosave(state: ActiveRun): void {
+    if (!periodicAutosaveEnabled()) return;
     if (state.cwd === this.repoRoot || state.autosaveTimer) return;
     state.autosaveTimer = setInterval(() => {
       void autosaveCommit(state.cwd);
