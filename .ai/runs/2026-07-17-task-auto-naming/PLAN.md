@@ -24,7 +24,7 @@ Run folder: `.ai/runs/2026-07-17-task-auto-naming/`
 | 3 | 3.3 | Settings → Agents toggle for live title updates (web UI) | done | 53a7d94 |
 | 4 | 4.1 | Retire raw turn-text titles (`title-summary.ts`) + update dependent tests | done | b4359fd |
 | 4 | 4.2 | Docs: .env.example, README env table + naming section, config key docs | done | 79a29fb |
-| 4 | 4.3-review-fix | Dry-run naming off by default (`autoNamingActive`, e2e fix) + AGENTS.md env-doc rule | done | pending |
+| 4 | 4.3-review-fix | Dry-run naming off by default (`autoNamingActive`, e2e fix) + AGENTS.md env-doc rule | done | d408880 |
 
 ## Goal
 
