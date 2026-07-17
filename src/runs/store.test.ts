@@ -302,3 +302,37 @@ describe('RunStore — referenced-PR discovery (#407, spec 2026-07-16-pr-autodis
     expect(legacyStore.getRun('legacy-1')?.referencedPullRequestUrl).toBeUndefined();
   });
 });
+
+describe('RunStore — seq survives a restart (#424 symptom class)', () => {
+  let dataDir: string;
+
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), 'cez-store-seq-'));
+  });
+
+  afterEach(() => {
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it('continues numbering above the NDJSON max after reopen, so replayed clients keep receiving', () => {
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({ title: 't', workflow: 'w', task: 't', steps: [] });
+    store.appendEvent(run.id, { type: 'note', message: 'one' });
+    store.appendEvent(run.id, { type: 'note', message: 'two' });
+    store.flush();
+
+    // A client that replayed the file now dedups with maxSeq = 2. A restarted
+    // process restarting seqs at 1 would have every resumed event dropped.
+    const reopened = RunStore.open(dataDir, { keepLive: true });
+    const resumed = reopened.appendEvent(run.id, { type: 'note', message: 'after restart' });
+    expect(resumed.seq).toBe(3);
+    const seqs = reopened.readEvents(run.id).map((e) => e.seq);
+    expect(seqs).toEqual([1, 2, 3]);
+  });
+
+  it('starts at 1 for a run with no event file', () => {
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({ title: 't', workflow: 'w', task: 't', steps: [] });
+    expect(store.appendEvent(run.id, { type: 'note', message: 'first' }).seq).toBe(1);
+  });
+});

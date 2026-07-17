@@ -93,6 +93,19 @@ export interface PickVariantResponse {
   winner?: RunRecord;
 }
 
+/** streamSSE with the anti-buffering contract (#424): hono's own header is a
+ *  bare `no-cache`, which lets an intermediary (reverse proxy, compression
+ *  middleware, corporate MITM) transform-buffer the stream — the client then
+ *  sees a silently frozen transcript while the server keeps writing. Headers
+ *  are set on the returned Response because hono's helper overwrites
+ *  `Cache-Control` set via `c.header()` before it. */
+const streamSSENoBuffer: typeof streamSSE = (c, cb, onError) => {
+  const res = streamSSE(c, cb, onError);
+  res.headers.set('Cache-Control', 'no-cache, no-transform');
+  res.headers.set('X-Accel-Buffering', 'no');
+  return res;
+};
+
 // A run starts from a named workflow OR an inline chain of steps (spec 008 —
 // the approved plan is posted as-is, never written to a file).
 const startRunSchema = z
@@ -1000,7 +1013,7 @@ export function createApp(deps: ServerDeps): Hono {
   app.get('/api/runs/:id/events', (c) => {
     const id = c.req.param('id');
     if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
-    return streamSSE(c, async (stream) => {
+    return streamSSENoBuffer(c, async (stream) => {
       let replaying = true;
       let maxSeq = 0;
       const buffered: RunEvent[] = [];
@@ -1052,7 +1065,7 @@ export function createApp(deps: ServerDeps): Hono {
 
   // Global SSE: run-summary updates for the list view + inbox changes.
   app.get('/api/events', (c) =>
-    streamSSE(c, async (stream) => {
+    streamSSENoBuffer(c, async (stream) => {
       const onRun = (run: RunRecord) =>
         void stream.writeSSE({ event: 'run', data: JSON.stringify(run) });
       const onDeleted = (id: string) =>
