@@ -30,8 +30,8 @@ Status: in-progress
 | 6 | 6.1 | Spec: group settings by agent, descriptor-driven (amends #404) | done | 4210235 |
 | 6 | 6.2 | `agent-descriptors.ts` — per-agent descriptor table + tests | done | 8a4ff9e |
 | 6 | 6.3 | Rework `agent-config-section.tsx`: agent selector + per-agent pane | done | ed62285 |
-| 6 | 6.4 | Fold MCP into the per-agent pane; remove the `mcp` section | done | pending |
-| 6 | 6.5 | Docs: README + AGENTS.md reflect the per-agent grouping | todo | — |
+| 6 | 6.4 | Fold MCP into the per-agent pane; remove the `mcp` section | done | e1fedb2 |
+| 6 | 6.5 | Docs: README + AGENTS.md reflect the per-agent grouping | done | pending |
 
 > Phase 6 (2026-07-17): owner direction on PR #418 — settings grouped BY AGENT (selector
 > first, then that agent's Settings/MCP/Memory together), driven by an agent-descriptor
