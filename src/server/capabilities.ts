@@ -16,6 +16,8 @@
  * The per-task handoff journal is independent and runs either way.
  */
 
+import { followupsEnabled } from '../handoff.js';
+
 export interface Capabilities {
   localHandoff: boolean;
   followups: boolean;
@@ -35,6 +37,8 @@ export function isLoopbackHost(host: string | undefined): boolean {
 export function resolveCapabilities(env: NodeJS.ProcessEnv = process.env, bindHost?: string): Capabilities {
   return {
     localHandoff: env.CEZ_REMOTE !== '1' && isLoopbackHost(bindHost),
-    followups: env.CEZ_FOLLOWUPS === '1',
+    // Deliberately not re-derived here: RunManager enforces the same predicate,
+    // and two spellings of "is the inbox on" would eventually disagree.
+    followups: followupsEnabled(env),
   };
 }
