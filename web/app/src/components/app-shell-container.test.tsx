@@ -32,7 +32,7 @@ const HEALTH: HealthResponse = {
   checks: [],
   defaultRunner: 'claude',
   forge: null,
-  capabilities: { localHandoff: true },
+  capabilities: { localHandoff: true, followups: true },
 }
 
 const TODOS = [

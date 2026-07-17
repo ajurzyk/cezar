@@ -18,11 +18,15 @@ describe('POST /api/runs systemPrompt', () => {
   let store: RunStore;
   let app: Hono;
   let captured: StartRunInput | undefined;
+  const savedFollowups = process.env.CEZ_FOLLOWUPS;
 
   beforeEach(() => {
     repoRoot = mkdtempSync(join(tmpdir(), 'cez-startrun-'));
     store = RunStore.open(join(repoRoot, '.ai/cezar'));
     captured = undefined;
+    // #471: these assertions are about systemPrompt, so pin the inbox on and
+    // let the dedicated suite below own the gate's behavior.
+    process.env.CEZ_FOLLOWUPS = '1';
     // The route hands the parsed input straight to the manager — a capturing
     // stub is all the harness needs (the patch-run.test.ts pattern).
     const manager = {
@@ -37,6 +41,8 @@ describe('POST /api/runs systemPrompt', () => {
   afterEach(() => {
     store.flush();
     rmSync(repoRoot, { recursive: true, force: true });
+    if (savedFollowups === undefined) delete process.env.CEZ_FOLLOWUPS;
+    else process.env.CEZ_FOLLOWUPS = savedFollowups;
   });
 
   const post = (body: unknown) =>
@@ -66,7 +72,7 @@ describe('POST /api/runs systemPrompt', () => {
     expect(captured?.generateFollowups).toBe(false);
   });
 
-  it('keeps generateFollowups absent for old clients (enabled by default)', async () => {
+  it('keeps generateFollowups absent for old clients (enabled by default) on an inbox-enabled server', async () => {
     const res = await post(base);
     expect(res.status).toBe(201);
     expect(captured?.generateFollowups).toBeUndefined();
@@ -95,5 +101,75 @@ describe('POST /api/runs systemPrompt', () => {
     const res = await post({ ...base, systemPrompt: 42 });
     expect(res.status).toBe(400);
     expect(captured).toBeUndefined();
+  });
+});
+
+/**
+ * The inbox capability is the ceiling on `generateFollowups` (#471): whatever a
+ * client asks for, an inbox-less server pins it to false. That single decision
+ * is what stops the agent being handed FOLLOWUP_INSTRUCTIONS and a usable
+ * CEZ_TODOS_FILE downstream (`RunManager.agentEnv`).
+ */
+describe('POST /api/runs generateFollowups — the CEZ_FOLLOWUPS ceiling (#471)', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  let app: Hono;
+  let captured: StartRunInput | undefined;
+  const savedFollowups = process.env.CEZ_FOLLOWUPS;
+
+  beforeEach(() => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-startrun-followups-'));
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    captured = undefined;
+    const manager = {
+      startRun: (_workflow: WorkflowDef, input: StartRunInput) => {
+        captured = input;
+        return store.createRun({ title: 't', workflow: '(planned)', task: input.task, steps: [] });
+      },
+    } as unknown as RunManager;
+    app = createApp({ repoRoot, store, manager, version: '0.0.0-test' });
+    delete process.env.CEZ_FOLLOWUPS;
+  });
+
+  afterEach(() => {
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+    if (savedFollowups === undefined) delete process.env.CEZ_FOLLOWUPS;
+    else process.env.CEZ_FOLLOWUPS = savedFollowups;
+  });
+
+  const post = (body: unknown) =>
+    app.request('/api/runs', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+  const base = { task: 'do the thing', steps: [{ id: 'work', prompt: '{{task}}' }] };
+
+  it('pins an omitted flag to false by default (the #444 default is now off)', async () => {
+    const res = await post(base);
+    expect(res.status).toBe(201);
+    expect(captured?.generateFollowups).toBe(false);
+  });
+
+  it('overrides a client asking for follow-ups — 201, not an error', async () => {
+    const res = await post({ ...base, generateFollowups: true });
+    expect(res.status).toBe(201);
+    expect(captured?.generateFollowups).toBe(false);
+  });
+
+  it('honours generateFollowups=true once CEZ_FOLLOWUPS=1', async () => {
+    process.env.CEZ_FOLLOWUPS = '1';
+    const res = await post({ ...base, generateFollowups: true });
+    expect(res.status).toBe(201);
+    expect(captured?.generateFollowups).toBe(true);
+  });
+
+  it('still lets an enabled server opt a single run out', async () => {
+    process.env.CEZ_FOLLOWUPS = '1';
+    const res = await post({ ...base, generateFollowups: false });
+    expect(res.status).toBe(201);
+    expect(captured?.generateFollowups).toBe(false);
   });
 });

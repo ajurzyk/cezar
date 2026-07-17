@@ -52,7 +52,7 @@ const HEALTH: HealthResponse = {
     { name: 'git', available: true, version: '2.43.0' },
   ],
   forge: null,
-  capabilities: { localHandoff: true },
+  capabilities: { localHandoff: true, followups: true },
 }
 
 const HEALTH_MULTI: HealthResponse = {
