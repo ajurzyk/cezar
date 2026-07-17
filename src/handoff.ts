@@ -112,11 +112,29 @@ export function deleteHandoff(dataDir: string, runId: string): void {
 }
 
 /**
+ * Is the global follow-up inbox on? (#471)
+ *
+ * Opt-in, off by default: agents kept hanging on stale, pre-saved follow-ups,
+ * which made skill behavior unpredictable. This is the single source of truth —
+ * `resolveCapabilities` reports it to the UI and `RunManager` enforces it on
+ * every run, so the HTTP route, the `cezar run` CLI and the inbox's own "▶ Run"
+ * cannot drift apart. The per-task handoff journal is a separate feature and is
+ * never gated by this.
+ *
+ * An exact `'1'` opts in — the house spelling (`AGENTS.md`: "opt-in behind a
+ * `CEZ_*` flag, off by default").
+ */
+export function followupsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.CEZ_FOLLOWUPS === '1';
+}
+
+/**
  * Appended to every agent step's `--append-system-prompt` (spec 007). The
  * matching handoff/task env vars are set on every agent process;
  * CEZ_TODOS_FILE carries a usable path only when follow-up generation is
- * enabled (#444) — opted-out runs get it empty, never absent, so an inherited
- * value from a parent cezar cannot shine through (`RunManager.agentEnv`).
+ * enabled (#444, #471) — opted-out runs get it empty, never absent, so an
+ * inherited value from a parent cezar cannot shine through
+ * (`RunManager.agentEnv`).
  */
 export const HANDOFF_ONLY_INSTRUCTIONS = `## Handoff (cezar)
 

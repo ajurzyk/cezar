@@ -7,6 +7,7 @@ import { queryKeys, useConfig, useRepo } from '@/api/queries'
 import type { ConfigResponse, Runner, SetConfigInput } from '@/api/types'
 import { CenteredState } from '@/components/centered-state'
 import { Button } from '@/components/ui/button'
+import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { toast } from '@/components/ui/toaster'
 import { cn } from '@/lib/utils'
@@ -194,6 +195,30 @@ function AgentsForm({ config }: { config: ConfigResponse }) {
             </p>
           )}
         </div>
+      </Field>
+
+      <Field
+        title="Live title updates"
+        hint="Refresh a task's short title through the namer model as the run progresses. A manual rename always wins and stops updates for that task."
+      >
+        <label className="flex w-fit items-center gap-3">
+          <Switch
+            aria-label="Live title updates"
+            data-slot="agents-live-title-updates"
+            checked={config.liveTitleUpdates ?? true}
+            disabled={save.isPending}
+            onCheckedChange={(checked) =>
+              save.mutate(
+                { liveTitleUpdates: checked },
+                { onSuccess: () => toast(checked ? 'Live title updates on' : 'Live title updates off') },
+              )
+            }
+          />
+          <span className="text-[13px] text-muted-foreground">
+            {(config.liveTitleUpdates ?? true) ? 'On' : 'Off'}
+            {config.liveTitleUpdates === null && ' (default)'}
+          </span>
+        </label>
       </Field>
 
       <Field

@@ -2,6 +2,20 @@
 
 Status: ZAIMPLEMENTOWANE 2026-07-10 · Fala: 2 · Zależy od: 002 · Wzorzec: janitor `seedHandoffFile`/`appendHandoffHeartbeat` + `todos.ts` (to jest to "sprytne globalne zarządzanie")
 
+> **Aktualizacja 2026-07-17 (#471) — globalny inbox jest domyślnie WYŁĄCZONY.**
+> Agenty potrafiły zawiesić się na nieaktualnych, wcześniej zapisanych follow-upach, przez co
+> zachowanie skilli stawało się nieprzewidywalne. Cała część "globalny inbox `todos.json`" tego
+> speca jest teraz opt-in: włącza ją `CEZ_FOLLOWUPS=1` (capability `followups` w
+> `src/server/capabilities.ts` → `/api/health`). Wyłączona: agent dostaje
+> `HANDOFF_ONLY_INSTRUCTIONS` i puste `CEZ_TODOS_FILE`, zakładka Inbox i przełącznik w kompozytorze
+> znikają, endpointy `/api/todos` degradują się do `200 []` / `409`. Wpisy w `todos.json` nie są
+> kasowane — po powrocie flagi wracają w całości.
+>
+> **Część "per task `handoff.md`" (dziennik, karta „Notatki", heartbeaty, `CEZ:DONE`) zostaje bez
+> zmian i działa zawsze** — #471 wprost ją zachowuje. Poprzedni krok w tę stronę: #444
+> (per-run `generateFollowups`), które ten issue zmienia z domyślnie-włączonego na globalnie
+> wyłączone.
+
 ## Cel
 
 Ciągłość między sesjami i taskami bez żadnej bazy: każdy task prowadzi

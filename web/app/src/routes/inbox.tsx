@@ -4,7 +4,7 @@ import { useState } from 'react'
 import { Link, useNavigate } from 'react-router'
 
 import { removeTodo, startTodo } from '@/api/client'
-import { queryKeys, useRuns, useTodos } from '@/api/queries'
+import { queryKeys, useHealth, useRuns, useTodos } from '@/api/queries'
 import type { TodoItem } from '@/api/types'
 import { CenteredState } from '@/components/centered-state'
 import { EnginePills, useResolvedEngine, type EnginePick } from '@/components/engine-pills'
@@ -50,7 +50,17 @@ export function isTodoRunnable(todo: TodoItem): boolean {
 }
 
 export function InboxRoute() {
-  const todosQuery = useTodos()
+  // The nav item is inbox-gated in the shell, but the route stays reachable so an old
+  // bookmark still resolves (the forge routes' rule). "Inbox empty" would be a lie here —
+  // the inbox is switched off, not empty — so say that instead, and park the query.
+  //
+  // Parked only once health has actually said the inbox is off (#471). Keying it on
+  // `inboxAvailable` instead would park the query for as long as health is unknown, which on a
+  // perfectly enabled server means the list waits on a second request it doesn't need.
+  const health = useHealth()
+  const inboxAvailable = health.data?.capabilities.followups === true
+  const inboxOff = health.data !== undefined && !inboxAvailable
+  const todosQuery = useTodos(!inboxOff)
   // Only to tell "source task" links from "source task deleted" — the legacy check against
   // its run map. The overview keeps this query warm, so revisits cost nothing.
   const runs = useRuns()
@@ -63,12 +73,22 @@ export function InboxRoute() {
       <header className="sticky top-0 z-10 hidden h-14 shrink-0 items-center gap-3 border-b border-border bg-background px-5 md:flex">
         <h1 className="text-base font-semibold">Inbox</h1>
         <p className="text-[13px] text-soft-foreground">
-          Follow-ups agents suggested when they finished a task.
+          {inboxOff
+            ? 'Disabled for this server; per-task Notes still run.'
+            : 'Follow-ups agents suggested when they finished a task.'}
         </p>
       </header>
 
       <div className="flex flex-1 flex-col p-3 pb-[calc(90px+env(safe-area-inset-bottom))] md:p-5 md:pb-5">
-        {todos === undefined ? (
+        {inboxOff ? (
+          <CenteredState
+            icon={<InboxIcon />}
+            tone="neutral"
+            title="The follow-up inbox is off"
+            subtitle="Agents are not asked to leave follow-ups. Set CEZ_FOLLOWUPS=1 and restart cezar to turn the inbox on."
+            heading="h2"
+          />
+        ) : todos === undefined ? (
           todosQuery.isError ? (
             <CenteredState
               icon={<TriangleAlertIcon />}
@@ -79,13 +99,20 @@ export function InboxRoute() {
             />
           ) : null
         ) : todos.length === 0 ? (
-          <CenteredState
-            icon={<InboxIcon />}
-            tone="neutral"
-            title="Inbox empty"
-            subtitle="Agents drop follow-up suggestions here when they finish a task."
-            heading="h2"
-          />
+          // Not while health is still in flight: an inbox-less server answers `[]` too, so
+          // claiming "empty" here would flash the very lie this route exists to avoid, then
+          // correct itself. Keyed on `isPending` rather than `data === undefined` so a health
+          // request that *fails* still falls through to the empty state — an unreachable
+          // /api/health must not leave this route blank forever.
+          health.isPending ? null : (
+            <CenteredState
+              icon={<InboxIcon />}
+              tone="neutral"
+              title="Inbox empty"
+              subtitle="Agents drop follow-up suggestions here when they finish a task."
+              heading="h2"
+            />
+          )
         ) : (
           <ul data-slot="todo-list" className="mx-auto flex w-full max-w-3xl flex-col gap-2.5">
             {todos.map((todo) => (

@@ -39,6 +39,7 @@ function serve({
     defaultModels: {},
     maxParallel: 2,
     memoryLimitMb: null,
+    liveTitleUpdates: null,
     ...config,
   }
   const json = (payload: unknown, status = 200) =>
@@ -58,6 +59,9 @@ function serve({
         if (body?.baseBranch !== undefined) state.baseBranch = (body.baseBranch as string | null) || null
         if (body?.systemPrompt !== undefined) {
           state.systemPrompt = (body.systemPrompt as string | null) || null
+        }
+        if (body?.liveTitleUpdates !== undefined) {
+          state.liveTitleUpdates = body.liveTitleUpdates as boolean | null
         }
         if (body?.defaultModels !== undefined) {
           for (const [runner, model] of Object.entries(body.defaultModels as Record<string, string | null>)) {
@@ -114,6 +118,20 @@ describe('the agents form', () => {
     await waitFor(() =>
       expect(screen.getByLabelText<HTMLSelectElement>('Base branch').value).toBe('develop'),
     )
+  })
+
+
+  it('live title updates: the switch defaults ON and PUTs the toggle', async () => {
+    serve()
+    renderAt('/settings/agents')
+    await waitFor(() => expect(form()).not.toBeNull())
+
+    const toggle = screen.getByLabelText('Live title updates')
+    expect(toggle.getAttribute('aria-checked') ?? toggle.getAttribute('data-state')).toBeTruthy()
+    fireEvent.click(toggle)
+    await waitFor(() => expect(puts()).toHaveLength(1))
+    expect(puts()[0]?.body).toEqual({ liveTitleUpdates: false })
+    await waitFor(() => expect(screen.getByText('Off')).toBeTruthy())
   })
 
   it('default runner round-trips: click PUTs the patch and the control follows the answer', async () => {

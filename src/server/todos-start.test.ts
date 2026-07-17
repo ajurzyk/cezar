@@ -23,6 +23,7 @@ describe('POST /api/todos/:id/start override', () => {
   let store: RunStore;
   let app: Hono;
   let captured: { opts: { task?: string; runner?: string; model?: string } } | undefined;
+  const savedFollowups = process.env.CEZ_FOLLOWUPS;
 
   const writeTodos = (items: unknown[]) => {
     const dataDir = join(repoRoot, '.ai/cezar');
@@ -31,6 +32,9 @@ describe('POST /api/todos/:id/start override', () => {
   };
 
   beforeEach(() => {
+    // #471: the inbox is opt-in, and this route 409s without it — these assertions are about
+    // the override, so the capability is switched on explicitly rather than left to the box.
+    process.env.CEZ_FOLLOWUPS = '1';
     repoRoot = mkdtempSync(join(tmpdir(), 'cez-todo-start-'));
     store = RunStore.open(join(repoRoot, '.ai/cezar'));
     captured = undefined;
@@ -45,6 +49,8 @@ describe('POST /api/todos/:id/start override', () => {
   });
 
   afterEach(() => {
+    if (savedFollowups === undefined) delete process.env.CEZ_FOLLOWUPS;
+    else process.env.CEZ_FOLLOWUPS = savedFollowups;
     store.flush();
     rmSync(repoRoot, { recursive: true, force: true });
   });

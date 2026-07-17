@@ -73,6 +73,15 @@ const runRecordSchema = z.object({
    *  existing PR (review/continue/merge). Display-only tier — `pullRequestUrl`
    *  (the PR this task CREATED) always wins, and action gates ignore this. */
   referencedPullRequestUrl: z.string().optional(),
+  /** The PR/issue number this task is ABOUT (spec 2026-07-17-task-auto-naming):
+   *  regex-extracted from the task prompt, upgradable by the namer's
+   *  cross-checked output. Display tier — never gates actions. */
+  prNumber: z.number().optional(),
+  issueNumber: z.number().optional(),
+  /** Who owns the display title: `user` (PATCH rename — never auto-overwritten)
+   *  or `auto` (namer-owned — a later namer result may replace it). Missing on
+   *  old runs = legacy behavior (auto fills only an unset titleSummary). */
+  titleOrigin: z.enum(['user', 'auto']).optional(),
   /** Distinct PR URLs spotted so far — the referenced tier's working set,
    *  persisted so a resumed run keeps disambiguating against the full history
    *  instead of re-adopting the next URL as "the only one". Capped. */
@@ -447,9 +456,22 @@ export class RunStore extends EventEmitter {
   private seqs = new Map<string, number>();
 
   private nextSeq(runId: string): number {
-    const next = (this.seqs.get(runId) ?? 0) + 1;
+    const next = (this.seqs.get(runId) ?? this.rehydrateSeq(runId)) + 1;
     this.seqs.set(runId, next);
     return next;
+  }
+
+  /** After a restart the in-memory counter is empty while the run's NDJSON file
+   *  keeps the history. Restarting from 1 would collide with the seqs a client
+   *  already replayed — its `seq > maxSeq` dedup then silently drops every
+   *  resumed event, even across a reload (the frozen-transcript symptom class
+   *  of #424). One file read on the first post-restart append per run. */
+  private rehydrateSeq(runId: string): number {
+    let max = 0;
+    for (const event of this.readEvents(runId)) {
+      if (typeof event.seq === 'number' && event.seq > max) max = event.seq;
+    }
+    return max;
   }
 
   private eventsPath(runId: string): string {

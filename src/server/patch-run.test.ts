@@ -53,6 +53,10 @@ describe('PATCH /api/runs/:id', () => {
     expect(body.titleSummary).toBe('Login 500 fix');
     // Persisted, not just echoed.
     expect(store.getRun(run.id)?.titleSummary).toBe('Login 500 fix');
+    // The rename marks the title user-owned — the namer's live updates stop here
+    // (spec 2026-07-17-task-auto-naming).
+    expect(body.titleOrigin).toBe('user');
+    expect(store.getRun(run.id)?.titleOrigin).toBe('user');
   });
 
   it('trims the title', async () => {
