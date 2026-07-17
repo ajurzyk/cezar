@@ -33,7 +33,7 @@ Status: in-progress
 | 6 | 6.4 | Fold MCP into the per-agent pane; remove the `mcp` section | done | e1fedb2 |
 | 6 | 6.5 | Docs: README + AGENTS.md reflect the per-agent grouping | done | 4ef4ddc |
 | 6 | 6.6-review-fix | Sync package-lock.json (npm ci failed at head — QA finding) | done | 657f665 |
-| 6 | 6.7-review-fix | De-duplicate the tracked-file effect sentence (QA cosmetic finding) | done | pending |
+| 6 | 6.7-review-fix | De-duplicate the tracked-file effect sentence (QA cosmetic finding) | done | a4dd697 |
 
 > Phase 6 (2026-07-17): owner direction on PR #418 — settings grouped BY AGENT (selector
 > first, then that agent's Settings/MCP/Memory together), driven by an agent-descriptor
