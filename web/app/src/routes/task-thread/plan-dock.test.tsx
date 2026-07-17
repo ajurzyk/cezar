@@ -23,6 +23,22 @@ describe('planCounts / planActiveEntry — the odometer math', () => {
     expect(planCounts(GOLDEN)).toEqual({ done: 1, total: 3 })
   })
 
+  // opencode's `cancelled` — work dropped on purpose. Counting it would strand the
+  // odometer below N/N for the rest of the run.
+  it('leaves cancelled entries out of the denominator, so a plan can still read done', () => {
+    expect(
+      planCounts([
+        { content: 'a', status: 'completed' },
+        { content: 'b', status: 'completed' },
+        { content: 'c', status: 'cancelled' },
+      ]),
+    ).toEqual({ done: 2, total: 2 })
+  })
+
+  it('an all-cancelled plan is 0/0, not a division by the dropped work', () => {
+    expect(planCounts([{ content: 'a', status: 'cancelled' }])).toEqual({ done: 0, total: 0 })
+  })
+
   it.each<[string, PlanEntry[], string | undefined]>([
     ['the in-progress entry wins', GOLDEN, 'Run tests'],
     [
@@ -34,6 +50,16 @@ describe('planCounts / planActiveEntry — the odometer math', () => {
       'b',
     ],
     ['fully completed → none', [{ content: 'a', status: 'completed' }], undefined],
+    [
+      'cancelled is never the current item — it skips to the next real pending one',
+      [
+        { content: 'a', status: 'completed' },
+        { content: 'b', status: 'cancelled' },
+        { content: 'c', status: 'pending' },
+      ],
+      'c',
+    ],
+    ['nothing left but cancelled → none', [{ content: 'a', status: 'cancelled' }], undefined],
   ])('%s', (_name, entries, expected) => {
     expect(planActiveEntry(entries)?.content).toBe(expected)
   })
@@ -64,6 +90,29 @@ describe('PlanDock', () => {
     expect(rows[2]!.querySelector('[data-slot="plan-tag"]')).toBeNull()
     // Expanded: the current-item line belongs to the collapsed head only.
     expect(document.querySelector('[data-slot="plan-current"]')).toBeNull()
+  })
+
+  // Regression: an opencode `cancelled` todo used to be dropped by the mapper and
+  // never reached the dock at all. It must render — struck through, out of the score.
+  it('renders a cancelled row struck through and keeps it out of the odometer', () => {
+    render(
+      <PlanDock
+        runId="dock-cancelled"
+        entries={[
+          { content: 'Ship the fix', status: 'completed' },
+          { content: 'Rework the parser', status: 'cancelled' },
+        ]}
+      />,
+    )
+    expect(document.querySelector('[data-slot="plan-count"]')?.textContent).toBe('· 1/1')
+
+    const rows = [...document.querySelectorAll('[data-slot="plan-item"]')]
+    expect(rows.map((row) => row.getAttribute('data-status'))).toEqual(['completed', 'cancelled'])
+    expect(rows.map((row) => row.textContent)).toEqual(['Ship the fix', 'Rework the parser'])
+    expect(rows[1]!.className).toContain('line-through')
+    // Not the pending ○ and not the pulsing ◐ — cancelled has its own glyph.
+    expect(rows[1]!.querySelector('svg')?.getAttribute('class')).not.toContain('animate-pulse')
+    expect(rows[1]!.querySelector('[data-slot="plan-tag"]')).toBeNull()
   })
 
   it('collapsing folds the list to "Plan · N/M — {activeForm of the current item}"', () => {
