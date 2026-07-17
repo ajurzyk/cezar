@@ -33,7 +33,9 @@ export interface EnginePick {
 export interface ResolvedEngine {
   runner: Runner
   model: string
-  /** Backends this host offers — a single-backend host must not send a runner (composer rule). */
+  /** The backends this host offers. A single-backend host must not send a runner (composer
+   *  rule) and shows no runner pill, so callers read `runners.length` for both decisions. */
+  runners: readonly Runner[]
   runnerCount: number
 }
 
@@ -45,6 +47,7 @@ export function useResolvedEngine(pick: EnginePick): ResolvedEngine {
   return {
     runner,
     model: resolveModel(pick.model, runner, config.data?.defaultModels),
+    runners,
     runnerCount: runners.length,
   }
 }
@@ -58,9 +61,7 @@ export function EnginePills({
   onChange: (pick: EnginePick) => void
   disabled?: boolean
 }) {
-  const health = useHealth()
-  const runners = availableRunners(health.data?.checks ?? [])
-  const { runner, model } = useResolvedEngine(pick)
+  const { runner, model, runners } = useResolvedEngine(pick)
   const models = modelsForRunner(runner)
 
   return (
