@@ -1,8 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   buildNamerPrompt,
   composeNameResult,
   crossCheckRefs,
+  liveTitleUpdatesEnabled,
   postValidateTitle,
   TITLE_MAX,
 } from './auto-name.js';
@@ -122,4 +123,29 @@ describe('generateRunName (dry run)', () => {
       else process.env.CEZ_DRY_RUN = saved;
     }
   }, 30_000);
+});
+
+describe('liveTitleUpdatesEnabled', () => {
+  const saved = process.env.CEZ_TITLE_UPDATES;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.CEZ_TITLE_UPDATES;
+    else process.env.CEZ_TITLE_UPDATES = saved;
+  });
+
+  it('defaults ON (owner decision, PR #479)', () => {
+    delete process.env.CEZ_TITLE_UPDATES;
+    expect(liveTitleUpdatesEnabled({})).toBe(true);
+  });
+
+  it('the env default turns it off with exactly "0"', () => {
+    expect(liveTitleUpdatesEnabled({}, { CEZ_TITLE_UPDATES: '0' })).toBe(false);
+    expect(liveTitleUpdatesEnabled({}, { CEZ_TITLE_UPDATES: '1' })).toBe(true);
+    expect(liveTitleUpdatesEnabled({}, { CEZ_TITLE_UPDATES: 'off' })).toBe(true);
+  });
+
+  it('the Settings toggle (config) wins over the env in both directions', () => {
+    expect(liveTitleUpdatesEnabled({ liveTitleUpdates: false }, {})).toBe(false);
+    expect(liveTitleUpdatesEnabled({ liveTitleUpdates: true }, { CEZ_TITLE_UPDATES: '0' })).toBe(true);
+    expect(liveTitleUpdatesEnabled({ liveTitleUpdates: false }, { CEZ_TITLE_UPDATES: '1' })).toBe(false);
+  });
 });

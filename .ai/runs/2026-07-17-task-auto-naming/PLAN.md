@@ -18,8 +18,8 @@ Run folder: `.ai/runs/2026-07-17-task-auto-naming/`
 | 1 | 1.4 | Number-prefixed heuristic title at creation (task-refs into `makeRunTitle`) | done | 4eff906 |
 | 2 | 2.1 | `src/runs/auto-name.ts` — namer prompt, strict-JSON parse, cross-check, post-validation | done | 8e2ebd0 |
 | 2 | 2.2 | `[cez-namer]` mock branch + one-shot runner call + `namerModel` config key | done | c38b1f8 |
-| 2 | 2.3 | Fire-and-forget wiring in `startRun` — apply rules, SSE, degradation | done | pending |
-| 3 | 3.1 | `liveTitleUpdates` config key + `CEZ_TITLE_UPDATES` env default (ON) | todo | — |
+| 2 | 2.3 | Fire-and-forget wiring in `startRun` — apply rules, SSE, degradation | done | aaa5648 |
+| 3 | 3.1 | `liveTitleUpdates` config key + `CEZ_TITLE_UPDATES` env default (ON) | done | pending |
 | 3 | 3.2 | Turn-end refresh via the namer in `recordTurnEnd` + skip conditions | todo | — |
 | 3 | 3.3 | Settings → Agents toggle for live title updates (web UI) | todo | — |
 | 4 | 4.1 | Retire raw turn-text titles (`title-summary.ts`) + update dependent tests | todo | — |

@@ -18,6 +18,22 @@ export const NAMER_TIMEOUT_MS = 20_000;
 /** Title budget in code points — the tasks table shows ~20-25 chars, 40 is the hard cap. */
 export const TITLE_MAX = 40;
 
+/**
+ * Live title updates switch (owner decision on PR #479 — deliberately ON by
+ * default, deviating from the cost-opt-in house rule; cost is bounded by the
+ * cheap `namerModel`, one call per turn end, and the skip conditions in
+ * `RunManager.recordTurnEnd`). Precedence: `config.liveTitleUpdates` (the
+ * Settings toggle) wins over the `CEZ_TITLE_UPDATES` env default (`'0'` = off)
+ * wins over the built-in ON.
+ */
+export function liveTitleUpdatesEnabled(
+  config: { liveTitleUpdates?: boolean },
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  if (config.liveTitleUpdates !== undefined) return config.liveTitleUpdates;
+  return env.CEZ_TITLE_UPDATES !== '0';
+}
+
 export const NAMER_SYSTEM_PROMPT =
   'You are a task-naming assistant for an AI coding agent cockpit. Respond with ONLY a JSON object: ' +
   '{"title": string, "pr"?: number, "issue"?: number}. Rules: "title" is a terse lowercase gerund phrase ' +
