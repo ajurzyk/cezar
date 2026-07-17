@@ -1,5 +1,5 @@
 import { useConfig, useHealth } from '@/api/queries'
-import type { Runner } from '@/api/types'
+import type { CreateRunInput, Runner } from '@/api/types'
 import { PickerPill, RunnerPill } from '@/components/picker-pill'
 import {
   availableRunners,
@@ -29,26 +29,53 @@ export interface EnginePick {
   model: string | null
 }
 
-/** The effective backend + what `buildCreateRunBody`/`githubRunBody` need to shape the body. */
+/** The effective backend, plus what the body rules need to decide what to send. */
 export interface ResolvedEngine {
   runner: Runner
   model: string
-  /** The backends this host offers. A single-backend host must not send a runner (composer
-   *  rule) and shows no runner pill, so callers read `runners.length` for both decisions. */
+  /** The backends this host offers — the runner pill renders only when there is a choice. */
   runners: readonly Runner[]
-  runnerCount: number
+  /** What the server would pick on its own, i.e. what an omitted runner resolves to. */
+  defaultRunner: Runner
 }
 
 export function useResolvedEngine(pick: EnginePick): ResolvedEngine {
   const health = useHealth()
   const config = useConfig()
   const runners = availableRunners(health.data?.checks ?? [])
-  const runner = resolveRunner(pick.runner, runners, health.data?.defaultRunner ?? 'claude')
+  const defaultRunner = health.data?.defaultRunner ?? 'claude'
+  const runner = resolveRunner(pick.runner, runners, defaultRunner)
   return {
     runner,
     model: resolveModel(pick.model, runner, config.data?.defaultModels),
     runners,
-    runnerCount: runners.length,
+    defaultRunner,
+  }
+}
+
+/**
+ * The runner/model fields of a create-run body. The one place these rules live, so the Inbox
+ * and the GitHub tab cannot disagree.
+ *
+ *  - `model`: auto (`''`) stays implicit — the composer's rule, verbatim.
+ *  - `runner`: omitted only when it IS what the server would choose anyway.
+ *
+ * That second rule is deliberately NOT the composer's `runnerCount > 1 ? runner : undefined`.
+ * Counting backends answers "is there a choice to make", which is the right question for
+ * *rendering the pill* and the wrong one for *omitting the field*: the two diverge exactly
+ * when the configured `defaultRunner` is unavailable. Then `resolveRunner` falls back to an
+ * installed backend and the model pill lists ITS presets — but the count is 1, so no runner is
+ * sent, and the server resolves the omitted field back to the unavailable default. A single
+ * flaky `--version` probe (the detector shells out under a timeout) is enough to hand codex a
+ * claude model. Comparing against the default collapses to the composer's behavior on every
+ * healthy host and closes that window on unhealthy ones.
+ *
+ * `buildCreateRunBody` still has the original hole; this only fixes the surfaces it feeds.
+ */
+export function engineBody(resolved: ResolvedEngine): Pick<CreateRunInput, 'runner' | 'model'> {
+  return {
+    runner: resolved.runner === resolved.defaultRunner ? undefined : resolved.runner,
+    model: resolved.model || undefined,
   }
 }
 
@@ -79,7 +106,9 @@ export function EnginePills({
       <PickerPill
         slot="model-pill"
         ariaLabel="Model"
-        label={models.find((m) => m.id === model)?.label ?? 'auto'}
+        // `resolveModel` only ever returns a member of `models` ('' is the auto preset), so
+        // the lookup cannot miss.
+        label={models.find((m) => m.id === model)!.label}
         value={model}
         disabled={disabled}
         onPick={(next) => onChange({ ...pick, model: next })}

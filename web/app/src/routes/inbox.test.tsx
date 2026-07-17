@@ -94,6 +94,7 @@ function stubFetch(
   overrides: Record<string, () => Response> = {},
   todos: TodoItem[] = TODOS,
   backends: readonly string[] = ['claude'],
+  defaultModels: Record<string, string> = {},
 ): SentRequest[] {
   const sent: SentRequest[] = []
   let inbox = [...todos]
@@ -113,7 +114,7 @@ function stubFetch(
       if (method === 'GET' && path === '/api/runs') return jsonResponse([RUN_1])
       // The runner/model pills (#401) read the host's backends and the per-runner defaults.
       if (method === 'GET' && path === '/api/health') return jsonResponse(health(backends))
-      if (method === 'GET' && path === '/api/config') return jsonResponse({ defaultModels: {} })
+      if (method === 'GET' && path === '/api/config') return jsonResponse({ defaultModels })
       if (method === 'DELETE' && path.startsWith('/api/todos/')) {
         const id = path.slice('/api/todos/'.length)
         inbox = inbox.filter((item) => item.id !== id)
@@ -280,6 +281,23 @@ describe('Run — backend selection (#401)', () => {
     fireEvent.click(cards()[0]!.querySelector('[data-action="todo-run"]')!)
 
     await waitFor(() => expect(startBody(sent, 't1')).toBeUndefined())
+  })
+
+  it('an untouched card honors Settings → Agents defaultModels — the one real behavior change', async () => {
+    // Pre-#401 the Inbox ignored `defaultModels` (it is a client-side preference the server
+    // never reads), so a Run always went out bare. Now the card resolves it like the composer
+    // does: an untouched card on a host with a configured default sends that model. This is
+    // the intended consequence of "cannot drift from the composer" — pinned so it stays a
+    // decision rather than an accident.
+    const sent = stubFetch({}, TODOS, ['claude'], { claude: 'opus' })
+    renderInbox()
+
+    await waitFor(() => expect(cards()).toHaveLength(2))
+    const card = cards()[0]!
+    await waitFor(() => expect(card.querySelector('[data-slot="model-pill"]')?.textContent).toContain('opus'))
+    fireEvent.click(card.querySelector('[data-action="todo-run"]')!)
+
+    await waitFor(() => expect(startBody(sent, 't1')).toEqual({ model: 'opus' }))
   })
 
   it('a single-backend host hides the runner pill but still offers the model (composer rule)', async () => {

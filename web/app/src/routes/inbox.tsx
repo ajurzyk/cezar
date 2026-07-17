@@ -7,7 +7,7 @@ import { removeTodo, startTodo } from '@/api/client'
 import { queryKeys, useHealth, useRuns, useTodos } from '@/api/queries'
 import type { TodoItem } from '@/api/types'
 import { CenteredState } from '@/components/centered-state'
-import { EnginePills, useResolvedEngine, type EnginePick } from '@/components/engine-pills'
+import { EnginePills, engineBody, useResolvedEngine, type EnginePick } from '@/components/engine-pills'
 import { StatusDot } from '@/components/status-dot'
 import { Button } from '@/components/ui/button'
 import { toast } from '@/components/ui/toaster'
@@ -149,13 +149,8 @@ function TodoCard({
   const resolved = useResolvedEngine(engine)
 
   const start = useMutation({
-    // A single-backend host sends no runner, and auto ('') stays implicit — the composer's
-    // two body rules, so an Inbox run and a /new run of the same thing reach the same server.
-    mutationFn: () =>
-      startTodo(todo.id, {
-        runner: resolved.runnerCount > 1 ? resolved.runner : undefined,
-        model: resolved.model || undefined,
-      }),
+    // The body rules live in engineBody so this surface and the GitHub tab cannot disagree.
+    mutationFn: () => startTodo(todo.id, engineBody(resolved)),
     onSuccess: ({ run }) => {
       // The server rewrote todos.json (SSE will confirm); the invalidations just refuse to
       // wait for the file watcher's debounce.

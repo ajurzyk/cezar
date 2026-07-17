@@ -15,7 +15,7 @@ import { Link } from 'react-router'
 import { createRun } from '@/api/client'
 import { queryKeys } from '@/api/queries'
 import type { GithubItem, Skill, WorkflowDef } from '@/api/types'
-import { EnginePills, useResolvedEngine, type EnginePick } from '@/components/engine-pills'
+import { EnginePills, engineBody, useResolvedEngine, type EnginePick } from '@/components/engine-pills'
 import { chipClass } from '@/components/picker-pill'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
@@ -85,7 +85,8 @@ export function HandToAgent({
   const resolved = useResolvedEngine(engine)
 
   const start = useMutation({
-    mutationFn: () => createRun(githubRunBody(item, workflow, validSkills, prompt, resolved)),
+    mutationFn: () =>
+      createRun(githubRunBody(item, workflow, validSkills, prompt, engineBody(resolved))),
     onSuccess: (created) => {
       // The GitHub tab never starts variants, so the answer is a single record.
       const run = 'runs' in created ? created.runs[0] : created
@@ -112,7 +113,7 @@ export function HandToAgent({
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <WorkflowPicker workflows={workflows} value={workflow} onChange={onWorkflowChange} />
         <SkillsPicker skills={skills} selected={selectedSkills} onToggle={toggleSkill} />
-        <EnginePills pick={engine} onChange={onEngineChange} />
+        <EnginePills pick={engine} onChange={onEngineChange} disabled={start.isPending} />
       </div>
 
       {selectedSkills.length > 0 ? (
@@ -173,10 +174,6 @@ export function HandToAgent({
   )
 }
 
-/** The pickers' shared trigger chip — the /new footer's pill grammar, now imported from the
- *  pill component itself (#401) rather than hand-copied, since the runner/model pills render
- *  on the same row and the two must not drift. */
-const triggerClass = chipClass
 
 /**
  * The workflow dropdown: single-select, and — legacy parity — selecting the chosen workflow
@@ -200,7 +197,7 @@ function WorkflowPicker({
           type="button"
           data-slot="gh-workflow-trigger"
           aria-label="Choose a workflow"
-          className={cn(triggerClass, value && 'border-foreground/60 font-mono text-[11.5px] font-semibold text-foreground')}
+          className={cn(chipClass, value && 'border-foreground/60 font-mono text-[11.5px] font-semibold text-foreground')}
         >
           <WorkflowIcon aria-hidden="true" className="size-3 shrink-0 text-violet" />
           <span className="max-w-44 truncate">{value ?? 'workflow'}</span>
@@ -315,7 +312,7 @@ function SkillsPicker({
             type="button"
             data-slot="gh-skills-trigger"
             aria-label="Choose skills"
-            className={cn(triggerClass, selected.length > 0 && 'border-foreground/60 font-semibold text-foreground')}
+            className={cn(chipClass, selected.length > 0 && 'border-foreground/60 font-semibold text-foreground')}
           >
             <SparklesIcon aria-hidden="true" className="size-3 shrink-0 text-violet" />
             skills{selected.length > 0 ? ` · ${selected.length}` : ''}

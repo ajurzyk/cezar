@@ -4,7 +4,7 @@ import { MemoryRouter, Route, Routes } from 'react-router'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
-import type { GithubData, GithubItem, Skill, WorkflowsResponse } from '@/api/types'
+import type { GithubData, GithubItem, HealthResponse, Runner, Skill, WorkflowsResponse } from '@/api/types'
 import { Toaster, resetToasts } from '@/components/ui/toaster'
 
 import { GithubIndexRoute, GithubRoute } from './github'
@@ -404,18 +404,22 @@ async function openDetail(entry = '/github/issues/142') {
   await waitFor(() => expect(document.querySelector('[data-slot="gh-hand"]')).not.toBeNull())
 }
 
-/** A host reporting more than one installed backend — the only state that shows the runner pill. */
-const MULTI_BACKEND = () =>
-  jsonResponse({
-    version: '0.0.0-test',
-    repo: '/repo',
-    branch: 'main',
-    defaultRunner: 'claude',
-    checks: [
-      { name: 'claude', available: true },
-      { name: 'codex', available: true },
-    ],
-  })
+/** A typed health fixture — `HealthResponse`, so tsc catches the drift an `unknown` body hides
+ *  (the pre-#471 shape silently rotted here until the merge fixed the inbox's copy). */
+const health = (backends: readonly Runner[]): HealthResponse => ({
+  version: '0.0.0-test',
+  repoRoot: '/repo',
+  repo: { root: '/repo', branch: 'main' },
+  checks: backends.map((name) => ({ name, available: true })),
+  defaultRunner: backends[0] ?? 'claude',
+  forge: null,
+  capabilities: { localHandoff: true, followups: true },
+})
+
+/** More than one installed backend — the only state that shows the runner pill. */
+const MULTI_BACKEND = () => jsonResponse(health(['claude', 'codex']))
+/** Exactly one installed backend — a real single-backend host, not merely absent health. */
+const SINGLE_BACKEND = () => jsonResponse(health(['claude']))
 
 /** Open a pill's dropdown and choose an option by label (Radix opens on pointerDown). */
 async function pickPill(slot: string, label: string) {
@@ -429,7 +433,9 @@ const postedRun = (sent: readonly SentRequest[]) =>
 
 describe('the hand-to-agent backend pills (#401)', () => {
   it('a single-backend host hides the runner pill but still offers the model', async () => {
-    stubFetch()
+    // A real one-check health response — the default stub 404s /api/health, which exercises
+    // the no-data fallback instead and would pass for the wrong reason.
+    stubFetch({ 'GET /api/health': SINGLE_BACKEND })
     await openDetail()
 
     await waitFor(() => expect(document.querySelector('[data-slot="model-pill"]')).not.toBeNull())
