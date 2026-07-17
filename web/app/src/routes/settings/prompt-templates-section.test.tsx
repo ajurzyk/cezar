@@ -16,8 +16,25 @@ import { PromptTemplatesSection } from './prompt-templates-section'
 
 let requests: Array<{ method: string; url: string; body?: unknown }> = []
 
-function serve(uiState: Record<string, unknown> = {}) {
+/** Two skills, deliberately global-first, so the project-first grouping rule (#377) is visible. */
+const SKILLS = [
+  { name: 'g-review', description: 'Global review', body: '', path: '/g/g-review', source: 'global' },
+  { name: 'om-fix', description: 'Fix an issue', body: '', path: '/p/om-fix', source: 'ai' },
+]
+
+function serve(uiState: Record<string, unknown> = {}, skills: unknown[] = SKILLS) {
   requests = []
+  // The skills picker is cmdk, which sizes its list with a ResizeObserver and scrolls the active
+  // item into view; jsdom has neither (same stubs as command-palette.test.tsx / github.test.tsx).
+  vi.stubGlobal(
+    'ResizeObserver',
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  )
+  Element.prototype.scrollIntoView = vi.fn()
   const json = (payload: unknown) =>
     new Response(JSON.stringify(payload), { status: 200, headers: { 'content-type': 'application/json' } })
   vi.stubGlobal(
@@ -30,6 +47,7 @@ function serve(uiState: Record<string, unknown> = {}) {
       if (url === '/api/ui-state' && method === 'GET') return json(uiState)
       if (url === '/api/ui-state' && method === 'PUT')
         return json({ ...uiState, ...(body as Record<string, unknown>) })
+      if (url.startsWith('/api/skills')) return json(skills)
       return new Promise<never>(() => {})
     }),
   )
@@ -182,5 +200,116 @@ describe('the prompt templates section', () => {
     fireEvent.click(rows()[0]!.querySelector('[data-action="prompt-template-remove"]')!)
     fireEvent.click(saveButton())
     expect(await screen.findByText('disk full')).toBeTruthy()
+  })
+})
+
+// ---- assigning templates to skills (#413 follow-up) ---------------------------------------------
+
+describe('assigning a template to a skill', () => {
+  const trigger = (row: HTMLElement) =>
+    row.querySelector<HTMLButtonElement>('[data-slot="prompt-template-skills-trigger"]')!
+  const option = (name: string) =>
+    document.querySelector<HTMLElement>(`[data-slot="prompt-template-skill-option"][data-skill="${name}"]`)
+
+  /** Open the picker. The trigger is disabled until /api/skills answers, so wait it out first —
+   *  a click on a disabled button is silently a no-op. */
+  const openPicker = async (row: HTMLElement) => {
+    await waitFor(() => expect(trigger(row).disabled).toBe(false))
+    fireEvent.click(trigger(row))
+    await waitFor(() =>
+      expect(document.querySelector('[data-slot="prompt-template-skill-option"]')).not.toBeNull(),
+    )
+  }
+
+  /** Toggling keeps the popover open (multi-select), so only open when it is not already showing. */
+  const assign = async (row: HTMLElement, name: string) => {
+    if (option(name) === null) await openPicker(row)
+    fireEvent.click(option(name)!)
+  }
+
+  it('lists skills project-first and bold, matching every other skill picker (#377)', async () => {
+    serve()
+    renderSection()
+    await waitFor(() => expect(rows()).toHaveLength(DEFAULT_PROMPT_TEMPLATES.length))
+
+    await openPicker(rows()[0]!)
+    await waitFor(() =>
+      expect(document.querySelectorAll('[data-slot="prompt-template-skill-option"]')).toHaveLength(2),
+    )
+    const options = [...document.querySelectorAll<HTMLElement>('[data-slot="prompt-template-skill-option"]')]
+    // Served global-first; rendered project-first.
+    expect(options.map((o) => o.dataset.skill)).toEqual(['om-fix', 'g-review'])
+    expect(options[0]?.querySelector('.font-semibold')).not.toBeNull()
+    expect(options[1]?.querySelector('.font-semibold')).toBeNull()
+  })
+
+  it('assigning shows a chip and Save PUTs the skills alongside the template', async () => {
+    serve()
+    renderSection()
+    await waitFor(() => expect(rows()).toHaveLength(DEFAULT_PROMPT_TEMPLATES.length))
+
+    await assign(rows()[0]!, 'om-fix')
+    await waitFor(() =>
+      expect(rows()[0]!.querySelector('[data-slot="prompt-template-skill-chip"][data-skill="om-fix"]')).not.toBeNull(),
+    )
+
+    fireEvent.click(saveButton())
+    await waitFor(() => expect(putBody()).toBeDefined())
+    expect(putBody()?.promptTemplates?.[0]).toMatchObject({ id: 'add-tests', skills: ['om-fix'] })
+    // Only the edited row gains an assignment.
+    expect(putBody()?.promptTemplates?.[1]).not.toHaveProperty('skills')
+  })
+
+  it('the chip unassigns, and doing so leaves NO empty skills key behind', async () => {
+    serve({
+      promptTemplates: [{ id: 'a', label: 'A', text: 'Do A.', skills: ['om-fix'] }],
+    })
+    renderSection()
+    await waitFor(() => expect(rows()).toHaveLength(1))
+
+    fireEvent.click(rows()[0]!.querySelector('[data-slot="prompt-template-skill-chip"]')!)
+    await waitFor(() =>
+      expect(rows()[0]!.querySelector('[data-slot="prompt-template-skill-chip"]')).toBeNull(),
+    )
+
+    fireEvent.click(saveButton())
+    await waitFor(() => expect(putBody()).toBeDefined())
+    expect(putBody()?.promptTemplates?.[0]).toEqual({ id: 'a', label: 'A', text: 'Do A.' })
+  })
+
+  it('assign-then-unassign is not an edit — the form goes back to clean', async () => {
+    serve({ promptTemplates: [{ id: 'a', label: 'A', text: 'Do A.' }] })
+    renderSection()
+    await waitFor(() => expect(rows()).toHaveLength(1))
+    expect(saveButton().disabled).toBe(true)
+
+    await assign(rows()[0]!, 'om-fix')
+    await waitFor(() => expect(saveButton().disabled).toBe(false))
+
+    await assign(rows()[0]!, 'om-fix')
+    // Back to `{id,label,text}` with no phantom `skills: []` making it look dirty forever.
+    await waitFor(() => expect(saveButton().disabled).toBe(true))
+  })
+
+  it('a template can be assigned to several skills at once', async () => {
+    serve({ promptTemplates: [{ id: 'a', label: 'A', text: 'Do A.' }] })
+    renderSection()
+    await waitFor(() => expect(rows()).toHaveLength(1))
+
+    await assign(rows()[0]!, 'om-fix')
+    await assign(rows()[0]!, 'g-review')
+
+    fireEvent.click(saveButton())
+    await waitFor(() => expect(putBody()).toBeDefined())
+    expect(putBody()?.promptTemplates?.[0]).toMatchObject({ skills: ['om-fix', 'g-review'] })
+  })
+
+  it('says so, rather than rendering nothing, when there are no skills to assign', async () => {
+    serve({}, [])
+    renderSection()
+    await waitFor(() => expect(rows()).toHaveLength(DEFAULT_PROMPT_TEMPLATES.length))
+
+    await waitFor(() => expect(trigger(rows()[0]!).disabled).toBe(true))
+    expect(trigger(rows()[0]!).textContent).toContain('no skills found')
   })
 })

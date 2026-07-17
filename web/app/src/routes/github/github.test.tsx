@@ -523,22 +523,26 @@ describe('the hand-to-agent run (legacy three-way body)', () => {
 // ---- prompt templates (#413) --------------------------------------------------------------------
 
 describe('the follow-up prompt template menu (#413)', () => {
-  /** Radix opens the menu on pointerdown, not click (same contract as tools-menu.test.tsx). */
-  async function openTemplateMenu(): Promise<HTMLElement> {
-    fireEvent.pointerDown(document.querySelector('[data-slot="prompt-template-trigger"]')!)
-    return await screen.findByRole('menu')
+  /** The menu is a Popover + cmdk (like the skills picker beside it), so it opens on click. */
+  async function openTemplateMenu(): Promise<void> {
+    fireEvent.click(document.querySelector('[data-slot="prompt-template-trigger"]')!)
+    await waitFor(() =>
+      expect(document.querySelector('[data-slot="prompt-template-option"]')).not.toBeNull(),
+    )
   }
+
+  const option = (id: string) =>
+    document.querySelector<HTMLElement>(`[data-slot="prompt-template-option"][data-template="${id}"]`)
 
   it('an untouched ui-state shows the built-in templates, and inserting one fills the custom prompt', async () => {
     stubFetch()
     await openDetail()
 
-    const menu = await openTemplateMenu()
-    expect(within(menu).getAllByRole('menuitem').length).toBeGreaterThan(1)
-    const addTests = menu.querySelector('[data-slot="prompt-template-option"][data-template="add-tests"]')
-    expect(addTests).not.toBeNull()
+    await openTemplateMenu()
+    expect(document.querySelectorAll('[data-slot="prompt-template-option"]').length).toBeGreaterThan(1)
+    expect(option('add-tests')).not.toBeNull()
 
-    fireEvent.click(addTests!)
+    fireEvent.click(option('add-tests')!)
     await waitFor(() =>
       expect(screen.getByLabelText('Custom prompt')).toHaveProperty(
         'value',
@@ -554,11 +558,11 @@ describe('the follow-up prompt template menu (#413)', () => {
     })
     await openDetail()
 
-    const menu = await openTemplateMenu()
-    expect(menu.querySelectorAll('[data-slot="prompt-template-option"]')).toHaveLength(1)
-    expect(menu.querySelector('[data-template="custom-1"]')?.textContent).toContain('My snippet')
+    await openTemplateMenu()
+    expect(document.querySelectorAll('[data-slot="prompt-template-option"]')).toHaveLength(1)
+    expect(option('custom-1')?.textContent).toContain('My snippet')
 
-    fireEvent.click(menu.querySelector('[data-template="custom-1"]')!)
+    fireEvent.click(option('custom-1')!)
     await waitFor(() =>
       expect(screen.getByLabelText('Custom prompt')).toHaveProperty('value', 'Custom instructions.'),
     )
@@ -568,8 +572,8 @@ describe('the follow-up prompt template menu (#413)', () => {
     stubFetch()
     await openDetail()
 
-    const firstMenu = await openTemplateMenu()
-    fireEvent.click(firstMenu.querySelector('[data-template="add-tests"]')!)
+    await openTemplateMenu()
+    fireEvent.click(option('add-tests')!)
     await waitFor(() =>
       expect(screen.getByLabelText('Custom prompt')).toHaveProperty(
         'value',
@@ -577,8 +581,8 @@ describe('the follow-up prompt template menu (#413)', () => {
       ),
     )
 
-    const secondMenu = await openTemplateMenu()
-    fireEvent.click(secondMenu.querySelector('[data-template="update-docs"]')!)
+    await openTemplateMenu()
+    fireEvent.click(option('update-docs')!)
 
     await waitFor(() =>
       expect(screen.getByLabelText('Custom prompt')).toHaveProperty(
@@ -586,5 +590,108 @@ describe('the follow-up prompt template menu (#413)', () => {
         'Also add or update tests covering this change.\n\nAlso update any relevant documentation or comments.',
       ),
     )
+  })
+
+  it('the menu is searchable — typing narrows it to the matching template', async () => {
+    stubFetch()
+    await openDetail()
+
+    await openTemplateMenu()
+    const all = document.querySelectorAll('[data-slot="prompt-template-option"]').length
+    expect(all).toBeGreaterThan(1)
+
+    fireEvent.change(screen.getByPlaceholderText('search templates…'), { target: { value: 'docs' } })
+    await waitFor(() =>
+      expect(document.querySelectorAll('[data-slot="prompt-template-option"]')).toHaveLength(1),
+    )
+    expect(option('update-docs')).not.toBeNull()
+  })
+
+  it('search matches a template by its TEXT, not just the label someone gave it', async () => {
+    stubFetch()
+    await openDetail()
+
+    await openTemplateMenu()
+    // "unrelated refactors" appears only in the body of the keep-minimal template.
+    fireEvent.change(screen.getByPlaceholderText('search templates…'), {
+      target: { value: 'unrelated refactors' },
+    })
+    await waitFor(() =>
+      expect(document.querySelectorAll('[data-slot="prompt-template-option"]')).toHaveLength(1),
+    )
+    expect(option('keep-minimal')).not.toBeNull()
+  })
+})
+
+// ---- auto-apply on skill selection (#413 follow-up) ---------------------------------------------
+
+describe('templates assigned to a skill auto-apply when a skill is picked', () => {
+  const ASSIGNED = {
+    'GET /api/ui-state': () =>
+      jsonResponse({
+        promptTemplates: [
+          { id: 'assigned', label: 'Fix rules', text: 'Follow the fix rules.', skills: ['om-fix'] },
+          { id: 'manual', label: 'Manual', text: 'Never auto.' },
+        ],
+      }),
+  }
+
+  /** Toggle a skill. The picker is multi-select and STAYS open after a toggle, so only open it
+   *  when it is not already showing — clicking the trigger again would close it instead. */
+  const pickSkill = async (name: string) => {
+    const selector = `[data-slot="gh-skill-option"][data-skill="${name}"]`
+    if (document.querySelector(selector) === null) {
+      fireEvent.click(document.querySelector('[data-slot="gh-skills-trigger"]')!)
+      await waitFor(() => expect(document.querySelector(selector)).not.toBeNull())
+    }
+    fireEvent.click(document.querySelector(selector)!)
+  }
+
+  it('fills an untouched prompt box with the assigned template, and only that one', async () => {
+    stubFetch(ASSIGNED)
+    await openDetail()
+
+    await pickSkill('om-fix')
+    await waitFor(() =>
+      expect(screen.getByLabelText('Custom prompt')).toHaveProperty('value', 'Follow the fix rules.'),
+    )
+  })
+
+  it('deselecting the skill takes the auto-applied text back out again', async () => {
+    stubFetch(ASSIGNED)
+    await openDetail()
+
+    await pickSkill('om-fix')
+    await waitFor(() =>
+      expect(screen.getByLabelText('Custom prompt')).toHaveProperty('value', 'Follow the fix rules.'),
+    )
+
+    await pickSkill('om-fix')
+    await waitFor(() => expect(screen.getByLabelText('Custom prompt')).toHaveProperty('value', ''))
+  })
+
+  it('NEVER overwrites a prompt the user already typed in', async () => {
+    stubFetch(ASSIGNED)
+    await openDetail()
+
+    fireEvent.change(screen.getByLabelText('Custom prompt'), { target: { value: 'my own words' } })
+    await pickSkill('om-fix')
+
+    // Give the effect every chance to misbehave before asserting it did not.
+    await waitFor(() =>
+      expect(document.querySelector('[data-slot="gh-skill-chip"][data-skill="om-fix"]')).not.toBeNull(),
+    )
+    expect(screen.getByLabelText('Custom prompt')).toHaveProperty('value', 'my own words')
+  })
+
+  it('a skill with no template assigned to it leaves the box alone', async () => {
+    stubFetch(ASSIGNED)
+    await openDetail()
+
+    await pickSkill('g-review')
+    await waitFor(() =>
+      expect(document.querySelector('[data-slot="gh-skill-chip"][data-skill="g-review"]')).not.toBeNull(),
+    )
+    expect(screen.getByLabelText('Custom prompt')).toHaveProperty('value', '')
   })
 })

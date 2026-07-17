@@ -7,14 +7,15 @@ import {
   SquareIcon,
   WorkflowIcon,
 } from 'lucide-react'
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useNavigate, useSearchParams } from 'react-router'
 
 import { createRun, getLaunchKey, postPlan, putConfig, putUiState } from '@/api/client'
 import { queryKeys, useConfig, useHealth, useRepo, useSkills, useUiState, useWorkflows } from '@/api/queries'
 import type { ImageInput, RepoResponse, Runner, Skill, WorkflowDef } from '@/api/types'
 import { TwinkleBackdrop } from '@/components/centered-state'
-import { Composer } from '@/components/composer/composer'
+import { Composer, type ComposerHandle } from '@/components/composer/composer'
+import { PromptTemplateMenu } from '@/components/prompt-template-menu'
 import { SkillPreviewDialog } from '@/components/skill-detail'
 import {
   Command,
@@ -33,6 +34,11 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { toast } from '@/components/ui/toaster'
+import {
+  autoApplyText,
+  normalizePromptTemplates,
+  resolveAutoApply,
+} from '@/lib/prompt-templates'
 import { isProjectSkill, multiWordFilter, orderSkillsByRecency, skillKeywords } from '@/lib/skills'
 import { submitShortcutHint } from '@/lib/use-submit-shortcut'
 import { cn } from '@/lib/utils'
@@ -116,6 +122,30 @@ export function NewTaskRoute() {
   const sourcesReady =
     skills.data !== undefined && workflows.data !== undefined && !uiState.isPending
   const source = resolveSource([draft.source, uiState.data?.lastTask], skillList, workflowList)
+
+  // ---- prompt templates (#413 follow-up) ----------------------------------------------------
+  // The same list the GitHub hand-over and Inbox composers read. Two ways in here: the footer's
+  // icon trigger inserts one by hand at the caret, and a skill whose templates are assigned to it
+  // applies them on selection — but only into a box the user has not typed in (`resolveAutoApply`).
+  const composerRef = useRef<ComposerHandle>(null)
+  const templates = useMemo(
+    () => normalizePromptTemplates(uiState.data?.promptTemplates),
+    [uiState.data?.promptTemplates],
+  )
+  const autoText = autoApplyText(templates, source.source === 'skill' ? [source.ref] : [])
+  const draftTextRef = useRef(draft.text)
+  draftTextRef.current = draft.text
+  const autoAppliedRef = useRef('')
+  useEffect(() => {
+    // Wait for the pickers' data: before it lands `source` is still a provisional guess, and
+    // auto-applying against it would flash text in for a skill the user may not end up on.
+    if (!sourcesReady) return
+    const resolved = resolveAutoApply(draftTextRef.current, autoAppliedRef.current, autoText)
+    autoAppliedRef.current = resolved.applied
+    if (resolved.text !== draftTextRef.current) update({ text: resolved.text })
+    // `autoText` is a derived STRING — this fires when the assigned set changes, not every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoText, sourcesReady])
 
   const runners = availableRunners(health.data?.checks ?? [])
   const runner = resolveRunner(draft.runner, runners, health.data?.defaultRunner ?? 'claude')
@@ -332,6 +362,7 @@ export function NewTaskRoute() {
         </header>
 
         <Composer
+          ref={composerRef}
           onSubmit={submit}
           value={draft.text}
           onValueChange={(text) => update({ text })}
@@ -348,6 +379,13 @@ export function NewTaskRoute() {
                 skills={skillList}
                 workflows={workflowList}
                 onPick={(next) => update({ source: next })}
+              />
+              {/* Icon-only: this row already carries source/runner/model/variants/worktree/
+                  autonomous/branch, and templates is the least-used of them. */}
+              <PromptTemplateMenu
+                templates={templates}
+                iconOnly
+                onInsert={(text) => composerRef.current?.insertAtCaret(text)}
               />
               {runners.length > 1 ? (
                 <RunnerPill runners={runners} value={runner} onPick={(next) => update({ runner: next, model: null })} />

@@ -883,3 +883,106 @@ describe('save as chain', () => {
     expect(screen.getByLabelText('Chain name')).toBeTruthy()
   })
 })
+
+// ---- prompt templates on /new (#413 follow-up) ---------------------------------------------------
+
+describe('prompt templates on the new-task composer', () => {
+  const ASSIGNED = [
+    { id: 'assigned', label: 'Fix rules', text: 'Follow the fix rules.', skills: ['om-fix'] },
+    { id: 'manual', label: 'Manual', text: 'Never auto.' },
+  ]
+
+  const templateTrigger = () => screen.getByRole('button', { name: 'Insert a prompt template' })
+  const option = (id: string) =>
+    document.querySelector<HTMLElement>(`[data-slot="prompt-template-option"][data-template="${id}"]`)
+
+  const pickSource = async (ref: string) => {
+    fireEvent.click(sourcePill())
+    await screen.findByPlaceholderText('search skills & workflows…')
+    fireEvent.click(document.querySelector(`[data-slot="source-option"][data-source-ref="${ref}"]`)!)
+  }
+
+  it('the trigger is icon-only here — the footer pill row is already full', async () => {
+    serve()
+    renderNewTask()
+    await pillReady()
+
+    // No "templates" word next to the icon, unlike the roomier GitHub/Inbox composers.
+    expect(templateTrigger().textContent).toBe('')
+    expect(templateTrigger().querySelector('svg')).not.toBeNull()
+  })
+
+  it('inserts a template into the composer draft at the caret', async () => {
+    serve()
+    renderNewTask()
+    await pillReady()
+
+    fireEvent.change(textarea(), { target: { value: 'Ship it' } })
+    fireEvent.click(templateTrigger())
+    await waitFor(() => expect(option('add-tests')).not.toBeNull())
+    fireEvent.click(option('add-tests')!)
+
+    await waitFor(() =>
+      expect(textarea().value).toBe('Ship it\n\nAlso add or update tests covering this change.'),
+    )
+  })
+
+  it('picking a skill auto-applies the templates assigned to it into an empty composer', async () => {
+    serve({ uiState: { promptTemplates: ASSIGNED } })
+    renderNewTask()
+    await pillReady()
+
+    await pickSource('om-fix')
+    await waitFor(() => expect(textarea().value).toBe('Follow the fix rules.'))
+  })
+
+  it('switching to a skill with nothing assigned takes the auto-applied text back out', async () => {
+    serve({ uiState: { promptTemplates: ASSIGNED } })
+    renderNewTask()
+    await pillReady()
+
+    await pickSource('om-fix')
+    await waitFor(() => expect(textarea().value).toBe('Follow the fix rules.'))
+
+    await pickSource('deploy')
+    await waitFor(() => expect(textarea().value).toBe(''))
+  })
+
+  it('NEVER overwrites a draft the user already typed', async () => {
+    serve({ uiState: { promptTemplates: ASSIGNED } })
+    renderNewTask()
+    await pillReady()
+
+    fireEvent.change(textarea(), { target: { value: 'my own words' } })
+    await pickSource('om-fix')
+
+    await waitFor(() => expect(sourcePill().textContent).toContain('om-fix'))
+    expect(textarea().value).toBe('my own words')
+  })
+
+  it('a workflow never auto-applies — assignment is a skill concept', async () => {
+    serve({ uiState: { promptTemplates: ASSIGNED } })
+    renderNewTask()
+    await pillReady()
+
+    await pickSource('quick-task')
+    await waitFor(() => expect(sourcePill().textContent).toContain('quick-task'))
+    expect(textarea().value).toBe('')
+  })
+
+  it('the auto-applied text is what actually gets submitted', async () => {
+    serve({ uiState: { promptTemplates: ASSIGNED } })
+    renderNewTask()
+    await pillReady()
+
+    await pickSource('om-fix')
+    await waitFor(() => expect(textarea().value).toBe('Follow the fix rules.'))
+
+    await startTask()
+    // The auto-applied text is the real task text on the wire, not just something on screen.
+    expect(postedBody()).toMatchObject({
+      task: 'Follow the fix rules.',
+      steps: [{ id: 'task', name: 'om-fix', skill: 'om-fix', prompt: '{{task}}' }],
+    })
+  })
+})

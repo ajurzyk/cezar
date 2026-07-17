@@ -1,12 +1,22 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { NotebookPenIcon, PlusIcon, XIcon } from 'lucide-react'
-import { useState, type ReactNode } from 'react'
+import { CheckIcon, ChevronDownIcon, NotebookPenIcon, PlusIcon, SparklesIcon, XIcon } from 'lucide-react'
+import { useRef, useState, type ReactNode } from 'react'
 
 import { putUiState } from '@/api/client'
-import { queryKeys, useUiState } from '@/api/queries'
+import { queryKeys, useSkills, useUiState } from '@/api/queries'
+import type { Skill } from '@/api/types'
 import { CenteredState } from '@/components/centered-state'
 import { Button } from '@/components/ui/button'
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from '@/components/ui/command'
 import { Input } from '@/components/ui/input'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Textarea } from '@/components/ui/textarea'
 import { toast } from '@/components/ui/toaster'
 import {
@@ -15,6 +25,8 @@ import {
   normalizePromptTemplates,
   type PromptTemplate,
 } from '@/lib/prompt-templates'
+import { isProjectSkill, multiWordFilter, skillKeywords } from '@/lib/skills'
+import { cn } from '@/lib/utils'
 
 /**
  * Settings → Prompt templates (#413): "add the settings pane for editing these prompt templates
@@ -56,6 +68,7 @@ export function PromptTemplatesSection() {
 
 function PromptTemplatesForm({ initial }: { initial: PromptTemplate[] }) {
   const queryClient = useQueryClient()
+  const skills = useSkills()
   const [templates, setTemplates] = useState<PromptTemplate[]>(initial)
   const [newLabel, setNewLabel] = useState('')
   const [newText, setNewText] = useState('')
@@ -74,6 +87,22 @@ function PromptTemplatesForm({ initial }: { initial: PromptTemplate[] }) {
 
   const updateTemplate = (id: string, patch: Partial<Pick<PromptTemplate, 'label' | 'text'>>) =>
     setTemplates((current) => current.map((t) => (t.id === id ? { ...t, ...patch } : t)))
+
+  /** Assign/unassign a skill. Unassigning the last one DROPS the key rather than leaving `[]`,
+   *  matching what `normalizePromptTemplates` produces — otherwise assign-then-unassign would
+   *  leave the form permanently "dirty" against an `initial` that never had the key. */
+  const toggleTemplateSkill = (id: string, name: string) =>
+    setTemplates((current) =>
+      current.map((template) => {
+        if (template.id !== id) return template
+        const assigned = template.skills ?? []
+        const next = assigned.includes(name)
+          ? assigned.filter((existing) => existing !== name)
+          : [...assigned, name]
+        const { skills: _previous, ...rest } = template
+        return next.length > 0 ? { ...rest, skills: next } : rest
+      }),
+    )
 
   const removeTemplate = (id: string) =>
     setTemplates((current) => current.filter((t) => t.id !== id))
@@ -96,7 +125,7 @@ function PromptTemplatesForm({ initial }: { initial: PromptTemplate[] }) {
     >
       <Field
         title="Prompt templates"
-        hint="Reusable snippets you can insert into a follow-up — the GitHub hand-over and the Inbox's “Add instructions” box both offer this list."
+        hint="Reusable snippets you can insert into a prompt — the new-task composer, the GitHub hand-over, and the Inbox's “Add instructions” box all offer this list. Assign a template to a skill and it fills the prompt in for you when you pick that skill, as long as you have not typed anything yet."
       >
         <div data-slot="prompt-template-list" className="flex flex-col gap-3">
           {templates.length === 0 ? (
@@ -139,6 +168,30 @@ function PromptTemplatesForm({ initial }: { initial: PromptTemplate[] }) {
                   onChange={(event) => updateTemplate(template.id, { text: event.target.value })}
                   className="min-h-14 text-[13px]"
                 />
+                <div className="mt-0.5 flex flex-wrap items-center gap-1.5">
+                  <TemplateSkillsPicker
+                    label={template.label}
+                    skills={skills.data ?? []}
+                    selected={template.skills ?? []}
+                    onToggle={(name) => toggleTemplateSkill(template.id, name)}
+                  />
+                  {/* Chips live OUTSIDE the dropdown — the house rule from the GitHub picker:
+                      cmdk may filter the list, never your selection. */}
+                  {(template.skills ?? []).map((name) => (
+                    <button
+                      key={name}
+                      type="button"
+                      data-slot="prompt-template-skill-chip"
+                      data-skill={name}
+                      title={`Stop applying “${template.label}” automatically with ${name}`}
+                      onClick={() => toggleTemplateSkill(template.id, name)}
+                      className="inline-flex items-center gap-1 rounded-full border border-border bg-muted px-2 py-px font-mono text-[11px] font-medium text-foreground transition-colors hover:bg-danger/10 hover:text-danger"
+                    >
+                      {name}
+                      <XIcon aria-hidden="true" className="size-3" />
+                    </button>
+                  ))}
+                </div>
               </div>
             ))
           )}
@@ -208,6 +261,98 @@ function PromptTemplatesForm({ initial }: { initial: PromptTemplate[] }) {
         </div>
       </Field>
     </div>
+  )
+}
+
+/**
+ * "Apply automatically with…" — assigns a template to skills. Multi-select (toggling keeps the
+ * popover open, because wiring a template to a few skills is several toggles), searchable, and
+ * grouped Project-first (#377) — the same cmdk grammar as the GitHub hand-over's skills picker,
+ * so this reads as the same control rather than a second dialect of it.
+ *
+ * Renders a disabled trigger, not nothing, when no skills are discovered: "there are no skills to
+ * assign to" is worth saying out loud in a Settings pane whose whole subject is the assignment.
+ */
+function TemplateSkillsPicker({
+  label,
+  skills,
+  selected,
+  onToggle,
+}: {
+  label: string
+  skills: readonly Skill[]
+  selected: readonly string[]
+  onToggle: (name: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const listRef = useRef<HTMLDivElement>(null)
+  const project = skills.filter(isProjectSkill)
+  const global = skills.filter((skill) => !isProjectSkill(skill))
+
+  const skillItem = (skill: Skill, emphasized: boolean) => {
+    const isSelected = selected.includes(skill.name)
+    return (
+      <CommandItem
+        key={skill.path}
+        // The path suffix keeps values unique when a project skill shadows a global one.
+        value={`skill ${skill.name} ${skill.path}`}
+        keywords={skillKeywords(skill.name, skill.description)}
+        data-slot="prompt-template-skill-option"
+        data-skill={skill.name}
+        data-selected={isSelected ? 'true' : undefined}
+        onSelect={() => onToggle(skill.name)}
+      >
+        <span className={cn('shrink-0 font-mono text-xs', emphasized && 'font-semibold')}>
+          {skill.name}
+        </span>
+        {skill.description ? (
+          <span className="min-w-0 flex-1 truncate text-xs text-soft-foreground">
+            {skill.description}
+          </span>
+        ) : null}
+        {isSelected ? (
+          <CheckIcon aria-hidden="true" className="ml-auto size-3.5 shrink-0 text-primary" />
+        ) : null}
+      </CommandItem>
+    )
+  }
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          data-slot="prompt-template-skills-trigger"
+          aria-label={`Apply ${label || 'this template'} automatically with a skill`}
+          title="Pick the skills this template applies itself to"
+          disabled={skills.length === 0}
+          className={cn(
+            'inline-flex h-[26px] items-center gap-1.5 rounded-full border border-border bg-card px-2.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50',
+            selected.length > 0 && 'border-foreground/60 font-semibold text-foreground',
+          )}
+        >
+          <SparklesIcon aria-hidden="true" className="size-3 shrink-0 text-violet" />
+          {skills.length === 0 ? 'no skills found' : 'apply with…'}
+          <ChevronDownIcon aria-hidden="true" className="size-2.5 shrink-0 text-soft-foreground" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="start" sideOffset={8} className="w-[336px] max-w-[calc(100vw-2rem)] p-0">
+        <Command filter={multiWordFilter}>
+          <CommandInput placeholder="search skills…" onInput={() => listRef.current?.scrollTo(0, 0)} />
+          <CommandList ref={listRef} data-slot="prompt-template-skill-menu" className="max-h-64">
+            <CommandEmpty>Nothing matches.</CommandEmpty>
+            {project.length > 0 ? (
+              <CommandGroup heading="Project skills">
+                {project.map((skill) => skillItem(skill, true))}
+              </CommandGroup>
+            ) : null}
+            {global.length > 0 ? (
+              <CommandGroup heading="Global">{global.map((skill) => skillItem(skill, false))}</CommandGroup>
+            ) : null}
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
   )
 }
 

@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  autoApplyText,
   DEFAULT_PROMPT_TEMPLATES,
   insertTemplate,
   makeTemplateId,
   normalizePromptTemplates,
+  resolveAutoApply,
+  templatesForSkills,
+  type PromptTemplate,
 } from './prompt-templates'
 
 describe('normalizePromptTemplates', () => {
@@ -123,7 +127,9 @@ describe('insertTemplate', () => {
     const cases: { name: string; text: string; caret: number; expected: string }[] = [
       { name: 'empty text', text: '', caret: 0, expected: 'SNIP' },
       { name: 'start of text', text: 'Fix the bug', caret: 0, expected: 'SNIP\n\nFix the bug' },
-      { name: 'middle of a word', text: 'Fix the bug', caret: 3, expected: 'Fix\n\nSNIP\n\n the bug' },
+      // The space that separated "Fix" from "the bug" is dropped, not carried onto the new line
+      // as indentation (the #413 review's nit).
+      { name: 'middle of a word', text: 'Fix the bug', caret: 3, expected: 'Fix\n\nSNIP\n\nthe bug' },
       { name: 'end of text', text: 'Fix the bug', caret: 11, expected: 'Fix the bug\n\nSNIP' },
       {
         name: 'existing blank line on both sides',
@@ -162,5 +168,116 @@ describe('insertTemplate', () => {
     const second = insertTemplate(first.text, first.caret, 'Two.')
     const third = insertTemplate(second.text, second.caret, 'Three.')
     expect(third.text).toBe('One.\n\nTwo.\n\nThree.')
+  })
+
+  // The #413 review's nit — and the trap in fixing it. A bare `trimStart()` on the tail also eats
+  // a leading NEWLINE, which is exactly the character that makes the blank line.
+  it('drops the space the caret split, but never a newline the separator still needs', () => {
+    expect(insertTemplate('ALPHA OMEGA', 5, 'SNIP').text).toBe('ALPHA\n\nSNIP\n\nOMEGA')
+    expect(insertTemplate('One.\nTwo.', 4, 'SNIP').text).toBe('One.\n\nSNIP\n\nTwo.')
+    expect(insertTemplate('One.\n\nTwo.', 6, 'SNIP').text).toBe('One.\n\nSNIP\n\nTwo.')
+  })
+
+  it('a tail of nothing but spaces leaves no trailing whitespace behind', () => {
+    expect(insertTemplate('Fix.   ', 4, 'SNIP').text).toBe('Fix.\n\nSNIP')
+  })
+})
+
+// ---- skill assignment + auto-apply (#413 follow-up) ---------------------------------------------
+
+const ADD_TESTS: PromptTemplate = { id: 'a', label: 'A', text: 'Add tests.', skills: ['om-fix'] }
+const BE_TERSE: PromptTemplate = { id: 'b', label: 'B', text: 'Be terse.', skills: ['om-fix', 'om-review'] }
+const MANUAL: PromptTemplate = { id: 'c', label: 'C', text: 'Manual only.' }
+const LIST = [ADD_TESTS, BE_TERSE, MANUAL]
+
+describe('normalizePromptTemplates — assigned skills', () => {
+  it('keeps a valid assignment', () => {
+    expect(normalizePromptTemplates([ADD_TESTS])).toEqual([ADD_TESTS])
+  })
+
+  it('omits the key rather than emitting [] — so an old ui-state.json round-trips unchanged', () => {
+    expect(normalizePromptTemplates([{ id: 'a', label: 'A', text: 'T.', skills: [] }])).toEqual([
+      { id: 'a', label: 'A', text: 'T.' },
+    ])
+    expect(normalizePromptTemplates([{ id: 'a', label: 'A', text: 'T.' }])[0]).not.toHaveProperty('skills')
+  })
+
+  it('garbage in skills degrades to no assignment — it never throws or bricks the template', () => {
+    const cases = ['nope', 42, {}, null, [null, 7, {}]]
+    for (const skills of cases) {
+      expect(normalizePromptTemplates([{ id: 'a', label: 'A', text: 'T.', skills }])).toEqual([
+        { id: 'a', label: 'A', text: 'T.' },
+      ])
+    }
+  })
+
+  it('trims and dedupes assigned names', () => {
+    expect(
+      normalizePromptTemplates([{ id: 'a', label: 'A', text: 'T.', skills: ['  om-fix ', 'om-fix', ''] }]),
+    ).toEqual([{ id: 'a', label: 'A', text: 'T.', skills: ['om-fix'] }])
+  })
+})
+
+describe('templatesForSkills', () => {
+  it('no selection assigns nothing', () => {
+    expect(templatesForSkills(LIST, [])).toEqual([])
+  })
+
+  it('picks the templates assigned to the selected skill, unassigned ones never self-apply', () => {
+    expect(templatesForSkills(LIST, ['om-review'])).toEqual([BE_TERSE])
+    expect(templatesForSkills(LIST, ['om-fix'])).toEqual([ADD_TESTS, BE_TERSE])
+  })
+
+  it('a skill with nothing assigned to it matches nothing', () => {
+    expect(templatesForSkills(LIST, ['om-unrelated'])).toEqual([])
+  })
+
+  it('a multi-skill selection stacks in LIST order, not selection order — and never twice', () => {
+    expect(templatesForSkills(LIST, ['om-review', 'om-fix'])).toEqual([ADD_TESTS, BE_TERSE])
+  })
+})
+
+describe('autoApplyText', () => {
+  it('joins the assigned templates with the same blank line insertTemplate uses', () => {
+    expect(autoApplyText(LIST, ['om-fix'])).toBe('Add tests.\n\nBe terse.')
+  })
+
+  it('nothing assigned is the empty string — "auto-apply contributes nothing"', () => {
+    expect(autoApplyText(LIST, [])).toBe('')
+    expect(autoApplyText(LIST, ['om-unrelated'])).toBe('')
+  })
+})
+
+describe('resolveAutoApply', () => {
+  it('fills an empty box', () => {
+    expect(resolveAutoApply('', '', 'AUTO')).toEqual({ text: 'AUTO', applied: 'AUTO' })
+  })
+
+  it('NEVER overwrites what the user typed — the whole point of the rule', () => {
+    expect(resolveAutoApply('my own words', '', 'AUTO')).toEqual({ text: 'my own words', applied: '' })
+  })
+
+  it('replaces its own previous text when the selection changes', () => {
+    expect(resolveAutoApply('AUTO', 'AUTO', 'NEXT')).toEqual({ text: 'NEXT', applied: 'NEXT' })
+  })
+
+  it('deselecting takes the auto-applied text back out again', () => {
+    expect(resolveAutoApply('AUTO', 'AUTO', '')).toEqual({ text: '', applied: '' })
+  })
+
+  it('a user edit to auto-applied text makes it theirs — later changes leave it alone', () => {
+    const edited = resolveAutoApply('AUTO plus my note', 'AUTO', 'NEXT')
+    expect(edited).toEqual({ text: 'AUTO plus my note', applied: 'AUTO' })
+    // …and it keeps standing its ground on every subsequent change.
+    expect(resolveAutoApply(edited.text, edited.applied, 'THIRD')).toEqual({
+      text: 'AUTO plus my note',
+      applied: 'AUTO',
+    })
+  })
+
+  it('clearing the box by hand opts back in — no mode the user can get stuck in', () => {
+    const typed = resolveAutoApply('mine', '', 'AUTO')
+    expect(typed.text).toBe('mine')
+    expect(resolveAutoApply('', typed.applied, 'AUTO')).toEqual({ text: 'AUTO', applied: 'AUTO' })
   })
 })

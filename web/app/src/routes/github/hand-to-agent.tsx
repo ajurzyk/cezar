@@ -9,7 +9,7 @@ import {
   XIcon,
   ZapIcon,
 } from 'lucide-react'
-import { useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router'
 
 import { createRun } from '@/api/client'
@@ -30,7 +30,12 @@ import { toast } from '@/components/ui/toaster'
 import { PromptTemplateMenu } from '@/components/prompt-template-menu'
 import { SkillPreviewDialog } from '@/components/skill-detail'
 import { githubRunBody } from '@/lib/github-task'
-import { insertTemplate, normalizePromptTemplates } from '@/lib/prompt-templates'
+import {
+  autoApplyText,
+  insertTemplate,
+  normalizePromptTemplates,
+  resolveAutoApply,
+} from '@/lib/prompt-templates'
 import { isProjectSkill, multiWordFilter, skillKeywords } from '@/lib/skills'
 import { cn } from '@/lib/utils'
 
@@ -81,18 +86,40 @@ export function HandToAgent({
   // Follow-up prompt templates (#413): built-in unless the user has edited them in Settings →
   // Prompt templates (`ui-state.json`'s `promptTemplates`).
   const uiState = useUiState()
-  const templates = normalizePromptTemplates(uiState.data?.promptTemplates)
+  const templates = useMemo(
+    () => normalizePromptTemplates(uiState.data?.promptTemplates),
+    [uiState.data?.promptTemplates],
+  )
   const insertPromptTemplate = (snippet: string) => {
     const el = promptRef.current
     const caret = el?.selectionStart ?? prompt.length
     const result = insertTemplate(prompt, caret, snippet)
     setPrompt(result.text)
-    // Restore focus + caret after the state update repaints the textarea.
+    // Restore focus + caret after the state update repaints the textarea. The menu's Popover
+    // suppresses its own focus-return (`onCloseAutoFocus`), so this is the last word on focus.
     requestAnimationFrame(() => {
       promptRef.current?.focus()
       promptRef.current?.setSelectionRange(result.caret, result.caret)
     })
   }
+
+  // Auto-apply (#413 follow-up): picking a skill fills the prompt with the templates assigned to
+  // it — but only while the box is untouched, per `resolveAutoApply`. Deselecting takes the
+  // auto-applied text back out again, so the box always reflects the current selection until the
+  // moment the user types, after which it is theirs.
+  const autoText = autoApplyText(templates, validSkills)
+  const promptRefValue = useRef(prompt)
+  promptRefValue.current = prompt
+  const autoAppliedRef = useRef('')
+  useEffect(() => {
+    // Reads/writes go through refs, never a setState updater: StrictMode double-invokes those in
+    // dev, which would double-apply the ref bookkeeping (the composer's #double-paste hazard).
+    const resolved = resolveAutoApply(promptRefValue.current, autoAppliedRef.current, autoText)
+    autoAppliedRef.current = resolved.applied
+    if (resolved.text !== promptRefValue.current) setPrompt(resolved.text)
+    // `autoText` is a derived STRING, so this fires only when the assigned set really changes —
+    // not on every render that rebuilds the skills array.
+  }, [autoText])
 
   const start = useMutation({
     mutationFn: () => createRun(githubRunBody(item, workflow, validSkills, prompt)),

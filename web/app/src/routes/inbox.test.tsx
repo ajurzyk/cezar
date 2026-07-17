@@ -329,8 +329,8 @@ describe('empty and error states', () => {
 
 describe('Add instructions', () => {
   beforeEach(() => {
-    // Radix's DropdownMenu (the template menu) positions with floating-ui, which needs a
-    // ResizeObserver; jsdom has none (same stub as github.test.tsx / tools-menu.test.tsx).
+    // The template menu is a Popover + cmdk: floating-ui positions with a ResizeObserver, and
+    // cmdk scrolls the active item into view. jsdom has neither (same stubs as github.test.tsx).
     vi.stubGlobal(
       'ResizeObserver',
       class {
@@ -339,6 +339,7 @@ describe('Add instructions', () => {
         disconnect() {}
       },
     )
+    Element.prototype.scrollIntoView = vi.fn()
   })
 
   interface CapturedRequest {
@@ -450,14 +451,32 @@ describe('Add instructions', () => {
     renderInbox()
     await openInstructions()
 
-    fireEvent.pointerDown(cards()[0]!.querySelector('[data-slot="prompt-template-trigger"]')!)
-    const menu = await screen.findByRole('menu')
-    fireEvent.click(menu.querySelector('[data-template="add-tests"]')!)
+    // A Popover + cmdk (matching the skill pickers), so: click, not pointerdown.
+    fireEvent.click(cards()[0]!.querySelector('[data-slot="prompt-template-trigger"]')!)
+    await waitFor(() => expect(document.querySelector('[data-template="add-tests"]')).not.toBeNull())
+    fireEvent.click(document.querySelector('[data-template="add-tests"]')!)
 
     await waitFor(() =>
       expect(
         cards()[0]!.querySelector<HTMLTextAreaElement>('[data-slot="todo-instructions-input"]')?.value,
       ).toBe('Also add or update tests covering this change.'),
     )
+  })
+
+  it('the template menu is searchable from the Inbox composer too', async () => {
+    stubFetchCapturingBody()
+    renderInbox()
+    await openInstructions()
+
+    fireEvent.click(cards()[0]!.querySelector('[data-slot="prompt-template-trigger"]')!)
+    await waitFor(() =>
+      expect(document.querySelectorAll('[data-slot="prompt-template-option"]').length).toBeGreaterThan(1),
+    )
+
+    fireEvent.change(screen.getByPlaceholderText('search templates…'), { target: { value: 'docs' } })
+    await waitFor(() =>
+      expect(document.querySelectorAll('[data-slot="prompt-template-option"]')).toHaveLength(1),
+    )
+    expect(document.querySelector('[data-template="update-docs"]')).not.toBeNull()
   })
 })

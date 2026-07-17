@@ -203,6 +203,9 @@ const uiStateSchema = z
           id: z.string().min(1).max(64),
           label: z.string().trim().min(1).max(80),
           text: z.string().trim().min(1).max(2000),
+          // Skill names this template auto-applies for. Optional and additive: templates
+          // written before this key existed keep validating, and stay manual-only.
+          skills: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
         }),
       )
       .max(50)

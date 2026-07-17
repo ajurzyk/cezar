@@ -15,11 +15,22 @@ export interface PromptTemplate {
   id: string
   label: string
   text: string
+  /**
+   * Skill names (`Skill.name` — the repo's skill identity) this template is assigned to. When one
+   * of these skills is picked in a composer and the prompt box is still untouched, the template
+   * auto-applies (`autoApplyText` / `resolveAutoApply`). Absent or empty = a manual-only template:
+   * it still lists in the menu, it just never applies itself.
+   */
+  skills?: string[]
 }
 
 const LABEL_MAX = 80
 const TEXT_MAX = 2000
 const LIST_MAX = 50
+/** Matches the server's `ref` bound for a skill name (`uiStateSchema.lastTask.ref`). */
+const SKILL_NAME_MAX = 200
+/** A template assigned to more skills than this is almost certainly a mis-edit, not a workflow. */
+const SKILLS_MAX = 50
 
 /** Sensible built-ins (issue #413: "a small set of reusable prompt templates"). Order is the
  *  order they render in the menu and in Settings. */
@@ -76,10 +87,82 @@ export function normalizePromptTemplates(raw: unknown): PromptTemplate[] {
     const text = typeof entry.text === 'string' ? entry.text.trim() : ''
     if (!id || !label || !text || seen.has(id)) continue
     seen.add(id)
-    out.push({ id, label: label.slice(0, LABEL_MAX), text: text.slice(0, TEXT_MAX) })
+    const skills = normalizeAssignedSkills(entry.skills)
+    out.push({
+      id,
+      label: label.slice(0, LABEL_MAX),
+      text: text.slice(0, TEXT_MAX),
+      // Omitted rather than `[]` when empty: "assigned to nothing" and "no assignment field" mean
+      // the same thing, and keeping one shape keeps the Settings dirty-check (a JSON compare)
+      // from seeing a phantom edit on every load of an old ui-state.json.
+      ...(skills.length > 0 ? { skills } : {}),
+    })
     if (out.length >= LIST_MAX) break
   }
   return out
+}
+
+/** Assigned skill names: same "garbage degrades, never throws" contract as the list itself —
+ *  a non-array, or entries that are not usable names, simply yield no assignment. */
+function normalizeAssignedSkills(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return []
+  const seen = new Set<string>()
+  for (const entry of raw) {
+    if (typeof entry !== 'string') continue
+    const name = entry.trim()
+    if (!name || seen.has(name)) continue
+    seen.add(name.slice(0, SKILL_NAME_MAX))
+    if (seen.size >= SKILLS_MAX) break
+  }
+  return [...seen]
+}
+
+/** Templates assigned to ANY of `skillNames`, in list order (so Settings' ordering decides what
+ *  a multi-skill selection stacks up as, not the order the skills happened to be toggled). */
+export function templatesForSkills(
+  templates: readonly PromptTemplate[],
+  skillNames: readonly string[],
+): PromptTemplate[] {
+  if (skillNames.length === 0) return []
+  const wanted = new Set(skillNames)
+  return templates.filter((template) => template.skills?.some((name) => wanted.has(name)))
+}
+
+/** The prompt text a skill selection auto-applies: every assigned template, blank-line separated
+ *  (the `insertTemplate` separator, so a stacked auto-apply reads like a hand-stacked one).
+ *  No assignments → `''`, which callers treat as "auto-apply contributes nothing". */
+export function autoApplyText(
+  templates: readonly PromptTemplate[],
+  skillNames: readonly string[],
+): string {
+  return templatesForSkills(templates, skillNames)
+    .map((template) => template.text)
+    .join('\n\n')
+}
+
+/**
+ * Resolve what the prompt box should hold after a skill selection changes.
+ *
+ * The one hard rule (#413 follow-up: "auto applied *if user didnt enter prompt yet*"): text the
+ * user typed is NEVER overwritten. Auto-apply may only write into a box that is either empty or
+ * still holds exactly what a previous auto-apply put there — so re-picking skills reshuffles the
+ * auto-applied text, but the moment you type, the box is yours and stays yours.
+ *
+ * Clearing the box by hand opts back in (`current === ''`), which is the same "empty means
+ * untouched" test the box started with — no hidden mode a user can get stuck in.
+ *
+ * `previousAuto` is what this function last returned as `applied` ('' on first run). Returning it
+ * back out (rather than having the caller track it) keeps the whole rule pure and testable.
+ */
+export function resolveAutoApply(
+  current: string,
+  previousAuto: string,
+  nextAuto: string,
+): { text: string; applied: string } {
+  if (current === '' || current === previousAuto) return { text: nextAuto, applied: nextAuto }
+  // The user owns the box now — leave it alone, and keep remembering the auto text we wrote, so
+  // that clearing it back to empty later re-opens the door above.
+  return { text: current, applied: previousAuto }
 }
 
 /** A fresh id for a template a user adds in Settings — client-side only, never sent anywhere
@@ -115,15 +198,22 @@ export function insertTemplate(
     else leading = '\n\n'
   }
 
+  // The tail is about to start a line of its own, so the SPACES that used to separate it from the
+  // caret ("ALPHA| OMEGA" → the space before OMEGA) would become leading indentation on that line,
+  // which is never what was meant. Horizontal whitespace only, and stripped BEFORE `trailing` is
+  // measured: a leading newline is part of the separator we are about to complete, not padding —
+  // eating it ("One.\n|Two." → "One.\n\nSNIP\nTwo.") would cost the blank line this is all for.
+  const tail = after.replace(/^[ \t]+/, '')
+
   let trailing = ''
-  if (after.length > 0) {
-    if (after.startsWith('\n\n')) trailing = ''
-    else if (after.startsWith('\n')) trailing = '\n'
+  if (tail.length > 0) {
+    if (tail.startsWith('\n\n')) trailing = ''
+    else if (tail.startsWith('\n')) trailing = '\n'
     else trailing = '\n\n'
   }
 
   return {
-    text: before + leading + snippet + trailing + after,
+    text: before + leading + snippet + trailing + tail,
     // Right after the snippet itself — the trailing separator belongs to the tail, not to the
     // text the user just inserted.
     caret: before.length + leading.length + snippet.length,
