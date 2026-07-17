@@ -20,8 +20,8 @@ Run folder: `.ai/runs/2026-07-17-task-auto-naming/`
 | 2 | 2.2 | `[cez-namer]` mock branch + one-shot runner call + `namerModel` config key | done | c38b1f8 |
 | 2 | 2.3 | Fire-and-forget wiring in `startRun` — apply rules, SSE, degradation | done | aaa5648 |
 | 3 | 3.1 | `liveTitleUpdates` config key + `CEZ_TITLE_UPDATES` env default (ON) | done | 56c44cc |
-| 3 | 3.2 | Turn-end refresh via the namer in `recordTurnEnd` + skip conditions | done | pending |
-| 3 | 3.3 | Settings → Agents toggle for live title updates (web UI) | todo | — |
+| 3 | 3.2 | Turn-end refresh via the namer in `recordTurnEnd` + skip conditions | done | e5df17c |
+| 3 | 3.3 | Settings → Agents toggle for live title updates (web UI) | done | pending |
 | 4 | 4.1 | Retire raw turn-text titles (`title-summary.ts`) + update dependent tests | todo | — |
 | 4 | 4.2 | Docs: .env.example, README env table + naming section, config key docs | todo | — |
 
