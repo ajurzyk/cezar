@@ -66,7 +66,7 @@ afterEach(() => {
 describe('the section registry', () => {
   it('declares the spec §Settings sections, later ones hidden', () => {
     const byId = new Map(SETTINGS_SECTIONS.map((s) => [s.id, s]))
-    for (const id of ['bookmarklets', 'appearance', 'agents', 'agent-config', 'resources', 'mcp', 'notifications']) {
+    for (const id of ['bookmarklets', 'appearance', 'agents', 'agent-config', 'resources', 'notifications']) {
       expect(byId.get(id as never)?.hidden).toBeUndefined()
     }
     // Listed in the registry but hidden until implemented (later phase).
@@ -79,7 +79,6 @@ describe('the section registry', () => {
       'agents',
       'agent-config',
       'resources',
-      'mcp',
       'notifications',
     ])
   })
@@ -90,19 +89,19 @@ describe('the settings shell', () => {
     renderAt('/settings/appearance')
     const nav = document.querySelector('[data-slot="settings-nav"]')!
     const ids = [...nav.querySelectorAll('[data-section]')].map((el) => el.getAttribute('data-section'))
-    expect(ids).toEqual(['bookmarklets', 'appearance', 'agents', 'agent-config', 'resources', 'mcp', 'notifications'])
+    expect(ids).toEqual(['bookmarklets', 'appearance', 'agents', 'agent-config', 'resources', 'notifications'])
     // The active section is marked for assistive tech, not just by color.
     expect(nav.querySelector('[aria-current="page"]')?.getAttribute('data-section')).toBe('appearance')
     // The mobile pill row renders through the same registry — the two can never disagree.
     const pills = document.querySelector('[data-slot="settings-nav-mobile"]')!
-    expect([...pills.querySelectorAll('[data-section]')].length).toBe(7)
+    expect([...pills.querySelectorAll('[data-section]')].length).toBe(6)
   })
 
   it('/settings is the registry as an index — one card per visible section', () => {
     renderAt('/settings')
     const index = document.querySelector('[data-slot="settings-index"]')!
     const ids = [...index.querySelectorAll('[data-section]')].map((el) => el.getAttribute('data-section'))
-    expect(ids).toEqual(['bookmarklets', 'appearance', 'agents', 'agent-config', 'resources', 'mcp', 'notifications'])
+    expect(ids).toEqual(['bookmarklets', 'appearance', 'agents', 'agent-config', 'resources', 'notifications'])
     expect(index.querySelector('[data-section="bookmarklets"]')?.getAttribute('href')).toBe(
       '/settings/bookmarklets',
     )
@@ -114,7 +113,7 @@ describe('the settings shell', () => {
   it('unfinished sections say so through the shared CenteredState template', () => {
     // Hidden sections are not routed (their URLs 404) — render the registry component
     // directly to pin the placeholder contract itself. (keyboard is the last hidden one;
-    // mcp shipped with the agent-config feature #404.)
+    // MCP lives inside Agent config as a per-agent subsection.)
     const Keyboard = SETTINGS_SECTIONS.find((s) => s.id === 'keyboard')!.component
     render(<Keyboard />)
     const state = document.querySelector('[data-slot="centered-state"]')

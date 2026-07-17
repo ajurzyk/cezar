@@ -85,7 +85,6 @@ describe('route map', () => {
     ['/settings/appearance', 'settings-appearance', 'Appearance'],
     ['/settings/agents', 'settings-agents', 'Agents'],
     ['/settings/agent-config', 'settings-agent-config', 'Agent config'],
-    ['/settings/mcp', 'settings-mcp', 'MCP'],
     ['/settings/notifications', 'settings-notifications', 'Notifications'],
   ]
 
@@ -105,13 +104,14 @@ describe('route map', () => {
   })
 
   // Hidden registry sections (keyboard) are deliberately NOT routed — their URLs
-  // stay honest 404s until the section ships (registry.tsx `hidden`). mcp shipped
-  // with the agent-config feature (#404), so it is a real route above now.
+  // stay honest 404s until the section ships (registry.tsx `hidden`). MCP lives inside
+  // Agent config as a per-agent subsection (spec 2026-07-17-agent-config-by-agent).
   const unknown = [
     '/nope-404',
     '/tasks',
     '/settings/nope',
     '/settings/keyboard',
+    '/settings/mcp',
     '/tasks/abc123/nope',
     '/compare',
   ]

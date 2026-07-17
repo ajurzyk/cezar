@@ -6,7 +6,6 @@ import {
   GaugeIcon,
   KeyboardIcon,
   PaletteIcon,
-  PlugIcon,
 } from 'lucide-react'
 import type { ComponentType, SVGProps } from 'react'
 
@@ -15,7 +14,6 @@ import { AgentConfigSection } from './agent-config-section'
 import { AgentsSection } from './agents-section'
 import { AppearanceSection } from './appearance'
 import { BookmarkletsSection } from './bookmarklets-section'
-import { McpSection } from './mcp-section'
 import { NotificationsSection } from './notifications-section'
 import { ResourcesSection } from './resources-section'
 
@@ -25,8 +23,8 @@ import { ResourcesSection } from './resources-section'
  * section later is one entry here — no layout work, no route wiring.
  *
  * `hidden` sections are declared but not routed and not listed: they exist so the plan is
- * visible in code (`keyboard` — later phase; `notifications` unhid in Step 1.7, `mcp` shipped
- * with the agent-config feature #404) and so unhiding is a one-word diff.
+ * visible in code (`keyboard` — later phase; `notifications` unhid in Step 1.7). MCP lives
+ * inside Agent config as a per-agent subsection (spec 2026-07-17-agent-config-by-agent).
  */
 
 export type SettingsSectionId =
@@ -35,7 +33,6 @@ export type SettingsSectionId =
   | 'agents'
   | 'agent-config'
   | 'resources'
-  | 'mcp'
   | 'notifications'
   | 'keyboard'
 
@@ -100,13 +97,6 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
     description: 'Parallel tasks and per-task memory limit.',
     icon: GaugeIcon,
     component: ResourcesSection,
-  },
-  {
-    id: 'mcp',
-    title: 'MCP',
-    description: 'Model Context Protocol servers.',
-    icon: PlugIcon,
-    component: McpSection,
   },
   {
     id: 'notifications',
