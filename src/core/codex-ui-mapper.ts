@@ -52,11 +52,15 @@ export interface CodexUiMapperState {
   /** Accumulated `outputDelta` text per commandExecution item, attached to
    *  the final snapshot when the wire `item/completed` carries no output. */
   readonly outputs: ReadonlyMap<string, string>;
-  /** True once `turn/plan/updated` has spoken. Both that notification and the
-   *  `plan`/`todoList` item arm write `plan.updated`, so without a precedence
-   *  rule the last frame wins and a prose plan item would flatten the real
-   *  checklist into one entry. The authoritative channel latches this and the
-   *  item arm stands down (see `mapItemLifecycle`). */
+  /** True once `turn/plan/updated` has spoken IN THE CURRENT TURN. Both that
+   *  notification and the `plan`/`todoList` item arm write `plan.updated`, so
+   *  without a precedence rule the last frame wins and a prose plan item would
+   *  flatten the real checklist into one entry. The authoritative channel
+   *  latches this and the item arm stands down (see `mapItemLifecycle`).
+   *
+   *  Turn-scoped, and reset by `turn/started`: a plan belongs to a turn (hence
+   *  `turn/plan/updated`), so a latch that outlived its turn would gag the item
+   *  arm for the rest of the session and strand the dock on a stale checklist. */
   readonly planFromNotification: boolean;
 }
 
@@ -137,7 +141,8 @@ function mapTurnStarted(params: Record<string, unknown>, state: CodexUiMapperSta
   const turnId = turnIdOf(params) ?? `turn_${turnSeq}`;
   return {
     events: [{ type: 'turn.started', turnId }],
-    state: { ...state, turnSeq, currentTurnId: turnId },
+    // planFromNotification is turn-scoped — a new turn re-opens the item arm.
+    state: { ...state, turnSeq, currentTurnId: turnId, planFromNotification: false },
   };
 }
 

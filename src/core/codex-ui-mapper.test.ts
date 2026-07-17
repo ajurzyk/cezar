@@ -471,6 +471,27 @@ describe('mapCodexNotification edge cases', () => {
       expect(stray.events).toEqual([]);
     });
 
+    // The latch is turn-scoped. If it outlived its turn it would gag the item arm
+    // for the rest of the session, stranding the dock on the previous turn's plan.
+    it('re-opens the item arm on the next turn', () => {
+      const latched = mapCodexNotification(planFrame([{ step: 'turn one', status: 'completed' }]), state);
+      expect(latched.state.planFromNotification).toBe(true);
+
+      const nextTurn = mapCodexNotification(
+        { method: 'turn/started', params: { turn: { id: 'turn_2', status: 'inProgress' } } },
+        latched.state,
+      );
+      expect(nextTurn.state.planFromNotification).toBe(false);
+
+      const prose = mapCodexNotification(
+        { method: 'item/completed', params: { item: { type: 'plan', id: 'item_p', text: 'Turn two plan' } } },
+        nextTurn.state,
+      );
+      expect(prose.events).toEqual([
+        { type: 'plan.updated', entries: [{ content: 'Turn two plan', status: 'in_progress' }] },
+      ]);
+    });
+
     it('leaves the item arm alone until the notification actually arrives', () => {
       // The tolerance arm still works for transports that never send the notification.
       const prose = mapCodexNotification(
