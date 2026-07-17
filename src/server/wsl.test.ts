@@ -28,6 +28,22 @@ describe('wslDistroName', () => {
     expect(wslDistroName({ WSL_DISTRO_NAME: 'Debian' })).toBe('Debian');
     expect(wslDistroName({})).toBe('Ubuntu');
   });
+
+  it('accepts the punctuation real distro names use', () => {
+    expect(wslDistroName({ WSL_DISTRO_NAME: 'Ubuntu-22.04' })).toBe('Ubuntu-22.04');
+    expect(wslDistroName({ WSL_DISTRO_NAME: 'my_distro.v2' })).toBe('my_distro.v2');
+  });
+
+  // Distro names are user-chosen at `wsl --import`, so this env value is untrusted and ends up
+  // on a command line and in a `\\wsl$\<distro>\…` path. A space-free name carrying shell
+  // metacharacters is the dangerous shape: libuv would pass it through unquoted.
+  it('rejects a name carrying shell metacharacters, falling back to the default', () => {
+    expect(wslDistroName({ WSL_DISTRO_NAME: 'a&calc&' })).toBe('Ubuntu');
+    expect(wslDistroName({ WSL_DISTRO_NAME: 'a|calc' })).toBe('Ubuntu');
+    expect(wslDistroName({ WSL_DISTRO_NAME: 'a`calc`' })).toBe('Ubuntu');
+    expect(wslDistroName({ WSL_DISTRO_NAME: '..\\..\\evil' })).toBe('Ubuntu');
+    expect(wslDistroName({ WSL_DISTRO_NAME: 'has space' })).toBe('Ubuntu');
+  });
 });
 
 describe('toWindowsPath', () => {

@@ -67,12 +67,19 @@ export async function openInTerminal(cwd: string, command: string): Promise<bool
 }
 
 /** The Windows-side (bin, args) candidates for launching `scriptPath` inside `distro` through
- *  WSL interop, in try-order — Windows Terminal first, classic `cmd` window as fallback. Pure
- *  (no spawning) so the exact command line is unit-testable without a real WSL host. */
+ *  WSL interop, in try-order — Windows Terminal first, a classic console window as fallback. Pure
+ *  (no spawning) so the exact command line is unit-testable without a real WSL host.
+ *
+ *  Every launcher here is shell-free by construction, and must stay that way: routing through
+ *  `cmd.exe` (`/c start …`) would reintroduce BatBadBut (CVE-2024-27980, see #459). Passing an
+ *  argument array is NOT protection when the binary is a shell — libuv only quotes arguments
+ *  containing space, tab or quote, so a space-free `distro` like `a&calc&` would reach `cmd`
+ *  live and be interpreted. `wt.exe` and `conhost.exe` parse no metacharacters, so the same
+ *  input is inert. `distro` is additionally validated at the source (`wslDistroName`). */
 export function wslTerminalLaunchers(scriptPath: string, distro: string): Array<[string, string[]]> {
   return [
     ['wt.exe', ['wsl.exe', '-d', distro, '--', scriptPath]],
-    ['cmd.exe', ['/c', 'start', '', 'wsl.exe', '-d', distro, '--', scriptPath]],
+    ['conhost.exe', ['wsl.exe', '-d', distro, '--', scriptPath]],
   ];
 }
 

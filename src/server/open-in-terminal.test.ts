@@ -8,12 +8,18 @@ describe('wslTerminalLaunchers (#361 WSL support)', () => {
     expect(first).toEqual(['wt.exe', ['wsl.exe', '-d', 'Ubuntu', '--', '/tmp/cez-term-abc/launch.sh']]);
   });
 
-  it('falls back to a classic cmd window, same wsl.exe re-entry', () => {
+  it('falls back to a classic console window, same wsl.exe re-entry', () => {
     const [, second] = wslTerminalLaunchers('/tmp/cez-term-abc/launch.sh', 'Ubuntu');
-    expect(second).toEqual([
-      'cmd.exe',
-      ['/c', 'start', '', 'wsl.exe', '-d', 'Ubuntu', '--', '/tmp/cez-term-abc/launch.sh'],
-    ]);
+    expect(second).toEqual(['conhost.exe', ['wsl.exe', '-d', 'Ubuntu', '--', '/tmp/cez-term-abc/launch.sh']]);
+  });
+
+  // Regression guard for the BatBadBut class (CVE-2024-27980) that #459 fixed in the sibling
+  // opener: an argument array does not save you when the binary itself is a shell, because libuv
+  // leaves space-free arguments unquoted. No launcher may route through one.
+  it('never routes a launcher through a shell', () => {
+    for (const [bin] of wslTerminalLaunchers('/tmp/script.sh', 'Ubuntu')) {
+      expect(bin).not.toMatch(/^(cmd|powershell|pwsh)\.exe$/i);
+    }
   });
 
   it('addresses the distro the launch actually runs in, not a hardcoded default', () => {

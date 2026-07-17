@@ -40,11 +40,19 @@ export function isWsl(
   return /microsoft/i.test(procVersion);
 }
 
+/** Distro names are user-chosen (`wsl --import <name> …`), so `WSL_DISTRO_NAME` is untrusted
+ *  input that we go on to put on a command line and into a UNC path. WSL's own naming rules are
+ *  narrower than this, so nothing legitimate is rejected — but a name like `a&calc&` is. */
+const SAFE_DISTRO_NAME = /^[A-Za-z0-9._-]+$/;
+
 /** The distro name Windows-side tools address this environment as (`wsl.exe -d <name>`, the
- *  `\\wsl$\<name>\…` UNC prefix). Falls back to "Ubuntu" — WSL's own default — when unset, which
- *  only matters for the manual UNC fallback below; the real `wslpath` never needs it. */
+ *  `\\wsl$\<name>\…` UNC prefix). Falls back to "Ubuntu" — WSL's own default — when unset or
+ *  when the name fails `SAFE_DISTRO_NAME`, so no unvalidated env value is ever interpolated into
+ *  a command line or a path. The launchers this feeds are shell-free anyway
+ *  (`wslTerminalLaunchers`); this is the belt to their braces. */
 export function wslDistroName(env: NodeJS.ProcessEnv = process.env): string {
-  return env.WSL_DISTRO_NAME || 'Ubuntu';
+  const name = env.WSL_DISTRO_NAME;
+  return name && SAFE_DISTRO_NAME.test(name) ? name : 'Ubuntu';
 }
 
 /** Pure POSIX → Windows path translation, no `wslpath` required (used as its fallback, and

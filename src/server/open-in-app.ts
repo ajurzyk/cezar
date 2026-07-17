@@ -69,10 +69,20 @@ const FILE_MANAGER_LABEL =
   process.platform === 'darwin' ? 'Finder' : process.platform === 'win32' || isWsl() ? 'Explorer' : 'Files';
 
 /** Is `bin` (with a Windows suffix under win32/WSL interop) an executable somewhere on PATH?
- *  Returns the exact resolved name (which may carry the suffix) — pure filesystem probe, no
- *  child process — or null. Windows-suffix probing also applies inside WSL: interop exposes
- *  `.exe`/`.cmd`/`.bat` binaries from the Windows side, but Linux doesn't auto-append them the
- *  way win32 does, so the caller must spawn the exact resolved name. */
+ *  Returns the name the caller should actually spawn — pure filesystem probe, no child process —
+ *  or null.
+ *
+ *  The suffix is used to FIND the binary on both win32 and WSL, but is only returned under WSL.
+ *  The two cases genuinely differ:
+ *   - **WSL**: interop exposes `.exe`/`.cmd`/`.bat` from the Windows side, and Linux never
+ *     auto-appends, so the exact suffixed name is the only thing that spawns.
+ *   - **win32**: spawning a resolved `code.cmd` directly THROWS — Node's CVE-2024-27980
+ *     mitigation rejects `.bat`/`.cmd` without `shell: true`, which `runDetached` would swallow
+ *     into a silent `false` (every Toolbox/`.cmd`-shimmed editor, VS Code included, would just
+ *     stop opening). Returning the bare name lets libuv do its own PATHEXT resolution, which
+ *     handles the shim correctly. Do NOT "fix" that by setting `shell: true` — it would put a
+ *     shell back in the launch path for every editor target, with a far more
+ *     attacker-influenceable `dir` argument than the WSL case ever had. */
 function resolveOnPath(bin: string): string | null {
   const dirs = (process.env.PATH ?? '').split(process.platform === 'win32' ? ';' : ':');
   const suffixed = process.platform === 'win32' || isWsl();
@@ -82,13 +92,21 @@ function resolveOnPath(bin: string): string | null {
     for (const name of names) {
       try {
         accessSync(join(dir, name), constants.X_OK);
-        return name;
+        return spawnNameFor(bin, name);
       } catch {
         // keep looking
       }
     }
   }
   return null;
+}
+
+/** Given `bin` was found on PATH as `foundName` (possibly suffix-probed), the name to actually
+ *  spawn: the bare name on win32 so libuv resolves PATHEXT itself, the exact found name
+ *  everywhere else. See `resolveOnPath` for why the two differ. `platform` defaults to the real
+ *  environment; tests pass it explicitly so this needs no global stubbing. */
+export function spawnNameFor(bin: string, foundName: string, platform: NodeJS.Platform = process.platform): string {
+  return platform === 'win32' ? bin : foundName;
 }
 
 function onPath(bin: string): boolean {
