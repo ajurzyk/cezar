@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { loadConfig } from '../config.js';
+import { createRunner } from '../core/runner-factory.js';
 import { parseStructured } from '../planner.js';
 import { extractTaskRefs, refineTaskRefs, titleRefNumber, type TaskRefs } from './task-refs.js';
 
@@ -110,6 +112,35 @@ export function postValidateTitle(title: string, refNumber?: number): string {
   const chars = [...t];
   if (chars.length > TITLE_MAX) t = `${chars.slice(0, TITLE_MAX - 1).join('').trimEnd()}…`;
   return refNumber !== undefined ? `${refNumber}: ${t}`.trim().replace(/:\s*$/, ':') : t;
+}
+
+/**
+ * The one-shot runner call: never throws, never blocks a run — every failure
+ * path (runner error, timeout, junk twice) answers null and the caller keeps
+ * the heuristic title. `namerModel` is a Claude alias, so it is passed only
+ * when the namer runs on Claude (the `plannerModel` precedent).
+ */
+export async function generateRunName(repoRoot: string, ctx: NamerContext): Promise<NameResult | null> {
+  try {
+    const config = await loadConfig(repoRoot);
+    const runner = createRunner(config.defaultRunner);
+    const model = config.defaultRunner === 'claude' ? config.namerModel : undefined;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = await runner.run({
+        systemPrompt: NAMER_SYSTEM_PROMPT,
+        userPrompt: buildNamerPrompt(ctx),
+        cwd: repoRoot,
+        allowedTools: [],
+        model,
+        timeoutMs: NAMER_TIMEOUT_MS,
+      });
+      const composed = composeNameResult(result.text, ctx);
+      if (composed) return composed;
+    }
+  } catch {
+    // runner unavailable / crashed — the heuristic title stays
+  }
+  return null;
 }
 
 /**

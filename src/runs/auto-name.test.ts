@@ -100,3 +100,26 @@ describe('composeNameResult', () => {
     });
   });
 });
+
+describe('generateRunName (dry run)', () => {
+  it('answers a short, pr-classified title through the mock runner and never throws', async () => {
+    const saved = process.env.CEZ_DRY_RUN;
+    process.env.CEZ_DRY_RUN = '1';
+    try {
+      const { mkdtempSync, rmSync } = await import('node:fs');
+      const { tmpdir } = await import('node:os');
+      const { join } = await import('node:path');
+      const root = mkdtempSync(join(tmpdir(), 'cez-namer-'));
+      try {
+        const { generateRunName } = await import('./auto-name.js');
+        const result = await generateRunName(root, { task: '437', skillName: 'om-auto-review-pr' });
+        expect(result).toEqual({ titleSummary: '437: implementing cr fixes', prNumber: 437 });
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    } finally {
+      if (saved === undefined) delete process.env.CEZ_DRY_RUN;
+      else process.env.CEZ_DRY_RUN = saved;
+    }
+  }, 30_000);
+});
