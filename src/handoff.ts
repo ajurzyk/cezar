@@ -130,7 +130,8 @@ Task completion marker: when the task's goal is fully achieved and you have no q
 export const FOLLOWUP_INSTRUCTIONS = `## Follow-ups (cezar)
 
 CEZ_TODOS_FILE (env) is the absolute path to the user's follow-up inbox — a JSON array. When you finish the task and a concrete follow-up remains for the user or a next agent, read the file (treat a missing file as []), append ONE object and write the whole array back:
-{ "ts": "<ISO 8601>", "taskId": "<value of CEZ_TASK_ID>", "summary": "<one sentence: what was done / what's next>", "action": "<imperative user action, optional>", "prUrl": "<optional>", "suggestedSkill": "<optional skill name for the follow-up>", "suggestedArgs": "<optional>", "suggestedPrompt": "<optional freeform prompt for the follow-up task>" }
+{ "ts": "<ISO 8601>", "taskId": "<value of CEZ_TASK_ID>", "summary": "<one sentence: what was done / what's next>", "action": "<imperative user action, optional>", "prUrl": "<optional>", "suggestedSkill": "<optional skill name for the follow-up>", "suggestedArgs": "<optional>", "suggestedPrompt": "<optional freeform prompt for the follow-up task>", "runnable": <true when an agent can execute this follow-up, false when it is a note> }
+Set "runnable": false for anything a human must do or merely read — manual QA, "remember to…", informational notes — and leave out suggestedSkill/suggestedPrompt for those; the inbox then offers "Acknowledge" instead of "Run". Set "runnable": true only when suggestedSkill or suggestedPrompt says what to actually execute.
 Never modify or remove existing entries — append only.`;
 
 /** Default-on combined contract retained for old callers and runs. */

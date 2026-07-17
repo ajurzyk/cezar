@@ -36,7 +36,8 @@ export function repoChipOf(health: HealthResponse | undefined): RepoChip | null 
  *
  * Nothing here caches boot-time values (#369: the legacy UI read the branch once at startup and
  * then showed a stale branch forever). The chips read whatever is currently in the health query,
- * so making them live is Step 3.2's job of invalidating that query — not a change here.
+ * so keeping them live is `useHealth`'s job — its poll plus Step 3.2's reconnect/visibility
+ * reconcile — not a change here.
  */
 export function AppShellContainer({ children }: { children: ReactNode }) {
   const health = useHealth()

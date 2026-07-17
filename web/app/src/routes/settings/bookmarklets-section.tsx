@@ -56,6 +56,9 @@ export function BookmarkletPanel({ skills }: { skills: readonly Skill[] }) {
   const [auto, setAuto] = useState(false)
   const [filter, setFilter] = useState('')
   const key = launchKey.data?.key ?? ''
+  // Bake THIS cockpit's origin into the bookmarklets so a click opens the very instance that
+  // generated them — no localhost port-scan (GitHub's CSP blocks that fetch). See bookmarklet.ts.
+  const origin = window.location.origin
   const needle = filter.trim().toLowerCase()
   const shown = skills.filter((skill) => skill.name.toLowerCase().includes(needle))
 
@@ -84,7 +87,7 @@ export function BookmarkletPanel({ skills }: { skills: readonly Skill[] }) {
         {/* Generic launcher: no skill, auto forced off — it only prefills the form. */}
         <BookmarkletRow
           label="cezar: this PR/issue"
-          url={bookmarkletUrl('', false, key)}
+          url={bookmarkletUrl('', false, key, origin)}
           hint="prefills the form — nothing starts by itself"
         />
       </div>
@@ -103,7 +106,7 @@ export function BookmarkletPanel({ skills }: { skills: readonly Skill[] }) {
             <BookmarkletRow
               key={skill.path}
               label={`/${skill.name}`}
-              url={bookmarkletUrl(skill.name, auto, key)}
+              url={bookmarkletUrl(skill.name, auto, key, origin)}
               hint={skill.source}
             />
           ))

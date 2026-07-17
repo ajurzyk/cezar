@@ -428,6 +428,8 @@ export interface TodoItem {
   suggestedSkill?: string
   suggestedArgs?: string
   suggestedPrompt?: string
+  /** Explicit intent; missing infers from suggestedSkill/suggestedPrompt for old files. */
+  runnable?: boolean
   /** Set by the server when "▶ Run" turned this entry into a task. */
   startedTaskId?: string
 }

@@ -186,7 +186,7 @@ event live and parks the run at a review gate when there's a diff to inspect.
    ┌──────────────────────────────┐     ┌───────────────────────────────┐
    │  git worktree per task       │     │  agent CLI  (your login)      │
    │  (isolated branch, parallel) │◄───►│  claude · codex · opencode    │
-   └──────────────────────────────┘     │  default-deny · acceptEdits   │
+   └──────────────────────────────┘     │  default-deny · no prompts    │
         │                                 └───────────────────────────────┘
         │  agent text · tool calls · tool results · tokens · cost
         ▼
@@ -317,16 +317,19 @@ skills: [reproduce, root-cause, implement, self-review]
 cezar shells out to your locally installed, logged-in agent CLI —
 **your subscription, no API key**. With the default Claude Code backend that
 means headless `stream-json` mode, tool access default-deny via
-`--allowedTools`, and edits auto-accepted (`--permission-mode acceptEdits`)
-inside the task's worktree. Codex and OpenCode are driven through their own
-native protocols — see [Coding agent backends](#coding-agent-backends).
-Nothing runs on a server you don't own.
+`--allowedTools`, with unapproved tools denied without prompting
+(`--permission-mode dontAsk`) inside the task's worktree. Set
+`CEZ_APPROVAL_GATE=1` to opt into Claude's interactive approval UI. Codex and
+OpenCode are driven through their own native protocols — see
+[Coding agent backends](#coding-agent-backends). Nothing runs on a server you
+don't own.
 
 Useful environment variables:
 
 | Var | Effect |
 |---|---|
 | `CEZ_DRY_RUN=1` | Use the bundled mock instead of the real `claude` CLI — the entire cockpit works offline, for demos and development. |
+| `CEZ_APPROVAL_GATE=1` | Opt into Claude's interactive approval UI; by default, unapproved tools are denied without interrupting the run. |
 | `CEZ_CLAUDE_BIN=/path/to/claude` | Override which `claude` binary is used. |
 | `CEZ_CODEX_BIN=/path/to/codex` | Override which `codex` binary is used. |
 | `CEZ_OPENCODE_BIN=/path/to/opencode` | Override which `opencode` binary is used. |

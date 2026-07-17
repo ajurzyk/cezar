@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { InboxIcon, PlayIcon, TriangleAlertIcon } from 'lucide-react'
+import { CheckIcon, InboxIcon, PlayIcon, TriangleAlertIcon } from 'lucide-react'
 import { Link, useNavigate } from 'react-router'
 
 import { removeTodo, startTodo } from '@/api/client'
@@ -40,6 +40,11 @@ const CARD_ATTENTION = deriveAttention({ status: 'waiting' })
 /** The legacy `visibleTodos()` rule: started entries are the audit trail, not the inbox. */
 export function visibleTodos(todos: readonly TodoItem[]): TodoItem[] {
   return todos.filter((todo) => !todo.startedTaskId)
+}
+
+/** Explicit intent wins; old todos infer actionability from an executable suggestion. */
+export function isTodoRunnable(todo: TodoItem): boolean {
+  return todo.runnable ?? Boolean(todo.suggestedSkill || todo.suggestedPrompt)
 }
 
 export function InboxRoute() {
@@ -136,6 +141,7 @@ function TodoCard({
   })
 
   const busy = start.isPending || dismiss.isPending
+  const runnable = isTodoRunnable(todo)
 
   return (
     <li
@@ -191,29 +197,46 @@ function TodoCard({
         </div>
       </div>
       <div className="flex shrink-0 items-center gap-1.5 self-center">
-        <Button
-          type="button"
-          variant="contrast"
-          size="sm"
-          data-action="todo-run"
-          title="Start a task from this follow-up"
-          disabled={busy}
-          onClick={() => start.mutate()}
-        >
-          <PlayIcon aria-hidden="true" className="size-3" />
-          Run
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          data-action="todo-dismiss"
-          title="Check off (remove)"
-          disabled={busy}
-          onClick={() => dismiss.mutate()}
-        >
-          Dismiss
-        </Button>
+        {runnable ? (
+          <>
+            <Button
+              type="button"
+              variant="contrast"
+              size="sm"
+              data-action="todo-run"
+              title="Start a task from this follow-up"
+              disabled={busy}
+              onClick={() => start.mutate()}
+            >
+              <PlayIcon aria-hidden="true" className="size-3" />
+              Run
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              data-action="todo-dismiss"
+              title="Check off (remove)"
+              disabled={busy}
+              onClick={() => dismiss.mutate()}
+            >
+              Dismiss
+            </Button>
+          </>
+        ) : (
+          <Button
+            type="button"
+            variant="contrast"
+            size="sm"
+            data-action="todo-acknowledge"
+            title="Acknowledge and remove this note"
+            disabled={busy}
+            onClick={() => dismiss.mutate()}
+          >
+            <CheckIcon aria-hidden="true" className="size-3" />
+            Acknowledge
+          </Button>
+        )}
       </div>
     </li>
   )
