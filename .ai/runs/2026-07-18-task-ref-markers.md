@@ -92,9 +92,9 @@ additive-only.
 
 ### Phase 4: Web cockpit
 
-- [ ] 4.1 v2 display strip in `thread-state.ts` + api-type mirror + tests
+- [x] 4.1 v2 display strip in `thread-state.ts` + api-type mirror + tests — a4d519b
 
 ### Phase 5: Gate + compatibility docs
 
-- [ ] 5.1 `BACKWARD_COMPATIBILITY.md` additive-marker note
-- [ ] 5.2 Full validation gate green
+- [x] 5.1 `BACKWARD_COMPATIBILITY.md` additive-marker note — 2f5db47
+- [x] 5.2 Full validation gate green (typecheck, vitest 2479, test:unit, build+check:pack, test:package) — verified 2026-07-18
