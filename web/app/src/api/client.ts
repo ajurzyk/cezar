@@ -16,6 +16,7 @@ import type {
   FinishResponse,
   GitCommitResponse,
   GitPushResponse,
+  GithubCommentsData,
   GithubData,
   GroupResponse,
   HealthResponse,
@@ -258,6 +259,16 @@ export function getGithub(
   if (params.refresh) query.set('refresh', '1')
   const search = query.toString()
   return get<GithubData>(`/api/github${search ? `?${search}` : ''}`, opts)
+}
+
+/** The full comment thread for one issue/PR (#499). Degrades to `{ available: false, reason }`
+ *  server-side — an unreachable thread is a one-line hint in the detail view, not an ApiError. */
+export function getGithubComments(
+  kind: 'issue' | 'pr',
+  number: number,
+  opts?: ReadOptions,
+): Promise<GithubCommentsData> {
+  return get<GithubCommentsData>(`/api/github/comments/${kind}/${number}`, opts)
 }
 
 /** The run's worktree diff against its base, as unified-diff text. Also the plain-text

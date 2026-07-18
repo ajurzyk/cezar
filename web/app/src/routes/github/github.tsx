@@ -5,6 +5,7 @@ import {
   CircleDotIcon,
   ExternalLinkIcon,
   GitPullRequestIcon,
+  MessageSquareIcon,
   RefreshCwIcon,
   SearchIcon,
   TagIcon,
@@ -14,14 +15,15 @@ import { useState, type DragEvent, type ReactNode } from 'react'
 import { Link, Navigate, useParams } from 'react-router'
 
 import { getGithub, putUiState } from '@/api/client'
-import { queryKeys, useGithub, useSkills, useUiState, useWorkflows } from '@/api/queries'
-import type { GithubItem, UiState } from '@/api/types'
+import { queryKeys, useGithub, useGithubComments, useSkills, useUiState, useWorkflows } from '@/api/queries'
+import type { GithubComment, GithubItem, UiState } from '@/api/types'
 import { CenteredState } from '@/components/centered-state'
 import { GithubIcon } from '@/components/icons'
 import { TabLink } from '@/components/tab-link'
 import { Button } from '@/components/ui/button'
 import { Command, CommandEmpty, CommandInput, CommandItem, CommandList } from '@/components/ui/command'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Skeleton } from '@/components/ui/skeleton'
 import { toast } from '@/components/ui/toaster'
 import { shortAge } from '@/lib/format'
 import { githubTaskPrompt } from '@/lib/github-task'
@@ -377,6 +379,7 @@ function GithubRow({
           <span>#{item.number}</span>
           <span className="min-w-0 truncate">{item.author}</span>
           <span>{shortAge(item.createdAt)}</span>
+          <CommentCount count={item.comments} />
           {item.checks ? <ChecksGlyph checks={item.checks} /> : null}
           {queued ? (
             <span data-slot="gh-queued-flag" className="font-sans font-medium text-violet">
@@ -502,7 +505,7 @@ function GithubDetail({
         <span>{shortAge(item.createdAt)} ago</span>
         {item.comments ? (
           <>
-            ·<span>{item.comments} comments</span>
+            ·<CommentCount count={item.comments} />
           </>
         ) : null}
         {hasDiffStat ? (
@@ -546,8 +549,156 @@ function GithubDetail({
         )}
       </div>
 
+      <GithubThread item={item} />
+
       {children}
     </article>
+  )
+}
+
+/** The conversation thread (#499): comments (+ PR review summaries) rendered under the body, each
+ *  body through the shared `Markdown` component so images and code fences render exactly as the
+ *  issue body does. Lazy — only fetched while this detail view is mounted. Everything degrades:
+ *  loading → skeleton, unreachable → one-line reason + "open on GitHub", empty → nothing (the
+ *  count badge already said there were none). */
+function GithubThread({ item }: { item: GithubItem }) {
+  const thread = useGithubComments(item.kind, item.number)
+  const data = thread.data
+
+  if (thread.isPending) {
+    return (
+      <section data-slot="gh-thread-loading" className="mt-6 border-t border-border pt-5">
+        <Skeleton className="mb-3 h-3 w-24" />
+        <div className="flex flex-col gap-3">
+          <Skeleton className="h-14 w-full" />
+          <Skeleton className="h-14 w-full" />
+        </div>
+      </section>
+    )
+  }
+
+  if (!data || !data.available) {
+    const reason = data?.reason ?? (thread.error instanceof Error ? thread.error.message : 'could not load comments')
+    return (
+      <section data-slot="gh-thread-error" className="mt-6 border-t border-border pt-5 text-xs text-soft-foreground">
+        <span>Couldn’t load comments — {reason}. </span>
+        <a
+          href={item.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-0.5 text-muted-foreground hover:text-foreground hover:underline"
+        >
+          open on GitHub
+          <ExternalLinkIcon aria-hidden="true" className="size-2.5" />
+        </a>
+      </section>
+    )
+  }
+
+  // An empty thread renders nothing: the count badge already communicated "no discussion", and an
+  // empty "Comments · 0" section would be noise on the many quiet issues/PRs.
+  if (data.comments.length === 0) return null
+
+  return (
+    <section data-slot="gh-thread" className="mt-6 border-t border-border pt-5">
+      <h3
+        data-slot="gh-thread-header"
+        className="mb-4 text-[11px] font-semibold tracking-wide text-soft-foreground uppercase"
+      >
+        Comments · {data.comments.length}
+      </h3>
+      <ul className="flex flex-col gap-5">
+        {data.comments.map((comment) => (
+          <ThreadEntry key={`${comment.kind}-${comment.id}`} comment={comment} />
+        ))}
+      </ul>
+      {data.truncated ? (
+        <a
+          href={item.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          data-slot="gh-thread-truncated"
+          className="mt-4 inline-flex items-center gap-0.5 text-xs text-soft-foreground hover:text-foreground hover:underline"
+        >
+          thread truncated — open on GitHub
+          <ExternalLinkIcon aria-hidden="true" className="size-2.5" />
+        </a>
+      ) : null}
+    </section>
+  )
+}
+
+/** Review-state chip tones — the same success/danger/muted vocabulary the checks badge uses, so
+ *  approved reads green and changes-requested reads red without a new color system. */
+const REVIEW_CHIP: Record<NonNullable<GithubComment['reviewState']>, { label: string; tone: string }> = {
+  approved: { label: 'approved', tone: 'border-success/40 text-success' },
+  changes_requested: { label: 'changes requested', tone: 'border-danger/40 text-danger' },
+  commented: { label: 'commented', tone: 'border-border text-muted-foreground' },
+  dismissed: { label: 'dismissed', tone: 'border-border text-muted-foreground' },
+}
+
+/** One thread entry: avatar (letter fallback), author, age, an optional review-state chip, and the
+ *  body via the shared `Markdown` component (images/code fences render as in the issue body). */
+function ThreadEntry({ comment }: { comment: GithubComment }) {
+  const chip = comment.reviewState ? REVIEW_CHIP[comment.reviewState] : null
+  return (
+    <li data-slot="gh-thread-entry" data-kind={comment.kind} className="min-w-0">
+      <div className="mb-1.5 flex items-center gap-1.5 font-mono text-[11px] text-soft-foreground">
+        <Avatar url={comment.avatarUrl} login={comment.author} />
+        <span className="font-sans font-medium text-foreground">{comment.author}</span>
+        <span>{shortAge(comment.createdAt)}</span>
+        {chip ? (
+          <span
+            data-slot="gh-review-chip"
+            data-review-state={comment.reviewState}
+            className={cn('rounded-full border px-1.5 py-px font-sans text-[10px] font-medium', chip.tone)}
+          >
+            {chip.label}
+          </span>
+        ) : null}
+        <a
+          href={comment.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="open comment on GitHub"
+          className="ml-auto shrink-0 text-muted-foreground hover:text-foreground"
+        >
+          <ExternalLinkIcon aria-hidden="true" className="size-2.5" />
+        </a>
+      </div>
+      <div data-slot="gh-thread-body" className="text-sm">
+        {comment.body ? <Markdown>{comment.body}</Markdown> : <p className="text-soft-foreground">(no body)</p>}
+      </div>
+    </li>
+  )
+}
+
+/** A 16 px comment avatar. Falls back to a letter block when no URL is known or the image fails to
+ *  load (private-repo attachments, deleted avatars) — never a broken-image glyph. */
+function Avatar({ url, login }: { url?: string; login: string }) {
+  const [failed, setFailed] = useState(false)
+  if (url && !failed) {
+    return (
+      <img
+        src={url}
+        alt=""
+        width={16}
+        height={16}
+        loading="lazy"
+        onError={() => setFailed(true)}
+        data-slot="gh-avatar"
+        className="size-4 shrink-0 rounded-full"
+      />
+    )
+  }
+  return (
+    <span
+      data-slot="gh-avatar-fallback"
+      aria-hidden="true"
+      className="flex size-4 shrink-0 items-center justify-center rounded-full bg-muted text-[8px] font-semibold text-muted-foreground uppercase"
+    >
+      {login.slice(0, 1) || '?'}
+    </span>
   )
 }
 
@@ -559,6 +710,24 @@ const CHECKS_TONE: Record<Checks, string> = {
   passing: 'text-success',
   failing: 'text-danger',
   pending: 'text-muted-foreground',
+}
+
+/** The comment-count badge (#499): a muted speech-bubble glyph + count, shown on issue/PR rows
+ *  and in the detail meta line. Renders nothing for a zero (or absent) count, so quiet items look
+ *  exactly as they did before real counts arrived. Shared so the row and detail can't drift. */
+function CommentCount({ count }: { count: number }) {
+  if (!count) return null
+  return (
+    <span
+      data-slot="gh-comment-count"
+      data-count={count}
+      aria-label={`${count} comment${count === 1 ? '' : 's'}`}
+      className="inline-flex shrink-0 items-center gap-0.5"
+    >
+      <MessageSquareIcon aria-hidden="true" className="size-3" />
+      {count}
+    </span>
+  )
 }
 
 /** The checks badge — the legacy tab's three phrases, tinted by outcome. Links out

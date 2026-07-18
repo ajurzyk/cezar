@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   getConfig,
   getGithub,
+  getGithubComments,
   getGroup,
   getHealth,
   getLaunchKey,
@@ -68,6 +69,7 @@ export const queryKeys = {
   /** The worktree management panel (`GET /api/worktrees`, #483). */
   worktrees: ['worktrees'] as const,
   github: (params: { limit?: number } = {}) => ['github', params.limit ?? null] as const,
+  githubComments: (kind: 'issue' | 'pr', number: number) => ['github', 'comments', kind, number] as const,
   openTargets: ['open-targets'] as const,
 } as const
 
@@ -330,5 +332,17 @@ export function useGithub(params: { limit?: number } = {}, enabled = true) {
     queryKey: queryKeys.github(params),
     queryFn: ({ signal }) => getGithub({ limit: params.limit }, { signal }),
     enabled,
+  })
+}
+
+/** The comment thread for one issue/PR (`/api/github/comments/…`, #499). Fetched only while a
+ *  detail view is mounted (`enabled`); `staleTime` aligns with the 60 s server cache so switching
+ *  back to an item doesn't re-hit gh. */
+export function useGithubComments(kind: 'issue' | 'pr', number: number, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.githubComments(kind, number),
+    queryFn: ({ signal }) => getGithubComments(kind, number, { signal }),
+    enabled,
+    staleTime: 60_000,
   })
 }
