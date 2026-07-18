@@ -6,6 +6,7 @@ import {
   filterSkills,
   fuzzyMatch,
   isProjectSkill,
+  matchScore,
   multiWordFilter,
   orderSkills,
   orderSkillsByRecency,
@@ -133,6 +134,59 @@ describe('multiWordFilter (#411: multi-keyword search for cmdk)', () => {
 
   it('matching is case-insensitive', () => {
     expect(multiWordFilter('skill Deploy /path', 'DEPLOY')).toBeGreaterThan(0)
+  })
+})
+
+describe('matchScore (#484: exact > prefix > word-boundary > substring > subsequence)', () => {
+  it('ranks a stronger match higher', () => {
+    expect(matchScore('review', 'review')).toBeGreaterThan(matchScore('review-prs', 'review')) // exact > prefix
+    expect(matchScore('review-prs', 'review')).toBeGreaterThan(matchScore('om-code-review', 'review')) // prefix > boundary
+    expect(matchScore('om-code-review', 'review')).toBeGreaterThan(matchScore('previewer', 'review')) // boundary > buried
+    expect(matchScore('previewer', 'review')).toBeGreaterThan(matchScore('om-fix-issue', 'omfx')) // buried > subsequence
+  })
+
+  it('0 when the query cannot even be found as a subsequence', () => {
+    expect(matchScore('om-fix-issue', 'zzz')).toBe(0)
+  })
+
+  it('empty query is a neutral match', () => {
+    expect(matchScore('anything', '')).toBe(1)
+  })
+})
+
+describe('#484: an (almost-)exact match sorts to the top', () => {
+  it('multiWordFilter scores a whole-word hit above a buried substring, undiluted by value length', () => {
+    // The bug: the old coverage ratio divided by the whole "skill <name> <path>" length, so a
+    // near-exact match on a skill with a long path scored ~0.5 — same as a weak partial.
+    const wholeWord = multiWordFilter('skill om-fix /very/long/path/to/skills/om-fix.md', 'fix', ['om', 'fix'])
+    const buried = multiWordFilter('skill affix-tool /p', 'fix', ['affix', 'tool'])
+    expect(wholeWord).toBeGreaterThan(buried)
+    expect(buried).toBeGreaterThan(0) // still a match, just ranked lower
+  })
+
+  it('filterSkills ranks an exact name match above a merely-partial one, reordering input', () => {
+    const skills = [
+      skill({ name: 'om-code-review', source: 'ai' }), // 'review' is a whole word, mid-name
+      skill({ name: 'review', source: 'ai' }), // exact match, but later in input order
+    ]
+    expect(filterSkills(skills, 'review').map((s) => s.name)).toEqual(['review', 'om-code-review'])
+  })
+
+  it('filterSkills ranks a prefix match above a word-boundary match', () => {
+    const skills = [
+      skill({ name: 'om-auto-deploy', source: 'ai' }), // boundary hit
+      skill({ name: 'deploy-app', source: 'ai' }), // prefix hit
+    ]
+    expect(filterSkills(skills, 'deploy').map((s) => s.name)).toEqual(['deploy-app', 'om-auto-deploy'])
+  })
+
+  it('filterSkills keeps project-first order when matches are equally good', () => {
+    const skills = [
+      skill({ name: 'global-review', source: 'global' }),
+      skill({ name: 'project-review', source: 'ai' }),
+    ]
+    // Both match 'review' as a word-boundary hit → tie → project (ai) stays first.
+    expect(filterSkills(skills, 'review').map((s) => s.name)).toEqual(['project-review', 'global-review'])
   })
 })
 
