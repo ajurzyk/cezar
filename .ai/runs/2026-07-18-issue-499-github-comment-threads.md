@@ -20,7 +20,7 @@ Branch: `cez/d59e473a`
 ### Phase 3 — polish
 - [x] 8. `github.tsx`: avatar + letter fallback; review-state chips; truncation row; image-bearing mock comment test.
 - [x] 9. dry-run coverage: route test serves the mock thread (image + PR review) end-to-end via createApp+CEZ_DRY_RUN; component test asserts image renders `<img>` through Markdown. (Browser `test:e2e` is outside the validation gate + needs a browser provider — the jsdom component + server route tests cover the same path.)
-- [ ] 10. Full gate + self-review + PR ready.
+- [x] 10. Full gate GREEN + adversarial self-review (1 finding fixed: counts pagination bound, d70c539) + PR ready.
 
 ## PR
-- PR: (pending)
+- PR: #505 (https://github.com/open-mercato/cezar/pull/505) — ready, Closes #499
