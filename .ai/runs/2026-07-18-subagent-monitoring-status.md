@@ -46,16 +46,16 @@ shows as a non-attention "monitoring" label.
 
 ## Progress
 
-PR: (pending)
+PR: #497
 
 > Convention: `- [ ]` pending, `- [x]` done. Append ` — <commit sha>` when a step lands. Do not rename step titles.
 
 ### Phase 1: Agent contract + server detection
 
-- [ ] 1.1 Add `MONITORING_MARKER_RE` + `stripMonitoringMarker` in `run.ts` (mirror DONE) + tests
-- [ ] 1.2 Add the `CEZ:MONITORING` rule to `HANDOFF_ONLY_INSTRUCTIONS` (`handoff.ts`) + system-prompt test
-- [ ] 1.3 Add `RunActivity`/`activity?` to `store.ts` (+ zod) and mirror in web `api/types.ts` + schema test
-- [ ] 1.4 Turn-end branch at both sites (runAgentStep, runContinuation); keep waiting-parity lifecycle; clear `activity` on resume/terminal + tests
+- [x] 1.1 Add `MONITORING_MARKER_RE` + `stripMonitoringMarker` in `run.ts` (mirror DONE) + tests — ddaff57
+- [x] 1.2 Add the `CEZ:MONITORING` rule to `HANDOFF_ONLY_INSTRUCTIONS` (`handoff.ts`) + system-prompt test — ddaff57
+- [x] 1.3 Add `RunActivity`/`activity?` to `store.ts` (+ zod) and mirror in web `api/types.ts` + schema test — ddaff57
+- [x] 1.4 Turn-end branch at both sites (runAgentStep, runContinuation); keep waiting-parity lifecycle; clear `activity` on resume/terminal + tests — ddaff57
 
 ### Phase 2: UI surfacing
 
