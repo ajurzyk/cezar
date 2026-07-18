@@ -136,6 +136,13 @@ export function useRunChanges(id: string | undefined, live = false) {
     // While the run is active the agent is still writing — poll so the Changes tab keeps up
     // instead of showing a stale empty snapshot from before the first write (#changes-live).
     refetchInterval: live ? 4000 : false,
+    // Once a run finishes, polling stops (live === false) — but final agent/post-run-hook
+    // writes and the user editing files in the worktree still change the diff. Scope a
+    // focus refetch and a zero staleTime to THIS query (the global client keeps
+    // refetchOnWindowFocus off + a 5-min staleTime, #query-client) so returning to a finished
+    // task's Changes tab re-fetches instead of serving the last, possibly-empty snapshot.
+    refetchOnWindowFocus: true,
+    staleTime: 0,
   })
 }
 

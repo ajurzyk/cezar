@@ -81,6 +81,15 @@ function applyGlobalEvent(queryClient: QueryClient, usage: UsageStore, event: Gl
       if (queryClient.getQueryData(key) !== undefined) {
         queryClient.setQueryData<ApiRun>(key, (previous) => mergeRun(previous, event.run))
       }
+      // The Changes tab stops polling once a run leaves the active set (queries.ts:
+      // refetchInterval only lives while active), so end-of-run writes would otherwise wait
+      // for the next SSE reconnect's reconcile(). Invalidate the changes cache on the run event
+      // itself — but only when one already exists, so a background tab that never opened the
+      // Changes view doesn't fetch a diff nobody is looking at (same stance as the detail guard).
+      const changesKey = queryKeys.runs.changes(event.run.id)
+      if (queryClient.getQueryData(changesKey) !== undefined) {
+        void queryClient.invalidateQueries({ queryKey: changesKey })
+      }
       // A terminal transition can reclaim (or re-materialize) a worktree (#483); keep the
       // panel live. invalidateQueries only refetches while the panel is actually mounted.
       void queryClient.invalidateQueries({ queryKey: queryKeys.worktrees })
