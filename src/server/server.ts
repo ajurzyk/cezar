@@ -809,14 +809,27 @@ export function createApp(deps: ServerDeps): Hono {
     if (!target) return c.json({ error: 'target required' }, 400);
     const dir = run.worktreePath && existsSync(run.worktreePath) ? run.worktreePath : repoRoot;
 
-    // Coding-agent CLI handoff (#cli-handoff): open a terminal in the worktree that resumes THIS
-    // run's session when the chosen CLI is the run's own runner (and a session exists), or starts
-    // a fresh CLI there otherwise. Same terminal launcher the Terminal button uses.
+    // Coding-agent CLI handoff (#cli-handoff, #402): open a terminal in the worktree that resumes
+    // THIS run's session when the chosen CLI is the run's own runner (and a session exists), or
+    // starts a fresh CLI there otherwise. Same terminal launcher the Terminal button uses.
+    // Records that predate the runner choice carry no `runner` at all — they default to Claude
+    // everywhere else (resumeCommand, the client's resumeHint/cliTargetResumes), so the match
+    // check defaults the same way here; without it, a legacy run's own Claude CLI would never
+    // resume its own session, only ever launch fresh.
+    // A run the engine still owns never resumes: `sessionId` is seeded when the agent step STARTS
+    // (workflows/run.ts), so a running/queued/waiting run already carries one, and resuming it
+    // would attach a SECOND CLI process to the transcript the engine is actively writing. Those
+    // picks launch the CLI fresh in the worktree — the same degradation as a cross-runner pick,
+    // and what the client's cliTargetResumes now labels. Resume-after-finish is untouched.
     const cliRunner = agentCliRunner(target);
     if (cliRunner) {
-      const sessionId = [...run.steps].reverse().find((s) => s.sessionId)?.sessionId;
+      const engineOwnsSession =
+        run.status === 'running' || run.status === 'queued' || run.status === 'waiting';
+      const sessionId = engineOwnsSession
+        ? undefined
+        : [...run.steps].reverse().find((s) => s.sessionId)?.sessionId;
       const command =
-        sessionId && cliRunner === run.runner ? resumeCommand(cliRunner, sessionId) : cliRunner;
+        sessionId && cliRunner === (run.runner ?? 'claude') ? resumeCommand(cliRunner, sessionId) : cliRunner;
       const opened = await openInTerminal(dir, command);
       if (!opened) {
         return c.json({ error: 'no terminal emulator found', command: `cd '${dir}' && ${command}` }, 409);
