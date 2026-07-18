@@ -1263,6 +1263,9 @@ export function createApp(deps: ServerDeps): Hono {
     // Live title updates (task auto-naming spec): tri-state — null means "no
     // config key, the CEZ_TITLE_UPDATES env default (ON) decides".
     liveTitleUpdates: config.liveTitleUpdates ?? null,
+    // Optional review gate (#489): tri-state — null means "no config key, the
+    // CEZ_REVIEW_GATE env default (OFF) decides".
+    reviewGate: config.reviewGate ?? null,
   });
   app.get('/api/config', async (c) => c.json(configAnswer(await loadConfig(repoRoot))));
 
@@ -1295,6 +1298,9 @@ export function createApp(deps: ServerDeps): Hono {
     // Live title updates toggle (Settings → Agents): null clears the key back
     // to the env-default behavior.
     liveTitleUpdates: z.boolean().nullable().optional(),
+    // Optional review gate toggle (Settings → Agents, #489): null clears the key
+    // back to the env-default behavior (OFF).
+    reviewGate: z.boolean().nullable().optional(),
   });
   app.put('/api/config', async (c) => {
     const parsed = setConfigSchema.safeParse(await c.req.json().catch(() => null));
@@ -1332,6 +1338,10 @@ export function createApp(deps: ServerDeps): Hono {
     if (parsed.data.liveTitleUpdates !== undefined) {
       if (parsed.data.liveTitleUpdates === null) delete raw.liveTitleUpdates;
       else raw.liveTitleUpdates = parsed.data.liveTitleUpdates;
+    }
+    if (parsed.data.reviewGate !== undefined) {
+      if (parsed.data.reviewGate === null) delete raw.reviewGate;
+      else raw.reviewGate = parsed.data.reviewGate;
     }
     if (parsed.data.memoryLimitMb !== undefined) {
       // null or 0 both mean "no ceiling" — drop the key back to the default.

@@ -41,6 +41,7 @@ function serve({
     memoryLimitMb: null,
     worktreeRetention: 10,
     liveTitleUpdates: null,
+    reviewGate: null,
     ...config,
   }
   const json = (payload: unknown, status = 200) =>
@@ -63,6 +64,9 @@ function serve({
         }
         if (body?.liveTitleUpdates !== undefined) {
           state.liveTitleUpdates = body.liveTitleUpdates as boolean | null
+        }
+        if (body?.reviewGate !== undefined) {
+          state.reviewGate = body.reviewGate as boolean | null
         }
         if (body?.defaultModels !== undefined) {
           for (const [runner, model] of Object.entries(body.defaultModels as Record<string, string | null>)) {
@@ -133,6 +137,19 @@ describe('the agents form', () => {
     await waitFor(() => expect(puts()).toHaveLength(1))
     expect(puts()[0]?.body).toEqual({ liveTitleUpdates: false })
     await waitFor(() => expect(screen.getByText('Off')).toBeTruthy())
+  })
+
+  it('review gate: the switch defaults OFF and PUTs the toggle (#489)', async () => {
+    serve()
+    renderAt('/settings/agents')
+    await waitFor(() => expect(form()).not.toBeNull())
+
+    const toggle = screen.getByLabelText('Review changes before finishing')
+    // Default off — the mirror image of live-title-updates.
+    expect(toggle.getAttribute('aria-checked') ?? toggle.getAttribute('data-state')).toMatch(/false|unchecked/)
+    fireEvent.click(toggle)
+    await waitFor(() => expect(puts()).toHaveLength(1))
+    expect(puts()[0]?.body).toEqual({ reviewGate: true })
   })
 
   it('default runner round-trips: click PUTs the patch and the control follows the answer', async () => {
