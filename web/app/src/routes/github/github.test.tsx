@@ -719,6 +719,23 @@ describe('the follow-up prompt template menu (#413)', () => {
     document.querySelector<HTMLElement>(`[data-slot="prompt-template-option"][data-template="${id}"]`)
 
   /**
+   * Click a mounted template option until the select provably lands. A re-render (the
+   * ui-state query resolving, a queries invalidation) can replace the option node between
+   * querying it and clicking it — a click on the detached node is a silent no-op, the race
+   * that made this suite flake (#413). Selecting closes the menu (`onSelect` →
+   * `setOpen(false)`), so re-query a FRESH node each retry and stop only once the options
+   * unmount: the insert has provably happened.
+   */
+  async function selectOption(id: string): Promise<void> {
+    await waitFor(() => {
+      const node = option(id)
+      if (!node) return // menu closed — the select landed
+      fireEvent.click(node)
+      throw new Error(`template option "${id}" still mounted — select has not landed yet`)
+    })
+  }
+
+  /**
    * Open the menu and click a specific template. Waits for *that* option to
    * mount before clicking it, so a stale option from the previous (closing)
    * popover can never satisfy the wait while the wanted one is still absent —
@@ -726,12 +743,10 @@ describe('the follow-up prompt template menu (#413)', () => {
    */
   async function chooseTemplate(id: string): Promise<void> {
     fireEvent.click(document.querySelector('[data-slot="prompt-template-trigger"]')!)
-    const el = await waitFor(() => {
-      const node = option(id)
-      if (!node) throw new Error(`template option "${id}" not mounted yet`)
-      return node
+    await waitFor(() => {
+      if (!option(id)) throw new Error(`template option "${id}" not mounted yet`)
     })
-    fireEvent.click(el)
+    await selectOption(id)
   }
 
   it('an untouched ui-state shows the built-in templates, and inserting one fills the custom prompt', async () => {
@@ -742,7 +757,7 @@ describe('the follow-up prompt template menu (#413)', () => {
     expect(document.querySelectorAll('[data-slot="prompt-template-option"]').length).toBeGreaterThan(1)
     expect(option('add-tests')).not.toBeNull()
 
-    fireEvent.click(option('add-tests')!)
+    await selectOption('add-tests')
     await waitFor(() =>
       expect(screen.getByLabelText('Custom prompt')).toHaveProperty(
         'value',
@@ -762,7 +777,7 @@ describe('the follow-up prompt template menu (#413)', () => {
     expect(document.querySelectorAll('[data-slot="prompt-template-option"]')).toHaveLength(1)
     expect(option('custom-1')?.textContent).toContain('My snippet')
 
-    fireEvent.click(option('custom-1')!)
+    await selectOption('custom-1')
     await waitFor(() =>
       expect(screen.getByLabelText('Custom prompt')).toHaveProperty('value', 'Custom instructions.'),
     )
