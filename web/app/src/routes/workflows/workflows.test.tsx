@@ -181,6 +181,18 @@ describe('palette add / remove / the 8-step limit', () => {
     expect(stepCards()).toHaveLength(8)
     await screen.findByText('A workflow holds at most 8 steps.')
   })
+
+  // #374: the palette's empty state must mention the same discovery dirs as the Skills tab's,
+  // not just `.ai/skills/`.
+  it('an empty skill catalog explains every discovery dir, not just .ai/skills/', async () => {
+    stubFetch({ 'GET /api/skills': [() => jsonResponse([])] })
+    renderAt('/workflows')
+
+    const hint = await screen.findByText(/No skills yet/)
+    expect(hint.textContent).toContain('.ai/skills/')
+    expect(hint.textContent).toContain('.ai/cezar/skills/')
+    expect(hint.textContent).toContain('.agents/skills/')
+  })
 })
 
 // ---- import ------------------------------------------------------------------------------------

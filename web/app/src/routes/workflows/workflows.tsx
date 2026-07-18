@@ -35,6 +35,7 @@ import { ApiError, createWorkflow, deleteWorkflow, parseWorkflow, postPlan } fro
 import { queryKeys, useSkills, useUiState, useWorkflows } from '@/api/queries'
 import type { Skill, WorkflowDef, WorkflowStepDef } from '@/api/types'
 import { CenteredState } from '@/components/centered-state'
+import { SkillEmptyHintCompact } from '@/components/skill-empty-hint'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -49,9 +50,8 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { toast } from '@/components/ui/toaster'
-import { isProjectSkill, orderSkillsByRecency } from '@/lib/skills'
+import { isProjectSkill, orderSkillsByUsage } from '@/lib/skills'
 import { cn } from '@/lib/utils'
-import { recentSkillNames } from '@/routes/new-task-form'
 import {
   WB_MAX_STEPS,
   draftFromPlan,
@@ -144,8 +144,8 @@ function WorkflowsBuilder({ routeName }: { routeName: string | undefined }) {
   const workflows = workflowsQuery.data?.workflows ?? []
   const skills = skillsQuery.data ?? []
   // The palette lists skills the way every other picker does (#408/#414): project skills first,
-  // then most-recently-run within each locality — so what you reach for floats to the top.
-  const paletteSkills = orderSkillsByRecency(skills, recentSkillNames(uiStateQuery.data?.recentSources))
+  // then most-used within each locality — so what you reach for floats to the top.
+  const paletteSkills = orderSkillsByUsage(skills, uiStateQuery.data?.skillUsage)
 
   // First visit seeds the canvas with the deep-linked workflow when the URL names one, else
   // the repo's first saved workflow — "open the tab, see your flow" (legacy rule). No files
@@ -943,14 +943,7 @@ function Palette({
         ))
       ) : (
         <p className="py-1 text-xs leading-relaxed text-soft-foreground">
-          {skills.length > 0 ? (
-            'No skills match.'
-          ) : (
-            <>
-              No skills yet — drop Markdown files into <span className="font-mono">.ai/skills/</span> or{' '}
-              <span className="font-mono">.ai/cezar/skills/</span>.
-            </>
-          )}
+          {skills.length > 0 ? 'No skills match.' : <SkillEmptyHintCompact />}
         </p>
       )}
     </div>

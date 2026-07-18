@@ -551,6 +551,28 @@ async function openDetail(entry = '/github/issues/142') {
   await waitFor(() => expect(document.querySelector('[data-slot="gh-hand"]')).not.toBeNull())
 }
 
+/**
+ * Toggle a skill ON through its picker, robustly. cmdk re-renders the option list while the
+ * popover opens, so an option `waitFor` just saw can be detached a tick later — clicking a node
+ * from a prior poll then hits `null` (#413 flake). Query-and-click atomically on each poll, and
+ * key completion on the skill's CHIP appearing so this multi-select toggle can never fire twice
+ * and flip it back off. Opens the picker only when neither the option nor the chip is showing
+ * yet (clicking the trigger while it is open would close it).
+ */
+async function selectSkill(name: string): Promise<void> {
+  const chip = `[data-slot="gh-skill-chip"][data-skill="${name}"]`
+  const opt = `[data-slot="gh-skill-option"][data-skill="${name}"]`
+  if (!document.querySelector(chip) && !document.querySelector(opt)) {
+    fireEvent.click(document.querySelector('[data-slot="gh-skills-trigger"]')!)
+  }
+  await waitFor(() => {
+    if (document.querySelector(chip)) return
+    const node = document.querySelector<HTMLElement>(opt)
+    if (node) fireEvent.click(node)
+    throw new Error(`skill "${name}" not selected yet`)
+  })
+}
+
 describe('the hand-to-agent pickers (#385)', () => {
   it('the workflow dropdown lists, filters, selects — and re-selecting deselects', async () => {
     stubFetch()
@@ -696,9 +718,7 @@ describe('the hand-to-agent run (legacy three-way body)', () => {
     await waitFor(() => expect(document.querySelector('[data-workflow="ship-it"]')).not.toBeNull())
     fireEvent.click(document.querySelector('[data-workflow="ship-it"]')!)
 
-    fireEvent.click(document.querySelector('[data-slot="gh-skills-trigger"]')!)
-    await waitFor(() => expect(document.querySelector('[data-skill="om-fix"]')).not.toBeNull())
-    fireEvent.click(document.querySelector('[data-slot="gh-skill-option"][data-skill="om-fix"]')!)
+    await selectSkill('om-fix')
 
     fireEvent.click(screen.getByRole('button', { name: /Run agent on this issue/ }))
 
@@ -714,9 +734,7 @@ describe('the hand-to-agent run (legacy three-way body)', () => {
     const sent = stubFetch()
     await openDetail()
 
-    fireEvent.click(document.querySelector('[data-slot="gh-skills-trigger"]')!)
-    await waitFor(() => expect(document.querySelector('[data-skill="om-fix"]')).not.toBeNull())
-    fireEvent.click(document.querySelector('[data-slot="gh-skill-option"][data-skill="om-fix"]')!)
+    await selectSkill('om-fix')
     fireEvent.click(document.querySelector('[data-slot="gh-skill-option"][data-skill="g-review"]')!)
 
     fireEvent.click(screen.getByRole('button', { name: /Run agent on this issue/ }))
@@ -783,9 +801,7 @@ describe('the skills dropdown frequency sort (#408 item 1, shared with project-f
     })
     await openDetail()
 
-    fireEvent.click(document.querySelector('[data-slot="gh-skills-trigger"]')!)
-    await waitFor(() => expect(document.querySelector('[data-skill="om-fix"]')).not.toBeNull())
-    fireEvent.click(document.querySelector('[data-slot="gh-skill-option"][data-skill="om-fix"]')!)
+    await selectSkill('om-fix')
     fireEvent.click(document.querySelector('[data-slot="gh-skill-option"][data-skill="g-review"]')!)
 
     fireEvent.click(screen.getByRole('button', { name: /Run agent on this issue/ }))
@@ -810,9 +826,7 @@ describe('the skills dropdown frequency sort (#408 item 1, shared with project-f
     })
     await openDetail()
 
-    fireEvent.click(document.querySelector('[data-slot="gh-skills-trigger"]')!)
-    await waitFor(() => expect(document.querySelector('[data-skill="om-fix"]')).not.toBeNull())
-    fireEvent.click(document.querySelector('[data-slot="gh-skill-option"][data-skill="om-fix"]')!)
+    await selectSkill('om-fix')
 
     fireEvent.click(screen.getByRole('button', { name: /Run agent on this issue/ }))
     // The run itself still goes through — persistence is fire-and-forget.
@@ -851,9 +865,7 @@ describe('the remembered last selection (#408 item 3)', () => {
     await waitFor(() => expect(document.querySelector('[data-workflow="ship-it"]')).not.toBeNull())
     fireEvent.click(document.querySelector('[data-workflow="ship-it"]')!)
 
-    fireEvent.click(document.querySelector('[data-slot="gh-skills-trigger"]')!)
-    await waitFor(() => expect(document.querySelector('[data-skill="om-fix"]')).not.toBeNull())
-    fireEvent.click(document.querySelector('[data-slot="gh-skill-option"][data-skill="om-fix"]')!)
+    await selectSkill('om-fix')
     await waitFor(() =>
       expect(document.querySelectorAll('[data-slot="gh-skill-chip"]')).toHaveLength(1),
     )
@@ -1091,19 +1103,25 @@ describe('the follow-up prompt template menu (#413)', () => {
     document.querySelector<HTMLElement>(`[data-slot="prompt-template-option"][data-template="${id}"]`)
 
   /**
-   * Open the menu and click a specific template. Waits for *that* option to
-   * mount before clicking it, so a stale option from the previous (closing)
-   * popover can never satisfy the wait while the wanted one is still absent —
-   * the race that made this suite flake in CI (#413).
+   * Open the menu and pick a specific template. A single click on a *just-mounted*
+   * cmdk item can land before cmdk has wired its `onSelect`, so it silently no-ops —
+   * the race that made this suite flake in CI (#413). Rather than capture a node that
+   * may go stale, re-query and click on each poll until the insertion actually lands
+   * (the custom prompt's value grows). This can't double-insert: `fireEvent.click`
+   * flushes React synchronously, so the very next poll sees the changed value and stops
+   * before a second click can fire.
    */
   async function chooseTemplate(id: string): Promise<void> {
+    const textarea = () => screen.getByLabelText('Custom prompt') as HTMLTextAreaElement
+    const before = textarea().value
     fireEvent.click(document.querySelector('[data-slot="prompt-template-trigger"]')!)
-    const el = await waitFor(() => {
+    await waitFor(() => {
+      if (textarea().value !== before) return // the click already landed
       const node = option(id)
       if (!node) throw new Error(`template option "${id}" not mounted yet`)
-      return node
+      fireEvent.click(node)
+      throw new Error(`template "${id}" not inserted yet`)
     })
-    fireEvent.click(el)
   }
 
   it('an untouched ui-state shows the built-in templates, and inserting one fills the custom prompt', async () => {

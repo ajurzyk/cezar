@@ -26,7 +26,7 @@ import { planChain, slugify } from '../planner.js';
 import { discoverSkills } from '../skills.js';
 import { refreshTeamSkills } from '../skills-remote.js';
 import { appendHandoffHeartbeat, handoffProgressExcerpt, readHandoff } from '../handoff.js';
-import { markStarted, onTodosChanged, readTodos, removeTodo, startTodosWatch, type TodoItem } from '../todos.js';
+import { markStarted, onTodosChanged, readTodos, removeTodo, startTodosWatch, todoTaskText, type TodoItem } from '../todos.js';
 import type { RunEvent, RunRecord, RunStatus, RunStore } from '../runs/store.js';
 import { isV2WireEventType } from '../runs/ui-event-sink.js';
 import type { RunManager } from '../workflows/run.js';
@@ -164,6 +164,12 @@ const startRunSchema = z
       )
       .max(4)
       .optional(),
+    // Inbox follow-up (#374): the todo the composer was prefilled from
+    // (`/new?skill=&ref=&todo=t1`). On a successful start the entry is marked
+    // started — the same bookkeeping POST /api/todos/:id/start does, so the
+    // audit trail survives the composer detour. Bounded like every other
+    // string here; a todo id is a short generated key.
+    todoId: z.string().min(1).max(200, 'todoId must be at most 200 characters').optional(),
   })
   .refine((b) => Boolean(b.workflow) !== Boolean(b.steps), {
     message: 'provide either "workflow" or "steps", not both',
@@ -612,6 +618,26 @@ export function createApp(deps: ServerDeps): Hono {
     return usage ? { ...run, usage } : run;
   };
 
+  // The inbox half of a composer launch (#374). Since the cockpit's "▶ Run"
+  // prefills `/new` instead of calling POST /api/todos/:id/start (never launch
+  // blind — #355), the todo id rides along on the composer's POST /api/runs and
+  // lands here: `markStarted` writes `startedTaskId`, so the entry leaves the
+  // inbox (`visibleTodos()`) and stays in todos.json as the audit trail, and a
+  // second launch of the same entry no longer double-starts it.
+  //
+  // Deliberately best-effort: bookkeeping must never cost the user their task,
+  // so an unknown, stale or already-started id (markStarted → false) and any I/O
+  // failure only log. The run has already been created by the time we get here.
+  const noteTodoStarted = async (todoId: string, taskId: string): Promise<void> => {
+    try {
+      if (!(await markStarted(dataDir, todoId, taskId))) {
+        console.warn(`[cezar] inbox entry ${todoId} not marked started (unknown or already started)`);
+      }
+    } catch (err) {
+      console.warn(`[cezar] could not mark inbox entry ${todoId} started: ${String(err)}`);
+    }
+  };
+
   app.get('/api/runs', (c) => c.json(store.listRuns().map(withUsage)));
 
   // Registered before the `/:id/...` routes so "archive-finished" never
@@ -679,9 +705,14 @@ export function createApp(deps: ServerDeps): Hono {
           400,
         );
       }
-      return c.json({ runs: manager.startVariants(workflow, input, variants) }, 201);
+      const runs = manager.startVariants(workflow, input, variants);
+      // The entry points at the first variant — the thread the composer navigates to.
+      const first = runs[0];
+      if (parsed.data.todoId && first) await noteTodoStarted(parsed.data.todoId, first.id);
+      return c.json({ runs }, 201);
     }
     const run = manager.startRun(workflow, input);
+    if (parsed.data.todoId) await noteTodoStarted(parsed.data.todoId, run.id);
     return c.json(run, 201);
   });
 
@@ -1261,8 +1292,7 @@ export function createApp(deps: ServerDeps): Hono {
       return c.json({ error: parsedBody.error.issues.map((i) => i.message).join('; ') }, 400);
     }
 
-    let task = (todo.suggestedPrompt ?? todo.summary).trim() || todo.summary;
-    if (todo.suggestedArgs) task += `\n\nArguments: ${todo.suggestedArgs}`;
+    let task = todoTaskText(todo);
     if (parsedBody.data?.prompt) task += `\n\n${parsedBody.data.prompt}`;
 
     let workflow: WorkflowDef | undefined;

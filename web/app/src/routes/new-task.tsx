@@ -305,6 +305,12 @@ export function NewTaskRoute() {
         worktree: worktreeOn,
         autonomous: autonomousOn,
         generateFollowups: generateFollowupsOn,
+        // #374: when the Inbox's "Run" sent us here, hand the entry's id back so the server
+        // records this run on it and it leaves the inbox — the audit trail the old
+        // POST /api/todos/:id/start kept, minus the blind launch. Empty otherwise.
+        // Deliberately not gated on generateFollowupsOn (#444): turning off follow-up
+        // generation for THIS task must not stop the entry it came from being marked started.
+        todoId: deepLink.todo,
       }),
     )
     // Remember what was actually run so the next visit preselects it (legacy
@@ -348,6 +354,7 @@ export function NewTaskRoute() {
           variants,
           images: plan.images,
           generateFollowups: generateFollowupsOn,
+          todoId: deepLink.todo, // #374: planning first must not lose the inbox entry
         }),
       )
       // Only remember a choice the user was actually offered (#471, the `lastWorktree` rule):

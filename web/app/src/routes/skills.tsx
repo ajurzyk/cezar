@@ -8,6 +8,7 @@ import { queryKeys, useSkills, useWorkflows } from '@/api/queries'
 import type { Skill } from '@/api/types'
 import { CenteredState } from '@/components/centered-state'
 import { SkillDetailBody, SkillSourceTag } from '@/components/skill-detail'
+import { SkillEmptyHint } from '@/components/skill-empty-hint'
 import { Input } from '@/components/ui/input'
 import { toast } from '@/components/ui/toaster'
 import { filterSkills, isProjectSkill, orderSkills, skillUsedBy } from '@/lib/skills'
@@ -136,16 +137,7 @@ function SkillsCatalog() {
             shown.map((skill) => <SkillRow key={skill.path} skill={skill} active={selection === skill.name} />)
           ) : (
             <li className="px-2.5 py-2 text-xs leading-relaxed text-soft-foreground">
-              {skills.length > 0 ? (
-                '(no skills match)'
-              ) : (
-                <>
-                  No skills yet. Drop Markdown files into <span className="font-mono">.ai/skills/</span> or{' '}
-                  <span className="font-mono">.ai/cezar/skills/</span> — optional frontmatter:{' '}
-                  <span className="font-mono">name</span>, <span className="font-mono">description</span>. Team
-                  skills from your skills repo appear here too — try Refresh.
-                </>
-              )}
+              {skills.length > 0 ? '(no skills match)' : <SkillEmptyHint />}
             </li>
           )}
         </ul>

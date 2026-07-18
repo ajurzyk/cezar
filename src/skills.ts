@@ -32,8 +32,14 @@ export interface Skill {
 /* Precedence order — earlier dirs win name collisions. `npx skills` writes
    the canonical copy to `.agents/skills/<name>/SKILL.md` and mirrors it into
    each agent's dir (often as symlinks) — scanning them all and deduping by
-   name yields exactly the union of unique skills. */
-const SKILL_DIRS: Array<{ dir: string; source: Skill['source'] }> = [
+   name yields exactly the union of unique skills.
+
+   Exported for the drift guard in `test/unit/skill-dirs.test.ts` (#374): the
+   cockpit's empty-state hint hand-copies this list into the bundle
+   (`web/app/src/components/skill-empty-hint.tsx`) because it runs in another
+   process, so adding a dir here without updating the hint makes the hint lie.
+   That test pins this list and says where to go. */
+export const SKILL_DIRS: Array<{ dir: string; source: Skill['source'] }> = [
   { dir: '.ai/cezar/skills', source: 'cezar' },
   { dir: '.ai/skills', source: 'ai' },
   { dir: '.agents/skills', source: 'agents' },
