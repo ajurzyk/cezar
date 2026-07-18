@@ -8,11 +8,14 @@ import { fileURLToPath } from 'node:url';
 import { detectEnvironment } from './core/backend-detect.js';
 import { pruneOrphans } from './git-worktree.js';
 import { getRepoInfo } from './server/git.js';
+import { loadConfig } from './config.js';
+import { reclaimWorktrees } from './runs/retention.js';
 import { RunStore } from './runs/store.js';
 import { RunManager } from './workflows/run.js';
 import { loadWorkflows } from './workflows/load.js';
 import { startServer } from './server/server.js';
 import { checkForUpdate } from './update-check.js';
+import { printSkillsBanner } from './skills-banner.js';
 
 const HELP = `cezar — local cockpit for AI agent tasks in your repo
 
@@ -118,6 +121,14 @@ async function serveCommand(repoRoot: string, preferredPort: number, openBrowser
     if (orphans.length > 0) {
       console.log(`  cleaned ${orphans.length} orphaned worktree(s): ${orphans.map((id) => id.slice(0, 8)).join(', ')}`);
     }
+    // Count-based worktree retention (#483): reclaim finished worktrees beyond
+    // the keep-limit (directory only — `cez/<id8>` branch kept, so recoverable).
+    // Best-effort; never blocks boot.
+    const keep = (await loadConfig(repoRoot).catch(() => null))?.worktreeRetention ?? 10;
+    const reclaimed = await reclaimWorktrees(repoRoot, store, keep).catch(() => [] as string[]);
+    if (reclaimed.length > 0) {
+      console.log(`  reclaimed ${reclaimed.length} old worktree(s), branch kept: ${reclaimed.map((id) => id.slice(0, 8)).join(', ')}`);
+    }
   }
 
   const recovered = store
@@ -149,6 +160,8 @@ async function serveCommand(repoRoot: string, preferredPort: number, openBrowser
   }
   if (port !== preferredPort) console.log(`  (port ${preferredPort} was busy — using ${port})`);
   console.log(`\n  cockpit → ${url}\n`);
+  // Silenced by CEZ_NO_BANNER=1 or by dismissing the cockpit's banner (#391).
+  await printSkillsBanner(repoRoot);
 
   const shutdown = () => {
     store.flush();
@@ -442,9 +455,9 @@ function readOwnName(): string {
   try {
     const here = dirname(fileURLToPath(import.meta.url));
     const pkg = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf8')) as { name?: string };
-    return pkg.name ?? '@pat-lewczuk/cezar';
+    return pkg.name ?? '@open-mercato/cezar';
   } catch {
-    return '@pat-lewczuk/cezar';
+    return '@open-mercato/cezar';
   }
 }
 
@@ -463,7 +476,14 @@ function openUrl(url: string): void {
     process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'cmd' : 'xdg-open';
   const args = process.platform === 'win32' ? ['/c', 'start', '', url] : [url];
   try {
-    spawn(cmd, args, { stdio: 'ignore', detached: true }).unref();
+    const child = spawn(cmd, args, { stdio: 'ignore', detached: true });
+    // A missing opener (e.g. no `xdg-open` on a headless Linux VPS) surfaces
+    // asynchronously as an 'error' event, NOT a synchronous throw — without a
+    // listener Node promotes it to an unhandled error and hard-crashes the whole
+    // process, even though the cockpit is already serving. Swallow it: the URL is
+    // printed above, so a browser-less host just doesn't auto-open.
+    child.on('error', () => {});
+    child.unref();
   } catch {
     // the printed URL is enough
   }

@@ -17,6 +17,7 @@ import {
   EOF_TERM_GRACE_MS,
   KILL_GRACE_MS,
 } from './claude-cli-runner.js';
+import { buildChildEnv } from './agent-env.js';
 import { readNdjson } from './ndjson.js';
 import {
   codexSessionStarted,
@@ -127,7 +128,7 @@ class CodexSession implements AgentSession {
       }
       this.child = nodeSpawn(bin, args, {
         cwd: spec.cwd,
-        env: { ...process.env, ...spec.env },
+        env: buildChildEnv({ backend: 'codex', extraEnv: spec.env }),
       });
     } catch (err) {
       throw wrapSpawnError(err, bin);

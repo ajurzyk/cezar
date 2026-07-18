@@ -7,14 +7,15 @@ import {
   SquareIcon,
   WorkflowIcon,
 } from 'lucide-react'
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useNavigate, useSearchParams } from 'react-router'
 
 import { createRun, getLaunchKey, postPlan, putConfig, putUiState } from '@/api/client'
 import { queryKeys, useConfig, useHealth, useRepo, useSkills, useUiState, useWorkflows } from '@/api/queries'
 import type { ImageInput, RepoResponse, Runner, Skill, WorkflowDef } from '@/api/types'
 import { TwinkleBackdrop } from '@/components/centered-state'
-import { Composer } from '@/components/composer/composer'
+import { Composer, type ComposerHandle } from '@/components/composer/composer'
+import { PromptTemplateMenu } from '@/components/prompt-template-menu'
 import { SkillPreviewDialog } from '@/components/skill-detail'
 import {
   Command,
@@ -33,7 +34,12 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { toast } from '@/components/ui/toaster'
-import { isProjectSkill, multiWordFilter, orderSkillsByRecency, skillKeywords } from '@/lib/skills'
+import {
+  autoApplyText,
+  normalizePromptTemplates,
+  resolveAutoApply,
+} from '@/lib/prompt-templates'
+import { isProjectSkill, orderSkillsByRecency, searchSkills, searchWorkflows, skillKeywords } from '@/lib/skills'
 import { submitShortcutHint } from '@/lib/use-submit-shortcut'
 import { cn } from '@/lib/utils'
 
@@ -117,6 +123,30 @@ export function NewTaskRoute() {
     skills.data !== undefined && workflows.data !== undefined && !uiState.isPending
   const source = resolveSource([draft.source, uiState.data?.lastTask], skillList, workflowList)
 
+  // ---- prompt templates (#413 follow-up) ----------------------------------------------------
+  // The same list the GitHub hand-over and Inbox composers read. Two ways in here: the footer's
+  // icon trigger inserts one by hand at the caret, and a skill whose templates are assigned to it
+  // applies them on selection — but only into a box the user has not typed in (`resolveAutoApply`).
+  const composerRef = useRef<ComposerHandle>(null)
+  const templates = useMemo(
+    () => normalizePromptTemplates(uiState.data?.promptTemplates),
+    [uiState.data?.promptTemplates],
+  )
+  const autoText = autoApplyText(templates, source.source === 'skill' ? [source.ref] : [])
+  const draftTextRef = useRef(draft.text)
+  draftTextRef.current = draft.text
+  const autoAppliedRef = useRef('')
+  useEffect(() => {
+    // Wait for the pickers' data: before it lands `source` is still a provisional guess, and
+    // auto-applying against it would flash text in for a skill the user may not end up on.
+    if (!sourcesReady) return
+    const resolved = resolveAutoApply(draftTextRef.current, autoAppliedRef.current, autoText)
+    autoAppliedRef.current = resolved.applied
+    if (resolved.text !== draftTextRef.current) update({ text: resolved.text })
+    // `autoText` is a derived STRING — this fires when the assigned set changes, not every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoText, sourcesReady])
+
   const runners = availableRunners(health.data?.checks ?? [])
   const runner = resolveRunner(draft.runner, runners, health.data?.defaultRunner ?? 'claude')
   const models = modelsForRunner(runner)
@@ -139,6 +169,18 @@ export function NewTaskRoute() {
   const autonomousOn = draft.planFirst
     ? false
     : (draft.autonomous ?? (source.source === 'skill' ? true : (uiState.data?.lastAutonomous ?? false)))
+
+  // Follow-up generation (#444) is offered only while the server has the global inbox on
+  // (#471, `CEZ_FOLLOWUPS=1`) — there is no inbox for the follow-ups to land in otherwise, and
+  // the server pins the flag to false regardless, so a toggle would be a lie. Hidden, the value
+  // is false, matching what the server will do. Health unknown → assume offered, the `hasGit`
+  // rule above: the composer must not flicker its controls while health is in flight.
+  const followupsToggleShown = health.data === undefined || health.data.capabilities.followups
+  // Within an enabled server it stays opt-out: a draft choice wins, then the remembered UI
+  // preference; absent state from older installs keeps the historical enabled behavior.
+  const generateFollowupsOn = followupsToggleShown
+    ? (draft.generateFollowups ?? uiState.data?.lastGenerateFollowups ?? true)
+    : false
 
   // ---- plan mode (#383 + spec 008) ----------------------------------------------------------
   const [plan, setPlan] = useState<PendingPlan | null>(null)
@@ -248,6 +290,7 @@ export function NewTaskRoute() {
         images,
         worktree: worktreeOn,
         autonomous: autonomousOn,
+        generateFollowups: generateFollowupsOn,
       }),
     )
     // Remember what was actually run so the next visit preselects it (legacy
@@ -258,6 +301,7 @@ export function NewTaskRoute() {
       recentSources: pushRecentSource(recentSources, source),
       ...(worktreeToggleShown ? { lastWorktree: worktreeOn } : {}),
       lastAutonomous: autonomousOn,
+      ...(followupsToggleShown ? { lastGenerateFollowups: generateFollowupsOn } : {}),
     })
       .then(() => queryClient.invalidateQueries({ queryKey: queryKeys.uiState }))
       .catch(() => {})
@@ -281,8 +325,17 @@ export function NewTaskRoute() {
           runnerCount: runners.length,
           variants,
           images: plan.images,
+          generateFollowups: generateFollowupsOn,
         }),
       )
+      // Only remember a choice the user was actually offered (#471, the `lastWorktree` rule):
+      // persisting the forced `false` would overwrite their real preference, so turning
+      // CEZ_FOLLOWUPS back on later would silently come up off.
+      if (followupsToggleShown) {
+        void putUiState({ lastGenerateFollowups: generateFollowupsOn })
+          .then(() => queryClient.invalidateQueries({ queryKey: queryKeys.uiState }))
+          .catch(() => {})
+      }
       clearDraftText()
       setPlan(null)
       void queryClient.invalidateQueries({ queryKey: queryKeys.runs.all })
@@ -332,6 +385,7 @@ export function NewTaskRoute() {
         </header>
 
         <Composer
+          ref={composerRef}
           onSubmit={submit}
           value={draft.text}
           onValueChange={(text) => update({ text })}
@@ -348,6 +402,13 @@ export function NewTaskRoute() {
                 skills={skillList}
                 workflows={workflowList}
                 onPick={(next) => update({ source: next })}
+              />
+              {/* Icon-only: this row already carries source/runner/model/variants/worktree/
+                  autonomous/branch, and templates is the least-used of them. */}
+              <PromptTemplateMenu
+                templates={templates}
+                iconOnly
+                onInsert={(text) => composerRef.current?.insertAtCaret(text)}
               />
               {runners.length > 1 ? (
                 <RunnerPill runners={runners} value={runner} onPick={(next) => update({ runner: next, model: null })} />
@@ -383,6 +444,12 @@ export function NewTaskRoute() {
                 disabled={draft.planFirst}
                 onChange={(on) => update({ autonomous: on })}
               />
+              {followupsToggleShown ? (
+                <GenerateFollowupsToggle
+                  on={generateFollowupsOn}
+                  onChange={(on) => update({ generateFollowups: on })}
+                />
+              ) : null}
               {repo.data ? <BaseBranchPill repo={repo.data} /> : null}
             </>
           }
@@ -484,6 +551,39 @@ function AutonomousToggle({
   )
 }
 
+/** Follow-up toggle: checked lets agents append newly discovered work to the task inbox.
+ *  Handoff journaling remains active either way. */
+function GenerateFollowupsToggle({
+  on,
+  onChange,
+}: {
+  on: boolean
+  onChange: (on: boolean) => void
+}) {
+  return (
+    <button
+      type="button"
+      role="checkbox"
+      aria-checked={on}
+      data-slot="generate-followups-toggle"
+      onClick={() => onChange(!on)}
+      title={
+        on
+          ? 'Agents can add newly discovered follow-up work to the task inbox'
+          : 'Follow-up generation is off; agents still maintain the handoff journal'
+      }
+      className={cn(chipClass, on && 'border-primary/60 text-foreground')}
+    >
+      {on ? (
+        <CheckIcon aria-hidden="true" className="size-3 shrink-0 text-primary" />
+      ) : (
+        <SquareIcon aria-hidden="true" className="size-3 shrink-0 text-soft-foreground" />
+      )}
+      Follow-ups
+    </button>
+  )
+}
+
 /** The mockup's `.chip`: a quiet bordered pill that darkens on hover. */
 const chipClass =
   'inline-flex h-[26px] items-center gap-1.5 rounded-full border border-border bg-card px-2.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-55'
@@ -509,10 +609,16 @@ function SourcePill({
   onPick: (source: TaskSource) => void
 }) {
   const [open, setOpen] = useState(false)
+  const [search, setSearch] = useState('')
   const [preview, setPreview] = useState<Skill | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
-  const project = skills.filter(isProjectSkill)
-  const global = skills.filter((skill) => !isProjectSkill(skill))
+  // #484: rank in JS (cmdk's own score-sort does not re-order reliably here), then split the
+  // ranked matches into the Project/Global groups so each group stays match-ordered.
+  const matched = searchSkills(skills, search)
+  const project = matched.filter(isProjectSkill)
+  const global = matched.filter((skill) => !isProjectSkill(skill))
+  const matchedWorkflows = searchWorkflows(workflows, search)
+  const nothingMatches = project.length === 0 && global.length === 0 && matchedWorkflows.length === 0
   const pick = (next: TaskSource) => {
     onPick(next)
     setOpen(false)
@@ -563,7 +669,13 @@ function SourcePill({
   return (
     <>
       <SkillPreviewDialog skill={preview} onClose={() => setPreview(null)} />
-      <Popover open={open} onOpenChange={setOpen}>
+      <Popover
+        open={open}
+        onOpenChange={(next) => {
+          setOpen(next)
+          if (!next) setSearch('')
+        }}
+      >
         <PopoverTrigger asChild>
           <button
             type="button"
@@ -586,10 +698,21 @@ function SourcePill({
           sideOffset={8}
           className="w-[336px] max-w-[calc(100vw-2rem)] p-0"
         >
-          <Command filter={multiWordFilter}>
-            <CommandInput placeholder="search skills & workflows…" onInput={() => listRef.current?.scrollTo(0, 0)} />
-            <CommandList ref={listRef} data-slot="source-menu" className="max-h-72">
-              <CommandEmpty>Nothing matches.</CommandEmpty>
+          <Command shouldFilter={false}>
+            <CommandInput
+              placeholder="search skills & workflows…"
+              value={search}
+              onValueChange={setSearch}
+              onInput={() => listRef.current?.scrollTo(0, 0)}
+            />
+            {/* The 3rem headroom is the CommandInput row: the popper's available-height var
+                covers the whole popover, and the list must leave the search box visible. */}
+            <CommandList
+              ref={listRef}
+              data-slot="source-menu"
+              className="max-h-[min(18rem,calc(var(--radix-popover-content-available-height)-3rem))]"
+            >
+              {nothingMatches ? <CommandEmpty>Nothing matches.</CommandEmpty> : null}
               {/* Project skills lead, Global trails everything — the closer a skill lives
                   to the repo, the more likely it's the one being picked. */}
               {project.length > 0 ? (
@@ -597,9 +720,9 @@ function SourcePill({
                   {project.map((skill) => skillItem(skill, true))}
                 </CommandGroup>
               ) : null}
-              {workflows.length > 0 ? (
+              {matchedWorkflows.length > 0 ? (
                 <CommandGroup heading="Workflows">
-                  {workflows.map((workflow) => {
+                  {matchedWorkflows.map((workflow) => {
                     const selected = source.source === 'workflow' && source.ref === workflow.name
                     return (
                       <CommandItem

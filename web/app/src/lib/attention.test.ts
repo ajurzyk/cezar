@@ -148,6 +148,27 @@ describe('wantsAttention', () => {
   })
 })
 
+describe("running activity: 'monitoring' (#490)", () => {
+  it('is a distinct, non-attention sub-state of running', () => {
+    expect(deriveAttention(run({ status: 'running', activity: 'monitoring' }))).toEqual({
+      bucket: 'running',
+      tone: 'violet',
+      pulse: true,
+      label: 'monitoring',
+    })
+  })
+
+  it('does not want attention — no notification, not "Needs you"', () => {
+    expect(wantsAttention(run({ status: 'running', activity: 'monitoring' }))).toBe(false)
+  })
+
+  it('leaves plain running untouched and is inert on non-running statuses', () => {
+    expect(deriveAttention(run({ status: 'running' })).label).toBe('running')
+    // `activity` is only read while running — a stale value on a terminal record is ignored.
+    expect(deriveAttention(run({ status: 'done', activity: 'monitoring' })).label).toBe('done')
+  })
+})
+
 describe('tone vocabulary', () => {
   it('is exactly the StatusDot tones', () => {
     // attention.ts names its tones itself to stay UI-free, so the two lists can drift. These

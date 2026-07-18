@@ -111,7 +111,11 @@ export function parseModelIdentity(raw: string | undefined | null): ModelIdentit
  * for the backend default.
  *  - empty / whitespace ("auto") → `undefined` (the backend picks — an
  *    explicit choice, not a silent fallback);
- *  - an explicit `provider/model` → that identity, for any backend;
+ *  - an explicit `provider/model` → that identity, for a multi-provider backend
+ *    or when the provider is the single-provider backend's own;
+ *  - an explicit `provider/model` naming a FOREIGN provider on a single-provider
+ *    backend → throws {@link ModelIdentityError} (it would be dropped on the wire
+ *    yet persisted, asserting a provider that never ran — #405 review M2);
  *  - a bare id → the backend's default provider;
  *  - a bare id on a backend with no default provider → throws
  *    {@link ModelIdentityError}.
@@ -121,10 +125,22 @@ export function resolveModelIdentity(
   raw: string | undefined,
 ): ModelIdentity | undefined {
   if (!raw || !raw.trim()) return undefined;
-  const explicit = parseModelIdentity(raw);
-  if (explicit) return explicit;
-  const model = raw.trim();
   const map = BACKEND_MODEL_MAP[backend] ?? {};
+  const explicit = parseModelIdentity(raw);
+  if (explicit) {
+    // A single-provider backend (claude/codex) can only serve its own provider. An explicit
+    // foreign provider would be silently dropped on the wire — `toBackendModel` hands the CLI
+    // the bare model id — while the record persists the foreign provider, asserting one that
+    // never served the run (#405 review M2). Reject it, the same fail-loud contract a bare id
+    // gets on a multi-provider backend.
+    if (map.defaultProvider !== undefined && explicit.provider !== map.defaultProvider) {
+      throw new ModelIdentityError(
+        `provider "${explicit.provider}" can't be served by the ${backend} runner (serves ${map.defaultProvider}) — use "${map.defaultProvider}/${explicit.model}" or a bare model id`,
+      );
+    }
+    return explicit;
+  }
+  const model = raw.trim();
   const provider = map.providerByModel?.[model] ?? map.defaultProvider;
   if (!provider) {
     throw new ModelIdentityError(

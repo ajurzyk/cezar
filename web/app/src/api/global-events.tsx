@@ -50,11 +50,11 @@ const EVENT_NAMES = ['run', 'run-deleted', 'todos', 'usage', 'ping'] as const
  * - runs: the summaries the stream patches (`invalidate(['runs'])` covers the list and every
  *   single-run query under it — that is what the hierarchical keys in queries.ts are for);
  * - todos: the inbox the `todos` event replaces;
- * - health: the repo/branch chip. Health is deliberately *not* on the stream — nothing server-side
- *   watches for a branch switch — so a chip read once at boot goes stale the moment the reader
- *   checks out another branch (#369, the legacy UI's bug). Refetching it here is the honest
- *   mechanism: one local request when we already know we were away, rather than a poll that asks
- *   a question nobody has, forever.
+ * - health: the repo/branch chip. Health is not on the stream — nothing server-side watches for a
+ *   branch switch — so this reconcile alone only catches a switch across a reconnect or a tab
+ *   coming back; a checkout in a foreground, connected tab is covered by `useHealth`'s own poll
+ *   instead (#369). Invalidating it here too costs nothing extra and keeps this list a complete
+ *   "everything the stream can leave stale" note.
  *
  * `invalidateQueries` and not `refetchQueries`: it refetches what is actually rendered and marks
  * the rest stale for whenever it next mounts. A background tab with fifty cached runs should not
@@ -64,6 +64,8 @@ function reconcile(queryClient: QueryClient): void {
   void queryClient.invalidateQueries({ queryKey: queryKeys.runs.all })
   void queryClient.invalidateQueries({ queryKey: queryKeys.todos })
   void queryClient.invalidateQueries({ queryKey: queryKeys.health })
+  // The worktree panel's list/total (#483) — a run finishing or a reclaim changes it.
+  void queryClient.invalidateQueries({ queryKey: queryKeys.worktrees })
 }
 
 /** Fold one stream message into the cache. The reducers it calls are pure and table-tested in
@@ -79,6 +81,18 @@ function applyGlobalEvent(queryClient: QueryClient, usage: UsageStore, event: Gl
       if (queryClient.getQueryData(key) !== undefined) {
         queryClient.setQueryData<ApiRun>(key, (previous) => mergeRun(previous, event.run))
       }
+      // The Changes tab stops polling once a run leaves the active set (queries.ts:
+      // refetchInterval only lives while active), so end-of-run writes would otherwise wait
+      // for the next SSE reconnect's reconcile(). Invalidate the changes cache on the run event
+      // itself — but only when one already exists, so a background tab that never opened the
+      // Changes view doesn't fetch a diff nobody is looking at (same stance as the detail guard).
+      const changesKey = queryKeys.runs.changes(event.run.id)
+      if (queryClient.getQueryData(changesKey) !== undefined) {
+        void queryClient.invalidateQueries({ queryKey: changesKey })
+      }
+      // A terminal transition can reclaim (or re-materialize) a worktree (#483); keep the
+      // panel live. invalidateQueries only refetches while the panel is actually mounted.
+      void queryClient.invalidateQueries({ queryKey: queryKeys.worktrees })
       return
     }
     case 'run-deleted': {
@@ -88,6 +102,8 @@ function applyGlobalEvent(queryClient: QueryClient, usage: UsageStore, event: Gl
       // truth — instead of rendering a record that no longer exists.
       queryClient.removeQueries({ queryKey: queryKeys.runs.detail(event.id) })
       queryClient.removeQueries({ queryKey: queryKeys.runs.diff(event.id) })
+      // Its worktree goes with it — refresh the panel (#483).
+      void queryClient.invalidateQueries({ queryKey: queryKeys.worktrees })
       return
     }
     case 'todos':

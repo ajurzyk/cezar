@@ -24,6 +24,8 @@ export interface Skill {
     path: string;
     /** True for the `SKILL.md` convention — a whole directory (references/…). */
     dir: boolean;
+    /** The exact commit `ref` resolved to when the skill was read (#428). */
+    commit?: string;
   };
 }
 

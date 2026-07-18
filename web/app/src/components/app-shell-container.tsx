@@ -5,6 +5,7 @@ import type { HealthResponse } from '@/api/types'
 import { AppShell, type RepoChip } from '@/components/app-shell'
 import { CommandPalette } from '@/components/command-palette'
 import { ListViewProvider } from '@/components/list-view'
+import { SkillsBanner } from '@/components/skills-banner'
 import { TaskQuickListContainer } from '@/components/task-quick-list'
 import { ToolsMenu } from '@/components/tools-menu'
 
@@ -36,11 +37,15 @@ export function repoChipOf(health: HealthResponse | undefined): RepoChip | null 
  *
  * Nothing here caches boot-time values (#369: the legacy UI read the branch once at startup and
  * then showed a stale branch forever). The chips read whatever is currently in the health query,
- * so making them live is Step 3.2's job of invalidating that query — not a change here.
+ * so keeping them live is `useHealth`'s job — its poll plus Step 3.2's reconnect/visibility
+ * reconcile — not a change here.
  */
 export function AppShellContainer({ children }: { children: ReactNode }) {
   const health = useHealth()
-  const todos = useTodos()
+  // The global inbox is opt-in (#471). With the capability off there is no Inbox nav item to
+  // badge and the endpoint can only answer [], so the query parks rather than polls.
+  const inboxAvailable = health.data?.capabilities.followups === true
+  const todos = useTodos(inboxAvailable)
 
   return (
     // The Active/Archived filter is shared by the quick-list below and the Tasks table (Step 3.4),
@@ -58,8 +63,12 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
         // the chips: the nav must not claim a GitHub tab it cannot back. The Tools menu's
         // forge note says why it is absent.
         forgeAvailable={health.data?.forge?.available === true}
+        // Hidden unless health reports the opt-in inbox (#471) — same honesty rule as above:
+        // the nav must not offer an Inbox this server will never fill.
+        inboxAvailable={inboxAvailable}
         taskQuickList={<TaskQuickListContainer />}
         toolsMenu={<ToolsMenu health={health.data} />}
+        banner={<SkillsBanner />}
       >
         {children}
       </AppShell>

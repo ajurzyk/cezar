@@ -84,6 +84,7 @@ function stubFetch(
         return jsonResponse({ workflows, issues: [] } satisfies WorkflowsResponse)
       }
       if (method === 'GET' && path === '/api/skills') return jsonResponse(SKILLS)
+      if (method === 'GET' && path === '/api/ui-state') return jsonResponse({})
       return jsonResponse({ error: 'not found' }, 404)
     }),
   )
@@ -232,6 +233,66 @@ describe('YAML import', () => {
       ),
     )
     expect(stepIds()).toEqual(['om-fix', 'om-review'])
+  })
+})
+
+// ---- auto chain creator (#414) -----------------------------------------------------------------
+
+describe('auto chain creator', () => {
+  it('a built plan lands its title + steps on the canvas', async () => {
+    const sent = stubFetch({
+      'POST /api/plan': [
+        () =>
+          jsonResponse({
+            name: 'fix-and-review',
+            steps: [
+              { id: 'implement', name: 'Implement', prompt: '{{task}}' },
+              { id: 'verify', name: 'Verify', command: 'npm test' },
+            ],
+            rationale: 'implement then verify',
+            fallback: false,
+          }),
+      ],
+    })
+    renderAt('/workflows')
+    await waitFor(() => expect(stepCards()).toHaveLength(2))
+
+    fireEvent.click(document.querySelector('[data-slot="wb-auto"]')!)
+    fireEvent.change(screen.getByLabelText('Describe the chain to build'), {
+      target: { value: 'Fix the bug and review it' },
+    })
+    fireEvent.click(document.querySelector('[data-slot="wb-auto-run"]')!)
+
+    await waitFor(() => expect(stepIds()).toEqual(['implement', 'verify']))
+    expect(nameInput().value).toBe('fix-and-review')
+    expect(sent.find((r) => r.path === '/api/plan')?.body).toEqual({ task: 'Fix the bug and review it' })
+    await screen.findByText('Built "fix-and-review" — review, tweak, then Save.')
+  })
+
+  it('a degraded (fallback) plan keeps the current name and warns', async () => {
+    stubFetch({
+      'POST /api/plan': [
+        () =>
+          jsonResponse({
+            steps: [{ id: 'task', name: 'Do the task', prompt: '{{task}}' }],
+            rationale: 'planner unavailable',
+            fallback: true,
+          }),
+      ],
+    })
+    renderAt('/workflows')
+    await waitFor(() => expect(stepCards()).toHaveLength(2))
+
+    fireEvent.click(document.querySelector('[data-slot="wb-auto"]')!)
+    fireEvent.change(screen.getByLabelText('Describe the chain to build'), {
+      target: { value: 'do something' },
+    })
+    fireEvent.click(document.querySelector('[data-slot="wb-auto-run"]')!)
+
+    await waitFor(() => expect(stepIds()).toEqual(['task']))
+    // No proposed title → the name the canvas already had (the seeded file) survives.
+    expect(nameInput().value).toBe('ship-it')
+    await screen.findByText('Planner unavailable — added a single step. Edit, then Save.')
   })
 })
 

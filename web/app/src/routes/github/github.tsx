@@ -5,27 +5,29 @@ import {
   CircleDotIcon,
   ExternalLinkIcon,
   GitPullRequestIcon,
+  MessageSquareIcon,
   RefreshCwIcon,
   SearchIcon,
   TagIcon,
   TriangleAlertIcon,
 } from 'lucide-react'
 import { useState, type DragEvent, type ReactNode } from 'react'
-import { Link, useParams } from 'react-router'
+import { Link, Navigate, useParams } from 'react-router'
 
-import { getGithub } from '@/api/client'
-import { queryKeys, useGithub, useSkills, useWorkflows } from '@/api/queries'
-import type { GithubItem } from '@/api/types'
+import { getGithub, putUiState } from '@/api/client'
+import { queryKeys, useGithub, useGithubComments, useSkills, useUiState, useWorkflows } from '@/api/queries'
+import type { GithubComment, GithubItem, UiState } from '@/api/types'
 import { CenteredState } from '@/components/centered-state'
 import { GithubIcon } from '@/components/icons'
 import { TabLink } from '@/components/tab-link'
 import { Button } from '@/components/ui/button'
 import { Command, CommandEmpty, CommandInput, CommandItem, CommandList } from '@/components/ui/command'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Skeleton } from '@/components/ui/skeleton'
 import { toast } from '@/components/ui/toaster'
 import { shortAge } from '@/lib/format'
 import { githubTaskPrompt } from '@/lib/github-task'
-import { cn } from '@/lib/utils'
+import { cn, isHttpUrl } from '@/lib/utils'
 
 import { Markdown } from '../task-thread/markdown'
 import { allLabels, filterGithubItems, labelChipStyle } from './github-filter'
@@ -37,7 +39,8 @@ import { HandToAgent } from './hand-to-agent'
  * functionally the legacy tab — issues/PRs lists, a detail pane with markdown body + label
  * chips + checks badge, drag-to-composer, hand-to-agent — with the chip walls replaced by
  * searchable cmdk dropdowns (#385) and every surface a URL: `/github` (issues),
- * `/github/prs`, `/github/issues/:n`, `/github/prs/:n`.
+ * `/github/prs`, `/github/issues/:n`, `/github/prs/:n`. PR rows also carry a compact checks
+ * glyph (#400) — the same tones as the detail pane's `ChecksBadge`, just the symbol.
  *
  * Data keeps the legacy two-shot load (feedback 2026-07-11: the 30-item `gh` default hid the
  * rest): the fast default batch paints the tab, then a background everything-open fetch
@@ -58,6 +61,23 @@ const FULL_LIMIT = 1000
 
 export type GithubView = 'issues' | 'prs'
 
+/**
+ * `/github`'s index (#417): restores the last-selected sub-tab instead of always defaulting
+ * to Issues. Only the bare path redirects — `/github/prs` and the `:n` deep links always
+ * render exactly what their URL says, memory or not, so a pasted link never surprises.
+ *
+ * A one-way check, not a live sync: it reads `ui-state.json` once per mount and either renders
+ * Issues or hands off to `/github/prs`. It never redirects back to Issues from `/github/prs` —
+ * that URL is authoritative on its own.
+ */
+export function GithubIndexRoute() {
+  const uiState = useUiState()
+  if (uiState.data?.githubView === 'prs') {
+    return <Navigate to="/github/prs" replace />
+  }
+  return <GithubRoute view="issues" />
+}
+
 export function GithubRoute({ view }: { view: GithubView }) {
   const { n } = useParams()
   const fast = useGithub()
@@ -69,6 +89,24 @@ export function GithubRoute({ view }: { view: GithubView }) {
   const isFull = full.data?.available === true
 
   const queryClient = useQueryClient()
+
+  // Persist the tab choice (#417), mirroring the appearance provider's read-then-write
+  // pattern. The cache is patched BEFORE the PUT resolves — not just for optimism, but so
+  // `GithubIndexRoute`'s check (which reads the same cache) sees the new choice immediately
+  // if the click just navigated `/github/prs` → `/github`: without the eager patch it would
+  // still read the stale "prs" and bounce the Issues tab straight back.
+  const saveGithubView = (next: GithubView) => {
+    queryClient.setQueryData<UiState>(queryKeys.uiState, (prev) => ({ ...prev, githubView: next }))
+    putUiState({ githubView: next })
+      .then((merged) => queryClient.setQueryData(queryKeys.uiState, merged))
+      .catch((error: unknown) => {
+        toast(error instanceof Error ? error.message : String(error), { tone: 'danger' })
+        // The write failed — fall back to the server's truth rather than keep the tab
+        // claiming a persistence it never got.
+        void queryClient.invalidateQueries({ queryKey: queryKeys.uiState })
+      })
+  }
+
   const refresh = useMutation({
     mutationFn: () => getGithub({ refresh: true }),
     onSuccess: (data) => {
@@ -187,10 +225,10 @@ export function GithubRoute({ view }: { view: GithubView }) {
             </button>
           </div>
           <div data-slot="gh-tabs" className="mt-2.5 flex items-end gap-1">
-            <TabLink to="/github" active={view === 'issues'}>
+            <TabLink to="/github" active={view === 'issues'} onClick={() => saveGithubView('issues')}>
               Issues · {countLabel(gh.issues.length, isFull)}
             </TabLink>
-            <TabLink to="/github/prs" active={view === 'prs'}>
+            <TabLink to="/github/prs" active={view === 'prs'} onClick={() => saveGithubView('prs')}>
               Pull requests · {countLabel(gh.prs.length, isFull)}
             </TabLink>
           </div>
@@ -341,6 +379,8 @@ function GithubRow({
           <span>#{item.number}</span>
           <span className="min-w-0 truncate">{item.author}</span>
           <span>{shortAge(item.createdAt)}</span>
+          <CommentCount count={item.comments} />
+          {item.checks ? <ChecksGlyph checks={item.checks} /> : null}
           {queued ? (
             <span data-slot="gh-queued-flag" className="font-sans font-medium text-violet">
               ↗ run queued
@@ -394,7 +434,7 @@ function LabelFilter({
       <PopoverContent align="end" sideOffset={6} className="w-60 p-0">
         <Command>
           <CommandInput placeholder="Filter labels…" />
-          <CommandList className="max-h-64">
+          <CommandList className="max-h-[min(16rem,calc(var(--radix-popover-content-available-height)-3rem))]">
             <CommandEmpty>No labels.</CommandEmpty>
             {selected.length > 0 ? (
               <CommandItem value="__clear__" onSelect={() => onChange([])} className="text-soft-foreground">
@@ -465,7 +505,7 @@ function GithubDetail({
         <span>{shortAge(item.createdAt)} ago</span>
         {item.comments ? (
           <>
-            ·<span>{item.comments} comments</span>
+            ·<CommentCount count={item.comments} />
           </>
         ) : null}
         {hasDiffStat ? (
@@ -478,16 +518,23 @@ function GithubDetail({
           </>
         ) : null}
         ·
-        <a
-          href={item.url}
-          target="_blank"
-          rel="noopener noreferrer"
-          data-slot="gh-open-link"
-          className="inline-flex items-center gap-0.5 text-muted-foreground hover:text-foreground hover:underline"
-        >
-          open on GitHub
-          <ExternalLinkIcon aria-hidden="true" className="size-2.5" />
-        </a>
+        {/* href protocol guard (#431): link only for http(s) URLs. */}
+        {isHttpUrl(item.url) ? (
+          <a
+            href={item.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            data-slot="gh-open-link"
+            className="inline-flex items-center gap-0.5 text-muted-foreground hover:text-foreground hover:underline"
+          >
+            open on GitHub
+            <ExternalLinkIcon aria-hidden="true" className="size-2.5" />
+          </a>
+        ) : (
+          <span data-slot="gh-open-link" className="text-muted-foreground">
+            open on GitHub
+          </span>
+        )}
       </p>
 
       <h2 className="mt-2 text-xl leading-snug font-semibold">{item.title}</h2>
@@ -497,7 +544,7 @@ function GithubDetail({
           {item.labels.map((label) => (
             <LabelChip key={label} label={label} color={colors[label]} />
           ))}
-          {item.checks ? <ChecksBadge checks={item.checks} /> : null}
+          {item.checks ? <ChecksBadge checks={item.checks} url={item.url} /> : null}
         </div>
       ) : null}
 
@@ -509,25 +556,228 @@ function GithubDetail({
         )}
       </div>
 
+      <GithubThread item={item} />
+
       {children}
     </article>
   )
 }
 
-/** The checks badge — the legacy tab's three phrases, tinted by outcome. */
-function ChecksBadge({ checks }: { checks: NonNullable<GithubItem['checks']> }) {
+/** The conversation thread (#499): comments (+ PR review summaries) rendered under the body, each
+ *  body through the shared `Markdown` component so images and code fences render exactly as the
+ *  issue body does. Lazy — only fetched while this detail view is mounted. Everything degrades:
+ *  loading → skeleton, unreachable → one-line reason + "open on GitHub", empty → nothing (the
+ *  count badge already said there were none). */
+function GithubThread({ item }: { item: GithubItem }) {
+  const thread = useGithubComments(item.kind, item.number)
+  const data = thread.data
+
+  if (thread.isPending) {
+    return (
+      <section data-slot="gh-thread-loading" className="mt-6 border-t border-border pt-5">
+        <Skeleton className="mb-3 h-3 w-24" />
+        <div className="flex flex-col gap-3">
+          <Skeleton className="h-14 w-full" />
+          <Skeleton className="h-14 w-full" />
+        </div>
+      </section>
+    )
+  }
+
+  if (!data || !data.available) {
+    const reason = data?.reason ?? (thread.error instanceof Error ? thread.error.message : 'could not load comments')
+    return (
+      <section data-slot="gh-thread-error" className="mt-6 border-t border-border pt-5 text-xs text-soft-foreground">
+        <span>Couldn’t load comments — {reason}. </span>
+        <a
+          href={item.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-0.5 text-muted-foreground hover:text-foreground hover:underline"
+        >
+          open on GitHub
+          <ExternalLinkIcon aria-hidden="true" className="size-2.5" />
+        </a>
+      </section>
+    )
+  }
+
+  // An empty thread renders nothing: the count badge already communicated "no discussion", and an
+  // empty "Comments · 0" section would be noise on the many quiet issues/PRs.
+  if (data.comments.length === 0) return null
+
+  return (
+    <section data-slot="gh-thread" className="mt-6 border-t border-border pt-5">
+      <h3
+        data-slot="gh-thread-header"
+        className="mb-4 text-[11px] font-semibold tracking-wide text-soft-foreground uppercase"
+      >
+        Comments · {data.comments.length}
+      </h3>
+      <ul className="flex flex-col gap-5">
+        {data.comments.map((comment) => (
+          <ThreadEntry key={`${comment.kind}-${comment.id}`} comment={comment} />
+        ))}
+      </ul>
+      {data.truncated ? (
+        <a
+          href={item.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          data-slot="gh-thread-truncated"
+          className="mt-4 inline-flex items-center gap-0.5 text-xs text-soft-foreground hover:text-foreground hover:underline"
+        >
+          thread truncated — open on GitHub
+          <ExternalLinkIcon aria-hidden="true" className="size-2.5" />
+        </a>
+      ) : null}
+    </section>
+  )
+}
+
+/** Review-state chip tones — the same success/danger/muted vocabulary the checks badge uses, so
+ *  approved reads green and changes-requested reads red without a new color system. */
+const REVIEW_CHIP: Record<NonNullable<GithubComment['reviewState']>, { label: string; tone: string }> = {
+  approved: { label: 'approved', tone: 'border-success/40 text-success' },
+  changes_requested: { label: 'changes requested', tone: 'border-danger/40 text-danger' },
+  commented: { label: 'commented', tone: 'border-border text-muted-foreground' },
+  dismissed: { label: 'dismissed', tone: 'border-border text-muted-foreground' },
+}
+
+/** One thread entry: avatar (letter fallback), author, age, an optional review-state chip, and the
+ *  body via the shared `Markdown` component (images/code fences render as in the issue body). */
+function ThreadEntry({ comment }: { comment: GithubComment }) {
+  const chip = comment.reviewState ? REVIEW_CHIP[comment.reviewState] : null
+  return (
+    <li data-slot="gh-thread-entry" data-kind={comment.kind} className="min-w-0">
+      <div className="mb-1.5 flex items-center gap-1.5 font-mono text-[11px] text-soft-foreground">
+        <Avatar url={comment.avatarUrl} login={comment.author} />
+        <span className="font-sans font-medium text-foreground">{comment.author}</span>
+        <span>{shortAge(comment.createdAt)}</span>
+        {chip ? (
+          <span
+            data-slot="gh-review-chip"
+            data-review-state={comment.reviewState}
+            className={cn('rounded-full border px-1.5 py-px font-sans text-[10px] font-medium', chip.tone)}
+          >
+            {chip.label}
+          </span>
+        ) : null}
+        <a
+          href={comment.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="open comment on GitHub"
+          className="ml-auto shrink-0 text-muted-foreground hover:text-foreground"
+        >
+          <ExternalLinkIcon aria-hidden="true" className="size-2.5" />
+        </a>
+      </div>
+      <div data-slot="gh-thread-body" className="text-sm">
+        {comment.body ? <Markdown>{comment.body}</Markdown> : <p className="text-soft-foreground">(no body)</p>}
+      </div>
+    </li>
+  )
+}
+
+/** A 16 px comment avatar. Falls back to a letter block when no URL is known or the image fails to
+ *  load (private-repo attachments, deleted avatars) — never a broken-image glyph. */
+function Avatar({ url, login }: { url?: string; login: string }) {
+  const [failed, setFailed] = useState(false)
+  if (url && !failed) {
+    return (
+      <img
+        src={url}
+        alt=""
+        width={16}
+        height={16}
+        loading="lazy"
+        onError={() => setFailed(true)}
+        data-slot="gh-avatar"
+        className="size-4 shrink-0 rounded-full"
+      />
+    )
+  }
   return (
     <span
+      data-slot="gh-avatar-fallback"
+      aria-hidden="true"
+      className="flex size-4 shrink-0 items-center justify-center rounded-full bg-muted text-[8px] font-semibold text-muted-foreground uppercase"
+    >
+      {login.slice(0, 1) || '?'}
+    </span>
+  )
+}
+
+/** Glyph + tone shared by the list row's compact indicator and the detail pane's full badge
+ *  (#400) — one source of truth so the two surfaces can't drift out of sync. */
+type Checks = NonNullable<GithubItem['checks']>
+const CHECKS_GLYPH: Record<Checks, string> = { passing: '✓', failing: '✗', pending: '○' }
+const CHECKS_TONE: Record<Checks, string> = {
+  passing: 'text-success',
+  failing: 'text-danger',
+  pending: 'text-muted-foreground',
+}
+
+/** The comment-count badge (#499): a muted speech-bubble glyph + count, shown on issue/PR rows
+ *  and in the detail meta line. Renders nothing for a zero (or absent) count, so quiet items look
+ *  exactly as they did before real counts arrived. Shared so the row and detail can't drift. */
+function CommentCount({ count }: { count: number }) {
+  if (!count) return null
+  return (
+    <span
+      data-slot="gh-comment-count"
+      data-count={count}
+      aria-label={`${count} comment${count === 1 ? '' : 's'}`}
+      className="inline-flex shrink-0 items-center gap-0.5"
+    >
+      <MessageSquareIcon aria-hidden="true" className="size-3" />
+      {count}
+    </span>
+  )
+}
+
+/** The checks badge — the legacy tab's three phrases, tinted by outcome. Links out
+ *  to the PR's checks tab on GitHub (issue #415) when a URL is available. */
+function ChecksBadge({ checks, url }: { checks: Checks; url?: string }) {
+  const className = cn('text-[11px] font-medium', CHECKS_TONE[checks], url && 'hover:underline')
+  const label = `${CHECKS_GLYPH[checks]} checks ${checks}`
+
+  if (!url) {
+    return (
+      <span data-slot="gh-checks" data-checks={checks} className={className}>
+        {label}
+      </span>
+    )
+  }
+
+  return (
+    <a
+      href={`${url}/checks`}
+      target="_blank"
+      rel="noopener noreferrer"
       data-slot="gh-checks"
       data-checks={checks}
-      className={cn(
-        'text-[11px] font-medium',
-        checks === 'passing' && 'text-success',
-        checks === 'failing' && 'text-danger',
-        checks === 'pending' && 'text-muted-foreground',
-      )}
+      className={className}
     >
-      {checks === 'passing' ? '✓ checks passing' : checks === 'failing' ? '✗ checks failing' : '○ checks pending'}
+      {label}
+    </a>
+  )
+}
+
+/** The PR row's compact checks indicator (#400) — same tones as `ChecksBadge`, just the glyph
+ *  (the row is too narrow for the full phrase). Issues never have `checks`, so this only ever
+ *  shows up on PR rows. */
+function ChecksGlyph({ checks }: { checks: Checks }) {
+  return (
+    <span
+      data-slot="gh-row-checks"
+      data-checks={checks}
+      title={`checks ${checks}`}
+      aria-label={`checks ${checks}`}
+      className={cn('shrink-0 font-sans text-[11px] font-semibold', CHECKS_TONE[checks])}
+    >
+      {CHECKS_GLYPH[checks]}
     </span>
   )
 }

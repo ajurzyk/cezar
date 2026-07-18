@@ -1,4 +1,4 @@
-import type { SaveWorkflowInput, WorkflowStepDef } from '@/api/types'
+import type { PlanResponse, SaveWorkflowInput, WorkflowStepDef } from '@/api/types'
 
 /**
  * The workflow builder's pure rules (R6 Step 1.6, spec §"Skills, Workflows, Inbox"), ported
@@ -143,6 +143,29 @@ export function workflowSlug(name: string): string {
 export function stepCountLabel(steps: readonly WorkflowStepDef[]): string {
   const noun = skillStack(steps) ? 'skill' : 'step'
   return `${steps.length} ${noun}${steps.length === 1 ? '' : 's'}`
+}
+
+/**
+ * The canvas draft an approved auto-chain plan (`POST /api/plan`, #414) lands on: the planner's
+ * proposed `name` when it named one (else the current name is kept, never blanked), and its steps
+ * capped at the server's `WB_MAX_STEPS` limit with ids re-deduped so a repaired plan can never
+ * seed a duplicate-id canvas the server would reject. Pure so the "build me a chain" flow is
+ * table-testable without a runner.
+ */
+export function draftFromPlan(
+  plan: Pick<PlanResponse, 'name' | 'steps'>,
+  currentName: string,
+): { name: string; steps: WorkflowStepDef[] } {
+  const used = new Set<string>()
+  const steps: WorkflowStepDef[] = []
+  for (const step of plan.steps.slice(0, WB_MAX_STEPS)) {
+    const base = step.id || 'step'
+    let id = base
+    for (let n = 2; used.has(id); n++) id = `${base}-${n}`
+    used.add(id)
+    steps.push({ ...step, id })
+  }
+  return { name: plan.name?.trim() || currentName, steps }
 }
 
 /** The `POST /api/workflows` body: compact `skills` for pure stacks, full `steps` otherwise —

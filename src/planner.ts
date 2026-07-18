@@ -18,12 +18,15 @@ const PLANNER_TIMEOUT_MS = 60_000;
 
 const PLANNER_SYSTEM_PROMPT =
   'You are a planning assistant for an AI coding agent cockpit. Respond with ONLY a JSON object: ' +
-  '{"steps":[{"skill"?:string,"name":string,"prompt"?:string,"command"?:string}],"rationale":string}. ' +
+  '{"title":string,"steps":[{"skill"?:string,"name":string,"prompt"?:string,"command"?:string}],"rationale":string}. ' +
   'Rules: pick skills ONLY from the provided catalog; a step has either "prompt" (an agent step) or ' +
   '"command" (a shell verification check); include the {{task}} placeholder in agent prompts where ' +
-  "the user's task text belongs; 1-5 steps; prefer fewer.";
+  "the user's task text belongs; 1-5 steps; prefer fewer; \"title\" is a short kebab-case name for " +
+  'the whole workflow (2-4 words, e.g. "fix-and-review").';
 
 const plannerResponseSchema = z.object({
+  /** A short workflow name the builder pre-fills. Optional so older / partial answers still parse. */
+  title: z.string().optional(),
   steps: z
     .array(
       z.object({
@@ -39,6 +42,9 @@ const plannerResponseSchema = z.object({
 });
 
 export interface PlanResult {
+  /** The proposed workflow title (kebab-case slug), when the planner named one. The auto chain
+   *  creator pre-fills the builder's name field with it. Absent on the degraded fallback. */
+  name?: string;
   steps: WorkflowStepDef[];
   rationale: string;
   /** True when this is the degraded one-step quick-task plan. */
@@ -79,7 +85,8 @@ export async function planChain(repoRoot: string, task: string): Promise<PlanRes
     if (!parsed) continue;
     const steps = sanitizeSteps(parsed.steps, skillNames);
     if (steps.length === 0) break; // everything got rejected — degrade
-    return { steps, rationale: parsed.rationale, fallback: false };
+    const name = proposeWorkflowName(parsed.title);
+    return { ...(name ? { name } : {}), steps, rationale: parsed.rationale, fallback: false };
   }
 
   return {
@@ -182,6 +189,17 @@ export function slugify(name: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
+}
+
+/**
+ * The proposed workflow title, normalized to the same kebab-case slug the builder saves as a
+ * file name — so what the auto chain creator pre-fills is already a valid workflow name. A blank
+ * or slug-less title (e.g. all punctuation) answers undefined, and the caller keeps the current
+ * name instead of blanking it.
+ */
+export function proposeWorkflowName(raw: string | undefined): string | undefined {
+  const slug = slugify((raw ?? '').trim());
+  return slug || undefined;
 }
 
 function uniqueId(base: string, used: Set<string>): string {

@@ -20,6 +20,10 @@
 
 export type RunStatus = 'queued' | 'running' | 'waiting' | 'review' | 'done' | 'failed' | 'cancelled'
 
+/** Sub-state of `running` (spec 2026-07-18-subagent-monitoring-status, #490): the agent is
+ *  still working on its own downstream work (a sub-agent / a monitored command), not on you. */
+export type RunActivity = 'monitoring'
+
 export type StepStatus =
   | 'pending'
   | 'running'
@@ -72,7 +76,12 @@ export interface RunRecord {
   runner?: Runner
   /** Echo of the extra system prompt the run used (POST override or config default). */
   systemPrompt?: string
+  /** false when the run deliberately disabled follow-up todo generation. Absent means enabled. */
+  generateFollowups?: boolean
   status: RunStatus
+  /** `monitoring` while `status === 'running'` and the agent is working on downstream work
+   *  (spec 2026-07-18-subagent-monitoring-status, #490). Absent on old runs; cleared on resume/end. */
+  activity?: RunActivity
   createdAt: string
   startedAt?: string
   finishedAt?: string
@@ -83,6 +92,15 @@ export interface RunRecord {
    *  Display tier only: `pullRequestUrl` (the PR this task CREATED) wins, and the
    *  Draft-PR / Create-PR action gates ignore it. Read via `taskPrUrl()`. */
   referencedPullRequestUrl?: string
+  /** The PR/issue number this task is ABOUT (task auto-naming spec) — display tier only. */
+  prNumber?: number
+  issueNumber?: number
+  /** 'user' = renamed via PATCH, never auto-overwritten; 'marker' = agent-declared
+   *  via CEZ:TITLE (spec 2026-07-18-task-ref-markers); 'auto' = namer-owned. */
+  titleOrigin?: 'user' | 'auto' | 'marker'
+  /** References the agent declared via CEZ:PR/CEZ:ISSUE markers — authoritative
+   *  over the namer for the matching kind. */
+  markerRefs?: { pr?: number; issue?: number }
   /** The referenced tier's working set (distinct PR URLs spotted, capped server-side). */
   referencedPrCandidates?: string[]
   /** Absent when the run executed in the repo working tree rather than its own worktree. */
@@ -188,11 +206,15 @@ export interface ForgeInfo {
   reason?: string
 }
 
-/** Deployment-mode capabilities (src/server/capabilities.ts). `localHandoff: false` means
+/** Server capabilities (src/server/capabilities.ts). `localHandoff: false` means
  *  hosted mode (`CEZ_REMOTE` / non-loopback bind) — every open-on-my-machine affordance
- *  (Terminal, editor, `cd …` hints) must disappear, not disable. */
+ *  (Terminal, editor, `cd …` hints) must disappear, not disable.
+ *  `followups: false` (the default — the inbox is opt-in via `CEZ_FOLLOWUPS=1`, #471) means
+ *  this server has no follow-up inbox: the Inbox nav item and the composer's follow-up
+ *  toggle disappear the same way. The per-task handoff journal is unrelated and always on. */
 export interface Capabilities {
   localHandoff: boolean
+  followups: boolean
 }
 
 export interface HealthResponse {
@@ -230,6 +252,9 @@ export interface ChangedFile {
   dels: number
   /** Binary per numstat — there is no text patch to render. */
   binary: boolean
+  /** True when the path is one the raw-bytes route serves as an `<img>` (#365) — present only
+   *  when true, so old clients that never read it stay correct. */
+  image?: boolean
   /** This file's unified-diff section; possibly `… (patch truncated)`, possibly empty. */
   patch: string
 }
@@ -360,6 +385,10 @@ export interface WorkflowsResponse {
  *  a missing CLI, a timeout or an unparseable answer degrade to the one-step quick-task plan
  *  with `fallback: true`, which the UI surfaces as a dim note. */
 export interface PlanResponse {
+  /** A short kebab-case workflow title the planner proposed (spec 008 follow-up / #414). The
+   *  workflow builder's auto chain creator pre-fills its name field with it. Absent on the
+   *  degraded fallback, and on older servers that never sent one. */
+  name?: string
   steps: WorkflowStepDef[]
   rationale: string
   fallback: boolean
@@ -426,6 +455,8 @@ export interface TodoItem {
   suggestedSkill?: string
   suggestedArgs?: string
   suggestedPrompt?: string
+  /** Explicit intent; missing infers from suggestedSkill/suggestedPrompt for old files. */
+  runnable?: boolean
   /** Set by the server when "▶ Run" turned this entry into a task. */
   startedTaskId?: string
 }
@@ -472,6 +503,27 @@ export interface GithubData {
   labelColors?: Record<string, string>
 }
 
+/** One comment or PR review summary in an issue/PR thread (`GET /api/github/comments/…`, #499). */
+export interface GithubComment {
+  id: number
+  author: string
+  avatarUrl?: string
+  createdAt: string
+  body: string
+  kind: 'comment' | 'review'
+  reviewState?: 'approved' | 'changes_requested' | 'commented' | 'dismissed'
+  url: string
+}
+
+/** `GET /api/github/comments/:kind/:number` — degrades to `{ available: false, reason }` like the
+ *  list fetch, never an error. */
+export interface GithubCommentsData {
+  available: boolean
+  reason?: string
+  comments: GithubComment[]
+  truncated?: boolean
+}
+
 // ---- GUI prefs (`PUT /api/ui-state`) -----------------------------------------------------------
 
 /** The keys the server's schema names. It is a passthrough schema, so unknown keys round-trip
@@ -486,13 +538,25 @@ export interface UiState {
   lastWorktree?: boolean
   /** The last autonomous choice — remembered like lastWorktree. Absent → off. */
   lastAutonomous?: boolean
+  /** Whether new runs should ask agents to append follow-up work. Absent → on. */
+  lastGenerateFollowups?: boolean
   runsView?: 'list' | 'table'
+  /** The GitHub tab's last-selected sub-tab (#417) — issues or PRs. Absent → issues. */
+  githubView?: 'issues' | 'prs'
   /** Settings → Appearance (redesign R6): accent + density. Theme itself stays in
    *  localStorage (`cez-theme`) — it must pre-paint, and it is per-browser by design. */
   appearance?: { accent?: 'lime' | 'violet'; density?: 'comfortable' | 'compact' | 'ultra' }
   /** Settings → Notifications (redesign R6 1.7): the browser-notification toggle. Off unless
    *  literally `true`. Permission itself is per-browser and never persisted. */
   notifications?: { enabled?: boolean }
+  /** Follow-up prompt templates (#413): reusable snippets insertable into the GitHub hand-over,
+   *  Inbox, and /new composers. Absent → the built-in defaults (`lib/prompt-templates.ts`);
+   *  present (even `[]`) is the user's own edited list from Settings → Prompt templates.
+   *  `skills` (optional) are the skill names the template auto-applies for. */
+  promptTemplates?: { id: string; label: string; text: string; skills?: string[] }[]
+  /** The open-mercato/skills promo banner (#391), dismissed for good. Set once true, never
+   *  unset — server-persisted rather than a cookie so "shown once" holds across browsers. */
+  dismissedSkillsBanner?: boolean
   [key: string]: unknown
 }
 
@@ -520,6 +584,9 @@ export interface CreateRunInput {
   worktree?: boolean
   /** true → autonomous run: never parks at "waiting" for the user; auto-continues until done. */
   autonomous?: boolean
+  /** false → keep the handoff journal but do not expose or request a follow-up todos file.
+   *  Omit for the default (enabled). */
+  generateFollowups?: boolean
 }
 
 export interface MessageInput {
@@ -547,6 +614,15 @@ export interface ConfigResponse {
   maxParallel: number
   /** Per-task memory ceiling in MiB (whole process tree); null = no limit. */
   memoryLimitMb: number | null
+  /** Keep the last N finished worktrees on disk (#483); 0 = unlimited. Older
+   *  ones are reclaimed (directory only — branch kept, so work is recoverable). */
+  worktreeRetention: number
+  /** Live title updates (task auto-naming): null = no config key, the
+   *  CEZ_TITLE_UPDATES env default (ON) decides. */
+  liveTitleUpdates: boolean | null
+  /** Optional review gate (#489): null = no config key, the CEZ_REVIEW_GATE env
+   *  default (OFF) decides. */
+  reviewGate: boolean | null
 }
 
 /** `PUT /api/config` (Settings → Agents; the Repo tab's base-branch picker). `baseBranch: null`
@@ -561,15 +637,56 @@ export interface SetConfigInput {
   maxParallel?: number
   /** null or 0 clears the ceiling back to "no limit". */
   memoryLimitMb?: number | null
+  /** Keep last N finished worktrees (#483); 0 = unlimited, null clears back to
+   *  the default (10). */
+  worktreeRetention?: number | null
+  /** null clears the key back to the env-default behavior. */
+  liveTitleUpdates?: boolean | null
+  /** null clears the key back to the env-default behavior (OFF). */
+  reviewGate?: boolean | null
 }
 
 /** The PUT answer: the same shape GET serves (the pre-R6 fields stayed, the rest is additive). */
 export type SetConfigResponse = ConfigResponse
 
+/** One materialized task worktree in the management panel (#483). `sizeBytes` is
+ *  null when `du` is unavailable (Windows / missing). `reclaimable` = finished,
+ *  has a directory, not yet reclaimed (retention's rule). */
+export interface WorktreeInfo {
+  runId: string
+  title: string
+  status: string
+  branch: string | null
+  sizeBytes: number | null
+  finishedAt: string | null
+  reclaimable: boolean
+}
+
+/** `GET /api/worktrees` (#483): the worktrees on disk, their total size (null when any
+ *  degraded), and the current keep-limit (0 = unlimited). */
+export interface WorktreesResponse {
+  worktrees: WorktreeInfo[]
+  totalBytes: number | null
+  keep: number
+}
+
+/** `POST /api/worktrees/reclaim` (#483): the run ids whose directory was reclaimed. */
+export interface ReclaimWorktreesResponse {
+  reclaimed: string[]
+}
+
+/** `POST /api/runs/:id/remove-worktree`: per-row delete in the worktrees panel. */
+export interface RemoveWorktreeResponse {
+  removed: boolean
+}
+
 /** A local app a worktree can be opened in (#open-in): editor, file manager, or terminal. */
 export interface OpenTarget {
   id: string
   label: string
+  /** A stable icon key (#361) the UI maps to a concrete icon — `openInIcon` in run-header.tsx.
+   *  Optional: an older server omitting it just renders the generic fallback icon. */
+  icon?: string
 }
 
 /** `GET /api/open-targets` — the detected local apps; empty in hosted mode (CEZ_REMOTE). */

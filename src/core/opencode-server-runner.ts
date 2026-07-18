@@ -9,6 +9,7 @@ import type {
 } from './agent-runner.js';
 import type { AgentSession, SessionOptions } from './agent-runner.js';
 import { prependSystemPrompt } from './agent-runner.js';
+import { buildChildEnv } from './agent-env.js';
 import { AUTO_END_DELAY_MS, DEFAULT_RUN_TIMEOUT_MS } from './claude-cli-runner.js';
 import { parseModelIdentity } from './model-identity.js';
 import {
@@ -116,7 +117,7 @@ class OpencodeSession implements AgentSession {
     try {
       this.child = nodeSpawn(bin, ['serve', '--hostname', '127.0.0.1', '--port', String(port)], {
         cwd: spec.cwd,
-        env: { ...process.env, ...spec.env },
+        env: buildChildEnv({ backend: 'opencode', extraEnv: spec.env }),
       });
     } catch (err) {
       throw wrapSpawnError(err, bin);

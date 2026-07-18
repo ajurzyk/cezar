@@ -91,16 +91,39 @@ describe('resolveModelIdentity — bare ids per backend', () => {
     }
   });
 
-  it('an explicit provider/model resolves for ANY backend, including opencode', () => {
+  it('an explicit provider/model resolves for a multi-provider backend (opencode), any provider', () => {
     expect(resolveModelIdentity('opencode', 'anthropic/claude-opus-4-8')).toEqual({
       provider: 'anthropic',
       model: 'claude-opus-4-8',
     });
-    // A user can pin a cross-provider id on claude too — provider wins over the default.
-    expect(resolveModelIdentity('claude', 'openrouter/some-model')).toEqual({
+    expect(resolveModelIdentity('opencode', 'openrouter/some-model')).toEqual({
       provider: 'openrouter',
       model: 'some-model',
     });
+  });
+
+  it("an explicit provider/model resolves on a single-provider backend when it's that backend's own provider", () => {
+    expect(resolveModelIdentity('claude', 'anthropic/claude-opus-4-8')).toEqual({
+      provider: 'anthropic',
+      model: 'claude-opus-4-8',
+    });
+    expect(resolveModelIdentity('codex', 'openai/gpt-5.1-codex')).toEqual({
+      provider: 'openai',
+      model: 'gpt-5.1-codex',
+    });
+  });
+
+  it('a FOREIGN explicit provider on a single-provider backend is rejected (#405 review M2)', () => {
+    // claude serves anthropic only: it would drop `openrouter` on the wire yet persist it,
+    // asserting a provider that never ran. Fail loud instead.
+    expect(() => resolveModelIdentity('claude', 'openrouter/some-model')).toThrow(ModelIdentityError);
+    try {
+      resolveModelIdentity('claude', 'openrouter/some-model');
+    } catch (err) {
+      expect((err as Error).message).toContain('openrouter');
+      expect((err as Error).message).toContain('anthropic');
+    }
+    expect(() => resolveModelIdentity('codex', 'anthropic/claude-opus-4-8')).toThrow(ModelIdentityError);
   });
 });
 

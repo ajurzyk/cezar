@@ -91,7 +91,7 @@ type UiEvent =
   | { type:'turn.started'; turnId } | { type:'turn.completed'; turnId; stopReason; usage?; costUsd? }
   | { type:'item.started'|'item.updated'|'item.completed'; item:UiItem }
   | { type:'item.delta'; itemId; field:'text'|'reasoning'|'output'; delta:string }
-  | { type:'plan.updated'; entries:{content; status:'pending'|'in_progress'|'completed'; priority?; activeForm?}[] }
+  | { type:'plan.updated'; entries:{content; status:'pending'|'in_progress'|'completed'|'cancelled'; priority?; activeForm?}[] }
   | { type:'permission.requested'|'permission.resolved'; ... }   // reserved; wired when auto-approve becomes optional
   | { type:'usage.updated'; usage:TokenUsage; costUsd? }         // raw counts + contextWindow, never pre-weighted
   | { type:'image'; itemId?; mediaType; data };
@@ -104,7 +104,7 @@ type UiItem =
 ```
 
 - Emitted by the runners (`src/core/*-runner.ts`) alongside v1 events; the RunManager persists v2 to the same NDJSON stream (new `type` values — the current GUI already renders unknown types as dim notes, so mixed files are safe).
-- **Key mappings**: Claude `TodoWrite` / Codex `todoList` / OpenCode `todowrite` → `plan.updated` (full-replacement, identical semantics); Claude `thinking` blocks / Codex `reasoning` items / OpenCode `reasoning` parts → reasoning items; Codex `item/commandExecution/outputDelta` → `item.delta{field:'output'}` (live command output); Claude `Edit` input & Codex `fileChange.changes` & OpenCode `patch` parts → structured `FileDiff`s; Claude `parent_tool_use_id` / OpenCode `subtask` → `parentItemId` (sub-agent nesting); OpenCode turn-end switches to `session.idle`.
+- **Key mappings**: Claude `TodoWrite` (or the `TaskCreate`/`TaskUpdate` fold) / Codex `turn/plan/updated` (NOT an item — the app-server `ThreadItem` union has no todo variant) / OpenCode `todowrite` → `plan.updated` (full-replacement, identical semantics); Claude `thinking` blocks / Codex `reasoning` items / OpenCode `reasoning` parts → reasoning items; Codex `item/commandExecution/outputDelta` → `item.delta{field:'output'}` (live command output); Claude `Edit` input & Codex `fileChange.changes` & OpenCode `patch` parts → structured `FileDiff`s; Claude `parent_tool_use_id` / OpenCode `subtask` → `parentItemId` (sub-agent nesting); OpenCode turn-end switches to `session.idle`.
 - The **tool display model** (title/verb/icon per tool name + `toolKind`) lives in `web/src/protocol/` next to the types — computed once, used by thread, activity groups and notifications (paseo's pattern).
 - **Performance guardrails**: the RunManager **coalesces `item.delta` events** (~30–50 ms flush per item) before SSE fan-out, and **persists item snapshots, not raw deltas**, so NDJSON write frequency stays at today's level and replay needs no delta reduction. Rationale and the full SSE/replay/render analysis: `.ai/analysis/cockpit-ui-redesign/protocol-rationale-and-performance.md`.
 - **System prompt**: `AgentRunSpec` already carries `systemPrompt` per backend (`--append-system-prompt` for claude; codex and opencode prepend it to the first user message). v2 adds it end-to-end: the system prompt is configured in **Settings → Agents** (`config.json: systemPrompt?`) and applied to every run; `POST /api/runs` keeps an optional `systemPrompt?` override for programmatic callers (bookmarklets, scripts) — it is deliberately NOT part of the new-task composer UI. Works with every backend because it rides the existing seam — coding-agent-agnostic by construction.
@@ -115,7 +115,7 @@ Every UI capability in this spec MUST work with **all coding agents cezar suppor
 
 | UI capability | claude | codex | opencode |
 |---|---|---|---|
-| Plan/todo dock (#382) | `TodoWrite` input | `todoList`/`plan` items | `todowrite` tool |
+| Plan/todo dock (#382) | `TodoWrite` input, or `TaskCreate`/`TaskUpdate`/`TaskList` results folded into a snapshot | `turn/plan/updated` notification | `todowrite` tool |
 | Tool cards + statuses (#381) | `tool_use`/`tool_result` | typed items + status | tool parts + state |
 | Reasoning line | `thinking` blocks | `reasoning` items/deltas | `reasoning` parts |
 | Live command output | — (result only; card fills on completion) | `outputDelta` | running-state `metadata` |

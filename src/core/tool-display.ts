@@ -11,9 +11,12 @@
  * Known names covered (matched case-insensitively so claude's `Bash` and
  * opencode's `bash` share one row):
  *  - claude:   Bash, Edit, Write, NotebookEdit, Read, Glob, Grep, WebFetch,
- *              WebSearch, Task, TodoWrite, mcp__server__tool
- *  - codex:    commandExecution, fileChange, mcpToolCall, webSearch,
- *              todoList, plan
+ *              WebSearch, Task, TodoWrite, TaskCreate, TaskUpdate, TaskList,
+ *              mcp__server__tool
+ *  - codex:    commandExecution, fileChange, mcpToolCall, webSearch, plan
+ *              (codex's checklist arrives as the `turn/plan/updated`
+ *              notification, not as a tool call — `todoList` is kept below only
+ *              as tolerance for its non-app-server transports)
  *  - opencode: bash, edit, write, read, grep, glob, webfetch, task, todowrite
  */
 
@@ -143,6 +146,9 @@ export function toolDisplay(name: string, input?: unknown): ToolDisplay {
     case 'todowrite':
     case 'todolist':
     case 'plan':
+    case 'taskcreate':
+    case 'taskupdate':
+    case 'tasklist':
       return { toolKind: 'plan', title: 'Update plan' };
 
     case 'mcptoolcall': {

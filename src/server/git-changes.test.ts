@@ -8,12 +8,17 @@ import { RunStore, type RunRecord } from '../runs/store.js';
 import type { RunManager } from '../workflows/run.js';
 import {
   FILE_CONTENT_CAP,
+  assemblePayload,
   collectChanges,
   collectRunCommits,
   commitAll,
+  createOrSwitchBranch,
   imageMimeType,
+  isOsOpenableImage,
+  patchByPath,
   pushCurrentBranch,
   readWorktreePath,
+  splitPatch,
   type ChangesPayload,
 } from './git-changes.js';
 import { createApp } from './server.js';
@@ -86,6 +91,30 @@ describe('collectChanges — structured diff vs base', () => {
     expect(result.changes.stat.dels).toBe(result.changes.files.reduce((s, f) => s + f.dels, 0));
   });
 
+  it('flags image paths with image:true (#365) — even ones git does not mark binary', async () => {
+    writeFileSync(join(dir, 'seed.txt'), 'seed\n');
+    g(dir, 'add', '-A');
+    g(dir, 'commit', '-m', 'base');
+    g(dir, 'checkout', '-b', 'task');
+
+    writeFileSync(join(dir, 'photo.png'), Buffer.from([0, 1, 2, 3, 0, 255]));
+    // SVG is text — git will not flag it binary — but it is still an image by extension.
+    writeFileSync(join(dir, 'icon.svg'), '<svg></svg>\n');
+    writeFileSync(join(dir, 'notes.txt'), 'plain text, not an image\n');
+    g(dir, 'add', '-A');
+
+    const result = await collectChanges(dir, 'main');
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const byPath = new Map(result.changes.files.map((f) => [f.path, f]));
+
+    expect(byPath.get('photo.png')).toMatchObject({ binary: true, image: true });
+    expect(byPath.get('icon.svg')).toMatchObject({ binary: false, image: true });
+    // Non-images never carry the field at all (optional, absent-by-default).
+    expect(byPath.get('notes.txt')?.image).toBeUndefined();
+    expect('image' in (byPath.get('notes.txt') ?? {})).toBe(false);
+  });
+
   it('an empty diff is a valid all-zero payload, not an error', async () => {
     writeFileSync(join(dir, 'a.txt'), 'hello\n');
     g(dir, 'add', '-A');
@@ -130,6 +159,78 @@ describe('collectChanges — structured diff vs base', () => {
     const withAdd = await collectChanges(dir, 'main');
     expect(withAdd.ok).toBe(true);
     if (withAdd.ok) expect(withAdd.changes.files.some((f) => f.path === 'untracked.txt')).toBe(true);
+  });
+});
+
+describe('assemblePayload — patches attach to files by path, not by position (#488)', () => {
+  // `-z` name-status: `X NUL path NUL`. Two modified files, in this order.
+  const nameStatus = 'M\0a.txt\0M\0b.txt\0';
+  const numstat = '1\t0\ta.txt\x002\t1\tb.txt\x00';
+  const patchA = ['diff --git a/a.txt b/a.txt', '--- a/a.txt', '+++ b/a.txt', '@@ -1 +1 @@', '-old-a', '+new-a', ''].join(
+    '\n',
+  );
+  const patchB = [
+    'diff --git a/b.txt b/b.txt',
+    '--- a/b.txt',
+    '+++ b/b.txt',
+    '@@ -1 +1,2 @@',
+    '-old-b',
+    '+new-b',
+    '+extra-b',
+    '',
+  ].join('\n');
+
+  it('keeps a file’s patch when name-status and patch file counts disagree', () => {
+    // The regression: a status entry (a.txt) emits no `diff --git` block, so the patch has
+    // one section for two files. The old `patches.length === statuses.length` guard blanked
+    // EVERY patch; now b.txt keeps its diff and only the genuinely patch-less a.txt is empty.
+    const payload = assemblePayload(nameStatus, numstat, patchB, 10_000);
+    const byPath = new Map(payload.files.map((f) => [f.path, f]));
+    expect(byPath.get('b.txt')?.patch).toContain('+new-b');
+    expect(byPath.get('b.txt')?.patch).toContain('+extra-b');
+    expect(byPath.get('a.txt')?.patch).toBe('');
+    // Counts/stats stay driven by numstat, untouched by the patch association.
+    expect(byPath.get('b.txt')).toMatchObject({ adds: 2, dels: 1 });
+  });
+
+  it('associates by path even when patch sections are ordered differently than name-status', () => {
+    // Both listings have two entries (counts agree), but the patch lists b before a. Positional
+    // matching would cross the patches over; path matching keeps each with its own file.
+    const payload = assemblePayload(nameStatus, numstat, `${patchB}${patchA}`, 10_000);
+    const byPath = new Map(payload.files.map((f) => [f.path, f]));
+    expect(byPath.get('a.txt')?.patch).toContain('+new-a');
+    expect(byPath.get('a.txt')?.patch).not.toContain('new-b');
+    expect(byPath.get('b.txt')?.patch).toContain('+new-b');
+  });
+});
+
+describe('patchByPath — maps a diff section to the file it describes', () => {
+  it('keys ordinary, deleted and renamed sections by their name-status path', () => {
+    const patch = [
+      'diff --git a/mod.txt b/mod.txt',
+      '--- a/mod.txt',
+      '+++ b/mod.txt',
+      '@@ -1 +1 @@',
+      '-a',
+      '+b',
+      'diff --git a/gone.txt b/gone.txt',
+      'deleted file mode 100644',
+      '--- a/gone.txt',
+      '+++ /dev/null',
+      '@@ -1 +0,0 @@',
+      '-bye',
+      'diff --git a/old.txt b/new.txt',
+      'similarity index 100%',
+      'rename from old.txt',
+      'rename to new.txt',
+      '',
+    ].join('\n');
+    const map = patchByPath(splitPatch(patch));
+    // deletion → its removed path (what --name-status reports for the `D` entry)
+    expect(map.get('gone.txt')).toContain('+++ /dev/null');
+    // rename → its target path (the `R` entry's new path)
+    expect(map.get('new.txt')).toContain('rename to new.txt');
+    expect(map.get('mod.txt')).toContain('+b');
   });
 });
 
@@ -259,6 +360,33 @@ describe('imageMimeType — the raw-serving allowlist (R5 Step 1.6)', () => {
     expect(imageMimeType('README')).toBeNull();
     expect(imageMimeType('.png')).toBeNull(); // a dotfile named ".png" is not an image
     expect(imageMimeType('archive.png.zip')).toBeNull();
+  });
+});
+
+describe('isOsOpenableImage — the OS-launcher allowlist (#365)', () => {
+  it('allows raster images, matching the raw allowlist case-insensitively', () => {
+    expect(isOsOpenableImage('logo.png')).toBe(true);
+    expect(isOsOpenableImage('deep/dir/Photo.JPEG')).toBe(true);
+    expect(isOsOpenableImage('anim.webp')).toBe(true);
+    expect(isOsOpenableImage('shot.avif')).toBe(true);
+  });
+
+  it('refuses SVG — the raw route\'s CSP does not exist once the OS opens the file', () => {
+    // `imageMimeType` says yes (inert in an <img>, plus a no-script CSP); the OS launcher
+    // applies neither, and the default .svg handler is usually a script-executing browser.
+    expect(imageMimeType('icon.svg')).toBe('image/svg+xml');
+    expect(isOsOpenableImage('icon.svg')).toBe(false);
+    expect(isOsOpenableImage('deep/ICON.SVG')).toBe(false);
+  });
+
+  it('refuses everything the OS would EXECUTE rather than display', () => {
+    expect(isOsOpenableImage('build.command')).toBe(false);
+    expect(isOsOpenableImage('run.desktop')).toBe(false);
+    expect(isOsOpenableImage('setup.exe')).toBe(false);
+    expect(isOsOpenableImage('index.html')).toBe(false);
+    expect(isOsOpenableImage('README')).toBe(false);
+    expect(isOsOpenableImage('.png')).toBe(false); // a dotfile named ".png" is not an image
+    expect(isOsOpenableImage('archive.png.zip')).toBe(false);
   });
 });
 
@@ -652,6 +780,40 @@ describe('repo git API routes (R5 Step 1.3 — main working tree)', () => {
     const invalid = await app.request('/api/repo/commit/not-a-sha?structured=1');
     expect(invalid.status).toBe(409);
     expect(((await invalid.json()) as { error: string }).error).toContain('not a commit hash');
+  });
+});
+
+describe('createOrSwitchBranch — dash-guard on both operands (#431)', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'cez-dashguard-'));
+    initRepo(dir);
+    writeFileSync(join(dir, 'a.txt'), 'a\n');
+    g(dir, 'add', '-A');
+    g(dir, 'commit', '-m', 'base');
+  });
+
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it('rejects an option-like branch name — it reaches `checkout [-b] <name>` positionally', async () => {
+    for (const name of ['-x', '--force', '-']) {
+      const res = await createOrSwitchBranch(dir, name);
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.error).toContain('invalid branch name');
+    }
+    expect(g(dir, 'rev-parse', '--abbrev-ref', 'HEAD').trim()).toBe('main');
+  });
+
+  it('rejects an option-like start point', async () => {
+    const res = await createOrSwitchBranch(dir, 'ok-name', '--upload-pack=touch /tmp/pwn');
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error).toContain('invalid start point');
+  });
+
+  it('still creates an ordinary branch', async () => {
+    const res = await createOrSwitchBranch(dir, 'feature', 'main');
+    expect(res).toEqual({ ok: true, branch: 'feature', created: true });
   });
 });
 

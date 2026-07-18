@@ -148,6 +148,9 @@ export function toolDisplay(name: string, input?: unknown): ToolDisplay {
     case 'todowrite':
     case 'todolist':
     case 'plan':
+    case 'taskcreate':
+    case 'taskupdate':
+    case 'tasklist':
       return { toolKind: 'plan', title: 'Update plan' }
 
     case 'mcptoolcall': {

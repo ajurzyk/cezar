@@ -85,6 +85,7 @@ describe('route map', () => {
     ['/settings/appearance', 'settings-appearance', 'Appearance'],
     ['/settings/agents', 'settings-agents', 'Agents'],
     ['/settings/notifications', 'settings-notifications', 'Notifications'],
+    ['/settings/prompt-templates', 'settings-prompt-templates', 'Prompt templates'],
   ]
 
   for (const [url, route, title] of cases) {

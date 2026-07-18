@@ -3,8 +3,17 @@ import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
+import { collectSecretValues, redactDeep, redactSecrets } from '../core/secret-redaction.js';
 
 export type RunStatus = 'queued' | 'running' | 'waiting' | 'review' | 'done' | 'failed' | 'cancelled';
+/**
+ * A sub-state of `running` (spec 2026-07-18-subagent-monitoring-status, #490):
+ * the agent ended its turn still working on its own downstream work (a sub-agent
+ * or a monitored command) and declared it with the `CEZ:MONITORING` marker — so
+ * the cockpit shows a non-attention "monitoring" label instead of "needs you".
+ * Only ever set while `status === 'running'`; cleared on resume/terminal.
+ */
+export type RunActivity = 'monitoring';
 export type StepStatus =
   | 'pending'
   | 'running'
@@ -63,7 +72,20 @@ const runRecordSchema = z.object({
    *  contract are derivable from the persisted workflow and would bloat the
    *  index. Resolved at execute time (a queued run picks up config edits). */
   systemPrompt: z.string().optional(),
+  /** Per-task follow-up inbox contract (spec 007, #444). Missing on old runs
+   *  means enabled — the historical behavior. */
+  generateFollowups: z.boolean().optional(),
+  /** Autonomous mode (#489): the run was started with the "autonomous" checkbox,
+   *  so it never parks at `waiting` (auto-nudge) and — once persisted here —
+   *  never parks at the terminal `review` gate either (`settleSuccess` + the
+   *  group-pick winner-park read it). Additive-safe: absent = falsy = not
+   *  autonomous. Set at creation from `WorkflowInput.autonomous`. */
+  autonomous: z.boolean().optional(),
   status: z.enum(['queued', 'running', 'waiting', 'review', 'done', 'failed', 'cancelled']),
+  /** Sub-state of `running` (spec 2026-07-18-subagent-monitoring-status, #490):
+   *  `monitoring` while the agent is still working on its own downstream work.
+   *  Optional/absent on old runs; cleared when the run resumes or ends. */
+  activity: z.enum(['monitoring']).optional(),
   createdAt: z.string(),
   startedAt: z.string().optional(),
   finishedAt: z.string().optional(),
@@ -76,6 +98,22 @@ const runRecordSchema = z.object({
    *  existing PR (review/continue/merge). Display-only tier — `pullRequestUrl`
    *  (the PR this task CREATED) always wins, and action gates ignore this. */
   referencedPullRequestUrl: z.string().optional(),
+  /** The PR/issue number this task is ABOUT (spec 2026-07-17-task-auto-naming):
+   *  regex-extracted from the task prompt, upgradable by the namer's
+   *  cross-checked output. Display tier — never gates actions. */
+  prNumber: z.number().optional(),
+  issueNumber: z.number().optional(),
+  /** Who owns the display title: `user` (PATCH rename — never auto-overwritten),
+   *  `marker` (agent-declared via `CEZ:TITLE`, spec 2026-07-18-task-ref-markers —
+   *  beats the namer, silences live refresh) or `auto` (namer-owned — a later
+   *  namer result may replace it). Missing on old runs = legacy behavior (auto
+   *  fills only an unset titleSummary). Precedence: user > marker > auto. */
+  titleOrigin: z.enum(['user', 'auto', 'marker']).optional(),
+  /** References the agent itself declared via `CEZ:PR=` / `CEZ:ISSUE=` markers
+   *  (spec 2026-07-18-task-ref-markers). Presence of a kind makes it
+   *  authoritative: the namer may no longer write that kind, and a declared PR
+   *  owns the referenced tier's resolution. */
+  markerRefs: z.object({ pr: z.number().optional(), issue: z.number().optional() }).optional(),
   /** Distinct PR URLs spotted so far — the referenced tier's working set,
    *  persisted so a resumed run keeps disambiguating against the full history
    *  instead of re-adopting the next URL as "the only one". Capped. */
@@ -86,6 +124,11 @@ const runRecordSchema = z.object({
   branch: z.string().optional(),
   /** Branch (or commit, when HEAD was detached) the worktree was forked from. */
   baseBranch: z.string().optional(),
+  /** Set when count-based retention (#483) reclaimed this run's worktree
+   *  *directory* (the `cez/<id8>` branch is kept). Presence means "materialized
+   *  dir gone, recoverable via `git worktree add`"; it excludes the run from the
+   *  retention budget until the dir is re-materialized (resume clears it). */
+  worktreeReclaimedAt: z.string().optional(),
   /** Parallel variants (spec 010): tasks sharing a groupId are one group. */
   groupId: z.string().optional(),
   /** Variant letter within the group — 'A' | 'B' | 'C' (kept as a string). */
@@ -166,11 +209,15 @@ function eventTextFragments(event: Record<string, unknown>): string[] {
 }
 
 /**
- * The referenced tier's resolution rule: one distinct URL is the subject;
- * among several, the one whose PR number the task prompt names (and only when
- * exactly one matches); otherwise ambiguous — no chip beats a wrong chip.
+ * The referenced tier's resolution rule: a marker-declared PR number (spec
+ * 2026-07-18-task-ref-markers) owns the answer outright — only a candidate URL
+ * ending in that number resolves, and a contradiction clears the chip.
+ * Without a declaration: one distinct URL is the subject; among several, the
+ * one whose PR number the task prompt names (and only when exactly one
+ * matches); otherwise ambiguous — no chip beats a wrong chip.
  */
-function resolveReferencedPr(candidates: string[], task: string): string | undefined {
+function resolveReferencedPr(candidates: string[], task: string, markerPr?: number): string | undefined {
+  if (markerPr !== undefined) return candidates.find((url) => url.endsWith(`/${markerPr}`));
   if (candidates.length === 1) return candidates[0];
   const named = candidates.filter((url) => {
     const num = url.split('/').pop() ?? '';
@@ -179,6 +226,26 @@ function resolveReferencedPr(candidates: string[], task: string): string | undef
     return num !== '' && new RegExp(`(?<!\\d)#?${num}(?!\\d)`).test(task);
   });
   return named.length === 1 ? named[0] : undefined;
+}
+
+/**
+ * The PR URL a creation phrase *introduces*, or undefined. The created URL is
+ * the first one at or after the `CREATED_PR_RE` phrase — a PR the same event
+ * merely referenced *earlier* (e.g. the issue's own linked `…/pull/1`) must not
+ * be mistaken for the one just created (#495). Falls back to the last URL
+ * *before* the phrase for `gh` orderings that print the URL first. Selection
+ * only — the caller decides whether creation phrasing is present.
+ */
+function createdPrUrl(haystack: string): string | undefined {
+  const phrase = CREATED_PR_RE.exec(haystack);
+  if (!phrase) return undefined;
+  const after = PR_URL_RE.exec(haystack.slice(phrase.index));
+  if (after) return after[0];
+  let before: string | undefined;
+  for (const m of haystack.slice(0, phrase.index).matchAll(new RegExp(PR_URL_RE.source, 'g'))) {
+    before = m[0];
+  }
+  return before;
 }
 
 /**
@@ -254,17 +321,27 @@ export class RunStore extends EventEmitter {
     task: string;
     model?: string;
     runner?: 'claude' | 'codex' | 'opencode';
+    generateFollowups?: boolean;
+    autonomous?: boolean;
     groupId?: string;
     variant?: string;
     steps: Array<Pick<StepState, 'id' | 'name' | 'kind'>>;
   }): RunRecord {
     const run: RunRecord = {
       id: randomUUID(),
-      title: input.title,
+      // Scrubbed on the way in, exactly as `updateRun` scrubs it on the way
+      // through (#456 review) — a token pasted into the prompt otherwise sat
+      // verbatim in `runs.json` from creation. `task` is deliberately NOT
+      // scrubbed: it is the user's own prompt and is replayed into `{{task}}`
+      // when a queued run is revived after a restart (#367), so redacting it
+      // would corrupt the revived run.
+      title: this.redactText(input.title),
       workflow: input.workflow,
       task: input.task,
       model: input.model,
       runner: input.runner,
+      generateFollowups: input.generateFollowups,
+      autonomous: input.autonomous,
       groupId: input.groupId,
       variant: input.variant,
       status: 'queued',
@@ -290,9 +367,48 @@ export class RunStore extends EventEmitter {
   updateRun(id: string, patch: Partial<Omit<RunRecord, 'id' | 'steps'>>): RunRecord | undefined {
     const run = this.runs.get(id);
     if (!run) return undefined;
-    Object.assign(run, patch);
+    Object.assign(run, this.redactPatch(patch));
     this.touch(run);
     return run;
+  }
+
+  /**
+   * Scrub the free-text fields of a record patch (#427 review). Redacting only
+   * events left a hole: `titleSummary` is derived from the RAW first agent turn
+   * and `error` from raw process output, so a token the agent echoed was
+   * `[REDACTED]` in the NDJSON yet verbatim in `runs.json` — the file the "no
+   * secrets in state files" rule names explicitly. These three are the only
+   * patch fields carrying agent/process text; the rest are ids, enums, counters
+   * and URLs, and running the scrubber over them would only risk mangling them.
+   *
+   * `StepState.error` is the step-level counterpart and is scrubbed the same
+   * way in `updateStep` — `run.ts` feeds the SAME `err.message` string to both
+   * calls, so redacting only the run-level copy left the token verbatim one
+   * field away (#456 review).
+   */
+  private redactPatch(
+    patch: Partial<Omit<RunRecord, 'id' | 'steps'>>,
+  ): Partial<Omit<RunRecord, 'id' | 'steps'>> {
+    if (process.env.CEZ_REDACT_SECRETS === '0') return patch;
+    const out = { ...patch };
+    for (const field of ['title', 'titleSummary', 'error'] as const) {
+      const value = out[field];
+      if (typeof value === 'string') out[field] = this.redactText(value);
+    }
+    return out;
+  }
+
+  /**
+   * Step-level counterpart of `redactPatch` (#456 review). `error` is the only
+   * free-text `StepState` field — it is set from raw `err.message` /process
+   * output (`run.ts` `finishStep`), and `touch()` fans the whole record out
+   * over SSE, so an unscrubbed copy leaked to `runs.json` AND to the browser.
+   * The remaining fields are ids, enums, counters and timestamps.
+   */
+  private redactStepPatch(patch: Partial<Omit<StepState, 'id'>>): Partial<Omit<StepState, 'id'>> {
+    if (process.env.CEZ_REDACT_SECRETS === '0') return patch;
+    if (typeof patch.error !== 'string') return patch;
+    return { ...patch, error: this.redactText(patch.error) };
   }
 
   /** Append a step to an existing run (used by "Continue" — spec 003). */
@@ -307,7 +423,7 @@ export class RunStore extends EventEmitter {
     const run = this.runs.get(runId);
     const step = run?.steps.find((s) => s.id === stepId);
     if (!run || !step) return;
-    Object.assign(step, patch);
+    Object.assign(step, this.redactStepPatch(patch));
     run.tokensUsed = run.steps.reduce((sum, s) => sum + s.tokensUsed, 0);
     const cost = run.steps.reduce((sum, s) => sum + (s.costUsd ?? 0), 0);
     run.costUsd = cost > 0 ? cost : undefined;
@@ -341,7 +457,10 @@ export class RunStore extends EventEmitter {
     const run = this.runs.get(runId);
     if (!run) throw new Error(`unknown run: ${runId}`);
     const seq = this.nextSeq(runId);
-    const full: RunEvent = { ...event, seq, ts: new Date().toISOString() };
+    // Scrub credentials before the event touches disk or the live wire (#427):
+    // tool-result output is persisted verbatim and served back over the API, so
+    // a secret in an agent's command output would otherwise land in `.ai/cezar/`.
+    const full: RunEvent = this.redact({ ...event, seq, ts: new Date().toISOString() });
     // Sync append keeps event order without a write queue; local NDJSON
     // appends at agent-event rates are effectively free.
     appendFileSync(this.eventsPath(runId), `${JSON.stringify(full)}\n`, 'utf8');
@@ -354,10 +473,10 @@ export class RunStore extends EventEmitter {
     if (!run.pullRequestUrl) {
       const haystack = eventTextFragments(full).join(' ');
       if (haystack.length > 0) {
-        const match = PR_URL_RE.exec(haystack);
-        if (match && CREATED_PR_RE.test(haystack)) {
-          this.updateRun(runId, { pullRequestUrl: match[0] });
-        } else if (match && this.trackReferencedPrs(run, haystack)) {
+        const created = createdPrUrl(haystack);
+        if (created) {
+          this.updateRun(runId, { pullRequestUrl: created });
+        } else if (PR_URL_RE.test(haystack) && this.trackReferencedPrs(run, haystack)) {
           this.touch(run);
         }
       }
@@ -380,8 +499,41 @@ export class RunStore extends EventEmitter {
     }
     if (seen.size === before) return false;
     run.referencedPrCandidates = [...seen];
-    run.referencedPullRequestUrl = resolveReferencedPr(run.referencedPrCandidates, run.task);
+    run.referencedPullRequestUrl = resolveReferencedPr(
+      run.referencedPrCandidates,
+      run.task,
+      run.markerRefs?.pr,
+    );
     return true;
+  }
+
+  /**
+   * Apply agent-declared reference markers (spec 2026-07-18-task-ref-markers).
+   * Marker values are authoritative for the display tier: they overwrite the
+   * regex/namer numbers, and a declared PR re-resolves the referenced URL
+   * against the candidate working set — including down to `undefined` when no
+   * candidate matches (a wrong chip is worse than no chip). The created tier
+   * (`pullRequestUrl`) is deliberately untouched.
+   */
+  applyMarkerRefs(runId: string, refs: { pr?: number; issue?: number }): RunRecord | undefined {
+    const run = this.runs.get(runId);
+    if (!run || (refs.pr === undefined && refs.issue === undefined)) return run;
+    run.markerRefs = {
+      ...run.markerRefs,
+      ...(refs.pr !== undefined ? { pr: refs.pr } : {}),
+      ...(refs.issue !== undefined ? { issue: refs.issue } : {}),
+    };
+    if (refs.pr !== undefined) run.prNumber = refs.pr;
+    if (refs.issue !== undefined) run.issueNumber = refs.issue;
+    if (run.markerRefs.pr !== undefined) {
+      run.referencedPullRequestUrl = resolveReferencedPr(
+        run.referencedPrCandidates ?? [],
+        run.task,
+        run.markerRefs.pr,
+      );
+    }
+    this.touch(run);
+    return run;
   }
 
   /**
@@ -393,9 +545,33 @@ export class RunStore extends EventEmitter {
    * (gaps are fine — dedup compares with `>`).
    */
   emitEphemeral(runId: string, event: { type: string; stepId?: string; [key: string]: unknown }): RunEvent {
-    const full: RunEvent = { ...event, seq: this.nextSeq(runId), ts: new Date().toISOString() };
+    const full: RunEvent = this.redact({ ...event, seq: this.nextSeq(runId), ts: new Date().toISOString() });
     this.emit('event', { runId, event: full });
     return full;
+  }
+
+  /** Lazily-collected concrete secret values from the host env (#427). */
+  private secretValues: readonly string[] | null = null;
+
+  /**
+   * Scrub known credential values / token shapes from an event before it is
+   * persisted or fanned out. On by default; `CEZ_REDACT_SECRETS=0` opts out.
+   */
+  private redact(event: RunEvent): RunEvent {
+    if (process.env.CEZ_REDACT_SECRETS === '0') return event;
+    return redactDeep(event, this.hostSecrets());
+  }
+
+  /** Best-effort scrub of one free-text string bound for `runs.json`. Honors
+   *  the `CEZ_REDACT_SECRETS=0` opt-out itself so every caller inherits it. */
+  private redactText(text: string): string {
+    if (process.env.CEZ_REDACT_SECRETS === '0') return text;
+    return redactSecrets(text, this.hostSecrets());
+  }
+
+  private hostSecrets(): readonly string[] {
+    if (this.secretValues === null) this.secretValues = collectSecretValues();
+    return this.secretValues;
   }
 
   readEvents(runId: string): RunEvent[] {
@@ -448,9 +624,22 @@ export class RunStore extends EventEmitter {
   private seqs = new Map<string, number>();
 
   private nextSeq(runId: string): number {
-    const next = (this.seqs.get(runId) ?? 0) + 1;
+    const next = (this.seqs.get(runId) ?? this.rehydrateSeq(runId)) + 1;
     this.seqs.set(runId, next);
     return next;
+  }
+
+  /** After a restart the in-memory counter is empty while the run's NDJSON file
+   *  keeps the history. Restarting from 1 would collide with the seqs a client
+   *  already replayed — its `seq > maxSeq` dedup then silently drops every
+   *  resumed event, even across a reload (the frozen-transcript symptom class
+   *  of #424). One file read on the first post-restart append per run. */
+  private rehydrateSeq(runId: string): number {
+    let max = 0;
+    for (const event of this.readEvents(runId)) {
+      if (typeof event.seq === 'number' && event.seq > max) max = event.seq;
+    }
+    return max;
   }
 
   private eventsPath(runId: string): string {

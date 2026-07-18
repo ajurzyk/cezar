@@ -19,6 +19,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import type { GitAction, GitActionBar, GitActionId } from '@/lib/git-actions'
+import { isHttpUrl } from '@/lib/utils'
 
 import { BranchChip, DiffViewToggles } from './diff-controls'
 
@@ -104,8 +105,9 @@ const ACTION_ICONS: Record<GitActionId, ReactNode> = {
   'open-terminal': <SquareTerminalIcon aria-hidden="true" />,
 }
 
-/** One policy entry → one button. `view-pr` is a real link (the policy carries the href);
- *  everything else clicks through to the parent's mutation switch. */
+/** One policy entry → one button. `view-pr` renders as a real link when the policy's href is a
+ *  safe URL, and disabled when it is not; everything else clicks through to the parent's
+ *  mutation switch. */
 function ActionButton({
   action,
   variant,
@@ -115,7 +117,26 @@ function ActionButton({
   variant: 'primary' | 'outline'
   onAction: (id: GitActionId) => void
 }) {
-  if (action.id === 'view-pr' && action.href) {
+  // href protocol guard (#431): treat the PR link as a link only for http(s) URLs. A refused
+  // href must NOT fall through to the generic button below — the policy hardcodes view-pr as
+  // enabled and the parent's `view-pr` case is a deliberate no-op, so it would render a
+  // clickable button that silently does nothing. Disabled + a reason, like every other
+  // unavailable action.
+  if (action.id === 'view-pr') {
+    if (!isHttpUrl(action.href)) {
+      return (
+        <Button
+          variant={variant}
+          size="sm"
+          data-action={action.id}
+          disabled
+          title="View PR unavailable — the recorded PR link is not an http(s) URL"
+        >
+          {ACTION_ICONS[action.id]}
+          {action.label}
+        </Button>
+      )
+    }
     return (
       <Button asChild variant={variant} size="sm" data-action={action.id}>
         <a href={action.href} target="_blank" rel="noopener noreferrer">
