@@ -156,6 +156,43 @@ export function composeSystemPrompt(...parts: Array<string | undefined>): string
     .join('\n\n---\n\n');
 }
 
+/**
+ * Materialized pasted attachment: the on-disk name/serving-URL pair the
+ * transcript already used, plus the absolute path that lets the agent
+ * operate on the file itself — save it, `cp` it, attach it to a GitHub
+ * issue/PR (#357). `path` is only ever an absolute path under
+ * `.ai/cezar/runs/<runId>-images/` (see `RunManager.persistImage`).
+ */
+export interface PersistedAttachment {
+  name: string;
+  url: string;
+  path: string;
+}
+
+/**
+ * Plain-text note listing the absolute paths of pasted attachments, appended
+ * to the message that carries them (#357). The base64 image blocks stay in
+ * the message for the model to *view*; this note is what lets it *use* the
+ * files as files — and the only usable reference on backends (codex,
+ * opencode) whose `textOf()` drops image blocks before reaching the model.
+ */
+export function pastedAttachmentsText(attachments: PersistedAttachment[]): string {
+  const list = attachments.map((a) => `- ${a.path}`).join('\n');
+  return (
+    `The user attached ${attachments.length} pasted file${attachments.length > 1 ? 's' : ''}, ` +
+    `also saved on disk at:\n${list}\n` +
+    `When the task involves saving, uploading, attaching, or transforming the pasted content ` +
+    `(e.g. attaching to a GitHub issue/PR, copying into the repo), operate on these files — do ` +
+    `not attempt to reconstruct them from the conversation.`
+  );
+}
+
+/** Same note as `pastedAttachmentsText`, wrapped as a trailing `ContentBlock`
+ *  ready to append to a message's content array. */
+export function pastedAttachmentsNote(attachments: PersistedAttachment[]): ContentBlock {
+  return { type: 'text', text: pastedAttachmentsText(attachments) };
+}
+
 /** Variant letters + the fixed diversification hints (spec 010). A runs the
  *  task verbatim; B/C get one constant sentence each — zero configuration. */
 export const VARIANT_LETTERS = ['A', 'B', 'C'] as const;
@@ -609,12 +646,13 @@ export class RunManager {
       .map((b) => b.text)
       .join('\n');
     // Persist the attached images so the thread can render them (not just count them) — the same
-    // on-disk store + `/images/` route the agent's own screenshots use.
-    const images = content
+    // on-disk store + `/images/` route the agent's own screenshots use. `pasted` prefix marks
+    // these as user attachments (vs. agent tool screenshots) on disk (#357).
+    const persisted = content
       .filter((b): b is Extract<ContentBlock, { type: 'image' }> => b.type === 'image')
-      .map((b) => this.persistImage(runId, state, b.source.media_type, b.source.data))
-      .filter((saved): saved is { name: string; url: string } => saved !== null)
-      .map((saved) => saved.url);
+      .map((b) => this.persistImage(runId, state, b.source.media_type, b.source.data, 'pasted'))
+      .filter((saved): saved is PersistedAttachment => saved !== null);
+    const images = persisted.map((saved) => saved.url);
     this.store.appendEvent(runId, {
       type: 'user-message',
       stepId: state.currentStepId,
@@ -623,7 +661,12 @@ export class RunManager {
       images,
     });
 
-    const delivered = state.session.sendMessage(content);
+    // Tell the agent where the pasted files live on disk (#357): the base64 blocks below still
+    // ride along so the model can *view* them, but a real path is what lets it *operate* on them
+    // (save, `cp`, attach to a GitHub issue/PR) — and it's the only usable reference on backends
+    // (codex, opencode) that drop image blocks entirely before reaching the model.
+    const deliverable = persisted.length ? [...content, pastedAttachmentsNote(persisted)] : content;
+    const delivered = state.session.sendMessage(deliverable);
     if (delivered) {
       this.clearIdleTimer(state);
       this.waiting.delete(runId); // resumed — the run counts against slots again
@@ -1016,13 +1059,18 @@ export class RunManager {
     let runError: string | null = null;
     // Persist the task's attached images so the thread's initial bubble can render them
     // (#image-display); they still ride the first agent step's opening message below.
+    // `pasted` prefix (#357) marks these as user attachments on disk and keeps their
+    // absolute paths so runAgentStep can tell the agent where to find the real files.
+    let startAttachments: PersistedAttachment[] = [];
     if (input.images?.length) {
-      const urls = input.images
+      const persisted = input.images
         .filter((b): b is Extract<ContentBlock, { type: 'image' }> => b.type === 'image')
-        .map((b) => this.persistImage(runId, state, b.source.media_type, b.source.data))
-        .filter((saved): saved is { name: string; url: string } => saved !== null)
-        .map((saved) => saved.url);
-      if (urls.length) this.store.updateRun(runId, { taskImages: urls });
+        .map((b) => this.persistImage(runId, state, b.source.media_type, b.source.data, 'pasted'))
+        .filter((saved): saved is PersistedAttachment => saved !== null);
+      if (persisted.length) {
+        this.store.updateRun(runId, { taskImages: persisted.map((p) => p.url) });
+        startAttachments = persisted;
+      }
     }
     // Task screenshots go with the FIRST agent step's opening message only —
     // later steps and retry loops run in fresh sessions without them.
@@ -1064,8 +1112,10 @@ export class RunManager {
           taskBackend,
           extraSystemPrompt,
           chainStepNote(workflow.steps, i),
+          startAttachments,
         );
         startImages = undefined;
+        startAttachments = [];
         checkFailure = null;
         if (state.cancelled) break;
         if (failure) {
@@ -1152,6 +1202,10 @@ export class RunManager {
     /** The chain-boundary note for this step (#410), or undefined when the
      *  workflow has a single agent step and there is no boundary to explain. */
     chainNote: string | undefined,
+    /** Pasted attachments already materialized to disk (#357) — their absolute
+     *  paths are appended to `userPrompt` so the agent can operate on the
+     *  real files, not just view the inline image blocks. */
+    attachments: PersistedAttachment[] = [],
   ): Promise<string | null> {
     let systemPrompt: string | undefined;
     if (step.skill) {
@@ -1196,6 +1250,10 @@ export class RunManager {
         stepId: step.id,
         message: `${images.length} screenshot${images.length > 1 ? 's' : ''} attached to the task`,
       });
+      // Point the agent at the on-disk files for the pasted subset (#357) — the
+      // base64 blocks above still let it *view* the images; this is what lets it
+      // *use* them as files (save, attach to an issue/PR, copy into the repo).
+      if (attachments.length) userPrompt += `\n\n${pastedAttachmentsText(attachments)}`;
     }
 
     const sessionId = randomUUID();
@@ -1529,18 +1587,23 @@ export class RunManager {
   }
 
   /**
-   * Agent screenshot (an image block inside a tool result): the base64 data
-   * never enters the NDJSON event log — it lands as a file under
-   * `.ai/cezar/runs/<id>-images/` and the transcript event carries only the
-   * name + serving URL. Best effort: on failure the screenshot is dropped,
-   * the transcript still shows the tool result's `[screenshot]` placeholder.
+   * Agent screenshot (an image block inside a tool result) or a user-pasted
+   * attachment: the base64 data never enters the NDJSON event log — it lands
+   * as a file under `.ai/cezar/runs/<id>-images/` and the transcript event
+   * carries only the name + serving URL. `namePrefix` distinguishes the two
+   * origins on disk (`screenshot-<n>.<ext>` for agent tool screenshots,
+   * `pasted-<n>.<ext>` for user-pasted attachments, #357) and the absolute
+   * `path` lets the agent operate on the file directly (save/attach/upload).
+   * Best effort: on failure the attachment is dropped, the transcript still
+   * shows the tool result's `[screenshot]` placeholder (or the image count).
    */
   private persistImage(
     runId: string,
     state: ActiveRun,
     mediaType: string,
     data: string,
-  ): { name: string; url: string } | null {
+    namePrefix: string = 'screenshot',
+  ): { name: string; url: string; path: string } | null {
     try {
       const ext =
         /png/.test(mediaType) ? 'png'
@@ -1549,11 +1612,12 @@ export class RunManager {
         : /gif/.test(mediaType) ? 'gif'
         : 'img';
       state.imageSeq = (state.imageSeq ?? 0) + 1;
-      const name = `screenshot-${state.imageSeq}.${ext}`;
+      const name = `${namePrefix}-${state.imageSeq}.${ext}`;
       const dir = join(this.dataDir, 'runs', `${runId}-images`);
       mkdirSync(dir, { recursive: true });
-      writeFileSync(join(dir, name), Buffer.from(data, 'base64'));
-      return { name, url: `/api/runs/${runId}/images/${name}` };
+      const path = join(dir, name);
+      writeFileSync(path, Buffer.from(data, 'base64'));
+      return { name, url: `/api/runs/${runId}/images/${name}`, path };
     } catch {
       return null;
     }

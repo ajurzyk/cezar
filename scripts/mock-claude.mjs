@@ -307,6 +307,18 @@ rl.on('line', (line) => {
   } catch {
     // keep placeholders
   }
+  // Testability hook: CEZ_MOCK_STDIN_FILE=<path> appends the FULL inbound
+  // text + image count (one JSON object per line) — the scripted replies
+  // below only echo a truncated slice, so tests asserting exact wiring (e.g.
+  // #357's pasted-attachment path note in the prompt) need the untruncated
+  // text this hook captures.
+  if (process.env.CEZ_MOCK_STDIN_FILE) {
+    try {
+      appendFileSync(process.env.CEZ_MOCK_STDIN_FILE, `${JSON.stringify({ userText, imageCount })}\n`);
+    } catch {
+      // best effort — never break the mock over the hook
+    }
+  }
   queue = queue.then(() => respond(userText, imageCount));
 });
 rl.on('close', () => {
