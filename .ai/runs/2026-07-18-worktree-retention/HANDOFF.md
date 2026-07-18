@@ -1,37 +1,33 @@
 # HANDOFF — worktree retention (#483, PR #486)
 
-**Status:** in-progress — Phase 1 complete, Phase 2 next
-**Branch:** cez/208500a8 (pushed via `git push origin HEAD:cez/208500a8` from a detached temp worktree)
-**Worktree:** `.ai/tmp/om-auto-continue-pr-loop/pr-486-<ts>` (temp; the branch is checked out in the original cez run worktree, so this run commits detached and pushes explicitly)
+**Status:** complete
+**Branch:** cez/208500a8 (pushed via `git push origin HEAD:cez/208500a8`)
 
-## Done so far
+## Outcome
 
-- Step 0.1 — flaky #413 follow-up-template CI test fixed (`chooseTemplate` helper).
-- Phase 1 (Steps 1.1–1.6) — retention engine complete: config key, `worktreeReclaimedAt`,
-  pure selector, enforcer, startup + terminal-transition wiring, resume re-materialization,
-  Settings → Resources "Keep last N worktrees" input. All unit-tested.
-- Checkpoint 1 green: typecheck + full unit suite (2356) + build all pass.
+Worktree retention & management fully implemented on top of the spec PR #486.
+Every Tasks-table row is `done`. Phase 1 (retention engine) + Phase 2
+(management panel) + Phase 3 (E2E + QA). The failing CI (flaky #413
+follow-up-template test) is fixed.
 
-## Next concrete action
+- Config knob `worktreeRetention` (0 = unlimited, default 10).
+- Optional `RunRecord.worktreeReclaimedAt`.
+- Pure selector + never-throws enforcer (dir-only reclaim, branch kept).
+- Enforced at startup + every terminal transition (single `dropActive` hook).
+- Re-materialization + un-stamp on resume (the no-leak invariant).
+- `GET /api/worktrees` + `POST /api/worktrees/reclaim`.
+- Settings → Resources: Keep-last-N field + worktrees management panel.
+- README + spec citations.
 
-Start **Phase 2, Step 2.1** — `GET /api/worktrees` in `src/server/server.ts`
-(list materialized worktrees + `du -sk` sizes degrading to null + `reclaimable`
-flag + `totalBytes`). Then 2.2 (`POST /api/worktrees/reclaim`), 2.3 (the
-Worktrees management table UI), 2.4 (docs). Then Phase 3 (E2E) + the final gate:
-run `om-auto-verify-pr-ui`, add integration tests, full validation gate, style pass.
+## Verification
 
-## Key implementation facts
+- Full validation gate green: typecheck, npm test (2369), test:unit, build, test:package.
+- Feature E2E `settings-resources.e2e.ts` green (4/4). Full e2e suite has pre-existing
+  unrelated flakes (documented in final-gate-checks.md).
+- UI QA (om-auto-verify-pr-ui): PASS, 3 inline screenshots posted to PR #486.
+- BACKWARD_COMPATIBILITY.md: no violation (additive only).
 
-- Reclaim = `removeWorktree(repoRoot, path)` with NO branch arg (dir only, branch kept).
-- Finished set = `['done','failed','cancelled']`; `review`/live excluded from the budget.
-- `worktreeRetention` 0 = unlimited; default 10; `.catch(10)`.
-- Enforcer hook is a single call in `RunManager.dropActive` (fire-and-forget).
-- Resume re-materialization: `rematerializeReclaimedWorktree` in `src/runs/retention.ts`,
-  called at the top of `runContinuation`.
-- The stamp (`worktreeReclaimedAt`), not the directory, is the definitive "reclaim
-  complete" signal (the dir disappears one git call earlier) — matters for tests.
+## Next action
 
-## Caveats
-
-- Branch is checked out in another cez-managed worktree, so this run commits detached.
-- CI on the pushed branch runs the full gate; only pushed HEAD needs to be green.
+None — ready for human review + merge. QA evidence posted; PR body flipped to
+`complete`; labels normalized; lock released.
