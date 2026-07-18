@@ -47,6 +47,16 @@ describe('composeSystemPrompt', () => {
   });
 });
 
+describe('handoff contract markers', () => {
+  it('teaches the CEZ:ASK structured-question marker with its schema (#473)', () => {
+    expect(HANDOFF_ONLY_INSTRUCTIONS).toContain('CEZ:ASK');
+    expect(HANDOFF_ONLY_INSTRUCTIONS).toContain('"questions"');
+    expect(HANDOFF_ONLY_INSTRUCTIONS).toContain('"multiSelect"');
+    // It rides in the combined contract every agent step receives.
+    expect(HANDOFF_INSTRUCTIONS).toContain('CEZ:ASK');
+  });
+});
+
 describe('skill-aware task naming (#432)', () => {
   const skillWorkflow: WorkflowDef = {
     name: '(planned)',
