@@ -64,4 +64,4 @@ PR: #497
 
 ### Phase 3: Polish & docs
 
-- [ ] 3.1 Strip `CEZ:MONITORING` from displayed transcript + heartbeat wording; document the marker beside `CEZ:DONE` (AGENTS.md / AGENT_PROTOCOL.md) + test
+- [x] 3.1 Strip `CEZ:MONITORING` from displayed transcript + heartbeat wording; document the marker beside `CEZ:DONE` (AGENTS.md / AGENT_PROTOCOL.md) + test — 1ce1639
