@@ -29,7 +29,8 @@ import { markStarted, onTodosChanged, readTodos, removeTodo, startTodosWatch, ty
 import type { RunEvent, RunRecord, RunStatus, RunStore } from '../runs/store.js';
 import { isV2WireEventType } from '../runs/ui-event-sink.js';
 import type { RunManager } from '../workflows/run.js';
-import { removeWorktree, worktreeDiff, worktreeDiffStat } from '../git-worktree.js';
+import { removeWorktree, worktreeDiff, worktreeDiffStat, worktreeSizeBytes } from '../git-worktree.js';
+import { isReclaimable, reclaimWorktrees } from '../runs/retention.js';
 import { getBranches, getCommit, getDiff, getLog, getRepoInfo, getStatus } from './git.js';
 import {
   collectChanges,
@@ -1011,6 +1012,42 @@ export function createApp(deps: ServerDeps): Hono {
     // Delete cleans up after itself: worktree + branch go with the run (spec 006).
     if (run.worktreePath) await removeWorktree(repoRoot, run.worktreePath, run.branch);
     return store.deleteRun(id) ? c.json({ deleted: true }) : c.json({ error: 'not found' }, 404);
+  });
+
+  // ---- worktree management panel (#483) --------------------------------------
+  // List materialized task worktrees with disk usage + retention state, and a
+  // "Reclaim now" action. Both additive; the per-row delete reuses the existing
+  // /api/runs/:id/remove-worktree route above.
+  app.get('/api/worktrees', async (c) => {
+    const config = await loadConfig(repoRoot);
+    const runs = store.listRuns().filter((r) => r.worktreePath && existsSync(r.worktreePath));
+    const worktrees = await Promise.all(
+      runs.map(async (r) => ({
+        runId: r.id,
+        title: r.title ?? r.id,
+        status: r.status,
+        branch: r.branch ?? null,
+        // POSIX `du` — degrades to null (Windows / du missing / error); never blocks.
+        sizeBytes: await worktreeSizeBytes(r.worktreePath as string),
+        finishedAt: r.finishedAt ?? null,
+        reclaimable: isReclaimable(r),
+      })),
+    );
+    // Total is null when any size degraded, so the panel never shows a wrong sum.
+    const totalBytes = worktrees.some((w) => w.sizeBytes === null)
+      ? null
+      : worktrees.reduce((sum, w) => sum + (w.sizeBytes ?? 0), 0);
+    return c.json({ worktrees, totalBytes, keep: config.worktreeRetention });
+  });
+
+  const reclaimBodySchema = z.object({}).passthrough();
+  app.post('/api/worktrees/reclaim', async (c) => {
+    // Accept an empty or `{}` body; retention is best-effort, so 200 always.
+    const parsed = reclaimBodySchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) return c.json({ error: 'invalid body' }, 400);
+    const { worktreeRetention } = await loadConfig(repoRoot);
+    const reclaimed = await reclaimWorktrees(repoRoot, store, worktreeRetention);
+    return c.json({ reclaimed });
   });
 
   // ---- inbox (spec 007) ------------------------------------------------------

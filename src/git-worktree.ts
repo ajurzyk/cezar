@@ -190,6 +190,26 @@ export async function createWorktree(
   return worktreeInfo(absolutePath, branch, base);
 }
 
+/**
+ * Best-effort on-disk size of a worktree directory in bytes, via POSIX
+ * `du -sk` (kibibytes → bytes). Returns `null` when `du` is unavailable —
+ * including all of Windows, where `du` is not a command — or on any error.
+ * Never throws and never blocks: worktree retention is count-based, so a null
+ * size only blanks the panel's size column, it does not affect reclamation.
+ */
+export function worktreeSizeBytes(path: string): Promise<number | null> {
+  return new Promise((resolve) => {
+    execFile('du', ['-sk', path], { encoding: 'utf8' }, (err, stdout) => {
+      if (err) {
+        resolve(null);
+        return;
+      }
+      const kib = Number.parseInt(stdout.trim().split(/\s+/)[0] ?? '', 10);
+      resolve(Number.isFinite(kib) ? kib * 1024 : null);
+    });
+  });
+}
+
 /** Remove a task worktree and its branch. Best effort — never throws. */
 export async function removeWorktree(
   repoRoot: string,
