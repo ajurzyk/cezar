@@ -89,7 +89,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
   {
     id: 'resources',
     title: 'Resources',
-    description: 'Parallel tasks and per-task memory limit.',
+    description: 'Parallel tasks, per-task memory limit and worktree retention.',
     icon: GaugeIcon,
     component: ResourcesSection,
   },
