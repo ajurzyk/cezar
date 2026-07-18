@@ -64,7 +64,7 @@ PR: #TBD
 
 ### Phase 1: Author the canonical protocol doc
 
-- [ ] 1.1 Draft `AGENT_PROTOCOL.md` (seam, v1, v2, per-backend mapping, testing contract, new-runner checklist)
+- [x] 1.1 Draft `AGENT_PROTOCOL.md` (seam, v1, v2, per-backend mapping, testing contract, new-runner checklist) — 055255e
 
 ### Phase 2: Wire into AGENTS.md and BACKWARD_COMPATIBILITY.md
 
