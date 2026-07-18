@@ -575,6 +575,9 @@ export interface ConfigResponse {
   maxParallel: number
   /** Per-task memory ceiling in MiB (whole process tree); null = no limit. */
   memoryLimitMb: number | null
+  /** Keep the last N finished worktrees on disk (#483); 0 = unlimited. Older
+   *  ones are reclaimed (directory only — branch kept, so work is recoverable). */
+  worktreeRetention: number
   /** Live title updates (task auto-naming): null = no config key, the
    *  CEZ_TITLE_UPDATES env default (ON) decides. */
   liveTitleUpdates: boolean | null
@@ -592,6 +595,9 @@ export interface SetConfigInput {
   maxParallel?: number
   /** null or 0 clears the ceiling back to "no limit". */
   memoryLimitMb?: number | null
+  /** Keep last N finished worktrees (#483); 0 = unlimited, null clears back to
+   *  the default (10). */
+  worktreeRetention?: number | null
   /** null clears the key back to the env-default behavior. */
   liveTitleUpdates?: boolean | null
 }

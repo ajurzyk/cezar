@@ -1210,6 +1210,9 @@ export function createApp(deps: ServerDeps): Hono {
     defaultModels: config.defaultModels ?? {},
     maxParallel: config.maxParallel,
     memoryLimitMb: config.memoryLimitMb ?? null,
+    // Count-based worktree retention (#483): keep the last N finished worktrees
+    // on disk. 0 = unlimited. Always materialized (schema default 10).
+    worktreeRetention: config.worktreeRetention,
     // Live title updates (task auto-naming spec): tri-state — null means "no
     // config key, the CEZ_TITLE_UPDATES env default (ON) decides".
     liveTitleUpdates: config.liveTitleUpdates ?? null,
@@ -1238,6 +1241,10 @@ export function createApp(deps: ServerDeps): Hono {
     // the schema's 1–16; memoryLimitMb null/0 clears the ceiling.
     maxParallel: z.number().int().min(1).max(16).optional(),
     memoryLimitMb: z.number().int().min(0).max(1_048_576).nullable().optional(),
+    // Worktree retention count (Settings → Resources, #483). 0 = unlimited;
+    // null clears the key back to the schema default (10). Unlike memoryLimitMb,
+    // 0 is a meaningful value (unlimited), so it is stored, not treated as clear.
+    worktreeRetention: z.number().int().min(0).max(1000).nullable().optional(),
     // Live title updates toggle (Settings → Agents): null clears the key back
     // to the env-default behavior.
     liveTitleUpdates: z.boolean().nullable().optional(),
@@ -1269,6 +1276,12 @@ export function createApp(deps: ServerDeps): Hono {
       }
     }
     if (parsed.data.maxParallel !== undefined) raw.maxParallel = parsed.data.maxParallel;
+    if (parsed.data.worktreeRetention !== undefined) {
+      // null clears back to the default (10); a number (including 0 = unlimited)
+      // is stored as-is.
+      if (parsed.data.worktreeRetention === null) delete raw.worktreeRetention;
+      else raw.worktreeRetention = parsed.data.worktreeRetention;
+    }
     if (parsed.data.liveTitleUpdates !== undefined) {
       if (parsed.data.liveTitleUpdates === null) delete raw.liveTitleUpdates;
       else raw.liveTitleUpdates = parsed.data.liveTitleUpdates;

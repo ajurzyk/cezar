@@ -13,8 +13,8 @@ Tracking PR: #486
 
 | Phase | Step | Title | Status | Commit |
 |-------|------|-------|--------|--------|
-| 0 | 0.1 | Fix flaky follow-up-template CI test (#413) — robust `chooseTemplate` helper | done | pending |
-| 1 | 1.1 | `worktreeRetention` config key (config.ts + server setConfigSchema/configAnswer/merge) | todo | — |
+| 0 | 0.1 | Fix flaky follow-up-template CI test (#413) — robust `chooseTemplate` helper | done | 8e71da3 |
+| 1 | 1.1 | `worktreeRetention` config key (config.ts + server setConfigSchema/configAnswer/merge) | done | pending |
 | 1 | 1.2 | `worktreeReclaimedAt` optional field on RunRecord | todo | — |
 | 1 | 1.3 | Pure `selectReclaimableWorktrees(runs, keep)` + unit tests | todo | — |
 | 1 | 1.4 | `reclaimWorktrees(repoRoot, store, keep)` I/O enforcer + real-git tests | todo | — |
