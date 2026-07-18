@@ -23,19 +23,44 @@ export function orderSkills(skills: readonly Skill[]): Skill[] {
   return [...skills].sort((a, b) => Number(!isProjectSkill(a)) - Number(!isProjectSkill(b)))
 }
 
-/** Locality first (project before global, the #377 rule), then recency WITHIN each locality:
- *  a skill you ran more recently sorts above one you ran longer ago, and both sort above skills
- *  you have never run. `recentNames` is newest-first (the ui-state `recentSources` refs). The
- *  sort is stable, so never-run skills keep the server's directory order. */
-export function orderSkillsByRecency(skills: readonly Skill[], recentNames: readonly string[]): Skill[] {
-  const rank = new Map<string, number>()
-  recentNames.forEach((name, index) => {
-    if (!rank.has(name)) rank.set(name, index)
-  })
-  const recency = (skill: Skill) => rank.get(skill.name) ?? Number.MAX_SAFE_INTEGER
+/**
+ * The composer picker's frequency sort (#408): locality first (project before global, the #377
+ * rule), then MOST-SELECTED first within each half. `usage` is the ui-state `skillUsage` map
+ * (name → times chosen, counted across BOTH composers — `/new`'s SourcePill and the GitHub tab's
+ * follow-up `SkillsPicker`). The sort is stable, so ties — including "never selected", the
+ * common case before any stats exist — keep the server's own directory order: the project-first
+ * fallback (#2) falls out of stability for free, no separate branch needed. Shared by both
+ * pickers so they can never drift into two different orders.
+ */
+export function orderSkillsByUsage(
+  skills: readonly Skill[],
+  usage: Readonly<Record<string, number>> | undefined,
+): Skill[] {
   return [...skills].sort(
-    (a, b) => Number(!isProjectSkill(a)) - Number(!isProjectSkill(b)) || recency(a) - recency(b),
+    (a, b) =>
+      Number(!isProjectSkill(a)) - Number(!isProjectSkill(b)) ||
+      usageCount(usage, b.name) - usageCount(usage, a.name),
   )
+}
+
+/** One skill's count out of the `skillUsage` map. `Object.hasOwn`, not a plain lookup: `usage`
+ *  comes from `JSON.parse`, so it carries Object.prototype — a skill named `constructor` or
+ *  `toString` would otherwise resolve to the INHERITED function, which `??` does not catch,
+ *  turning the comparator into NaN and the bump into string garbage. */
+function usageCount(usage: Readonly<Record<string, number>> | undefined, name: string): number {
+  if (!usage || !Object.hasOwn(usage, name)) return 0
+  const count = usage[name]
+  return typeof count === 'number' ? count : 0
+}
+
+/** A pure reducer over the ui-state `skillUsage` map (#408): bump one skill's count by one. The
+ *  server's `PUT /api/ui-state` merge is shallow (`uiStateSchema` passthrough), so a successful
+ *  run start always sends the WHOLE updated map back, never just the one changed entry. */
+export function bumpSkillUsage(
+  usage: Readonly<Record<string, number>> | undefined,
+  name: string,
+): Record<string, number> {
+  return { ...usage, [name]: usageCount(usage, name) + 1 }
 }
 
 /**

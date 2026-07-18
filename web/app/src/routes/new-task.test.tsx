@@ -121,6 +121,8 @@ function serve(overrides: {
   workflows?: WorkflowsResponse
   repo?: RepoResponse
   uiState?: Record<string, unknown>
+  /** Non-2xx `GET /api/ui-state` answers (the query-errored path: `data` stays undefined). */
+  uiStateStatus?: number
   createRun?: unknown
   /** Non-2xx `POST /api/runs` answers (the auto-start failure path). */
   createRunStatus?: number
@@ -137,6 +139,7 @@ function serve(overrides: {
     workflows: WORKFLOWS,
     repo: REPO,
     uiState: {},
+    uiStateStatus: 200,
     createRun: { id: 'r1' },
     createRunStatus: 201,
     launchKey: 'k-real',
@@ -168,7 +171,7 @@ function serve(overrides: {
       }
       if (url === '/api/repo') return json(data.repo)
       if (url === '/api/launch-key') return json({ key: data.launchKey })
-      if (url === '/api/ui-state' && method === 'GET') return json(data.uiState)
+      if (url === '/api/ui-state' && method === 'GET') return json(data.uiState, data.uiStateStatus)
       if (url === '/api/ui-state' && method === 'PUT') return json(body ?? {})
       if (url === '/api/runs' && method === 'POST') return json(data.createRun, data.createRunStatus)
       if (url === '/api/config' && method === 'GET')
@@ -407,8 +410,29 @@ describe('submit', () => {
         lastWorktree: true,
         lastAutonomous: true,
         lastGenerateFollowups: true,
+        // ...and bumps its usage count for the #408 frequency sort (a workflow source would
+        // NOT carry a skillUsage key at all — see the WORKFLOW test below).
+        skillUsage: { 'om-fix': 1 },
       }),
     )
+  })
+
+  it('a SKILL run with ui-state unavailable omits skillUsage rather than wiping the map', async () => {
+    // `sourcesReady` only rules out `isPending`, so an ERRORED ui-state query still lets the
+    // form submit with `uiState.data === undefined`. The PUT merge is shallow, so bumping off
+    // that would send a one-entry map and replace every stored count.
+    // 404, not a 5xx: the query client never retries a 4xx (query-client.ts), so the query
+    // lands in its errored state immediately and the test stays deterministic.
+    serve({ createRun: { id: 'run-9' }, uiStateStatus: 404 })
+    renderNewTask()
+    await pillReady('om-fix')
+    fireEvent.change(textarea(), { target: { value: 'Fix the flaky worktree test' } })
+    await startTask()
+
+    await waitFor(() => expect(location()).toBe('/tasks/run-9'))
+    const put = requests.find((r) => r.method === 'PUT' && r.url === '/api/ui-state')
+    // The other prefs still persist — only the unknowable map is left alone.
+    expect(put?.body).not.toHaveProperty('skillUsage')
   })
 
   it('a WORKFLOW source posts { workflow, task }', async () => {

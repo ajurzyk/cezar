@@ -9,10 +9,10 @@ import {
   XIcon,
   ZapIcon,
 } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { Link } from 'react-router'
 
-import { createRun } from '@/api/client'
+import { createRun, putUiState } from '@/api/client'
 import { queryKeys, useUiState } from '@/api/queries'
 import type { GithubItem, Skill, WorkflowDef } from '@/api/types'
 import { Button } from '@/components/ui/button'
@@ -36,8 +36,11 @@ import {
   normalizePromptTemplates,
   resolveAutoApply,
 } from '@/lib/prompt-templates'
-import { isProjectSkill, searchSkills, searchWorkflows, skillKeywords } from '@/lib/skills'
+import { bumpSkillUsage, isProjectSkill, searchSkills, searchWorkflows, skillKeywords } from '@/lib/skills'
+import { isSubmitShortcut, submitShortcutHint } from '@/lib/use-submit-shortcut'
 import { cn } from '@/lib/utils'
+
+import { readFollowupPrompt, writeFollowupPrompt } from './hand-to-agent-draft'
 
 /**
  * The detail pane's "Hand this to the agent" panel: the legacy chip walls replaced by
@@ -47,11 +50,19 @@ import { cn } from '@/lib/utils'
  * the POST is exactly the legacy tab's.
  *
  * Picker state lives in the ROUTE, not here (legacy parity: your workflow/skill selection
- * survives switching between issues — it is a way of working, not a property of one item).
+ * survives switching between issues — it is a way of working, not a property of one item) —
+ * `github.tsx` also persists it to localStorage (#408) so it survives a reload and pre-fills a
+ * hand-off you have never touched (`hand-to-agent-draft.ts`). `skills` arrives already ordered
+ * project-first-then-frequency (`orderSkillsByUsage`, #408) — this component just renders it.
  *
  * The selected skills render as an always-visible chip row OUTSIDE the dropdown — the legacy
  * invariant "the filter can't hide your selection", carried over: cmdk may filter the list,
  * never the selection.
+ *
+ * The custom prompt persists per-item to localStorage as you type (#408 — keyed by `item.url`
+ * so distinct hand-off targets never collide) and submits on ⌘/Ctrl+Enter — deliberately NOT
+ * on a bare Enter, unlike the thread composer's `isSubmitShortcut`: this is a multi-line
+ * instructions box, so Enter alone inserts a newline (the textarea's own default).
  */
 export function HandToAgent({
   item,
@@ -76,16 +87,21 @@ export function HandToAgent({
   onQueued: (url: string, runId: string) => void
 }) {
   const queryClient = useQueryClient()
+  const uiState = useUiState()
   // A skill deleted since it was toggled must not reach the server (legacy rule).
   const validSkills = selectedSkills.filter((name) => skills.some((skill) => skill.name === name))
   // Optional custom prompt (#gh-custom-prompt): empty → the default "Fix GitHub issue #N …"
-  // text. Local + reset per item (the route remounts this via key={item.url}).
-  const [prompt, setPrompt] = useState('')
+  // text. The route remounts this component per item (key={item.url}); the DRAFT — not plain
+  // component state (#408) — restores whatever was typed for THIS item, so switching away and
+  // back (or a page refresh) never loses it.
+  const [prompt, setPrompt] = useState(() => readFollowupPrompt(item.url))
   const promptRef = useRef<HTMLTextAreaElement>(null)
+  useEffect(() => {
+    writeFollowupPrompt(item.url, prompt)
+  }, [item.url, prompt])
 
   // Follow-up prompt templates (#413): built-in unless the user has edited them in Settings →
   // Prompt templates (`ui-state.json`'s `promptTemplates`).
-  const uiState = useUiState()
   const templates = useMemo(
     () => normalizePromptTemplates(uiState.data?.promptTemplates),
     [uiState.data?.promptTemplates],
@@ -127,10 +143,47 @@ export function HandToAgent({
       // The GitHub tab never starts variants, so the answer is a single record.
       const run = 'runs' in created ? created.runs[0] : created
       if (run) onQueued(item.url, run.id)
+      // Frequency sort (#408): every hand-off skill counts, mirroring the /new composer.
+      // Only bump once the CURRENT map is actually known (`uiState.data` present). The PUT
+      // merge is shallow (`uiStateSchema` passthrough, src/server/server.ts), so the client
+      // must send the WHOLE map — bumping off an unresolved or errored query would send a
+      // one-entry map and REPLACE every count the user has accumulated. Skipping the bump
+      // costs one count; sending it would cost the whole history. Fire-and-forget either way.
+      if (validSkills.length > 0 && uiState.data !== undefined) {
+        const nextUsage = validSkills.reduce(
+          (usage, name) => bumpSkillUsage(usage, name),
+          uiState.data.skillUsage,
+        )
+        void putUiState({ skillUsage: nextUsage })
+          .then(() => queryClient.invalidateQueries({ queryKey: queryKeys.uiState }))
+          .catch(() => {})
+      }
+      // The prompt is spent; the picker choices remain (legacy keeps its pills too, #408).
+      // Clear BOTH the store and the state: the persist effect keys on `prompt`, so spending
+      // only the store would leave the textarea showing text that no longer exists anywhere —
+      // text that then vanishes on the next remount.
+      writeFollowupPrompt(item.url, '')
+      setPrompt('')
       void queryClient.invalidateQueries({ queryKey: queryKeys.runs.all })
     },
     onError: (error) => toast(error.message, { tone: 'danger' }),
   })
+
+  const submitShortcut = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    const shouldSubmit =
+      isSubmitShortcut({
+        key: event.key,
+        shiftKey: event.shiftKey,
+        metaKey: event.metaKey,
+        ctrlKey: event.ctrlKey,
+        altKey: event.altKey,
+        repeat: event.repeat,
+        isComposing: event.nativeEvent.isComposing,
+      }) && (event.metaKey || event.ctrlKey) // multi-line box: bare Enter inserts a newline
+    if (!shouldSubmit) return
+    event.preventDefault()
+    if (!start.isPending) start.mutate()
+  }
 
   const toggleSkill = (name: string) =>
     onSkillsChange(
@@ -148,13 +201,16 @@ export function HandToAgent({
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <WorkflowPicker workflows={workflows} value={workflow} onChange={onWorkflowChange} />
-        <SkillsPicker skills={skills} selected={selectedSkills} onToggle={toggleSkill} />
+        <SkillsPicker skills={skills} selected={validSkills} onToggle={toggleSkill} />
         <PromptTemplateMenu templates={templates} onInsert={insertPromptTemplate} />
       </div>
 
-      {selectedSkills.length > 0 ? (
+      {/* Chips and the trigger's count render from `validSkills`, not `selectedSkills`: the run
+          POSTs `validSkills`, so showing a deleted skill here would promise the run a skill it
+          will not use. What the composer shows and what it sends are the same list. */}
+      {validSkills.length > 0 ? (
         <div data-slot="gh-skill-chips" className="mt-2.5 flex flex-wrap gap-1.5">
-          {selectedSkills.map((name) => (
+          {validSkills.map((name) => (
             <button
               key={name}
               type="button"
@@ -175,8 +231,10 @@ export function HandToAgent({
         ref={promptRef}
         data-slot="gh-custom-prompt"
         aria-label="Custom prompt"
+        aria-keyshortcuts="Control+Enter Meta+Enter"
         value={prompt}
         onChange={(event) => setPrompt(event.target.value)}
+        onKeyDown={submitShortcut}
         placeholder={`Add instructions for the agent… (empty uses the default "${item.kind === 'pr' ? 'Address' : 'Fix'} #${item.number}" prompt)`}
         className="mt-3 min-h-20 text-[13px]"
       />
@@ -191,6 +249,12 @@ export function HandToAgent({
           <PlayIcon aria-hidden="true" className="size-3.5" />
           Run agent on this {item.kind === 'pr' ? 'PR' : 'issue'}
         </Button>
+        <kbd
+          aria-hidden="true"
+          className="rounded-[5px] border border-b-2 border-border bg-card px-[5px] py-px font-mono text-[10.5px] font-medium text-muted-foreground"
+        >
+          {submitShortcutHint()}
+        </kbd>
         {queuedRunId ? (
           <>
             <span data-slot="gh-queued" className="flex items-center gap-1 text-xs font-medium text-success">

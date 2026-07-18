@@ -31,12 +31,6 @@ export function pushRecentSource(
   return [source, ...rest].slice(0, cap)
 }
 
-/** The recent SKILL names, newest first — the recency key the composer's skill picker sorts by
- *  (workflow entries are ignored; only skills share a namespace with `Skill.name`). */
-export function recentSkillNames(recent: readonly TaskSource[] | undefined): string[] {
-  return (recent ?? []).filter((s) => s.source === 'skill').map((s) => s.ref)
-}
-
 export interface RunnerOption {
   id: Runner
   label: string
