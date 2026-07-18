@@ -68,8 +68,8 @@ PR: #TBD
 
 ### Phase 2: Wire into AGENTS.md and BACKWARD_COMPATIBILITY.md
 
-- [ ] 2.1 Link `AGENT_PROTOCOL.md` from AGENTS.md (routing row + Related documents)
-- [ ] 2.2 Add the agent-protocol protected-surface section to BACKWARD_COMPATIBILITY.md
+- [x] 2.1 Link `AGENT_PROTOCOL.md` from AGENTS.md (routing row + Related documents) — fd0b7ee
+- [x] 2.2 Add the agent-protocol protected-surface section to BACKWARD_COMPATIBILITY.md — b910faa
 
 ### Phase 3: Validate, self-review, PR
 
