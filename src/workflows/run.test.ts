@@ -98,6 +98,40 @@ describe('RunManager.recordTurnEnd', () => {
   it('is a quiet no-op for an unknown run', async () => {
     await expect(manager.recordTurnEnd('nope', TURN_TEXT)).resolves.toBeUndefined();
   });
+
+  it('applies in-band CEZ markers from the turn text (spec 2026-07-18-task-ref-markers)', async () => {
+    const record = store.createRun({ title: 't', workflow: 'w', task: 'implement comment threads', steps: [] });
+    await manager.recordTurnEnd(
+      record.id,
+      'Progress so far.\nCEZ:PR=500\nCEZ:ISSUE=433\nCEZ:TITLE=implementing comment threads\nMore to come.',
+    );
+    const after = store.getRun(record.id);
+    expect(after?.prNumber).toBe(500);
+    expect(after?.issueNumber).toBe(433);
+    expect(after?.markerRefs).toEqual({ pr: 500, issue: 433 });
+    // The declared title lands number-prefixed, marker-owned.
+    expect(after?.titleSummary).toBe('500: implementing comment threads');
+    expect(after?.titleOrigin).toBe('marker');
+  });
+
+  it('a marker title never overwrites a user rename — but the numbers still land', async () => {
+    const record = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    store.updateRun(record.id, { title: 'My name', titleSummary: 'My name', titleOrigin: 'user' });
+    await manager.recordTurnEnd(record.id, 'CEZ:PR=500\nCEZ:TITLE=implementing comment threads');
+    const after = store.getRun(record.id);
+    expect(after?.titleSummary).toBe('My name');
+    expect(after?.titleOrigin).toBe('user');
+    expect(after?.prNumber).toBe(500);
+  });
+
+  it('prose that merely mentions a marker changes nothing', async () => {
+    const record = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    await manager.recordTurnEnd(record.id, 'I will emit CEZ:PR=442 once the PR exists.');
+    const after = store.getRun(record.id);
+    expect(after?.markerRefs).toBeUndefined();
+    expect(after?.prNumber).toBeUndefined();
+    expect(after?.titleSummary).toBeUndefined();
+  });
 });
 
 /**

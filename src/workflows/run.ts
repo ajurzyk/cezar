@@ -25,7 +25,8 @@ import { loadWorkflows } from './load.js';
 import type { RunRecord, RunStore } from '../runs/store.js';
 import { reclaimWorktrees, rematerializeReclaimedWorktree } from '../runs/retention.js';
 import { extractTaskRefs, refineTaskRefs, titleRefNumber } from '../runs/task-refs.js';
-import { autoNamingActive, generateRunName, liveTitleUpdatesEnabled } from '../runs/auto-name.js';
+import { parseTaskMarkers, stripTaskMarkers } from '../runs/task-markers.js';
+import { autoNamingActive, generateRunName, liveTitleUpdatesEnabled, postValidateTitle } from '../runs/auto-name.js';
 import { reviewGateEnabled } from '../runs/review-gate.js';
 import { UiEventSink } from '../runs/ui-event-sink.js';
 import { chainStepNote, DEFAULT_ALLOWED_TOOLS, stepKind, type WorkflowDef, type WorkflowStepDef } from './types.js';
@@ -764,7 +765,7 @@ export class RunManager {
       }
       if (event.type === 'text') {
         turnText += event.text;
-        const text = stripMonitoringMarker(stripDoneMarker(event.text));
+        const text = stripTaskMarkers(stripMonitoringMarker(stripDoneMarker(event.text)));
         if (text) this.store.appendEvent(runId, { type: 'text', text, stepId });
         return;
       }
@@ -1213,7 +1214,7 @@ export class RunManager {
       }
       if (event.type === 'text') {
         turnText += event.text;
-        const text = stripMonitoringMarker(stripDoneMarker(event.text));
+        const text = stripTaskMarkers(stripMonitoringMarker(stripDoneMarker(event.text)));
         if (text) emit({ type: 'text', text, stepId: step.id });
         return;
       }
@@ -1390,12 +1391,19 @@ export class RunManager {
       const result = await generateRunName(this.repoRoot, { task, skillName, skillDescription, ...live });
       if (!result) return;
       const run = this.store.getRun(runId);
-      if (!run || run.titleOrigin === 'user') return;
+      // Marker-owned state outranks the namer (spec 2026-07-18-task-ref-markers):
+      // a declared title blocks the whole apply (this call raced the marker),
+      // and a declared pr/issue kind blocks that kind field-by-field.
+      if (!run || run.titleOrigin === 'user' || run.titleOrigin === 'marker') return;
       this.store.updateRun(runId, {
         titleSummary: result.titleSummary,
         titleOrigin: 'auto',
-        ...(result.prNumber !== undefined ? { prNumber: result.prNumber } : {}),
-        ...(result.issueNumber !== undefined ? { issueNumber: result.issueNumber } : {}),
+        ...(result.prNumber !== undefined && run.markerRefs?.pr === undefined
+          ? { prNumber: result.prNumber }
+          : {}),
+        ...(result.issueNumber !== undefined && run.markerRefs?.issue === undefined
+          ? { issueNumber: result.issueNumber }
+          : {}),
       });
     } catch {
       // Naming is best-effort — nothing here may disturb the run.
@@ -1406,8 +1414,10 @@ export class RunManager {
     try {
       const run = this.store.getRun(runId);
       if (!run) return;
+      this.applyTurnMarkers(runId, run, turnText);
       // Titles are the namer's job (task auto-naming spec) — turn text is
-      // deliberately NEVER a title source; see maybeRefreshTitle below.
+      // deliberately NEVER a title source; see maybeRefreshTitle below. The
+      // one exception is an explicit CEZ:TITLE declaration (applied above).
       if (run.worktreePath && existsSync(run.worktreePath)) {
         const stat = await worktreeShortstat(run.worktreePath, run.baseBranch ?? 'HEAD');
         if (stat) this.store.updateRun(runId, { diffStat: stat });
@@ -1420,10 +1430,35 @@ export class RunManager {
   }
 
   /**
+   * In-band declarations from the finished turn (spec
+   * 2026-07-18-task-ref-markers): the main thread's own `CEZ:PR=` /
+   * `CEZ:ISSUE=` / `CEZ:TITLE=` lines, parsed from the accumulated turn text
+   * like `CEZ:DONE` — never from tool output. Declared numbers overwrite the
+   * regex/namer display tier (the store re-resolves the referenced-PR chip);
+   * a declared title takes `titleOrigin: 'marker'`, which beats the namer but
+   * never a user rename, and silences the live refresh below.
+   */
+  private applyTurnMarkers(runId: string, run: RunRecord, turnText: string): void {
+    const markers = parseTaskMarkers(turnText);
+    if (markers.pr !== undefined || markers.issue !== undefined) {
+      this.store.applyMarkerRefs(runId, { pr: markers.pr, issue: markers.issue });
+    }
+    if (markers.title && run.titleOrigin !== 'user') {
+      const current = this.store.getRun(runId);
+      const refNumber = current?.prNumber ?? current?.issueNumber;
+      this.store.updateRun(runId, {
+        titleSummary: postValidateTitle(markers.title, refNumber),
+        titleOrigin: 'marker',
+      });
+    }
+  }
+
+  /**
    * Live title refresh (task auto-naming spec, step 3): re-run the namer with
    * the turn's context. Skips: toggle off (`liveTitleUpdates` config over
-   * `CEZ_TITLE_UPDATES` env, default ON), user-owned title, dry-run mocks
-   * (canned answers add nothing), empty turn text, unchanged namer inputs.
+   * `CEZ_TITLE_UPDATES` env, default ON), user-owned title, marker-owned title
+   * (the agent declares via `CEZ:TITLE` — the token-saving fast path), dry-run
+   * mocks (canned answers add nothing), empty turn text, unchanged namer inputs.
    */
   private async maybeRefreshTitle(runId: string, turnText: string): Promise<void> {
     if (!autoNamingActive()) return;
@@ -1431,7 +1466,7 @@ export class RunManager {
     const config = await loadConfig(this.repoRoot);
     if (!liveTitleUpdatesEnabled(config)) return;
     const run = this.store.getRun(runId);
-    if (!run || run.titleOrigin === 'user') return;
+    if (!run || run.titleOrigin === 'user' || run.titleOrigin === 'marker') return;
     const statText = run.diffStat ? `${run.diffStat.files} files, +${run.diffStat.adds} -${run.diffStat.dels}` : undefined;
     const key = `${turnText.slice(0, 200)}|${statText ?? ''}`;
     if (this.lastNamerKey.get(runId) === key) return;
