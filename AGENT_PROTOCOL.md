@@ -239,9 +239,11 @@ partial or malformed. A mapper **must never throw**: unparseable NDJSON lines ar
 skipped (`src/core/ndjson.ts` + the mapper), unknown message/content types
 produce **no events**, and malformed entries in a `plan.updated` payload are
 filtered out (a non-array plan emits no plan event at all). Mapper state is
-**explicit and immutable** — `map<Backend>Message(msg, state)` returns
-`{ events, state }` and never mutates the passed-in state (see the claude mapper's
-`createClaudeUiState` and the "state carries across messages" tests).
+**explicit and immutable** — each mapper's map function takes `(frame, state)`
+and returns `{ events, state }`, never mutating the passed-in state
+(`mapClaudeMessage` / `mapCodexNotification` / `mapOpencodeEvent`, each paired
+with a `create<Backend>UiState`; see the claude mapper's "state carries across
+messages" tests).
 
 ---
 
