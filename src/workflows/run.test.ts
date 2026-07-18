@@ -539,4 +539,14 @@ describe('CEZ:ASK parks as waiting and emits ask.requested (#473)', () => {
     await waitFor(record.id, (r) => r?.status === 'waiting');
     expect(readEvents(record.id).some((e) => e.type === 'ask.requested')).toBe(false);
   }, 30_000);
+
+  it('a malformed CEZ:ASK degrades gracefully: parks waiting, no ask card', async () => {
+    const record = manager.startRun(SINGLE_STEP, { task: 'mock:ask-bad choose', worktree: false });
+    currentId = record.id;
+    await waitFor(record.id, (r) => r?.status === 'waiting');
+    const parked = store.getRun(record.id);
+    expect(parked?.status).toBe('waiting'); // still parks — never worse than the prose fallback
+    expect(parked?.activity).toBeUndefined();
+    expect(readEvents(record.id).some((e) => e.type === 'ask.requested')).toBe(false);
+  }, 30_000);
 });

@@ -85,21 +85,25 @@ async function respond(userText, imageCount) {
   const monitoringMarker = userText.includes('mock:monitoring') ? '\n\nCEZ:MONITORING' : '';
   // `mock:ask` → the reply ends with a valid CEZ:ASK marker (#473), so the
   // AskUser card path (park `waiting` + emit `ask.requested`) is testable dry.
-  const askMarker = userText.includes('mock:ask')
-    ? '\n\nCEZ:ASK ' +
-      JSON.stringify({
-        questions: [
-          {
-            header: 'Library',
-            question: 'Which date library should I standardize on?',
-            options: [
-              { label: 'date-fns', description: 'Tree-shakeable, functional' },
-              { label: 'Luxon', description: 'Immutable, tz-aware' },
-            ],
-          },
-        ],
-      })
-    : '';
+  // `mock:ask-bad` → a MALFORMED marker (invalid JSON), to prove graceful
+  // degradation: the run still parks `waiting`, no ask card, prose preserved.
+  const askMarker = userText.includes('mock:ask-bad')
+    ? '\n\nCEZ:ASK {not valid json'
+    : userText.includes('mock:ask')
+      ? '\n\nCEZ:ASK ' +
+        JSON.stringify({
+          questions: [
+            {
+              header: 'Library',
+              question: 'Which date library should I standardize on?',
+              options: [
+                { label: 'date-fns', description: 'Tree-shakeable, functional' },
+                { label: 'Luxon', description: 'Immutable, tz-aware' },
+              ],
+            },
+          ],
+        })
+      : '';
 
   // `mock:slow` → hold the turn for ~25 s so queue states are observable.
   if (userText.includes('mock:slow')) await sleep(25_000);
