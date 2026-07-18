@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createWorktree } from '../git-worktree.js';
 import { RunStore, type RunRecord } from '../runs/store.js';
 import { RunManager } from './run.js';
@@ -265,5 +265,85 @@ describe('a single agent step plus a check step gets NO chain note (#410)', () =
     expect(notes[0]).not.toContain('chain of');
     expect(notes[0]).not.toContain('earlier step');
     expect(notes[0]).not.toContain('project-conventions');
+  }, 30_000);
+});
+
+/**
+ * #490 — the `CEZ:MONITORING` marker parks a still-working turn-end as
+ * `running`/`activity:'monitoring'` (a non-attention state) instead of
+ * `waiting`, while a markerless turn-end still parks as `waiting`. Resuming
+ * clears the activity. Driven dry through the mock (`mock:monitoring`).
+ */
+describe('CEZ:MONITORING parks as running/monitoring, not waiting (#490)', () => {
+  // Fresh repo + manager per test: these runs PARK (they never reach a terminal
+  // status), and a `worktree:false` parked run holds the exclusive repo-root
+  // lock — so a shared manager would starve the next test. Isolation avoids that.
+  let repoRoot: string;
+  let store: RunStore;
+  let manager: RunManager;
+  let currentId: string | undefined;
+  const savedEnv: Record<string, string | undefined> = {};
+  const SINGLE_STEP: WorkflowDef = {
+    name: 'quick-task',
+    source: 'built-in',
+    steps: [{ id: 'task', name: 'Task', prompt: '{{task}}' }],
+  };
+
+  beforeEach(async () => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-490-'));
+    savedEnv.CEZ_DRY_RUN = process.env.CEZ_DRY_RUN;
+    process.env.CEZ_DRY_RUN = '1';
+    await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
+    writeFileSync(join(repoRoot, 'a.txt'), 'one\n');
+    await run('git', ['add', '-A'], { cwd: repoRoot });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repoRoot });
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot);
+    currentId = undefined;
+  });
+
+  afterEach(() => {
+    if (currentId) manager.cancel(currentId); // release the session + repo lock
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  const waitFor = async (id: string, pred: (r: RunRecord | undefined) => boolean, ms = 15_000) => {
+    const deadline = Date.now() + ms;
+    while (!pred(store.getRun(id))) {
+      if (Date.now() > deadline) throw new Error('condition not met in time');
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  };
+
+  it('a CEZ:MONITORING turn-end parks the run as running/monitoring', async () => {
+    const record = manager.startRun(SINGLE_STEP, { task: 'mock:monitoring keep going', worktree: false });
+    currentId = record.id;
+    await waitFor(record.id, (r) => r?.activity === 'monitoring');
+    const parked = store.getRun(record.id);
+    expect(parked?.status).toBe('running'); // a sub-state of running, NOT waiting
+    expect(parked?.activity).toBe('monitoring');
+  }, 30_000);
+
+  it('a markerless turn-end still parks as waiting with no activity', async () => {
+    const record = manager.startRun(SINGLE_STEP, { task: 'just do the thing', worktree: false });
+    currentId = record.id;
+    await waitFor(record.id, (r) => r?.status === 'waiting');
+    expect(store.getRun(record.id)?.activity).toBeUndefined();
+  }, 30_000);
+
+  it('resuming a monitoring run clears the activity', async () => {
+    const record = manager.startRun(SINGLE_STEP, { task: 'mock:monitoring keep going', worktree: false });
+    currentId = record.id;
+    await waitFor(record.id, (r) => r?.activity === 'monitoring');
+    // A user reply (no marker) resumes the run: the follow-up turn re-parks as
+    // plain `waiting`, and the monitoring activity is gone.
+    expect(manager.sendMessage(record.id, [{ type: 'text', text: 'thanks, carry on' }])).toBe(true);
+    await waitFor(record.id, (r) => r?.status === 'waiting');
+    expect(store.getRun(record.id)?.activity).toBeUndefined();
   }, 30_000);
 });

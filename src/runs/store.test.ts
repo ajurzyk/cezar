@@ -76,6 +76,40 @@ describe('RunStore — titleSummary + diffStat (#389)', () => {
     expect(RunStore.open(dataDir).getRun(run.id)?.worktreeReclaimedAt).toBeUndefined();
   });
 
+  it("round-trips activity:'monitoring' and lets updateRun clear it (#490)", () => {
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    // A fresh record has no activity (additive/optional).
+    expect(run.activity).toBeUndefined();
+    store.updateRun(run.id, { status: 'running', activity: 'monitoring' });
+    store.flush();
+
+    const reopened = RunStore.open(dataDir);
+    expect(reopened.getRun(run.id)?.activity).toBe('monitoring');
+    // Resume/terminal transitions clear it back to a plain running/other state.
+    reopened.updateRun(run.id, { status: 'running', activity: undefined });
+    reopened.flush();
+    expect(RunStore.open(dataDir).getRun(run.id)?.activity).toBeUndefined();
+  });
+
+  it('still loads an old runs.json that predates activity (#490)', () => {
+    writeFileSync(join(dataDir, 'runs.json'), JSON.stringify([LEGACY_RUN]), 'utf8');
+    const store = RunStore.open(dataDir);
+    expect(store.getRun('legacy-1')?.activity).toBeUndefined();
+  });
+
+  it('rejects an unknown activity value at the schema boundary (#490)', () => {
+    writeFileSync(
+      join(dataDir, 'runs.json'),
+      JSON.stringify([{ ...LEGACY_RUN, id: 'bad-activity', status: 'running', activity: 'bogus' }]),
+      'utf8',
+    );
+    // A corrupt/unknown activity must not smuggle a run in with an invalid value:
+    // the schema drops the bad record (degrade-to-fresh), so it does not load.
+    const store = RunStore.open(dataDir);
+    expect(store.getRun('bad-activity')?.activity).not.toBe('bogus');
+  });
+
   it('persists an explicit follow-up opt-out while omission stays compatible', () => {
     const store = RunStore.open(dataDir);
     const disabled = store.createRun({
