@@ -81,8 +81,8 @@ additive-only.
 
 ### Phase 2: Parsing core + record model
 
-- [ ] 2.1 `src/runs/task-markers.ts` parser + unit tests
-- [ ] 2.2 `RunRecord.markerRefs` + `titleOrigin: 'marker'` + store marker-aware referenced-PR resolution + tests
+- [x] 2.1 `src/runs/task-markers.ts` parser + unit tests — ee49008
+- [x] 2.2 `RunRecord.markerRefs` + `titleOrigin: 'marker'` + store marker-aware referenced-PR resolution + tests — ee49008
 
 ### Phase 3: Engine wiring
 
