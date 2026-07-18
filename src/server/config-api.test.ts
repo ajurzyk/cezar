@@ -56,6 +56,7 @@ describe('the config API', () => {
       defaultModels: {},
       maxParallel: 2,
       memoryLimitMb: null,
+      worktreeRetention: 10,
       liveTitleUpdates: null,
     });
   });
@@ -112,8 +113,29 @@ describe('the config API', () => {
       defaultModels: { claude: 'opus' },
       maxParallel: 5,
       memoryLimitMb: null,
+      worktreeRetention: 10,
       liveTitleUpdates: null,
     });
+  });
+
+  it('PUT worktreeRetention persists, keeps 0 (unlimited), and null clears back to the default', async () => {
+    const res = await put({ worktreeRetention: 3 });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ worktreeRetention: 3 });
+    expect(rawFile().worktreeRetention).toBe(3);
+    // 0 is a meaningful value (unlimited) — stored, not treated as "clear".
+    await put({ worktreeRetention: 0 });
+    expect(rawFile().worktreeRetention).toBe(0);
+    expect((await getBody()).worktreeRetention).toBe(0);
+    // null drops the key so it degrades to the schema default (10).
+    await put({ worktreeRetention: null });
+    expect(rawFile().worktreeRetention).toBeUndefined();
+    expect((await getBody()).worktreeRetention).toBe(10);
+  });
+
+  it('rejects a negative or over-limit worktreeRetention with 400', async () => {
+    expect((await put({ worktreeRetention: -1 })).status).toBe(400);
+    expect((await put({ worktreeRetention: 1001 })).status).toBe(400);
   });
 
   it('PUT keeps the pre-R6 answer fields (protected shape) alongside the additive ones', async () => {

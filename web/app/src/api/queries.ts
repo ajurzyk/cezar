@@ -22,6 +22,7 @@ import {
   getTodos,
   getUiState,
   getWorkflows,
+  getWorktrees,
   patchRun,
   sendMessage,
 } from './client'
@@ -64,6 +65,8 @@ export const queryKeys = {
   uiState: ['ui-state'] as const,
   /** The Settings → Agents knobs (`GET /api/config`, R6 1.5). */
   config: ['config'] as const,
+  /** The worktree management panel (`GET /api/worktrees`, #483). */
+  worktrees: ['worktrees'] as const,
   github: (params: { limit?: number } = {}) => ['github', params.limit ?? null] as const,
   openTargets: ['open-targets'] as const,
 } as const
@@ -270,6 +273,15 @@ export function useConfig() {
   return useQuery({
     queryKey: queryKeys.config,
     queryFn: ({ signal }) => getConfig({ signal }),
+  })
+}
+
+/** The worktree management panel (#483). Invalidated by the global event stream when a run
+ *  finishes or is reclaimed, so the on-disk list and total stay live while the panel is open. */
+export function useWorktrees() {
+  return useQuery({
+    queryKey: queryKeys.worktrees,
+    queryFn: ({ signal }) => getWorktrees({ signal }),
   })
 }
 

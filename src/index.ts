@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url';
 import { detectEnvironment } from './core/backend-detect.js';
 import { pruneOrphans } from './git-worktree.js';
 import { getRepoInfo } from './server/git.js';
+import { loadConfig } from './config.js';
+import { reclaimWorktrees } from './runs/retention.js';
 import { RunStore } from './runs/store.js';
 import { RunManager } from './workflows/run.js';
 import { loadWorkflows } from './workflows/load.js';
@@ -118,6 +120,14 @@ async function serveCommand(repoRoot: string, preferredPort: number, openBrowser
     );
     if (orphans.length > 0) {
       console.log(`  cleaned ${orphans.length} orphaned worktree(s): ${orphans.map((id) => id.slice(0, 8)).join(', ')}`);
+    }
+    // Count-based worktree retention (#483): reclaim finished worktrees beyond
+    // the keep-limit (directory only — `cez/<id8>` branch kept, so recoverable).
+    // Best-effort; never blocks boot.
+    const keep = (await loadConfig(repoRoot).catch(() => null))?.worktreeRetention ?? 10;
+    const reclaimed = await reclaimWorktrees(repoRoot, store, keep).catch(() => [] as string[]);
+    if (reclaimed.length > 0) {
+      console.log(`  reclaimed ${reclaimed.length} old worktree(s), branch kept: ${reclaimed.map((id) => id.slice(0, 8)).join(', ')}`);
     }
   }
 

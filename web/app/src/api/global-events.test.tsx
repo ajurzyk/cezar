@@ -353,6 +353,7 @@ describe('useGlobalEvents — reconcile doctrine', () => {
       queryKeys.runs.all, // covers the list and every detail under it
       queryKeys.todos,
       queryKeys.health, // the repo/branch chip — health is not on the stream (#369)
+      queryKeys.worktrees, // the Resources panel's list/total (#483)
     ])
   })
 
@@ -367,7 +368,12 @@ describe('useGlobalEvents — reconcile doctrine', () => {
     // A phone that slept: the tab was frozen, no error handler ever ran, and the stream may have
     // been dead for an hour. What is on screen is about to be read as true.
     setVisibility('visible')
-    expect(invalidatedKeys(invalidate)).toEqual([queryKeys.runs.all, queryKeys.todos, queryKeys.health])
+    expect(invalidatedKeys(invalidate)).toEqual([
+      queryKeys.runs.all,
+      queryKeys.todos,
+      queryKeys.health,
+      queryKeys.worktrees,
+    ])
   })
 
   it('stops listening for visibility once unmounted', () => {

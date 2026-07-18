@@ -39,6 +39,7 @@ function serve({
     defaultModels: {},
     maxParallel: 2,
     memoryLimitMb: null,
+    worktreeRetention: 10,
     liveTitleUpdates: null,
     ...config,
   }

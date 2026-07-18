@@ -1,0 +1,126 @@
+import { QueryClientProvider } from '@tanstack/react-query'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { MemoryRouter } from 'react-router'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+
+import { createQueryClient } from '@/api/query-client'
+import type { ConfigResponse } from '@/api/types'
+import { Toaster, resetToasts } from '@/components/ui/toaster'
+import { AppRoutes } from '@/routes'
+
+/**
+ * Settings → Resources: the "Keep last N worktrees" field (#483). Renders the
+ * current value, saves the entered number (0 = unlimited, sent as a number so it
+ * is never mistaken for "clear"), and rejects out-of-range / non-integer input.
+ * The API contract itself is pinned server-side in src/server/config-api.test.ts.
+ */
+
+let requests: Array<{ method: string; url: string; body?: unknown }> = []
+
+function serve(config: Partial<ConfigResponse> = {}) {
+  requests = []
+  const state: ConfigResponse = {
+    baseBranch: null,
+    defaultRunner: 'claude',
+    systemPrompt: null,
+    defaultModels: {},
+    maxParallel: 2,
+    memoryLimitMb: null,
+    worktreeRetention: 10,
+    liveTitleUpdates: null,
+    ...config,
+  }
+  const json = (payload: unknown, status = 200) =>
+    new Response(JSON.stringify(payload), { status, headers: { 'content-type': 'application/json' } })
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      const method = init?.method ?? 'GET'
+      const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined
+      requests.push({ method, url, body })
+      if (url === '/api/config' && method === 'GET') return json(state)
+      if (url === '/api/config' && method === 'PUT') {
+        if (body?.worktreeRetention !== undefined) {
+          state.worktreeRetention = body.worktreeRetention as number
+        }
+        return json(state)
+      }
+      return new Promise<never>(() => {})
+    }),
+  )
+}
+
+function renderAt(entry: string) {
+  render(
+    <QueryClientProvider client={createQueryClient()}>
+      <MemoryRouter initialEntries={[entry]}>
+        <AppRoutes />
+        <Toaster />
+      </MemoryRouter>
+    </QueryClientProvider>,
+  )
+}
+
+const retentionInput = () =>
+  document.querySelector<HTMLInputElement>('[data-slot="resources-worktree-retention"]')
+const saveButton = () =>
+  document.querySelector<HTMLButtonElement>('[data-action="resources-save-retention"]')
+const puts = () =>
+  requests.filter(
+    (r) => r.method === 'PUT' && r.url === '/api/config' && (r.body as { worktreeRetention?: unknown })?.worktreeRetention !== undefined,
+  )
+
+afterEach(() => {
+  act(() => resetToasts())
+  cleanup()
+  vi.unstubAllGlobals()
+})
+
+describe('Settings → Resources: keep-last-N-worktrees (#483)', () => {
+  it('renders the configured value and disables Save until it changes', async () => {
+    serve({ worktreeRetention: 7 })
+    renderAt('/settings/resources')
+    await waitFor(() => expect(retentionInput()).not.toBeNull())
+    expect(retentionInput()!.value).toBe('7')
+    expect(saveButton()!.disabled).toBe(true)
+  })
+
+  it('saves the entered count through PUT /api/config', async () => {
+    serve({ worktreeRetention: 10 })
+    renderAt('/settings/resources')
+    await waitFor(() => expect(retentionInput()).not.toBeNull())
+
+    fireEvent.change(retentionInput()!, { target: { value: '3' } })
+    expect(saveButton()!.disabled).toBe(false)
+    fireEvent.click(saveButton()!)
+
+    await waitFor(() => expect(puts()).toHaveLength(1))
+    expect(puts()[0]?.body).toEqual({ worktreeRetention: 3 })
+  })
+
+  it('saves 0 as a real value (unlimited), not as a clear', async () => {
+    serve({ worktreeRetention: 5 })
+    renderAt('/settings/resources')
+    await waitFor(() => expect(retentionInput()).not.toBeNull())
+
+    fireEvent.change(retentionInput()!, { target: { value: '0' } })
+    fireEvent.click(saveButton()!)
+
+    await waitFor(() => expect(puts()).toHaveLength(1))
+    expect(puts()[0]?.body).toEqual({ worktreeRetention: 0 })
+  })
+
+  it('rejects a negative, over-limit, or non-integer count (Save stays disabled, no PUT)', async () => {
+    serve({ worktreeRetention: 10 })
+    renderAt('/settings/resources')
+    await waitFor(() => expect(retentionInput()).not.toBeNull())
+
+    for (const bad of ['-1', '1001', '2.5', '']) {
+      fireEvent.change(retentionInput()!, { target: { value: bad } })
+      expect(saveButton()!.disabled).toBe(true)
+      expect(document.querySelector('[data-slot="resources-retention-invalid"]')).not.toBeNull()
+    }
+    expect(puts()).toHaveLength(0)
+  })
+})

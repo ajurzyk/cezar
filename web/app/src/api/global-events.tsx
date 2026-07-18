@@ -64,6 +64,8 @@ function reconcile(queryClient: QueryClient): void {
   void queryClient.invalidateQueries({ queryKey: queryKeys.runs.all })
   void queryClient.invalidateQueries({ queryKey: queryKeys.todos })
   void queryClient.invalidateQueries({ queryKey: queryKeys.health })
+  // The worktree panel's list/total (#483) — a run finishing or a reclaim changes it.
+  void queryClient.invalidateQueries({ queryKey: queryKeys.worktrees })
 }
 
 /** Fold one stream message into the cache. The reducers it calls are pure and table-tested in
@@ -79,6 +81,9 @@ function applyGlobalEvent(queryClient: QueryClient, usage: UsageStore, event: Gl
       if (queryClient.getQueryData(key) !== undefined) {
         queryClient.setQueryData<ApiRun>(key, (previous) => mergeRun(previous, event.run))
       }
+      // A terminal transition can reclaim (or re-materialize) a worktree (#483); keep the
+      // panel live. invalidateQueries only refetches while the panel is actually mounted.
+      void queryClient.invalidateQueries({ queryKey: queryKeys.worktrees })
       return
     }
     case 'run-deleted': {
@@ -88,6 +93,8 @@ function applyGlobalEvent(queryClient: QueryClient, usage: UsageStore, event: Gl
       // truth — instead of rendering a record that no longer exists.
       queryClient.removeQueries({ queryKey: queryKeys.runs.detail(event.id) })
       queryClient.removeQueries({ queryKey: queryKeys.runs.diff(event.id) })
+      // Its worktree goes with it — refresh the panel (#483).
+      void queryClient.invalidateQueries({ queryKey: queryKeys.worktrees })
       return
     }
     case 'todos':

@@ -29,7 +29,8 @@ import { markStarted, onTodosChanged, readTodos, removeTodo, startTodosWatch, ty
 import type { RunEvent, RunRecord, RunStatus, RunStore } from '../runs/store.js';
 import { isV2WireEventType } from '../runs/ui-event-sink.js';
 import type { RunManager } from '../workflows/run.js';
-import { removeWorktree, worktreeDiff, worktreeDiffStat } from '../git-worktree.js';
+import { removeWorktree, worktreeDiff, worktreeDiffStat, worktreeSizeBytes } from '../git-worktree.js';
+import { isReclaimable, reclaimWorktrees } from '../runs/retention.js';
 import { getBranches, getCommit, getDiff, getLog, getRepoInfo, getStatus } from './git.js';
 import {
   collectChanges,
@@ -1013,6 +1014,42 @@ export function createApp(deps: ServerDeps): Hono {
     return store.deleteRun(id) ? c.json({ deleted: true }) : c.json({ error: 'not found' }, 404);
   });
 
+  // ---- worktree management panel (#483) --------------------------------------
+  // List materialized task worktrees with disk usage + retention state, and a
+  // "Reclaim now" action. Both additive; the per-row delete reuses the existing
+  // /api/runs/:id/remove-worktree route above.
+  app.get('/api/worktrees', async (c) => {
+    const config = await loadConfig(repoRoot);
+    const runs = store.listRuns().filter((r) => r.worktreePath && existsSync(r.worktreePath));
+    const worktrees = await Promise.all(
+      runs.map(async (r) => ({
+        runId: r.id,
+        title: r.title ?? r.id,
+        status: r.status,
+        branch: r.branch ?? null,
+        // POSIX `du` — degrades to null (Windows / du missing / error); never blocks.
+        sizeBytes: await worktreeSizeBytes(r.worktreePath as string),
+        finishedAt: r.finishedAt ?? null,
+        reclaimable: isReclaimable(r),
+      })),
+    );
+    // Total is null when any size degraded, so the panel never shows a wrong sum.
+    const totalBytes = worktrees.some((w) => w.sizeBytes === null)
+      ? null
+      : worktrees.reduce((sum, w) => sum + (w.sizeBytes ?? 0), 0);
+    return c.json({ worktrees, totalBytes, keep: config.worktreeRetention });
+  });
+
+  const reclaimBodySchema = z.object({}).passthrough();
+  app.post('/api/worktrees/reclaim', async (c) => {
+    // Accept an empty or `{}` body; retention is best-effort, so 200 always.
+    const parsed = reclaimBodySchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) return c.json({ error: 'invalid body' }, 400);
+    const { worktreeRetention } = await loadConfig(repoRoot);
+    const reclaimed = await reclaimWorktrees(repoRoot, store, worktreeRetention);
+    return c.json({ reclaimed });
+  });
+
   // ---- inbox (spec 007) ------------------------------------------------------
   // Opt-in via CEZ_FOLLOWUPS=1 (#471). Off, the reader degrades to an empty
   // inbox (a 404 would make old clients surface an error for a feature that is
@@ -1210,6 +1247,9 @@ export function createApp(deps: ServerDeps): Hono {
     defaultModels: config.defaultModels ?? {},
     maxParallel: config.maxParallel,
     memoryLimitMb: config.memoryLimitMb ?? null,
+    // Count-based worktree retention (#483): keep the last N finished worktrees
+    // on disk. 0 = unlimited. Always materialized (schema default 10).
+    worktreeRetention: config.worktreeRetention,
     // Live title updates (task auto-naming spec): tri-state — null means "no
     // config key, the CEZ_TITLE_UPDATES env default (ON) decides".
     liveTitleUpdates: config.liveTitleUpdates ?? null,
@@ -1238,6 +1278,10 @@ export function createApp(deps: ServerDeps): Hono {
     // the schema's 1–16; memoryLimitMb null/0 clears the ceiling.
     maxParallel: z.number().int().min(1).max(16).optional(),
     memoryLimitMb: z.number().int().min(0).max(1_048_576).nullable().optional(),
+    // Worktree retention count (Settings → Resources, #483). 0 = unlimited;
+    // null clears the key back to the schema default (10). Unlike memoryLimitMb,
+    // 0 is a meaningful value (unlimited), so it is stored, not treated as clear.
+    worktreeRetention: z.number().int().min(0).max(1000).nullable().optional(),
     // Live title updates toggle (Settings → Agents): null clears the key back
     // to the env-default behavior.
     liveTitleUpdates: z.boolean().nullable().optional(),
@@ -1269,6 +1313,12 @@ export function createApp(deps: ServerDeps): Hono {
       }
     }
     if (parsed.data.maxParallel !== undefined) raw.maxParallel = parsed.data.maxParallel;
+    if (parsed.data.worktreeRetention !== undefined) {
+      // null clears back to the default (10); a number (including 0 = unlimited)
+      // is stored as-is.
+      if (parsed.data.worktreeRetention === null) delete raw.worktreeRetention;
+      else raw.worktreeRetention = parsed.data.worktreeRetention;
+    }
     if (parsed.data.liveTitleUpdates !== undefined) {
       if (parsed.data.liveTitleUpdates === null) delete raw.liveTitleUpdates;
       else raw.liveTitleUpdates = parsed.data.liveTitleUpdates;

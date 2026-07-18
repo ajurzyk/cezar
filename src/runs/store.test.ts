@@ -58,6 +58,22 @@ describe('RunStore — titleSummary + diffStat (#389)', () => {
     expect(run?.titleSummary).toBeUndefined();
     expect(run?.diffStat).toBeUndefined();
     expect(run?.generateFollowups).toBeUndefined();
+    // Retention field (#483) is additive: a record without it parses and reads undefined.
+    expect(run?.worktreeReclaimedAt).toBeUndefined();
+  });
+
+  it('round-trips worktreeReclaimedAt and lets updateRun clear it (retention #483)', () => {
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    store.updateRun(run.id, { worktreeReclaimedAt: '2026-07-18T00:00:00.000Z' });
+    store.flush();
+
+    const reopened = RunStore.open(dataDir);
+    expect(reopened.getRun(run.id)?.worktreeReclaimedAt).toBe('2026-07-18T00:00:00.000Z');
+    // Re-materialization clears the stamp so retention sees the run again.
+    reopened.updateRun(run.id, { worktreeReclaimedAt: undefined });
+    reopened.flush();
+    expect(RunStore.open(dataDir).getRun(run.id)?.worktreeReclaimedAt).toBeUndefined();
   });
 
   it('persists an explicit follow-up opt-out while omission stays compatible', () => {
