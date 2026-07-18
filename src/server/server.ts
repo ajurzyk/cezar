@@ -42,7 +42,7 @@ import {
   readWorktreePath,
 } from './git-changes.js';
 import { loadConfig, type CezConfig } from '../config.js';
-import { isLoopbackHost, resolveCapabilities } from './capabilities.js';
+import { isLoopbackHostHeader, normalizeHostname, resolveCapabilities } from './capabilities.js';
 import { resolveForge } from './forge/index.js';
 import { fetchGithub } from './github.js';
 import { ensureLaunchKey } from './launch-key.js';
@@ -262,7 +262,10 @@ export function createApp(deps: ServerDeps): Hono {
     if (c.req.path === '/api/health') return next();
 
     const hostName = hostnameOfHost(c.req.header('host'));
-    if (!isHostedMode() && !isLoopbackHost(hostName)) {
+    // Strict twin of `isLoopbackHost`: a *missing* Host is untrusted here (an
+    // absent header is not the "we defaulted to the loopback bind" case), and
+    // the loopback match is anchored so `127.0.0.1.evil.com` does not pass.
+    if (!isHostedMode() && !isLoopbackHostHeader(hostName)) {
       return c.json(
         { error: 'forbidden: unexpected Host header — this request did not originate from this machine (see #426)' },
         403,
@@ -278,8 +281,8 @@ export function createApp(deps: ServerDeps): Hono {
         // `changeOrigin` proxy, so its Origin is `localhost:5173` while our Host
         // is `127.0.0.1:<port>`; both name this one machine, never a remote site.
         const sameOrigin =
-          originHost !== null &&
-          (originHost === hostName || (isLoopbackHost(originHost) && isLoopbackHost(hostName)));
+          !!originHost &&
+          (originHost === hostName || (isLoopbackHostHeader(originHost) && isLoopbackHostHeader(hostName)));
         if (!sameOrigin) {
           return c.json({ error: 'forbidden: cross-origin request rejected (same-origin only)' }, 403);
         }
@@ -1338,21 +1341,20 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
   return serve({ fetch: app.fetch, port, hostname: deps.bindHost ?? '127.0.0.1' });
 }
 
-/** The bare hostname of a `Host` header — port stripped, IPv6 brackets
- *  removed, lowercased. `[::1]:4321` → `::1`, `127.0.0.1:4321` → `127.0.0.1`. */
+/** The bare hostname of a `Host` header — port stripped, IPv6 brackets and the
+ *  FQDN trailing dot removed, lowercased. `[::1]:4321` → `::1`,
+ *  `127.0.0.1:4321` → `127.0.0.1`, `localhost.:4321` → `localhost`. */
 function hostnameOfHost(host: string | undefined): string {
-  if (!host) return '';
-  const bracketed = host.match(/^\[([^\]]+)\]/);
-  if (bracketed?.[1]) return bracketed[1].toLowerCase();
-  return (host.split(':')[0] ?? '').toLowerCase();
+  return host ? normalizeHostname(host) : '';
 }
 
 /** The hostname of an `Origin` header, or `null` when it is not a parseable URL
- *  (e.g. the opaque `"null"` origin of a sandboxed iframe). Brackets stripped so
- *  it compares equal to `hostnameOfHost` for IPv6. */
+ *  (e.g. the opaque `"null"` origin of a sandboxed iframe). Normalized through
+ *  the same path as `hostnameOfHost` so the two compare equal for IPv6 and for
+ *  trailing-dot FQDNs. */
 function hostnameOfOrigin(origin: string): string | null {
   try {
-    return new URL(origin).hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    return normalizeHostname(new URL(origin).hostname);
   } catch {
     return null;
   }

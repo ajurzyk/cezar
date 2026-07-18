@@ -90,6 +90,68 @@ describe('request-origin guard (#426)', () => {
     expect(res.status).toBe(403);
   });
 
+  // The allowlist must match loopback *addresses*, not a `127.` string prefix:
+  // an attacker can register any of these hostnames, point them at 127.0.0.1
+  // and be genuinely same-origin with the cockpit, which satisfies the Origin
+  // and Sec-Fetch-Site checks too. A prefix match hands them the whole API.
+  const REBINDING_HOSTS = ['127.0.0.1.evil.com', '127.evil.com', '127.0.0.1.nip.io', '1270.0.0.1', '127.0.0.1x'];
+
+  for (const host of REBINDING_HOSTS) {
+    it(`rejects a READ whose Host is the rebinding hostname ${host} → 403`, async () => {
+      const res = await app.request('/api/runs', { headers: { host: `${host}:4321` } });
+      expect(res.status).toBe(403);
+    });
+
+    it(`rejects the same-origin RCE write from rebinding hostname ${host} → 403`, async () => {
+      // The full attack: the page really is served from `host`, so Origin
+      // matches Host and the browser reports same-origin. Only the anchored
+      // Host allowlist can stop this one.
+      const res = await postRuns({
+        host: `${host}:4321`,
+        origin: `http://${host}:4321`,
+        'sec-fetch-site': 'same-origin',
+      });
+      expect(res.status).toBe(403);
+      expect(store.listRuns()).toHaveLength(0); // no run created — RCE path closed
+    });
+  }
+
+  // ---- a missing Host is untrusted, not "defaulted to loopback" ------------
+
+  it('rejects a write with no Host and no Origin header → 403', async () => {
+    const res = await postRuns({});
+    expect(res.status).toBe(403);
+    expect(store.listRuns()).toHaveLength(0);
+  });
+
+  it('rejects a read with no Host header → 403', async () => {
+    const res = await app.request('/api/runs', { headers: {} });
+    expect(res.status).toBe(403);
+  });
+
+  // ---- loopback spellings that must NOT fail closed ------------------------
+
+  it('allows a trailing-dot FQDN loopback Host (localhost.) → 201', async () => {
+    const res = await postRuns({ host: 'localhost.:4321', origin: 'http://localhost.:4321' });
+    expect(res.status).toBe(201);
+    expect(store.listRuns()).toHaveLength(1);
+  });
+
+  it('allows the expanded IPv6 loopback Host (0:0:0:0:0:0:0:1) → 201', async () => {
+    const res = await postRuns({
+      host: '[0:0:0:0:0:0:0:1]:4321',
+      origin: 'http://[0:0:0:0:0:0:0:1]:4321',
+    });
+    expect(res.status).toBe(201);
+    expect(store.listRuns()).toHaveLength(1);
+  });
+
+  it('allows other addresses inside 127.0.0.0/8 (127.0.0.2) → 201', async () => {
+    const res = await postRuns({ host: '127.0.0.2:4321', origin: 'http://127.0.0.2:4321' });
+    expect(res.status).toBe(201);
+    expect(store.listRuns()).toHaveLength(1);
+  });
+
   // ---- the cockpit's own same-origin traffic passes -----------------------
 
   it('allows the cockpit same-origin write (Origin === Host, loopback) → 201', async () => {
