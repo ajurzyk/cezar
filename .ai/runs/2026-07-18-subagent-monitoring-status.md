@@ -59,8 +59,8 @@ PR: #497
 
 ### Phase 2: UI surfacing
 
-- [ ] 2.1 Widen `AttentionInput` to include `activity`; add `deriveAttention` monitoring branch + `attention.test.ts`
-- [ ] 2.2 Surface/suppression tests: run-header pill, task-thread no paused-hint, notifications no-notify, stays in Working
+- [x] 2.1 Widen `AttentionInput` to include `activity`; add `deriveAttention` monitoring branch + `attention.test.ts` — 6b286e3
+- [x] 2.2 Surface/suppression tests: run-header pill, task-thread no paused-hint, notifications no-notify, stays in Working — 6b286e3
 
 ### Phase 3: Polish & docs
 
