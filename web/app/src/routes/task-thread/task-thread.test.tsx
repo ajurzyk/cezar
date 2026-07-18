@@ -128,6 +128,16 @@ describe('ThreadView', () => {
     expect(textarea.placeholder).toBe('Message the agent — / for skills, @ for files…')
   })
 
+  it('monitoring → no paused hint, "message" placeholder, and a "monitoring" pill (#490)', () => {
+    renderView(<ThreadView run={run('running', { activity: 'monitoring' })} thread={reduceThread(EVENTS)} />)
+    // Still working on downstream work, not on you: never the "paused, waiting for your reply" banner.
+    expect(document.querySelector('[data-slot="paused-hint"]')).toBeNull()
+    expect(document.querySelector('[data-slot="pill"]')?.textContent).toContain('monitoring')
+    const textarea = screen.getByLabelText('Reply to the agent') as HTMLTextAreaElement
+    expect(textarea.disabled).toBe(false)
+    expect(textarea.placeholder).toBe('Message the agent — / for skills, @ for files…')
+  })
+
   it('closed → the composer is disabled with the legacy reason and the Continue way out', () => {
     renderView(
       <ThreadView

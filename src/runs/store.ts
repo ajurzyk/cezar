@@ -5,6 +5,14 @@ import { join } from 'node:path';
 import { z } from 'zod';
 
 export type RunStatus = 'queued' | 'running' | 'waiting' | 'review' | 'done' | 'failed' | 'cancelled';
+/**
+ * A sub-state of `running` (spec 2026-07-18-subagent-monitoring-status, #490):
+ * the agent ended its turn still working on its own downstream work (a sub-agent
+ * or a monitored command) and declared it with the `CEZ:MONITORING` marker — so
+ * the cockpit shows a non-attention "monitoring" label instead of "needs you".
+ * Only ever set while `status === 'running'`; cleared on resume/terminal.
+ */
+export type RunActivity = 'monitoring';
 export type StepStatus =
   | 'pending'
   | 'running'
@@ -67,6 +75,10 @@ const runRecordSchema = z.object({
    *  autonomous. Set at creation from `WorkflowInput.autonomous`. */
   autonomous: z.boolean().optional(),
   status: z.enum(['queued', 'running', 'waiting', 'review', 'done', 'failed', 'cancelled']),
+  /** Sub-state of `running` (spec 2026-07-18-subagent-monitoring-status, #490):
+   *  `monitoring` while the agent is still working on its own downstream work.
+   *  Optional/absent on old runs; cleared when the run resumes or ends. */
+  activity: z.enum(['monitoring']).optional(),
   createdAt: z.string(),
   startedAt: z.string().optional(),
   finishedAt: z.string().optional(),

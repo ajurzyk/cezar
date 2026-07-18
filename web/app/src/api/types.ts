@@ -20,6 +20,10 @@
 
 export type RunStatus = 'queued' | 'running' | 'waiting' | 'review' | 'done' | 'failed' | 'cancelled'
 
+/** Sub-state of `running` (spec 2026-07-18-subagent-monitoring-status, #490): the agent is
+ *  still working on its own downstream work (a sub-agent / a monitored command), not on you. */
+export type RunActivity = 'monitoring'
+
 export type StepStatus =
   | 'pending'
   | 'running'
@@ -75,6 +79,9 @@ export interface RunRecord {
   /** false when the run deliberately disabled follow-up todo generation. Absent means enabled. */
   generateFollowups?: boolean
   status: RunStatus
+  /** `monitoring` while `status === 'running'` and the agent is working on downstream work
+   *  (spec 2026-07-18-subagent-monitoring-status, #490). Absent on old runs; cleared on resume/end. */
+  activity?: RunActivity
   createdAt: string
   startedAt?: string
   finishedAt?: string

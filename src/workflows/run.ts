@@ -41,11 +41,27 @@ export const IDLE_TIMEOUT_MS = 15 * 60_000;
  * (codex, opencode) can't split the marker across text events.
  */
 const DONE_MARKER_RE = /CEZ:DONE\s*$/;
+/**
+ * Still-working marker from the agent contract (spec
+ * 2026-07-18-subagent-monitoring-status, #490): a turn whose text ends with
+ * `CEZ:MONITORING` means "I ended this turn but I'm still working on my own
+ * downstream work (a sub-agent / a command I'm monitoring), not waiting on the
+ * user" — cezar parks it as `running`/`activity:'monitoring'` instead of
+ * `waiting`, so the cockpit shows a non-attention state. `CEZ:DONE` wins if both
+ * appear. Detected on accumulated turn text (like `CEZ:DONE`) so delta-streaming
+ * backends can't split the marker across text events.
+ */
+const MONITORING_MARKER_RE = /CEZ:MONITORING\s*$/;
 /** Strip a trailing marker from one text event so transcripts stay free of
  *  protocol noise. Delta backends may split the marker across events — then
  *  it stays visible; detection above is unaffected. */
 function stripDoneMarker(text: string): string {
   return text.replace(/\s*CEZ:DONE\s*$/, '');
+}
+/** Strip a trailing `CEZ:MONITORING` marker from one text event (see
+ *  `stripDoneMarker`; same delta-backend caveat). */
+function stripMonitoringMarker(text: string): string {
+  return text.replace(/\s*CEZ:MONITORING\s*$/, '');
 }
 /** Periodic "cezar autosave" commit in the task worktree (spec 006). */
 export const AUTOSAVE_INTERVAL_MS = 90_000;
@@ -610,7 +626,9 @@ export class RunManager {
     if (delivered) {
       this.clearIdleTimer(state);
       this.waiting.delete(runId); // resumed — the run counts against slots again
-      this.store.updateRun(runId, { status: 'running' });
+      // Clear any `monitoring` activity — the agent is actively working again
+      // (spec 2026-07-18-subagent-monitoring-status, #490).
+      this.store.updateRun(runId, { status: 'running', activity: undefined });
       if (state.currentStepId) {
         this.store.updateStep(runId, state.currentStepId, { status: 'running' });
       }
@@ -724,6 +742,7 @@ export class RunManager {
       error: undefined,
       finishedAt: undefined,
       currentStepId: stepId,
+      activity: undefined, // resuming a monitoring run — it's actively working again (#490)
     });
     this.store.updateStep(runId, stepId, {
       status: 'running',
@@ -745,7 +764,7 @@ export class RunManager {
       }
       if (event.type === 'text') {
         turnText += event.text;
-        const text = stripDoneMarker(event.text);
+        const text = stripMonitoringMarker(stripDoneMarker(event.text));
         if (text) this.store.appendEvent(runId, { type: 'text', text, stepId });
         return;
       }
@@ -768,6 +787,7 @@ export class RunManager {
         void this.recordTurnEnd(runId, turnText); // titleSummary + diffStat (#389)
         const sessionOpen = !state.cancelled && state.session?.open;
         const done = sessionOpen && DONE_MARKER_RE.test(turnText.trimEnd());
+        const monitoring = sessionOpen && !done && MONITORING_MARKER_RE.test(turnText.trimEnd());
         turnText = '';
         if (done) {
           // Goal achieved (agent contract, #347) — same as in runAgentStep.
@@ -794,14 +814,27 @@ export class RunManager {
               return true;
             })();
           if (!autoContinued) {
-            this.store.updateRun(runId, { status: 'waiting' });
-            this.store.updateStep(runId, stepId, { status: 'waiting' });
+            // `CEZ:MONITORING` → non-attention `running`/`activity:'monitoring'`
+            // instead of `waiting` (spec 2026-07-18-subagent-monitoring-status,
+            // #490). Same lifecycle as waiting (frees the slot, keeps the idle
+            // timer). The autonomous nudge above still wins over monitoring.
+            if (monitoring) {
+              this.store.updateRun(runId, { status: 'running', activity: 'monitoring' });
+              this.store.updateStep(runId, stepId, { status: 'running' });
+            } else {
+              this.store.updateRun(runId, { status: 'waiting', activity: undefined });
+              this.store.updateStep(runId, stepId, { status: 'waiting' });
+            }
             this.waiting.add(runId);
             this.armIdleTimer(runId, state);
             void this.pump();
           }
         }
-        appendHandoffHeartbeat(this.dataDir, runId, `turn complete — status=${sessionOpen ? 'waiting' : 'running'}`);
+        appendHandoffHeartbeat(
+          this.dataDir,
+          runId,
+          `turn complete — status=${monitoring ? 'monitoring' : sessionOpen ? 'waiting' : 'running'}`,
+        );
       }
     };
 
@@ -1180,7 +1213,7 @@ export class RunManager {
       }
       if (event.type === 'text') {
         turnText += event.text;
-        const text = stripDoneMarker(event.text);
+        const text = stripMonitoringMarker(stripDoneMarker(event.text));
         if (text) emit({ type: 'text', text, stepId: step.id });
         return;
       }
@@ -1203,6 +1236,8 @@ export class RunManager {
         void this.recordTurnEnd(runId, turnText); // titleSummary + diffStat (#389)
         const sessionOpen = !state.cancelled && state.session?.open;
         const done = interactive && sessionOpen && DONE_MARKER_RE.test(turnText.trimEnd());
+        const monitoring =
+          interactive && sessionOpen && !done && MONITORING_MARKER_RE.test(turnText.trimEnd());
         turnText = '';
         if (done) {
           // Goal achieved (agent contract, #347): close the session instead
@@ -1214,16 +1249,31 @@ export class RunManager {
         }
         const waiting = interactive && sessionOpen;
         if (waiting) {
-          // Turn over, session open: the ball is in the user's court.
-          this.store.updateRun(runId, { status: 'waiting' });
-          this.store.updateStep(runId, step.id, { status: 'waiting' });
+          // Turn over, session open. Either the ball is in the user's court
+          // (`waiting`), or the agent declared it is still working on its own
+          // downstream work with `CEZ:MONITORING` — then park as
+          // `running`/`activity:'monitoring'`, a non-attention state, instead of
+          // raising "needs you" (spec 2026-07-18-subagent-monitoring-status, #490).
+          // Lifecycle is identical either way: the run frees its slot and keeps
+          // the idle timer, so even a stalled monitoring run is reclaimed.
+          if (monitoring) {
+            this.store.updateRun(runId, { status: 'running', activity: 'monitoring' });
+            this.store.updateStep(runId, step.id, { status: 'running' });
+          } else {
+            this.store.updateRun(runId, { status: 'waiting', activity: undefined });
+            this.store.updateStep(runId, step.id, { status: 'waiting' });
+          }
           this.waiting.add(runId);
           this.armIdleTimer(runId, state);
           void this.pump(); // the freed slot can start a queued run right away
         }
         // Cez's own heartbeat — the handoff stays current even when the
         // agent forgets to write (spec 007).
-        appendHandoffHeartbeat(this.dataDir, runId, `turn complete — status=${waiting ? 'waiting' : 'running'}`);
+        appendHandoffHeartbeat(
+          this.dataDir,
+          runId,
+          `turn complete — status=${monitoring ? 'monitoring' : waiting ? 'waiting' : 'running'}`,
+        );
       }
     };
 

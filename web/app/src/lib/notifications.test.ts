@@ -95,6 +95,13 @@ describe('diffRunTransitions (attention → notify mapping)', () => {
     expect(entering).toEqual([])
   })
 
+  it('entering monitoring never notifies — it is a running sub-state, not attention (#490)', () => {
+    const monitoring = run({ status: 'running', activity: 'monitoring' })
+    // From active running (no status change) and from waiting (leaving attention): neither notifies.
+    expect(diffRunTransitions(seen([['r1', 'running']]), [monitoring]).entering).toEqual([])
+    expect(diffRunTransitions(seen([['r1', 'waiting']]), [monitoring]).entering).toEqual([])
+  })
+
   it('rebuilds the status map each observation, so deleted runs fall out', () => {
     const { statuses } = diffRunTransitions(seen([['gone', 'running'], ['r1', 'running']]), [
       run({ id: 'r1', status: 'running' }),

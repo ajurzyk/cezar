@@ -478,6 +478,8 @@ describe('the global follow-up gate (dry run)', () => {
     const id = await runToEnd({ task: 'do the thing mock:done' });
     expect(capturedSystemPrompt()).toContain('CEZ_HANDOFF_FILE');
     expect(capturedSystemPrompt()).toContain('CEZ:DONE');
+    // The still-working marker rides in the same handoff contract (#490).
+    expect(capturedSystemPrompt()).toContain('CEZ:MONITORING');
     expect(readFileSync(join(repoRoot, '.ai/cezar/runs', `${id}.handoff.md`), 'utf8')).toContain(
       'mock: implemented the change',
     );
