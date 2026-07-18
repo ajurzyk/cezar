@@ -440,6 +440,12 @@ never blocks startup):
 ```jsonc
 {
   "skillsRepos": [{ "repo": "open-mercato/skills", "ref": "main" }], // team skills; [] disables
+  // Team-skill repos are code-trusted: a skill body becomes an agent system prompt.
+  // Only owner/name, https/ssh URLs, or local paths (`/abs`, `./rel`, `~/dir`,
+  // `C:\dir`) are accepted — no ext::/fd:: transport helpers. Write a relative
+  // path as `./name`, not a bare `name`. Pin `ref` to a full commit SHA to freeze
+  // the source against a moving branch head — cezar verifies it resolves to
+  // exactly that commit, and reports it as `team.commit`.
   "maxParallel": 2,          // how many tasks may run at once (non-git dirs always run 1)
   "worktreeRetention": 10,   // keep the last N finished worktrees on disk; 0 = unlimited (branch always kept)
   "defaultRunner": "claude", // agent backend: "claude" (default) · "codex" · "opencode"
