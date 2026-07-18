@@ -16,8 +16,8 @@ Tracking PR: #486
 | 0 | 0.1 | Fix flaky follow-up-template CI test (#413) — robust `chooseTemplate` helper | done | 8e71da3 |
 | 1 | 1.1 | `worktreeRetention` config key (config.ts + server setConfigSchema/configAnswer/merge) | done | ebe9543 |
 | 1 | 1.2 | `worktreeReclaimedAt` optional field on RunRecord | done | bb729cd |
-| 1 | 1.3 | Pure `selectReclaimableWorktrees(runs, keep)` + unit tests | done | pending |
-| 1 | 1.4 | `reclaimWorktrees(repoRoot, store, keep)` I/O enforcer + real-git tests | todo | — |
+| 1 | 1.3 | Pure `selectReclaimableWorktrees(runs, keep)` + unit tests | done | 0bc6ab3 |
+| 1 | 1.4 | `reclaimWorktrees(repoRoot, store, keep)` I/O enforcer + real-git tests | done | pending |
 | 1 | 1.5 | Wire enforcer: startup (index.ts) + terminal transitions (run.ts) | todo | — |
 | 1 | 1.5a | Clear `worktreeReclaimedAt` + re-materialize dir on resume/continue | todo | — |
 | 1 | 1.6 | Settings → Resources "Keep last N worktrees" input + types + test | todo | — |

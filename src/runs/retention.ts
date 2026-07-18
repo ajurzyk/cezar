@@ -2,8 +2,10 @@
 // checkout per finished task under `.ai/cezar/worktrees/<runId>`; nothing bounds
 // the total, so disk saturates. This module decides *which* finished worktrees
 // to reclaim (directory only — the `cez/<id8>` branch is kept, so the work stays
-// recoverable). The selector here is pure and unit-testable; the I/O enforcer
-// that actually calls `removeWorktree` lives beside it in `retention-enforce.ts`.
+// recoverable) and the thin I/O enforcer that performs the reclaim. The selector
+// is pure and unit-testable; the enforcer never throws (helper discipline).
+import { existsSync } from 'node:fs';
+import { removeWorktree } from '../git-worktree.js';
 import type { RunRecord, RunStatus } from './store.js';
 
 /** The "finished" status set — mirrors `RunStore.archiveFinished`. A run at the
@@ -38,4 +40,58 @@ export function selectReclaimableWorktrees(runs: readonly RunRecord[], keep: num
     .filter(isReclaimable)
     .sort((a, b) => (recencyKey(a) < recencyKey(b) ? 1 : recencyKey(a) > recencyKey(b) ? -1 : 0));
   return reclaimable.slice(keep).map((r) => r.id);
+}
+
+/** The slice of the runs store the enforcer needs. Kept structural so the
+ *  enforcer stays easy to test and never imports the concrete store. */
+export interface RetentionStore {
+  listRuns(): RunRecord[];
+  updateRun(id: string, patch: { worktreeReclaimedAt?: string }): unknown;
+}
+
+/**
+ * Enforce the retention budget: reclaim the *directory* of every over-limit
+ * finished worktree (branch kept via `removeWorktree` without the branch arg),
+ * stamping `worktreeReclaimedAt` on each run actually reclaimed. Returns the
+ * reclaimed run ids (for logging/SSE).
+ *
+ * Never throws (helper discipline). `removeWorktree` is best-effort and does not
+ * report failure, so a run is stamped only once its directory is confirmed gone
+ * — a locked/permission failure leaves the stamp unset so the next pass retries.
+ * Idempotent under races: `removeWorktree` is `--force` + `prune` and a repeated
+ * stamp is harmless.
+ */
+export interface ReclaimOptions {
+  /** Timestamp source for the stamp — injectable for deterministic tests. */
+  now?: () => string;
+  /** Directory reclaimer — defaults to the real `removeWorktree` (branch kept).
+   *  Injectable so tests can exercise the "removal failed" branch without brittle
+   *  filesystem-permission tricks. */
+  remove?: (repoRoot: string, worktreePath: string) => Promise<void>;
+}
+
+export async function reclaimWorktrees(
+  repoRoot: string,
+  store: RetentionStore,
+  keep: number,
+  opts: ReclaimOptions = {},
+): Promise<string[]> {
+  const now = opts.now ?? (() => new Date().toISOString());
+  const remove = opts.remove ?? ((root, path) => removeWorktree(root, path)); // branch kept
+  const runs = store.listRuns();
+  const byId = new Map(runs.map((r) => [r.id, r]));
+  const reclaimed: string[] = [];
+  for (const id of selectReclaimableWorktrees(runs, keep)) {
+    const run = byId.get(id);
+    if (!run?.worktreePath) continue;
+    try {
+      await remove(repoRoot, run.worktreePath);
+      if (existsSync(run.worktreePath)) continue; // reclaim failed; retry next pass
+      store.updateRun(id, { worktreeReclaimedAt: now() });
+      reclaimed.push(id);
+    } catch {
+      // best-effort: never let retention crash a terminal transition or startup.
+    }
+  }
+  return reclaimed;
 }
