@@ -139,6 +139,9 @@ describe('toolDisplay', () => {
       { name: 'todowrite', expected: { toolKind: 'plan', title: 'Update plan' } },
       { name: 'todoList', expected: { toolKind: 'plan', title: 'Update plan' } },
       { name: 'plan', expected: { toolKind: 'plan', title: 'Update plan' } },
+      { name: 'TaskCreate', input: { subject: 'x' }, expected: { toolKind: 'plan', title: 'Update plan' } },
+      { name: 'TaskUpdate', input: { taskId: '1' }, expected: { toolKind: 'plan', title: 'Update plan' } },
+      { name: 'TaskList', expected: { toolKind: 'plan', title: 'Update plan' } },
 
       // ---- MCP: codex mcpToolCall item + claude/opencode mcp__server__tool names ----
       {

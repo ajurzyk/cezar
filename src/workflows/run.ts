@@ -23,6 +23,7 @@ import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff, worktreeS
 import { getRepoInfo } from '../server/git.js';
 import { loadWorkflows } from './load.js';
 import type { RunRecord, RunStore } from '../runs/store.js';
+import { reclaimWorktrees, rematerializeReclaimedWorktree } from '../runs/retention.js';
 import { extractTaskRefs, refineTaskRefs, titleRefNumber } from '../runs/task-refs.js';
 import { autoNamingActive, generateRunName, liveTitleUpdatesEnabled } from '../runs/auto-name.js';
 import { UiEventSink } from '../runs/ui-event-sink.js';
@@ -466,6 +467,24 @@ export class RunManager {
     this.active.delete(runId);
     this.memoryPausing.delete(runId);
     this.lastNamerKey.delete(runId);
+    // A run leaving the active registry is a terminal transition (done/review/
+    // failed/cancelled) — the one moment the finished-worktree count can grow.
+    // Enforce count-based retention (#483) here so a single hook covers every
+    // terminal path. Fire-and-forget: retention must never delay or throw into
+    // the lifecycle.
+    void this.enforceRetention();
+  }
+
+  /** Reclaim finished worktrees beyond the keep-limit (#483) — directory only,
+   *  `cez/<id8>` branch kept. Best-effort; a failure never affects run
+   *  lifecycle. `review`/live runs are excluded by the selector. */
+  private async enforceRetention(): Promise<void> {
+    try {
+      const keep = (await loadConfig(this.repoRoot)).worktreeRetention;
+      await reclaimWorktrees(this.repoRoot, this.store, keep);
+    } catch {
+      // retention is best-effort; swallow so terminal transitions never break.
+    }
   }
 
   /** Last live-refresh namer inputs per run — unchanged inputs skip the call. */
@@ -653,6 +672,12 @@ export class RunManager {
   ): Promise<void> {
     // Continuation runs in the task's worktree when it still exists (spec
     // 006) — the resumed session sees exactly what the original run left.
+    // Retention (#483) may have reclaimed this run's worktree directory while
+    // keeping its branch and worktreePath. Re-materialize it on resume and clear
+    // the stamp so the session regains its isolated tree and the run is eligible
+    // for retention again — otherwise it keeps a dir on disk while staying
+    // invisible to the enforcer forever. Best-effort; falls back to repoRoot.
+    await rematerializeReclaimedWorktree(this.repoRoot, this.store, runId);
     const record = this.store.getRun(runId);
     // The env is a live ceiling: a run created while the inbox was on must not keep writing
     // follow-ups after it is switched off.

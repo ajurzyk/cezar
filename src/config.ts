@@ -25,6 +25,14 @@ const configSchema = z.object({
   /** How many tasks may run at once (spec 006). Non-git dirs always run 1. */
   maxParallel: z.number().int().min(1).max(16).default(2),
   /**
+   * Count-based worktree retention (#483): keep the last N *finished*
+   * worktrees materialized on disk; reclaim older ones (directory only — the
+   * `cez/<id8>` branch is kept, so the work stays recoverable). 0 = unlimited
+   * (never auto-reclaim). Default 10. `.catch(10)` keeps it additive-safe: a
+   * bad value degrades to the default instead of discarding the rest.
+   */
+  worktreeRetention: z.number().int().min(0).max(1000).default(10).catch(10),
+  /**
    * Per-task memory ceiling in MiB (whole process tree). When a running task's
    * RSS crosses this the engine pauses it with a warning and lets the queue
    * advance (#memory-guard). 0 / unset = no limit. `.catch(undefined)` keeps
