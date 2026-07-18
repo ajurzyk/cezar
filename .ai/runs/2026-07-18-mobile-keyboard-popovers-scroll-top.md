@@ -89,6 +89,8 @@ no route resets it on navigation, so a deep scroll on one page carries into the 
 
 ## Progress
 
+PR: #504
+
 > Convention: `- [ ]` pending, `- [x]` done. Append ` — <commit sha>` when a step lands. Do not rename step titles.
 
 ### Phase 1: visual-viewport insets utility
@@ -106,5 +108,5 @@ no route resets it on navigation, so a deep scroll on one page carries into the 
 
 ### Phase 4: validation + PR
 
-- [ ] 4.1 Full validation gate, self-review, draft PR + labels
+- [x] 4.1 Full validation gate, self-review, draft PR + labels — PR #504
 - [ ] 4.2 om-auto-verify-pr-ui QA + om-auto-review-pr autofix loop
