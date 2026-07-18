@@ -164,6 +164,15 @@ describe('request shapes', () => {
     // Inbox actions (R6 1.2): the exact legacy endpoints, ids URL-encoded like every other path.
     { name: 'removeTodo', call: () => removeTodo('todo/1'), path: '/api/todos/todo%2F1', method: 'DELETE' },
     { name: 'startTodo', call: () => startTodo('todo/1'), path: '/api/todos/todo%2F1/start', method: 'POST' },
+    // #413: extra instructions (e.g. an inserted prompt template) ride an optional body;
+    // omitted (the case above) sends none at all — the pre-#413 call shape.
+    {
+      name: 'startTodo (with prompt)',
+      call: () => startTodo('todo/1', { prompt: 'Also add tests.' }),
+      path: '/api/todos/todo%2F1/start',
+      method: 'POST',
+      body: { prompt: 'Also add tests.' },
+    },
     {
       // #401: an Inbox card that picked a backend. No pick → the bodyless POST above, unchanged.
       name: 'startTodo (runner + model override, #401)',

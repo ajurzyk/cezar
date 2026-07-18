@@ -1,5 +1,5 @@
 import { QueryClientProvider } from '@tanstack/react-query'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -701,5 +701,181 @@ describe('the hand-to-agent run (legacy three-way body)', () => {
 
     await waitFor(() => expect(screen.getByText('a task is already running')).toBeTruthy())
     expect(document.querySelector('[data-slot="gh-queued"]')).toBeNull()
+  })
+})
+
+// ---- prompt templates (#413) --------------------------------------------------------------------
+
+describe('the follow-up prompt template menu (#413)', () => {
+  /** The menu is a Popover + cmdk (like the skills picker beside it), so it opens on click. */
+  async function openTemplateMenu(): Promise<void> {
+    fireEvent.click(document.querySelector('[data-slot="prompt-template-trigger"]')!)
+    await waitFor(() =>
+      expect(document.querySelector('[data-slot="prompt-template-option"]')).not.toBeNull(),
+    )
+  }
+
+  const option = (id: string) =>
+    document.querySelector<HTMLElement>(`[data-slot="prompt-template-option"][data-template="${id}"]`)
+
+  it('an untouched ui-state shows the built-in templates, and inserting one fills the custom prompt', async () => {
+    stubFetch()
+    await openDetail()
+
+    await openTemplateMenu()
+    expect(document.querySelectorAll('[data-slot="prompt-template-option"]').length).toBeGreaterThan(1)
+    expect(option('add-tests')).not.toBeNull()
+
+    fireEvent.click(option('add-tests')!)
+    await waitFor(() =>
+      expect(screen.getByLabelText('Custom prompt')).toHaveProperty(
+        'value',
+        'Also add or update tests covering this change.',
+      ),
+    )
+  })
+
+  it('a user-edited ui-state templates list replaces the built-ins in the menu', async () => {
+    stubFetch({
+      'GET /api/ui-state': () =>
+        jsonResponse({ promptTemplates: [{ id: 'custom-1', label: 'My snippet', text: 'Custom instructions.' }] }),
+    })
+    await openDetail()
+
+    await openTemplateMenu()
+    expect(document.querySelectorAll('[data-slot="prompt-template-option"]')).toHaveLength(1)
+    expect(option('custom-1')?.textContent).toContain('My snippet')
+
+    fireEvent.click(option('custom-1')!)
+    await waitFor(() =>
+      expect(screen.getByLabelText('Custom prompt')).toHaveProperty('value', 'Custom instructions.'),
+    )
+  })
+
+  it('inserting a second template stacks it below the first, separated by a blank line', async () => {
+    stubFetch()
+    await openDetail()
+
+    await openTemplateMenu()
+    fireEvent.click(option('add-tests')!)
+    await waitFor(() =>
+      expect(screen.getByLabelText('Custom prompt')).toHaveProperty(
+        'value',
+        'Also add or update tests covering this change.',
+      ),
+    )
+
+    await openTemplateMenu()
+    fireEvent.click(option('update-docs')!)
+
+    await waitFor(() =>
+      expect(screen.getByLabelText('Custom prompt')).toHaveProperty(
+        'value',
+        'Also add or update tests covering this change.\n\nAlso update any relevant documentation or comments.',
+      ),
+    )
+  })
+
+  it('the menu is searchable — typing narrows it to the matching template', async () => {
+    stubFetch()
+    await openDetail()
+
+    await openTemplateMenu()
+    const all = document.querySelectorAll('[data-slot="prompt-template-option"]').length
+    expect(all).toBeGreaterThan(1)
+
+    fireEvent.change(screen.getByPlaceholderText('search templates…'), { target: { value: 'docs' } })
+    await waitFor(() =>
+      expect(document.querySelectorAll('[data-slot="prompt-template-option"]')).toHaveLength(1),
+    )
+    expect(option('update-docs')).not.toBeNull()
+  })
+
+  it('search matches a template by its TEXT, not just the label someone gave it', async () => {
+    stubFetch()
+    await openDetail()
+
+    await openTemplateMenu()
+    // "unrelated refactors" appears only in the body of the keep-minimal template.
+    fireEvent.change(screen.getByPlaceholderText('search templates…'), {
+      target: { value: 'unrelated refactors' },
+    })
+    await waitFor(() =>
+      expect(document.querySelectorAll('[data-slot="prompt-template-option"]')).toHaveLength(1),
+    )
+    expect(option('keep-minimal')).not.toBeNull()
+  })
+})
+
+// ---- auto-apply on skill selection (#413 follow-up) ---------------------------------------------
+
+describe('templates assigned to a skill auto-apply when a skill is picked', () => {
+  const ASSIGNED = {
+    'GET /api/ui-state': () =>
+      jsonResponse({
+        promptTemplates: [
+          { id: 'assigned', label: 'Fix rules', text: 'Follow the fix rules.', skills: ['om-fix'] },
+          { id: 'manual', label: 'Manual', text: 'Never auto.' },
+        ],
+      }),
+  }
+
+  /** Toggle a skill. The picker is multi-select and STAYS open after a toggle, so only open it
+   *  when it is not already showing — clicking the trigger again would close it instead. */
+  const pickSkill = async (name: string) => {
+    const selector = `[data-slot="gh-skill-option"][data-skill="${name}"]`
+    if (document.querySelector(selector) === null) {
+      fireEvent.click(document.querySelector('[data-slot="gh-skills-trigger"]')!)
+      await waitFor(() => expect(document.querySelector(selector)).not.toBeNull())
+    }
+    fireEvent.click(document.querySelector(selector)!)
+  }
+
+  it('fills an untouched prompt box with the assigned template, and only that one', async () => {
+    stubFetch(ASSIGNED)
+    await openDetail()
+
+    await pickSkill('om-fix')
+    await waitFor(() =>
+      expect(screen.getByLabelText('Custom prompt')).toHaveProperty('value', 'Follow the fix rules.'),
+    )
+  })
+
+  it('deselecting the skill takes the auto-applied text back out again', async () => {
+    stubFetch(ASSIGNED)
+    await openDetail()
+
+    await pickSkill('om-fix')
+    await waitFor(() =>
+      expect(screen.getByLabelText('Custom prompt')).toHaveProperty('value', 'Follow the fix rules.'),
+    )
+
+    await pickSkill('om-fix')
+    await waitFor(() => expect(screen.getByLabelText('Custom prompt')).toHaveProperty('value', ''))
+  })
+
+  it('NEVER overwrites a prompt the user already typed in', async () => {
+    stubFetch(ASSIGNED)
+    await openDetail()
+
+    fireEvent.change(screen.getByLabelText('Custom prompt'), { target: { value: 'my own words' } })
+    await pickSkill('om-fix')
+
+    // Give the effect every chance to misbehave before asserting it did not.
+    await waitFor(() =>
+      expect(document.querySelector('[data-slot="gh-skill-chip"][data-skill="om-fix"]')).not.toBeNull(),
+    )
+    expect(screen.getByLabelText('Custom prompt')).toHaveProperty('value', 'my own words')
+  })
+
+  it('a skill with no template assigned to it leaves the box alone', async () => {
+    stubFetch(ASSIGNED)
+    await openDetail()
+
+    await pickSkill('g-review')
+    await waitFor(() =>
+      expect(document.querySelector('[data-slot="gh-skill-chip"][data-skill="g-review"]')).not.toBeNull(),
+    )
+    expect(screen.getByLabelText('Custom prompt')).toHaveProperty('value', '')
   })
 })

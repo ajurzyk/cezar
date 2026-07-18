@@ -510,6 +510,11 @@ export interface UiState {
   /** Settings → Notifications (redesign R6 1.7): the browser-notification toggle. Off unless
    *  literally `true`. Permission itself is per-browser and never persisted. */
   notifications?: { enabled?: boolean }
+  /** Follow-up prompt templates (#413): reusable snippets insertable into the GitHub hand-over,
+   *  Inbox, and /new composers. Absent → the built-in defaults (`lib/prompt-templates.ts`);
+   *  present (even `[]`) is the user's own edited list from Settings → Prompt templates.
+   *  `skills` (optional) are the skill names the template auto-applies for. */
+  promptTemplates?: { id: string; label: string; text: string; skills?: string[] }[]
   /** The open-mercato/skills promo banner (#391), dismissed for good. Set once true, never
    *  unset — server-persisted rather than a cookie so "shown once" holds across browsers. */
   dismissedSkillsBanner?: boolean
@@ -598,6 +603,9 @@ export type SetConfigResponse = ConfigResponse
 export interface OpenTarget {
   id: string
   label: string
+  /** A stable icon key (#361) the UI maps to a concrete icon — `openInIcon` in run-header.tsx.
+   *  Optional: an older server omitting it just renders the generic fallback icon. */
+  icon?: string
 }
 
 /** `GET /api/open-targets` — the detected local apps; empty in hosted mode (CEZ_REMOTE). */

@@ -221,6 +221,23 @@ const uiStateSchema = z
         density: z.enum(['comfortable', 'compact', 'ultra']).optional(),
       })
       .optional(),
+    // Follow-up prompt templates (#413): reusable snippets insertable into the GitHub hand-over
+    // and Inbox follow-up composers. Absent → the client's built-in defaults; present (even `[]`)
+    // is the user's own edited list, from Settings → Prompt templates. Additive, like the rest of
+    // ui-state — the cockpit is the only writer, so validation stays generous but bounded.
+    promptTemplates: z
+      .array(
+        z.object({
+          id: z.string().min(1).max(64),
+          label: z.string().trim().min(1).max(80),
+          text: z.string().trim().min(1).max(2000),
+          // Skill names this template auto-applies for. Optional and additive: templates
+          // written before this key existed keep validating, and stay manual-only.
+          skills: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
+        }),
+      )
+      .max(50)
+      .optional(),
     // Skills promo banner (#391): set once the cockpit banner is dismissed, never unset.
     // Server-persisted (not a cookie) so the "shown once" promise holds across browsers.
     dismissedSkillsBanner: z.boolean().optional(),
@@ -264,14 +281,25 @@ const continueSchema = z.object({
   model: z.string().max(200).optional(),
 });
 
-// Inbox "▶ Run" body (spec 007 / #401): both fields optional, so an empty POST — every client
-// before the pills — starts on the host's `defaultRunner`, exactly as before. This is a START
-// path, not a continue: there is no prior backend to preserve, so an omitted field means "host
-// default" rather than "keep what the run had".
-const startTodoSchema = z.object({
-  runner: z.enum(['claude', 'codex', 'opencode']).optional(),
-  model: z.string().max(200).optional(),
-});
+// Inbox "▶ Run" body (spec 007 / #401 / #413): every field optional, and the whole body is
+// optional too, so an empty POST — every client before the pills and the composer — starts on
+// the host's `defaultRunner` with no extra instructions, exactly as before. This is a START
+// path, not a continue: there is no prior backend to preserve, so an omitted `runner`/`model`
+// means "host default" rather than "keep what the run had". `prompt` (#413) is extra
+// instructions appended to the entry's suggested/summary task text; whitespace-only degrades to
+// absent so it never touches `task`.
+const startTodoSchema = z
+  .object({
+    runner: z.enum(['claude', 'codex', 'opencode']).optional(),
+    model: z.string().max(200).optional(),
+    prompt: z
+      .string()
+      .trim()
+      .max(20_000, 'prompt must be at most 20000 characters')
+      .optional()
+      .transform((s) => (s ? s : undefined)),
+  })
+  .optional();
 
 export function createApp(deps: ServerDeps): Hono {
   const { repoRoot, store, manager, version, update, bindHost } = deps;
@@ -1028,7 +1056,22 @@ export function createApp(deps: ServerDeps): Hono {
     const id = c.req.param('id');
     const todo = (await readTodos(dataDir)).find((t) => t.id === id);
     if (!todo) return c.json({ error: 'not found' }, 404);
-    const parsed = startTodoSchema.safeParse(await c.req.json().catch(() => ({})));
+
+    // Body is optional and read exactly once (runner/model #401 + prompt #413 share it). A
+    // request with none at all (the pre-pills/pre-composer client) stays `undefined`, same as an
+    // empty `{}`. A body that IS present but is not valid JSON becomes `null`, which the schema
+    // rejects → 400 (the `.catch(() => null)` pattern every other mutating route uses); mapping
+    // it to `undefined` too would let a broken payload pass as "no body" and silently 201.
+    const rawBody = await c.req.text().catch(() => '');
+    let body: unknown;
+    if (rawBody.trim().length > 0) {
+      try {
+        body = JSON.parse(rawBody);
+      } catch {
+        body = null;
+      }
+    }
+    const parsed = startTodoSchema.safeParse(body);
     if (!parsed.success) {
       return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
     }
@@ -1036,6 +1079,7 @@ export function createApp(deps: ServerDeps): Hono {
 
     let task = (todo.suggestedPrompt ?? todo.summary).trim() || todo.summary;
     if (todo.suggestedArgs) task += `\n\nArguments: ${todo.suggestedArgs}`;
+    if (parsed.data?.prompt) task += `\n\n${parsed.data.prompt}`;
 
     let workflow: WorkflowDef | undefined;
     if (todo.suggestedSkill) {
@@ -1056,8 +1100,8 @@ export function createApp(deps: ServerDeps): Hono {
 
     const run = manager.startRun(workflow, {
       task,
-      runner: parsed.data.runner,
-      model: parsed.data.model,
+      runner: parsed.data?.runner,
+      model: parsed.data?.model,
     });
     await markStarted(dataDir, id, run.id);
     return c.json({ run }, 201);

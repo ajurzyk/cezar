@@ -362,21 +362,26 @@ export function removeTodo(id: string): Promise<RemoveTodoResponse> {
   return mutate<RemoveTodoResponse>('DELETE', `/api/todos/${encodeURIComponent(id)}`)
 }
 
-/** The Inbox card's optional backend choice for a Run (#401). Unlike `ContinueOptions` these
- *  start a NEW run, so an omitted field means the host's `defaultRunner`, not "keep the run's". */
+/** The Inbox card's optional backend choice + extra instructions for a Run. Unlike
+ *  `ContinueOptions` these start a NEW run, so an omitted `runner`/`model` means the host's
+ *  `defaultRunner`, not "keep the run's". `prompt` (#413) is extra instructions appended to the
+ *  suggested/summary task text — e.g. a template inserted in the Inbox composer. */
 export interface StartTodoOptions {
   runner?: Runner
   model?: string
+  prompt?: string
 }
 
 /** Inbox "Run" (spec 007): the server turns the entry into a task — a one-off single-step
  *  workflow around the suggested skill when it exists, plain quick-task otherwise — and
  *  answers 201 with the new run. 409 when the entry was already started. An optional
- *  runner/model picks the engine; omitted starts on the host default (backward compat). */
+ *  runner/model (#401) picks the engine and an optional `prompt` (#413) appends instructions;
+ *  with neither, sends no body at all — the pre-#401/#413 bodyless POST, kept for compat. */
 export function startTodo(id: string, opts: StartTodoOptions = {}): Promise<StartTodoResponse> {
   const body: Record<string, unknown> = {}
   if (opts.runner !== undefined) body.runner = opts.runner
   if (opts.model !== undefined) body.model = opts.model
+  if (opts.prompt !== undefined) body.prompt = opts.prompt
   // No override → no body at all, exactly the bodyless POST this endpoint has always sent
   // (`continueRun` posts `{}` because it always carried one). The server tolerates either.
   return mutate<StartTodoResponse>(

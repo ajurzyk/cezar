@@ -1,18 +1,21 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { CheckIcon, InboxIcon, PlayIcon, TriangleAlertIcon } from 'lucide-react'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router'
 
 import { removeTodo, startTodo } from '@/api/client'
-import { queryKeys, useHealth, useRuns, useTodos } from '@/api/queries'
+import { queryKeys, useHealth, useRuns, useTodos, useUiState } from '@/api/queries'
 import type { TodoItem } from '@/api/types'
 import { CenteredState } from '@/components/centered-state'
 import { EnginePills, engineBody, useResolvedEngine, type EnginePick } from '@/components/engine-pills'
+import { PromptTemplateMenu } from '@/components/prompt-template-menu'
 import { StatusDot } from '@/components/status-dot'
 import { Button } from '@/components/ui/button'
+import { Textarea } from '@/components/ui/textarea'
 import { toast } from '@/components/ui/toaster'
 import { deriveAttention } from '@/lib/attention'
 import { shortAge } from '@/lib/format'
+import { insertTemplate, normalizePromptTemplates } from '@/lib/prompt-templates'
 
 /**
  * `/inbox` — the follow-up inbox rebuilt in React (R6 Step 1.2, spec §"Skills, Workflows,
@@ -26,6 +29,13 @@ import { shortAge } from '@/lib/format'
  *  - Dismiss → `DELETE /api/todos/:id` — check off, gone;
  *  - the meta row keeps age / action / source-task link (or the honest "source task
  *    deleted") / PR link / suggested skill.
+ *
+ * "Add instructions" (#413) is new: a collapsed-by-default composer per card, closed unless a
+ * user opts in — most follow-ups just run as suggested. Whatever is typed there is extra
+ * instructions appended (server-side) to the suggested/summary task text, and the same reusable
+ * prompt templates as the GitHub hand-over insert into it. Unlike that composer's custom prompt,
+ * nothing here survives a reload: the card itself is gone the moment Run succeeds, so there is
+ * no draft worth persisting.
  *
  * The nav badge is NOT this view's business: the global-events reducer maintains the todos
  * query from the SSE `todos` event and the shell derives the badge from it — this route only
@@ -143,14 +153,37 @@ function TodoCard({
 }) {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const uiState = useUiState()
+
   // Per card, not per route (#401): each card starts its OWN run, so "run this one on codex"
   // must not silently re-aim the card below it. Reset is free — a started card leaves the list.
   const [engine, setEngine] = useState<EnginePick>({ runner: null, model: null })
   const resolved = useResolvedEngine(engine)
 
+  // "Add instructions" (#413): collapsed by default, local to the card (see the doc block
+  // above for why nothing here needs to persist across a reload).
+  const [notesOpen, setNotesOpen] = useState(false)
+  const [notes, setNotes] = useState('')
+  const notesRef = useRef<HTMLTextAreaElement>(null)
+  const templates = normalizePromptTemplates(uiState.data?.promptTemplates)
+  const insertNotesTemplate = (snippet: string) => {
+    const el = notesRef.current
+    const caret = el?.selectionStart ?? notes.length
+    const result = insertTemplate(notes, caret, snippet)
+    setNotes(result.text)
+    requestAnimationFrame(() => {
+      notesRef.current?.focus()
+      notesRef.current?.setSelectionRange(result.caret, result.caret)
+    })
+  }
+
   const start = useMutation({
-    // The body rules live in engineBody so this surface and the GitHub tab cannot disagree.
-    mutationFn: () => startTodo(todo.id, engineBody(resolved)),
+    // The engine pick (#401) and the "Add instructions" prompt (#413) ride the same Run: the
+    // body rules live in engineBody so this surface and the GitHub tab cannot disagree, and the
+    // trimmed note joins them as `prompt`. Both are optional — an untouched card on a
+    // single-backend host with no note sends the bodyless POST this endpoint always has.
+    mutationFn: () =>
+      startTodo(todo.id, { ...engineBody(resolved), prompt: notes.trim() || undefined }),
     onSuccess: ({ run }) => {
       // The server rewrote todos.json (SSE will confirm); the invalidations just refuse to
       // wait for the file watcher's debounce.
@@ -181,103 +214,153 @@ function TodoCard({
     <li
       data-slot="todo-card"
       data-id={todo.id}
-      className="flex items-start gap-3 rounded-lg border border-border bg-card p-4 shadow-xs"
+      className="flex flex-col gap-2.5 rounded-lg border border-border bg-card p-4 shadow-xs"
     >
-      <StatusDot
-        tone={CARD_ATTENTION.tone}
-        pulse={CARD_ATTENTION.pulse}
-        title={CARD_ATTENTION.label}
-        className="mt-[5px]"
-      />
-      <div className="min-w-0 flex-1">
-        <p data-slot="todo-summary" className="text-sm leading-snug font-medium text-foreground">
-          {todo.summary}
-        </p>
-        <div
-          data-slot="todo-meta"
-          className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-soft-foreground"
-        >
-          {todo.ts ? <span>{shortAge(todo.ts)} ago</span> : null}
-          {todo.action ? <span>{todo.action}</span> : null}
-          {todo.taskId !== undefined ? (
-            sourceTaskExists ? (
-              <Link
-                to={`/tasks/${todo.taskId}`}
-                data-slot="todo-source"
+      <div className="flex items-start gap-3">
+        <StatusDot
+          tone={CARD_ATTENTION.tone}
+          pulse={CARD_ATTENTION.pulse}
+          title={CARD_ATTENTION.label}
+          className="mt-[5px]"
+        />
+        <div className="min-w-0 flex-1">
+          <p data-slot="todo-summary" className="text-sm leading-snug font-medium text-foreground">
+            {todo.summary}
+          </p>
+          <div
+            data-slot="todo-meta"
+            className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-soft-foreground"
+          >
+            {todo.ts ? <span>{shortAge(todo.ts)} ago</span> : null}
+            {todo.action ? <span>{todo.action}</span> : null}
+            {todo.taskId !== undefined ? (
+              sourceTaskExists ? (
+                <Link
+                  to={`/tasks/${todo.taskId}`}
+                  data-slot="todo-source"
+                  className="text-muted-foreground underline decoration-border underline-offset-2 hover:text-foreground"
+                >
+                  source task
+                </Link>
+              ) : (
+                <span data-slot="todo-source-gone">source task deleted</span>
+              )
+            ) : null}
+            {todo.prUrl ? (
+              <a
+                href={todo.prUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                data-slot="todo-pr"
                 className="text-muted-foreground underline decoration-border underline-offset-2 hover:text-foreground"
               >
-                source task
-              </Link>
-            ) : (
-              <span data-slot="todo-source-gone">source task deleted</span>
-            )
-          ) : null}
-          {todo.prUrl ? (
-            <a
-              href={todo.prUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              data-slot="todo-pr"
-              className="text-muted-foreground underline decoration-border underline-offset-2 hover:text-foreground"
-            >
-              PR
-            </a>
-          ) : null}
-          {todo.suggestedSkill ? (
-            <span data-slot="todo-skill" className="font-mono">
-              skill: {todo.suggestedSkill}
-            </span>
-          ) : null}
-        </div>
-        {/* Only a runnable card gets pills — an acknowledge-only note has no run to aim. */}
-        {runnable ? (
-          <div data-slot="todo-engine" className="mt-2.5 flex flex-wrap items-center gap-2">
-            <EnginePills pick={engine} onChange={setEngine} disabled={busy} />
+                PR
+              </a>
+            ) : null}
+            {todo.suggestedSkill ? (
+              <span data-slot="todo-skill" className="font-mono">
+                skill: {todo.suggestedSkill}
+              </span>
+            ) : null}
           </div>
-        ) : null}
-      </div>
-      <div className="flex shrink-0 items-center gap-1.5 self-center">
-        {runnable ? (
-          <>
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5 self-center">
+          {runnable ? (
+            <>
+              <Button
+                type="button"
+                variant="contrast"
+                size="sm"
+                data-action="todo-run"
+                title="Start a task from this follow-up"
+                disabled={busy}
+                onClick={() => start.mutate()}
+              >
+                <PlayIcon aria-hidden="true" className="size-3" />
+                Run
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                data-action="todo-dismiss"
+                title="Check off (remove)"
+                disabled={busy}
+                onClick={() => dismiss.mutate()}
+              >
+                Dismiss
+              </Button>
+            </>
+          ) : (
             <Button
               type="button"
               variant="contrast"
               size="sm"
-              data-action="todo-run"
-              title="Start a task from this follow-up"
-              disabled={busy}
-              onClick={() => start.mutate()}
-            >
-              <PlayIcon aria-hidden="true" className="size-3" />
-              Run
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              data-action="todo-dismiss"
-              title="Check off (remove)"
+              data-action="todo-acknowledge"
+              title="Acknowledge and remove this note"
               disabled={busy}
               onClick={() => dismiss.mutate()}
             >
-              Dismiss
+              <CheckIcon aria-hidden="true" className="size-3" />
+              Acknowledge
             </Button>
-          </>
-        ) : (
-          <Button
-            type="button"
-            variant="contrast"
-            size="sm"
-            data-action="todo-acknowledge"
-            title="Acknowledge and remove this note"
-            disabled={busy}
-            onClick={() => dismiss.mutate()}
-          >
-            <CheckIcon aria-hidden="true" className="size-3" />
-            Acknowledge
-          </Button>
-        )}
+          )}
+        </div>
       </div>
+
+      {/* Only a runnable card gets pills (#401) — an acknowledge-only note has no run to aim.
+          Indented under the summary, above the instructions composer, so the two per-card
+          Run knobs (engine + prompt) read as one group. */}
+      {runnable ? (
+        <div data-slot="todo-engine" className="flex flex-wrap items-center gap-2 pl-5">
+          <EnginePills pick={engine} onChange={setEngine} disabled={busy} />
+        </div>
+      ) : null}
+
+      {/* Instructions are carried by Run, so they only make sense on a runnable
+          follow-up (#440): a note-only entry has no Run to carry them, and a
+          composer there would be a dead end. */}
+      {runnable ? (
+        notesOpen ? (
+          <div data-slot="todo-instructions" className="flex flex-col gap-2 pl-5">
+            <Textarea
+              ref={notesRef}
+              data-slot="todo-instructions-input"
+              aria-label="Extra instructions for this follow-up"
+              value={notes}
+              onChange={(event) => setNotes(event.target.value)}
+              placeholder="Add instructions for the agent… (appended to the suggestion above)"
+              // Same cap the server enforces on the `prompt` body field, so an over-long note is
+              // stopped at the keystroke rather than by a 400 on Run (the Settings inputs cap the
+              // same way).
+              maxLength={20_000}
+              className="min-h-16 text-[13px]"
+            />
+            <div className="flex items-center gap-2">
+              <PromptTemplateMenu templates={templates} onInsert={insertNotesTemplate} />
+              <button
+                type="button"
+                data-slot="todo-instructions-hide"
+                onClick={() => setNotesOpen(false)}
+                className="text-xs font-medium text-muted-foreground underline decoration-border underline-offset-2 hover:text-foreground"
+              >
+                Hide
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button
+            type="button"
+            data-slot="todo-instructions-toggle"
+            onClick={() => setNotesOpen(true)}
+            className="self-start pl-5 text-xs font-medium text-muted-foreground underline decoration-border underline-offset-2 hover:text-foreground"
+          >
+            {/* A collapsed composer keeps its draft, and Run still carries it — so say so
+                rather than hiding instructions the next Run would silently send. */}
+            {notes.trim() ? 'Edit instructions (added)' : '+ Add instructions'}
+          </button>
+        )
+      ) : null}
     </li>
   )
 }

@@ -1,14 +1,15 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { CheckIcon, EyeIcon, SparklesIcon, SquareIcon, WorkflowIcon } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router'
 
 import { createRun, getLaunchKey, postPlan, putConfig, putUiState } from '@/api/client'
 import { queryKeys, useConfig, useHealth, useRepo, useSkills, useUiState, useWorkflows } from '@/api/queries'
 import type { ImageInput, RepoResponse, Runner, Skill, WorkflowDef } from '@/api/types'
 import { TwinkleBackdrop } from '@/components/centered-state'
-import { Composer } from '@/components/composer/composer'
+import { Composer, type ComposerHandle } from '@/components/composer/composer'
 import { PickerPill, RunnerPill, chevron, chipClass } from '@/components/picker-pill'
+import { PromptTemplateMenu } from '@/components/prompt-template-menu'
 import { SkillPreviewDialog } from '@/components/skill-detail'
 import {
   Command,
@@ -20,7 +21,12 @@ import {
 } from '@/components/ui/command'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { toast } from '@/components/ui/toaster'
-import { isProjectSkill, multiWordFilter, orderSkillsByRecency, skillKeywords } from '@/lib/skills'
+import {
+  autoApplyText,
+  normalizePromptTemplates,
+  resolveAutoApply,
+} from '@/lib/prompt-templates'
+import { isProjectSkill, orderSkillsByRecency, searchSkills, searchWorkflows, skillKeywords } from '@/lib/skills'
 import { submitShortcutHint } from '@/lib/use-submit-shortcut'
 import { cn } from '@/lib/utils'
 
@@ -102,6 +108,30 @@ export function NewTaskRoute() {
   const sourcesReady =
     skills.data !== undefined && workflows.data !== undefined && !uiState.isPending
   const source = resolveSource([draft.source, uiState.data?.lastTask], skillList, workflowList)
+
+  // ---- prompt templates (#413 follow-up) ----------------------------------------------------
+  // The same list the GitHub hand-over and Inbox composers read. Two ways in here: the footer's
+  // icon trigger inserts one by hand at the caret, and a skill whose templates are assigned to it
+  // applies them on selection — but only into a box the user has not typed in (`resolveAutoApply`).
+  const composerRef = useRef<ComposerHandle>(null)
+  const templates = useMemo(
+    () => normalizePromptTemplates(uiState.data?.promptTemplates),
+    [uiState.data?.promptTemplates],
+  )
+  const autoText = autoApplyText(templates, source.source === 'skill' ? [source.ref] : [])
+  const draftTextRef = useRef(draft.text)
+  draftTextRef.current = draft.text
+  const autoAppliedRef = useRef('')
+  useEffect(() => {
+    // Wait for the pickers' data: before it lands `source` is still a provisional guess, and
+    // auto-applying against it would flash text in for a skill the user may not end up on.
+    if (!sourcesReady) return
+    const resolved = resolveAutoApply(draftTextRef.current, autoAppliedRef.current, autoText)
+    autoAppliedRef.current = resolved.applied
+    if (resolved.text !== draftTextRef.current) update({ text: resolved.text })
+    // `autoText` is a derived STRING — this fires when the assigned set changes, not every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoText, sourcesReady])
 
   const runners = availableRunners(health.data?.checks ?? [])
   const runner = resolveRunner(draft.runner, runners, health.data?.defaultRunner ?? 'claude')
@@ -341,6 +371,7 @@ export function NewTaskRoute() {
         </header>
 
         <Composer
+          ref={composerRef}
           onSubmit={submit}
           value={draft.text}
           onValueChange={(text) => update({ text })}
@@ -357,6 +388,13 @@ export function NewTaskRoute() {
                 skills={skillList}
                 workflows={workflowList}
                 onPick={(next) => update({ source: next })}
+              />
+              {/* Icon-only: this row already carries source/runner/model/variants/worktree/
+                  autonomous/branch, and templates is the least-used of them. */}
+              <PromptTemplateMenu
+                templates={templates}
+                iconOnly
+                onInsert={(text) => composerRef.current?.insertAtCaret(text)}
               />
               {runners.length > 1 ? (
                 <RunnerPill runners={runners} value={runner} onPick={(next) => update({ runner: next, model: null })} />
@@ -551,10 +589,16 @@ function SourcePill({
   onPick: (source: TaskSource) => void
 }) {
   const [open, setOpen] = useState(false)
+  const [search, setSearch] = useState('')
   const [preview, setPreview] = useState<Skill | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
-  const project = skills.filter(isProjectSkill)
-  const global = skills.filter((skill) => !isProjectSkill(skill))
+  // #484: rank in JS (cmdk's own score-sort does not re-order reliably here), then split the
+  // ranked matches into the Project/Global groups so each group stays match-ordered.
+  const matched = searchSkills(skills, search)
+  const project = matched.filter(isProjectSkill)
+  const global = matched.filter((skill) => !isProjectSkill(skill))
+  const matchedWorkflows = searchWorkflows(workflows, search)
+  const nothingMatches = project.length === 0 && global.length === 0 && matchedWorkflows.length === 0
   const pick = (next: TaskSource) => {
     onPick(next)
     setOpen(false)
@@ -605,7 +649,13 @@ function SourcePill({
   return (
     <>
       <SkillPreviewDialog skill={preview} onClose={() => setPreview(null)} />
-      <Popover open={open} onOpenChange={setOpen}>
+      <Popover
+        open={open}
+        onOpenChange={(next) => {
+          setOpen(next)
+          if (!next) setSearch('')
+        }}
+      >
         <PopoverTrigger asChild>
           <button
             type="button"
@@ -628,10 +678,15 @@ function SourcePill({
           sideOffset={8}
           className="w-[336px] max-w-[calc(100vw-2rem)] p-0"
         >
-          <Command filter={multiWordFilter}>
-            <CommandInput placeholder="search skills & workflows…" onInput={() => listRef.current?.scrollTo(0, 0)} />
+          <Command shouldFilter={false}>
+            <CommandInput
+              placeholder="search skills & workflows…"
+              value={search}
+              onValueChange={setSearch}
+              onInput={() => listRef.current?.scrollTo(0, 0)}
+            />
             <CommandList ref={listRef} data-slot="source-menu" className="max-h-72">
-              <CommandEmpty>Nothing matches.</CommandEmpty>
+              {nothingMatches ? <CommandEmpty>Nothing matches.</CommandEmpty> : null}
               {/* Project skills lead, Global trails everything — the closer a skill lives
                   to the repo, the more likely it's the one being picked. */}
               {project.length > 0 ? (
@@ -639,9 +694,9 @@ function SourcePill({
                   {project.map((skill) => skillItem(skill, true))}
                 </CommandGroup>
               ) : null}
-              {workflows.length > 0 ? (
+              {matchedWorkflows.length > 0 ? (
                 <CommandGroup heading="Workflows">
-                  {workflows.map((workflow) => {
+                  {matchedWorkflows.map((workflow) => {
                     const selected = source.source === 'workflow' && source.ref === workflow.name
                     return (
                       <CommandItem
