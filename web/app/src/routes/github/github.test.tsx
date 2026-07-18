@@ -613,6 +613,22 @@ describe('the follow-up prompt template menu (#413)', () => {
   const option = (id: string) =>
     document.querySelector<HTMLElement>(`[data-slot="prompt-template-option"][data-template="${id}"]`)
 
+  /**
+   * Open the menu and click a specific template. Waits for *that* option to
+   * mount before clicking it, so a stale option from the previous (closing)
+   * popover can never satisfy the wait while the wanted one is still absent —
+   * the race that made this suite flake in CI (#413).
+   */
+  async function chooseTemplate(id: string): Promise<void> {
+    fireEvent.click(document.querySelector('[data-slot="prompt-template-trigger"]')!)
+    const el = await waitFor(() => {
+      const node = option(id)
+      if (!node) throw new Error(`template option "${id}" not mounted yet`)
+      return node
+    })
+    fireEvent.click(el)
+  }
+
   it('an untouched ui-state shows the built-in templates, and inserting one fills the custom prompt', async () => {
     stubFetch()
     await openDetail()
@@ -651,8 +667,7 @@ describe('the follow-up prompt template menu (#413)', () => {
     stubFetch()
     await openDetail()
 
-    await openTemplateMenu()
-    fireEvent.click(option('add-tests')!)
+    await chooseTemplate('add-tests')
     await waitFor(() =>
       expect(screen.getByLabelText('Custom prompt')).toHaveProperty(
         'value',
@@ -660,8 +675,7 @@ describe('the follow-up prompt template menu (#413)', () => {
       ),
     )
 
-    await openTemplateMenu()
-    fireEvent.click(option('update-docs')!)
+    await chooseTemplate('update-docs')
 
     await waitFor(() =>
       expect(screen.getByLabelText('Custom prompt')).toHaveProperty(
