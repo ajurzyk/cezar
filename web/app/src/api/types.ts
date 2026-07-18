@@ -95,8 +95,12 @@ export interface RunRecord {
   /** The PR/issue number this task is ABOUT (task auto-naming spec) — display tier only. */
   prNumber?: number
   issueNumber?: number
-  /** 'user' = renamed via PATCH, never auto-overwritten; 'auto' = namer-owned. */
-  titleOrigin?: 'user' | 'auto'
+  /** 'user' = renamed via PATCH, never auto-overwritten; 'marker' = agent-declared
+   *  via CEZ:TITLE (spec 2026-07-18-task-ref-markers); 'auto' = namer-owned. */
+  titleOrigin?: 'user' | 'auto' | 'marker'
+  /** References the agent declared via CEZ:PR/CEZ:ISSUE markers — authoritative
+   *  over the namer for the matching kind. */
+  markerRefs?: { pr?: number; issue?: number }
   /** The referenced tier's working set (distinct PR URLs spotted, capped server-side). */
   referencedPrCandidates?: string[]
   /** Absent when the run executed in the repo working tree rather than its own worktree. */
