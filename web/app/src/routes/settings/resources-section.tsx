@@ -8,6 +8,7 @@ import type { ConfigResponse, SetConfigInput } from '@/api/types'
 import { CenteredState } from '@/components/centered-state'
 import { Button } from '@/components/ui/button'
 import { toast } from '@/components/ui/toaster'
+import { WorktreesPanel } from './worktrees-panel'
 
 /**
  * Settings → Resources: how hard the machine works. `maxParallel` caps concurrent tasks (the run
@@ -201,6 +202,13 @@ function ResourcesForm({ config }: { config: ConfigResponse }) {
             {retentionNum === 0 ? 'Keeping every finished worktree.' : `Keeping the last ${retentionNum} finished worktree${retentionNum === 1 ? '' : 's'} on disk.`}
           </p>
         )}
+      </Field>
+
+      <Field
+        title="Worktrees"
+        hint="Task worktrees currently on disk. Delete one to reclaim its space now, or reclaim everything past the keep-limit at once. Branches are always kept, so the work stays recoverable."
+      >
+        <WorktreesPanel />
       </Field>
     </div>
   )

@@ -21,9 +21,9 @@ Tracking PR: #486
 | 1 | 1.5 | Wire enforcer: startup (index.ts) + terminal transitions (run.ts) | done | bca6926 |
 | 1 | 1.5a | Clear `worktreeReclaimedAt` + re-materialize dir on resume/continue | done | 24ada5b |
 | 1 | 1.6 | Settings → Resources "Keep last N worktrees" input + types + test | done | da9186f |
-| 2 | 2.1 | `GET /api/worktrees` (list + du sizes, degrade to null) + tests | done | pending |
-| 2 | 2.2 | `POST /api/worktrees/reclaim` (force enforce) + tests | done | pending |
-| 2 | 2.3 | Worktrees management table in Settings → Resources + component test | todo | — |
+| 2 | 2.1 | `GET /api/worktrees` (list + du sizes, degrade to null) + tests | done | 070f6ad |
+| 2 | 2.2 | `POST /api/worktrees/reclaim` (force enforce) + tests | done | 070f6ad |
+| 2 | 2.3 | Worktrees management table in Settings → Resources + component test | done | pending |
 | 2 | 2.4 | Docs: README settings table + spec citations at touch sites | todo | — |
 | 3 | 3.1 | Integration/E2E: Settings → Resources retention smoke (`web/app/e2e`) | todo | — |
 

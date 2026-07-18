@@ -605,6 +605,37 @@ export interface SetConfigInput {
 /** The PUT answer: the same shape GET serves (the pre-R6 fields stayed, the rest is additive). */
 export type SetConfigResponse = ConfigResponse
 
+/** One materialized task worktree in the management panel (#483). `sizeBytes` is
+ *  null when `du` is unavailable (Windows / missing). `reclaimable` = finished,
+ *  has a directory, not yet reclaimed (retention's rule). */
+export interface WorktreeInfo {
+  runId: string
+  title: string
+  status: string
+  branch: string | null
+  sizeBytes: number | null
+  finishedAt: string | null
+  reclaimable: boolean
+}
+
+/** `GET /api/worktrees` (#483): the worktrees on disk, their total size (null when any
+ *  degraded), and the current keep-limit (0 = unlimited). */
+export interface WorktreesResponse {
+  worktrees: WorktreeInfo[]
+  totalBytes: number | null
+  keep: number
+}
+
+/** `POST /api/worktrees/reclaim` (#483): the run ids whose directory was reclaimed. */
+export interface ReclaimWorktreesResponse {
+  reclaimed: string[]
+}
+
+/** `POST /api/runs/:id/remove-worktree`: per-row delete in the worktrees panel. */
+export interface RemoveWorktreeResponse {
+  removed: boolean
+}
+
 /** A local app a worktree can be opened in (#open-in): editor, file manager, or terminal. */
 export interface OpenTarget {
   id: string
