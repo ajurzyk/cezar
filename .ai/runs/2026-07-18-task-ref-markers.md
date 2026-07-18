@@ -86,9 +86,9 @@ additive-only.
 
 ### Phase 3: Engine wiring
 
-- [ ] 3.1 Handoff-instructions marker contract + system-prompt test
-- [ ] 3.2 `recordTurnEnd` marker apply + namer precedence/skip + v1 strip + tests
-- [ ] 3.3 `mock-claude.mjs` `mock:refs` branch + dry-run integration test
+- [x] 3.1 Handoff-instructions marker contract + system-prompt test — 680de9a
+- [x] 3.2 `recordTurnEnd` marker apply + namer precedence/skip + v1 strip + tests — 680de9a
+- [x] 3.3 `mock-claude.mjs` `mock:refs` branch + dry-run integration test — 680de9a
 
 ### Phase 4: Web cockpit
 
