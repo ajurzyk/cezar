@@ -98,6 +98,29 @@ describe('RunStore — titleSummary + diffStat (#389)', () => {
     expect(reopened.getRun(defaulted.id)?.generateFollowups).toBeUndefined();
   });
 
+  it('round-trips the autonomous flag while omission stays compatible (#489)', () => {
+    const store = RunStore.open(dataDir);
+    const autonomous = store.createRun({
+      title: 'autonomous task',
+      workflow: 'quick-task',
+      task: 'autonomous task',
+      autonomous: true,
+      steps: [],
+    });
+    const interactive = store.createRun({
+      title: 'interactive task',
+      workflow: 'quick-task',
+      task: 'interactive task',
+      steps: [],
+    });
+    store.flush();
+
+    const reopened = RunStore.open(dataDir);
+    expect(reopened.getRun(autonomous.id)?.autonomous).toBe(true);
+    // Absent = falsy = "not autonomous" — old records and interactive runs alike.
+    expect(reopened.getRun(interactive.id)?.autonomous).toBeUndefined();
+  });
+
   it('updateRun fans the new fields out on the run channel (the SSE feed)', () => {
     const store = RunStore.open(dataDir);
     const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });

@@ -222,6 +222,30 @@ function AgentsForm({ config }: { config: ConfigResponse }) {
       </Field>
 
       <Field
+        title="Review changes before finishing"
+        hint="When on, a task with changes pauses so you can Accept, Send back, or open a Draft PR. Autonomous tasks always skip this and finish on their own. Default: off — tasks finish without asking."
+      >
+        <label className="flex w-fit items-center gap-3">
+          <Switch
+            aria-label="Review changes before finishing"
+            data-slot="agents-review-gate"
+            checked={config.reviewGate ?? false}
+            disabled={save.isPending}
+            onCheckedChange={(checked) =>
+              save.mutate(
+                { reviewGate: checked },
+                { onSuccess: () => toast(checked ? 'Review gate on' : 'Review gate off') },
+              )
+            }
+          />
+          <span className="text-[13px] text-muted-foreground">
+            {(config.reviewGate ?? false) ? 'On' : 'Off'}
+            {config.reviewGate === null && ' (default)'}
+          </span>
+        </label>
+      </Field>
+
+      <Field
         title="Base branch"
         hint="New task worktrees branch from this and draft PRs target it. Also settable from the Git view."
       >

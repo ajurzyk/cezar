@@ -54,6 +54,11 @@ const configSchema = z.object({
    *  turn end. Absent = the `CEZ_TITLE_UPDATES` env decides (default ON — owner
    *  decision on PR #479). */
   liveTitleUpdates: z.boolean().optional(),
+  /** Optional diff-first review gate (#489): when a successful run with changes
+   *  should park at `review` for a human. Absent = the `CEZ_REVIEW_GATE` env
+   *  decides (default OFF — the deliberate inverse of `liveTitleUpdates`).
+   *  Autonomous runs always skip the gate regardless of this. */
+  reviewGate: z.boolean().optional(),
   /**
    * Branch task worktrees fork from and draft PRs target (e.g. `develop`).
    * Unset = the branch currently checked out. Settable from the Repo tab.
