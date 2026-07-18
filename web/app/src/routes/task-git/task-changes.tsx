@@ -3,7 +3,7 @@ import { FileDiffIcon, GitCommitHorizontalIcon } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { useParams } from 'react-router'
 
-import { ApiError, createRunPr, getRunFile, openRunInCli, pushRun } from '@/api/client'
+import { ApiError, createRunPr, getRunFile, openRunFileInApp, openRunInCli, pushRun, runFileRawUrl } from '@/api/client'
 import { queryKeys, useHealth, useRun, useRunChanges } from '@/api/queries'
 import type { ApiRun } from '@/api/types'
 import { CenteredState } from '@/components/centered-state'
@@ -86,6 +86,12 @@ function ChangesView({ run }: { run: ApiRun }) {
       }
       onError(error)
     },
+  })
+  // Diff pane "open in default app" (#365, local mode only) — the mutation itself is safe to
+  // wire unconditionally; only its trigger (the `onOpenInApp` prop below) is capability-gated.
+  const openImage = useMutation({
+    mutationFn: (path: string) => openRunFileInApp(run.id, path),
+    onError,
   })
 
   // A 409 from /changes is an answer, not an outage: "no worktree — …" (or a git failure).
@@ -182,6 +188,10 @@ function ChangesView({ run }: { run: ApiRun }) {
             mode={effectiveMode}
             wrap={effectiveWrap}
             loadFileText={(path) => loadWorktreeText(run.id, path)}
+            imageSrc={(path) => runFileRawUrl(run.id, path)}
+            onOpenInApp={
+              health.data?.capabilities.localHandoff ? (path) => openImage.mutate(path) : undefined
+            }
             className="min-w-0 flex-1"
           />
         </div>

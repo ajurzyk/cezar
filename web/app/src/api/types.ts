@@ -252,6 +252,9 @@ export interface ChangedFile {
   dels: number
   /** Binary per numstat — there is no text patch to render. */
   binary: boolean
+  /** True when the path is one the raw-bytes route serves as an `<img>` (#365) — present only
+   *  when true, so old clients that never read it stay correct. */
+  image?: boolean
   /** This file's unified-diff section; possibly `… (patch truncated)`, possibly empty. */
   patch: string
 }

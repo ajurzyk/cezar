@@ -398,6 +398,13 @@ export function openRunIn(id: string, target: string): Promise<{ opened: boolean
   return mutate<{ opened: boolean; path: string }>('POST', runPath(id, '/open-in'), { target })
 }
 
+/** Diff pane "open in default app" (#365, LOCAL MODE ONLY): opens one worktree file with the
+ *  OS's default handler for its type — not the file manager, a specific file. 409 (server's own
+ *  words) in hosted mode, for a path outside the worktree, or when no app could be launched. */
+export function openRunFileInApp(id: string, path: string): Promise<{ opened: boolean; path: string }> {
+  return mutate<{ opened: boolean; path: string }>('POST', runPath(id, '/open-in'), { target: 'default', path })
+}
+
 /** `git add -A && git commit` in the run's worktree (R5). Every predictable git failure —
  *  clean tree, failing hook, missing identity — is a 409 whose ApiError speaks git's words. */
 export function commitRun(id: string, message: string): Promise<GitCommitResponse> {

@@ -62,6 +62,10 @@ export interface ChangedFile {
   adds: number;
   dels: number;
   binary: boolean;
+  /** True when `path`'s extension is one the raw-bytes route (`/files?raw=1`) will serve as an
+   *  `<img>` (#365) — lets the diff pane preview it inline instead of the "Binary file" note,
+   *  even for extensions (SVG) git itself doesn't flag `binary`. Present only when true. */
+  image?: boolean;
   patch: string;
 }
 
@@ -313,6 +317,7 @@ export function assemblePayload(
       adds: count?.adds ?? 0,
       dels: count?.dels ?? 0,
       binary: count?.binary ?? false,
+      ...(imageMimeType(entry.path) ? { image: true } : {}),
       patch,
     };
   });
@@ -450,6 +455,30 @@ export function imageMimeType(path: string): string | null {
   const dot = name.lastIndexOf('.');
   if (dot <= 0) return null;
   return IMAGE_MIME[name.slice(dot + 1).toLowerCase()] ?? null;
+}
+
+/**
+ * Extensions the "open in the OS default app" route (#365) will hand to the OS launcher —
+ * deliberately NOT `imageMimeType`'s list, even though it is otherwise the same set minus one.
+ *
+ * `IMAGE_MIME` earns its SVG entry from two mitigations that belong to the HTTP response:
+ * the bytes land inside an `<img>` (inert), and the raw route attaches a no-script CSP. The OS
+ * launcher has neither — it just asks the OS to open the file, and the default handler for
+ * `.svg` is usually a browser, which runs `<script>` inside it from a `file://` origin. A repo
+ * can force an SVG down the preview branch on demand (`*.svg binary` in its own `.gitattributes`
+ * makes numstat report it binary ⇒ `shouldPreviewImage`), so this is reachable, not theoretical.
+ *
+ * Raster only: pixels, no document. Sharing the list with the raw route would silently inherit
+ * a decision that was justified by a CSP this path never applies.
+ */
+const OS_OPENABLE_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico', 'avif']);
+
+/** True when `path` is an image safe to hand to the OS's default handler — see OS_OPENABLE_EXT. */
+export function isOsOpenableImage(path: string): boolean {
+  const name = path.slice(path.lastIndexOf('/') + 1);
+  const dot = name.lastIndexOf('.');
+  if (dot <= 0) return false;
+  return OS_OPENABLE_EXT.has(name.slice(dot + 1).toLowerCase());
 }
 
 /** True when the first 8 KB contain a NUL byte — good enough for a viewer flag. */

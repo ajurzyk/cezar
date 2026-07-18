@@ -14,6 +14,7 @@ import {
   commitAll,
   createOrSwitchBranch,
   imageMimeType,
+  isOsOpenableImage,
   patchByPath,
   pushCurrentBranch,
   readWorktreePath,
@@ -88,6 +89,30 @@ describe('collectChanges — structured diff vs base', () => {
     expect(result.changes.stat.files).toBe(5);
     expect(result.changes.stat.adds).toBe(result.changes.files.reduce((s, f) => s + f.adds, 0));
     expect(result.changes.stat.dels).toBe(result.changes.files.reduce((s, f) => s + f.dels, 0));
+  });
+
+  it('flags image paths with image:true (#365) — even ones git does not mark binary', async () => {
+    writeFileSync(join(dir, 'seed.txt'), 'seed\n');
+    g(dir, 'add', '-A');
+    g(dir, 'commit', '-m', 'base');
+    g(dir, 'checkout', '-b', 'task');
+
+    writeFileSync(join(dir, 'photo.png'), Buffer.from([0, 1, 2, 3, 0, 255]));
+    // SVG is text — git will not flag it binary — but it is still an image by extension.
+    writeFileSync(join(dir, 'icon.svg'), '<svg></svg>\n');
+    writeFileSync(join(dir, 'notes.txt'), 'plain text, not an image\n');
+    g(dir, 'add', '-A');
+
+    const result = await collectChanges(dir, 'main');
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const byPath = new Map(result.changes.files.map((f) => [f.path, f]));
+
+    expect(byPath.get('photo.png')).toMatchObject({ binary: true, image: true });
+    expect(byPath.get('icon.svg')).toMatchObject({ binary: false, image: true });
+    // Non-images never carry the field at all (optional, absent-by-default).
+    expect(byPath.get('notes.txt')?.image).toBeUndefined();
+    expect('image' in (byPath.get('notes.txt') ?? {})).toBe(false);
   });
 
   it('an empty diff is a valid all-zero payload, not an error', async () => {
@@ -335,6 +360,33 @@ describe('imageMimeType — the raw-serving allowlist (R5 Step 1.6)', () => {
     expect(imageMimeType('README')).toBeNull();
     expect(imageMimeType('.png')).toBeNull(); // a dotfile named ".png" is not an image
     expect(imageMimeType('archive.png.zip')).toBeNull();
+  });
+});
+
+describe('isOsOpenableImage — the OS-launcher allowlist (#365)', () => {
+  it('allows raster images, matching the raw allowlist case-insensitively', () => {
+    expect(isOsOpenableImage('logo.png')).toBe(true);
+    expect(isOsOpenableImage('deep/dir/Photo.JPEG')).toBe(true);
+    expect(isOsOpenableImage('anim.webp')).toBe(true);
+    expect(isOsOpenableImage('shot.avif')).toBe(true);
+  });
+
+  it('refuses SVG — the raw route\'s CSP does not exist once the OS opens the file', () => {
+    // `imageMimeType` says yes (inert in an <img>, plus a no-script CSP); the OS launcher
+    // applies neither, and the default .svg handler is usually a script-executing browser.
+    expect(imageMimeType('icon.svg')).toBe('image/svg+xml');
+    expect(isOsOpenableImage('icon.svg')).toBe(false);
+    expect(isOsOpenableImage('deep/ICON.SVG')).toBe(false);
+  });
+
+  it('refuses everything the OS would EXECUTE rather than display', () => {
+    expect(isOsOpenableImage('build.command')).toBe(false);
+    expect(isOsOpenableImage('run.desktop')).toBe(false);
+    expect(isOsOpenableImage('setup.exe')).toBe(false);
+    expect(isOsOpenableImage('index.html')).toBe(false);
+    expect(isOsOpenableImage('README')).toBe(false);
+    expect(isOsOpenableImage('.png')).toBe(false); // a dotfile named ".png" is not an image
+    expect(isOsOpenableImage('archive.png.zip')).toBe(false);
   });
 });
 

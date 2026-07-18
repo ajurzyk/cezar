@@ -39,6 +39,7 @@ import {
   commitAll,
   createOrSwitchBranch,
   imageMimeType,
+  isOsOpenableImage,
   pushCurrentBranch,
   readWorktreePath,
 } from './git-changes.js';
@@ -50,7 +51,7 @@ import { resolveForge } from './forge/index.js';
 import { fetchGithub, fetchGithubComments } from './github.js';
 import { ensureLaunchKey } from './launch-key.js';
 import { openInTerminal } from './open-in-terminal.js';
-import { agentCliRunner, detectOpenTargets, openInApp } from './open-in-app.js';
+import { agentCliRunner, detectOpenTargets, openFileInDefaultApp, openInApp } from './open-in-app.js';
 import { createDraftPr } from './pr.js';
 import { ASSET_CACHE_CONTROL, BUILD_HINT_HTML, assetContentType, isSafeAssetFilename, resolveGetRequest } from './static-ui.js';
 
@@ -269,6 +270,15 @@ const startTodoBodySchema = z
 // Session commit (redesign R5 — §"Git/session API additions").
 const gitCommitSchema = z.object({
   message: z.string().trim().min(1, 'commit message must not be empty').max(5_000),
+});
+
+// "Open in…" (#open-in / #365): `target` selects the app; `path` (optional, worktree-relative)
+// narrows the target's own worktree/repo-root default to one file — used by the diff pane's
+// "open in default app" action for images. Containment is re-checked server-side via
+// `readWorktreePath`; this schema only shapes the request.
+const openInSchema = z.object({
+  target: z.string().trim().min(1, 'target required'),
+  path: z.string().max(1_000).optional(),
 });
 
 const messageSchema = z
@@ -815,10 +825,56 @@ export function createApp(deps: ServerDeps): Hono {
         409,
       );
     }
-    const body = (await c.req.json().catch(() => ({}))) as { target?: unknown };
-    const target = typeof body.target === 'string' ? body.target : '';
-    if (!target) return c.json({ error: 'target required' }, 400);
+    const parsedBody = openInSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsedBody.success) {
+      return c.json({ error: parsedBody.error.issues.map((i) => i.message).join('; ') }, 400);
+    }
+    const { target, path: relPath } = parsedBody.data;
     const dir = run.worktreePath && existsSync(run.worktreePath) ? run.worktreePath : repoRoot;
+
+    // Diff pane "open in OS default app" (#365): one worktree file, opened with the platform's
+    // default handler for its type — not a directory in the file manager (that's `finder`
+    // above) and not a session takeover (editors/CLIs above). `path` is re-validated against
+    // the worktree here regardless of what the schema allowed, so a stale/forged path can never
+    // escape it.
+    if (target === 'default') {
+      if (!run.worktreePath || !existsSync(run.worktreePath)) {
+        return c.json({ error: NO_WORKTREE }, 409);
+      }
+      if (!relPath) return c.json({ error: 'path required for the default-app target' }, 400);
+      const result = await readWorktreePath(run.worktreePath, relPath);
+      if (result.kind !== 'file') {
+        return c.json(
+          { error: result.kind === 'dir' ? `not a file: ${relPath}` : result.error },
+          409,
+        );
+      }
+      // This route's whole contract is "preview an image in its default app", and containment
+      // alone does not enforce it. Without this gate any regular file in the worktree — a
+      // `.command`/`.desktop` an agent just wrote, an `.exe` — would be handed to the OS
+      // launcher, which EXECUTES it. Not remotely reachable (random run ids, same-origin, local
+      // mode), so: defense in depth.
+      //
+      // Deliberately `isOsOpenableImage`, NOT the raw route's `imageMimeType`: that list allows
+      // SVG on the strength of an `<img>` + no-script CSP the OS launcher never applies (the
+      // default `.svg` handler is usually a browser, which would run the file's `<script>`).
+      if (!isOsOpenableImage(result.path)) {
+        // Say which rule refused, in the route's own words — "limited to images" would be a lie
+        // to someone holding an SVG, which IS an image and DOES preview inline.
+        return c.json(
+          {
+            error: imageMimeType(result.path)
+              ? `SVG can carry scripts, so it previews inline but is never handed to the OS: ${result.path}`
+              : `opening in the default app is limited to images: ${result.path}`,
+          },
+          409,
+        );
+      }
+      const filePath = join(run.worktreePath, result.path);
+      const opened = await openFileInDefaultApp(filePath);
+      if (!opened) return c.json({ error: `could not open ${result.path}`, path: filePath }, 409);
+      return c.json({ opened: true, path: filePath });
+    }
 
     // Coding-agent CLI handoff (#cli-handoff, #402): open a terminal in the worktree that resumes
     // THIS run's session when the chosen CLI is the run's own runner (and a session exists), or

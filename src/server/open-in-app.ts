@@ -176,6 +176,25 @@ async function openFileManager(dir: string): Promise<boolean> {
   return runDetached(bin, args);
 }
 
+/** Open a single worktree FILE with whatever application the OS has registered as its
+ *  default handler — the diff pane's "open in default app" action for images (#365). Distinct
+ *  from `openFileManager` above: that opens a *directory* in the file manager; this launches
+ *  the file itself (e.g. the OS's default image viewer), never a directory listing. Local-only
+ *  by construction — the caller gates this behind `localHandoff`.
+ *
+ *  `path` is worktree CONTENT — a filename some cloned repo or coding agent chose — so it is
+ *  hostile input, and it must never reach a process that re-parses its command line. That rules
+ *  `cmd.exe` out on Windows: an argument array does NOT protect you there, because libuv quotes
+ *  a spawn arg only when it contains a space/tab/quote and passes everything else verbatim, so
+ *  `cmd /c start "" C:\dev\proj\a&calc&.png` would let cmd's `&` run `calc` (BatBadBut,
+ *  CVE-2024-27980). `explorer <file>` hands the file to its registered handler with no such
+ *  re-parsing — the same launcher `openFileManager` already uses for directories. */
+export async function openFileInDefaultApp(path: string): Promise<boolean> {
+  if (process.platform === 'darwin') return runDetached('open', [path]);
+  if (process.platform === 'win32') return runDetached('explorer', [path]);
+  return runDetached('xdg-open', [path]);
+}
+
 /** Open `dir` in the given target. Unknown/unavailable target → false (the caller 409s). */
 export async function openInApp(targetId: string, dir: string): Promise<boolean> {
   if (targetId === 'finder') return openFileManager(dir);
