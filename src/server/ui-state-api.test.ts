@@ -97,7 +97,10 @@ describe('the ui-state API — skillUsage (#408)', () => {
 
     it('a huge key cannot balloon the file (the 50 MB PUT)', async () => {
       const res = await put({ skillUsage: { ['A'.repeat(50 * 1024 * 1024)]: 1 } });
-      expect(res.status).toBe(400);
+      // A body this size never reaches the handler's 400 validators — the request-body size
+      // guard (#429) refuses it first with 413 Payload Too Large. Either way the point holds:
+      // it is refused before any write.
+      expect(res.status).toBe(413);
       // Refused before any write — the file must not exist at all.
       expect(() => readFileSync(uiStatePath(), 'utf8')).toThrow();
     });
