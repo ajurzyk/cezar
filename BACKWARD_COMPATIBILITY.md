@@ -78,6 +78,20 @@ The normalized streams every runner emits — persisted to `runs/<id>.ndjson` an
 
 Breaking: removing or renaming a v1 `AgentEvent` type or a v2 `UiEvent` `type`/`UiItem` kind; removing a field consumers read; narrowing an enum so a previously emitted value disappears; or dropping a parity capability from a backend. Additive is fine (new optional field, new event type — protocol v2 event types are additive by design; a new `ToolKind`/`StopReason` member is additive). Required path: read old + new shapes for at least one minor release (old NDJSON must still replay), and follow the parity requirement when adding a backend — a new runner is not compatible until it emits every matrix capability (`AGENT_PROTOCOL.md` §9). See also `AGENT_PROTOCOL.md` for the full schema, per-backend mapping, and new-runner checklist.
 
+## 8. In-band agent marker vocabulary (`src/handoff.ts`, `src/runs/task-markers.ts`)
+
+The plain-text markers the handoff contract asks every agent to emit and the engine parses from
+turn text: `CEZ:DONE` (#347), `CEZ:MONITORING` (#490), and the task-reference markers
+`CEZ:PR=<n>` / `CEZ:ISSUE=<n>` / `CEZ:TITLE=<phrase>` (spec 2026-07-18-task-ref-markers). These
+are an agent-facing contract: skills, prompts, and running agents rely on an emitted marker
+meaning what it meant when their session started.
+
+Breaking: removing or renaming a marker, or changing what an emitted marker does (e.g. making
+`CEZ:PR` gate an action instead of steering display). Additive is fine — a new `CEZ:*` marker is
+inert prose to older cezars, which is the property that keeps the vocabulary forward-compatible.
+Required path for a change: keep parsing the old spelling for at least one minor release while
+the instructions emit the new one.
+
 ## Cockpit UI redesign waiver (spec `.ai/specs/2026-07-14-cockpit-ui-redesign.md`) — EXPIRED at R7
 
 **Status: expired as of phase R7 (2026-07-15).** The waiver below covered the redesign program R1–R7 and, per the spec's compatibility policy, expires at R7. It is kept for the historical record only — the surfaces it waived (the `web/` asset layout, the npm tarball layout, internal-only `/api` shapes whose sole consumer is the bundled UI) are back under this document's normal rules, as restated in sections 1–6 above with their post-redesign shapes (built `web/dist`, no legacy `web/app.js`).
