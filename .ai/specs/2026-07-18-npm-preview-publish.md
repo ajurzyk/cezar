@@ -189,6 +189,7 @@ we don't try); untagged prerelease versions are inert and never resolved by `npx
 |---|---|
 | `package.json`, `package-lock.json` | `name` → `@open-mercato/cezar` |
 | `alias-cezar/package.json`, `alias-cezar/bin.js` | dependency + import → `@open-mercato/cezar` |
+| `src/index.ts:458-460` (`readOwnName`) | fallback name → `@open-mercato/cezar`, so the npm-registry update check (#368) never queries the deprecated package |
 | `README.md:149` | `npx @pat-lewczuk/cezar` → `npx @open-mercato/cezar` |
 | `README.md` (Quick start area) | new **Preview builds** subsection: `npx cezar-cli@develop`, `npx cezar-cli@main`, per-PR `pr-<N>` tags + where the PR comment appears |
 | `docs/server-install/README.md`, `ubuntu-vps.md`, `macosx-ngrok.md` | note that `server-deploy` accepts a pinned preview (`npx cezar-cli@<snapshot> server-deploy …`) for testing a PR build on a VPS |
@@ -259,8 +260,10 @@ The Phase/Step numbering is the execution order for `om-auto-create-pr`
 
 **Phase 1 — Rename and rewire (no publishing yet).**
 1. Rename `package.json` `name` to `@open-mercato/cezar`; regenerate `package-lock.json`;
-   update `alias-cezar/package.json` dependency and `alias-cezar/bin.js` import;
-   `README.md:149`. Tests: full suite (`test:package` proves the tarball still works).
+   update `alias-cezar/package.json` dependency and `alias-cezar/bin.js` import; the
+   `readOwnName` fallback (`src/index.ts:458-460`); `README.md:149`. Tests: full suite
+   (`test:package` proves the tarball still works), plus the update-check unit coverage
+   picking up the new fallback.
 2. Update `BACKWARD_COMPATIBILITY.md` §1/§6 with the new name + migration record.
 
 **Phase 2 — Snapshot logic.**
