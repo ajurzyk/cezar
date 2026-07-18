@@ -58,7 +58,7 @@ the protocol as a protected surface in `BACKWARD_COMPATIBILITY.md`.
 
 ## Progress
 
-PR: #TBD
+PR: #491
 
 > Convention: `- [ ]` pending, `- [x]` done. Append ` — <commit sha>` when a step lands. Do not rename step titles.
 
@@ -73,5 +73,5 @@ PR: #TBD
 
 ### Phase 3: Validate, self-review, PR
 
-- [ ] 3.1 Docs-only validation + `om-code-review` self-review
+- [x] 3.1 Docs-only validation + self-review (diff re-read; referenced paths + technical claims verified against code) — 02f90a7
 - [ ] 3.2 Open PR, normalize labels, run `om-auto-review-pr`, post summary comment
