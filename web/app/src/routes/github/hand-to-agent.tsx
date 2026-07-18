@@ -36,7 +36,7 @@ import {
   normalizePromptTemplates,
   resolveAutoApply,
 } from '@/lib/prompt-templates'
-import { isProjectSkill, multiWordFilter, skillKeywords } from '@/lib/skills'
+import { isProjectSkill, searchSkills, searchWorkflows, skillKeywords } from '@/lib/skills'
 import { cn } from '@/lib/utils'
 
 /**
@@ -229,9 +229,18 @@ function WorkflowPicker({
   onChange: (workflow: string | null) => void
 }) {
   const [open, setOpen] = useState(false)
+  const [search, setSearch] = useState('')
   const listRef = useRef<HTMLDivElement>(null)
+  // #484: rank matches in JS rather than trusting cmdk's built-in score-sort.
+  const matched = searchWorkflows(workflows, search)
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next)
+        if (!next) setSearch('')
+      }}
+    >
       <PopoverTrigger asChild>
         <button
           type="button"
@@ -245,12 +254,17 @@ function WorkflowPicker({
         </button>
       </PopoverTrigger>
       <PopoverContent align="start" sideOffset={8} className="w-[320px] max-w-[calc(100vw-2rem)] p-0">
-        <Command filter={multiWordFilter}>
-          <CommandInput placeholder="search workflows…" onInput={() => listRef.current?.scrollTo(0, 0)} />
+        <Command shouldFilter={false}>
+          <CommandInput
+            placeholder="search workflows…"
+            value={search}
+            onValueChange={setSearch}
+            onInput={() => listRef.current?.scrollTo(0, 0)}
+          />
           <CommandList ref={listRef} data-slot="gh-workflow-menu" className="max-h-64">
-            <CommandEmpty>Nothing matches.</CommandEmpty>
+            {matched.length === 0 ? <CommandEmpty>Nothing matches.</CommandEmpty> : null}
             <CommandGroup>
-              {workflows.map((workflowDef) => {
+              {matched.map((workflowDef) => {
                 const selected = value === workflowDef.name
                 return (
                   <CommandItem
@@ -300,10 +314,13 @@ function SkillsPicker({
   onToggle: (name: string) => void
 }) {
   const [open, setOpen] = useState(false)
+  const [search, setSearch] = useState('')
   const [preview, setPreview] = useState<Skill | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
-  const project = skills.filter(isProjectSkill)
-  const global = skills.filter((skill) => !isProjectSkill(skill))
+  // #484: rank matches in JS, then split into Project/Global groups (cmdk's own sort is unreliable here).
+  const matched = searchSkills(skills, search)
+  const project = matched.filter(isProjectSkill)
+  const global = matched.filter((skill) => !isProjectSkill(skill))
 
   const skillItem = (skill: Skill, emphasized: boolean) => {
     const isSelected = selected.includes(skill.name)
@@ -346,7 +363,13 @@ function SkillsPicker({
   return (
     <>
       <SkillPreviewDialog skill={preview} onClose={() => setPreview(null)} />
-      <Popover open={open} onOpenChange={setOpen}>
+      <Popover
+        open={open}
+        onOpenChange={(next) => {
+          setOpen(next)
+          if (!next) setSearch('')
+        }}
+      >
         <PopoverTrigger asChild>
           <button
             type="button"
@@ -360,10 +383,15 @@ function SkillsPicker({
           </button>
         </PopoverTrigger>
         <PopoverContent align="start" sideOffset={8} className="w-[336px] max-w-[calc(100vw-2rem)] p-0">
-          <Command filter={multiWordFilter}>
-            <CommandInput placeholder="search skills…" onInput={() => listRef.current?.scrollTo(0, 0)} />
+          <Command shouldFilter={false}>
+            <CommandInput
+              placeholder="search skills…"
+              value={search}
+              onValueChange={setSearch}
+              onInput={() => listRef.current?.scrollTo(0, 0)}
+            />
             <CommandList ref={listRef} data-slot="gh-skill-menu" className="max-h-64">
-              <CommandEmpty>Nothing matches.</CommandEmpty>
+              {project.length === 0 && global.length === 0 ? <CommandEmpty>Nothing matches.</CommandEmpty> : null}
               {project.length > 0 ? (
                 <CommandGroup heading="Project skills">{project.map((skill) => skillItem(skill, true))}</CommandGroup>
               ) : null}
