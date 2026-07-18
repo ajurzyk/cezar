@@ -93,7 +93,11 @@ export function PromptTemplateMenu({
             placeholder="search templates…"
             onInput={() => listRef.current?.scrollTo(0, 0)}
           />
-          <CommandList ref={listRef} data-slot="prompt-template-list-menu" className="max-h-64">
+          <CommandList
+            ref={listRef}
+            data-slot="prompt-template-list-menu"
+            className="max-h-[min(16rem,calc(var(--radix-popover-content-available-height)-3rem))]"
+          >
             <CommandEmpty>Nothing matches.</CommandEmpty>
             <CommandGroup heading="Insert a template">
               {templates.map((template) => (

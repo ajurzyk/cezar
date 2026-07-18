@@ -261,7 +261,7 @@ function WorkflowPicker({
             onValueChange={setSearch}
             onInput={() => listRef.current?.scrollTo(0, 0)}
           />
-          <CommandList ref={listRef} data-slot="gh-workflow-menu" className="max-h-64">
+          <CommandList ref={listRef} data-slot="gh-workflow-menu" className="max-h-[min(16rem,calc(var(--radix-popover-content-available-height)-3rem))]">
             {matched.length === 0 ? <CommandEmpty>Nothing matches.</CommandEmpty> : null}
             <CommandGroup>
               {matched.map((workflowDef) => {
@@ -390,7 +390,7 @@ function SkillsPicker({
               onValueChange={setSearch}
               onInput={() => listRef.current?.scrollTo(0, 0)}
             />
-            <CommandList ref={listRef} data-slot="gh-skill-menu" className="max-h-64">
+            <CommandList ref={listRef} data-slot="gh-skill-menu" className="max-h-[min(16rem,calc(var(--radix-popover-content-available-height)-3rem))]">
               {project.length === 0 && global.length === 0 ? <CommandEmpty>Nothing matches.</CommandEmpty> : null}
               {project.length > 0 ? (
                 <CommandGroup heading="Project skills">{project.map((skill) => skillItem(skill, true))}</CommandGroup>

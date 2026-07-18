@@ -339,7 +339,11 @@ function TemplateSkillsPicker({
       <PopoverContent align="start" sideOffset={8} className="w-[336px] max-w-[calc(100vw-2rem)] p-0">
         <Command filter={multiWordFilter}>
           <CommandInput placeholder="search skills…" onInput={() => listRef.current?.scrollTo(0, 0)} />
-          <CommandList ref={listRef} data-slot="prompt-template-skill-menu" className="max-h-64">
+          <CommandList
+            ref={listRef}
+            data-slot="prompt-template-skill-menu"
+            className="max-h-[min(16rem,calc(var(--radix-popover-content-available-height)-3rem))]"
+          >
             <CommandEmpty>Nothing matches.</CommandEmpty>
             {project.length > 0 ? (
               <CommandGroup heading="Project skills">
