@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -244,6 +244,222 @@ describe('RunStore — PR auto-link only on real creation (#fake-pr)', () => {
       result: 'https://github.com/open-mercato/cezar/pull/321\nDraft pull request created.',
     } as never);
     expect(store.getRun(run.id)?.pullRequestUrl).toBe('https://github.com/open-mercato/cezar/pull/321');
+  });
+});
+
+describe('RunStore — secret redaction before persistence (#427)', () => {
+  let dataDir: string;
+  const saved = { GITHUB_TOKEN: process.env.GITHUB_TOKEN, CEZ_REDACT_SECRETS: process.env.CEZ_REDACT_SECRETS };
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), 'cez-store-'));
+  });
+  afterEach(() => {
+    rmSync(dataDir, { recursive: true, force: true });
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  const eventsFile = (dir: string, id: string) => readFileSync(join(dir, 'runs', `${id}.ndjson`), 'utf8');
+
+  it('scrubs a host secret value from the NDJSON transcript', () => {
+    process.env.GITHUB_TOKEN = 'gho_thisisarealsecrettoken123456';
+    delete process.env.CEZ_REDACT_SECRETS;
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    store.appendEvent(run.id, {
+      type: 'tool-result',
+      result: 'printenv output: GITHUB_TOKEN=gho_thisisarealsecrettoken123456',
+    } as never);
+    const raw = eventsFile(dataDir, run.id);
+    expect(raw).not.toContain('gho_thisisarealsecrettoken123456');
+    expect(raw).toContain('[REDACTED]');
+  });
+
+  it('scrubs a token shape even when it never lived in cezar’s env', () => {
+    delete process.env.CEZ_REDACT_SECRETS;
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    store.appendEvent(run.id, {
+      type: 'tool-result',
+      result: 'cat ~/.aws: AKIAIOSFODNN7EXAMPLE and sk-ant-api03-abcdefghijklmnopqrst',
+    } as never);
+    const raw = eventsFile(dataDir, run.id);
+    expect(raw).not.toMatch(/AKIA|sk-ant/);
+  });
+
+  it('CEZ_REDACT_SECRETS=0 opts out (escape hatch)', () => {
+    process.env.GITHUB_TOKEN = 'gho_thisisarealsecrettoken123456';
+    process.env.CEZ_REDACT_SECRETS = '0';
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    store.appendEvent(run.id, {
+      type: 'tool-result',
+      result: 'GITHUB_TOKEN=gho_thisisarealsecrettoken123456',
+    } as never);
+    expect(eventsFile(dataDir, run.id)).toContain('gho_thisisarealsecrettoken123456');
+  });
+
+  /**
+   * #427 review: redaction reached the NDJSON but not runs.json. `titleSummary`
+   * is derived from the RAW first agent turn and `error` from raw process
+   * output, so a token the agent echoed was `[REDACTED]` in the transcript and
+   * verbatim in the file the "no secrets in state files" rule names explicitly.
+   */
+  it('scrubs a host secret from titleSummary and error before runs.json is written', () => {
+    process.env.GITHUB_TOKEN = 'gho_thisisarealsecrettoken123456';
+    delete process.env.CEZ_REDACT_SECRETS;
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    store.updateRun(run.id, {
+      titleSummary: 'Set GITHUB_TOKEN=gho_thisisarealsecrettoken123456 in CI',
+      error: 'auth failed for gho_thisisarealsecrettoken123456',
+    });
+    store.flush();
+
+    expect(store.getRun(run.id)?.error).toBe('auth failed for [REDACTED]');
+    const raw = readFileSync(join(dataDir, 'runs.json'), 'utf8');
+    expect(raw).not.toContain('gho_thisisarealsecrettoken123456');
+    expect(raw).toContain('[REDACTED]');
+    // …and it survives the round-trip scrubbed (reopening rewrites `error` on
+    // an unfinished run — the raw-file assertion above is what covers it).
+    expect(RunStore.open(dataDir).getRun(run.id)?.titleSummary).toBe('Set GITHUB_TOKEN=[REDACTED] in CI');
+  });
+
+  it('scrubs a token shape from a user-supplied title too', () => {
+    delete process.env.CEZ_REDACT_SECRETS;
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    store.updateRun(run.id, { title: 'rotate ghp_0123456789abcdefghijABCDEFGHIJ0123' });
+    expect(store.getRun(run.id)?.title).toBe('rotate [REDACTED]');
+  });
+
+  it('leaves ordinary record fields alone', () => {
+    delete process.env.CEZ_REDACT_SECRETS;
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    store.updateRun(run.id, {
+      titleSummary: 'Catch AuthError in the login handler',
+      status: 'done',
+      diffStat: { adds: 1, dels: 2, files: 3 },
+    });
+    const loaded = store.getRun(run.id);
+    expect(loaded?.titleSummary).toBe('Catch AuthError in the login handler');
+    expect(loaded?.status).toBe('done');
+    expect(loaded?.diffStat).toEqual({ adds: 1, dels: 2, files: 3 });
+  });
+
+  /**
+   * #456 review: redaction covered the run-level `error` but not the STEP-level
+   * one, and `run.ts` feeds the SAME `err.message` string to both — so a token
+   * was `[REDACTED]` in `runs.json`'s `error` and verbatim in
+   * `steps[].error` one field away. `touch()` fans the record out over SSE too,
+   * so it also reached the browser.
+   */
+  it('scrubs a host secret from steps[].error before runs.json is written', () => {
+    process.env.GITHUB_TOKEN = 'gho_thisisarealsecrettoken123456';
+    delete process.env.CEZ_REDACT_SECRETS;
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({
+      title: 't',
+      workflow: 'quick-task',
+      task: 'task',
+      steps: [{ id: 'task', name: 'Do the task', kind: 'agent' }],
+    });
+    // Exactly what run.ts does on a failed step: raw err.message straight in.
+    store.updateStep(run.id, 'task', {
+      status: 'failed',
+      error: 'auth failed for gho_thisisarealsecrettoken123456',
+    });
+    store.flush();
+
+    expect(store.getRun(run.id)?.steps[0]?.error).toBe('auth failed for [REDACTED]');
+    const raw = readFileSync(join(dataDir, 'runs.json'), 'utf8');
+    expect(raw).not.toContain('gho_thisisarealsecrettoken123456');
+    expect(raw).toContain('[REDACTED]');
+    // Survives a reopen — the scrub happened on the way in, not on read.
+    expect(RunStore.open(dataDir).getRun(run.id)?.steps[0]?.error).toBe('auth failed for [REDACTED]');
+  });
+
+  it('leaves non-error step fields untouched (no over-redaction)', () => {
+    process.env.GITHUB_TOKEN = 'gho_thisisarealsecrettoken123456';
+    delete process.env.CEZ_REDACT_SECRETS;
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({
+      title: 't',
+      workflow: 'quick-task',
+      task: 'task',
+      steps: [{ id: 'task', name: 'Do the task', kind: 'agent' }],
+    });
+    store.updateStep(run.id, 'task', { status: 'done', sessionId: 'sess-123', tokensUsed: 42 });
+    const step = store.getRun(run.id)?.steps[0];
+    expect(step?.status).toBe('done');
+    expect(step?.sessionId).toBe('sess-123');
+    expect(step?.tokensUsed).toBe(42);
+  });
+
+  it('CEZ_REDACT_SECRETS=0 opts steps[].error out too', () => {
+    process.env.GITHUB_TOKEN = 'gho_thisisarealsecrettoken123456';
+    process.env.CEZ_REDACT_SECRETS = '0';
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({
+      title: 't',
+      workflow: 'quick-task',
+      task: 'task',
+      steps: [{ id: 'task', name: 'Do the task', kind: 'agent' }],
+    });
+    store.updateStep(run.id, 'task', { error: 'gho_thisisarealsecrettoken123456' });
+    expect(store.getRun(run.id)?.steps[0]?.error).toBe('gho_thisisarealsecrettoken123456');
+  });
+
+  /** #456 review: `updateRun` scrubbed `title` but `createRun` stored it raw. */
+  it('scrubs a host secret from the title at creation time', () => {
+    process.env.GITHUB_TOKEN = 'gho_thisisarealsecrettoken123456';
+    delete process.env.CEZ_REDACT_SECRETS;
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({
+      title: 'rotate gho_thisisarealsecrettoken123456',
+      workflow: 'w',
+      task: 'task',
+      steps: [],
+    });
+    expect(run.title).toBe('rotate [REDACTED]');
+    store.flush();
+    expect(readFileSync(join(dataDir, 'runs.json'), 'utf8')).not.toContain(
+      'gho_thisisarealsecrettoken123456',
+    );
+  });
+
+  /** `task` is the user's own prompt and is replayed into `{{task}}` when a
+   *  queued run is revived (#367) — scrubbing it would corrupt the revived run,
+   *  so it stays verbatim by design. Pinning that decision. */
+  it('leaves the task prompt unredacted (re-enqueue must replay it verbatim)', () => {
+    process.env.GITHUB_TOKEN = 'gho_thisisarealsecrettoken123456';
+    delete process.env.CEZ_REDACT_SECRETS;
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({ title: 't', workflow: 'w', task: 'deploy the thing', steps: [] });
+    expect(store.getRun(run.id)?.task).toBe('deploy the thing');
+  });
+
+  it('CEZ_REDACT_SECRETS=0 opts runs.json out as well', () => {
+    process.env.GITHUB_TOKEN = 'gho_thisisarealsecrettoken123456';
+    process.env.CEZ_REDACT_SECRETS = '0';
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    store.updateRun(run.id, { titleSummary: 'gho_thisisarealsecrettoken123456' });
+    expect(store.getRun(run.id)?.titleSummary).toBe('gho_thisisarealsecrettoken123456');
+  });
+
+  it('does not disturb a PR URL (redaction leaves non-secrets intact)', () => {
+    delete process.env.CEZ_REDACT_SECRETS;
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    store.appendEvent(run.id, {
+      type: 'result',
+      result: 'Opened a draft pull request: https://github.com/open-mercato/cezar/pull/42',
+    } as never);
+    expect(store.getRun(run.id)?.pullRequestUrl).toBe('https://github.com/open-mercato/cezar/pull/42');
   });
 });
 
