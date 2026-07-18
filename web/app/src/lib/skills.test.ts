@@ -3,13 +3,14 @@ import { describe, expect, it } from 'vitest'
 import type { Skill, WorkflowDef } from '@/api/types'
 
 import {
+  bumpSkillUsage,
   filterSkills,
   fuzzyMatch,
   isProjectSkill,
   matchScore,
   multiWordFilter,
   orderSkills,
-  orderSkillsByRecency,
+  orderSkillsByUsage,
   queryScore,
   searchSkills,
   searchWorkflows,
@@ -43,7 +44,7 @@ describe('isProjectSkill / orderSkills (#377)', () => {
   })
 })
 
-describe('orderSkillsByRecency', () => {
+describe('orderSkillsByUsage (#408: frequency sort, shared by both composers)', () => {
   const skills = [
     skill({ name: 'g1', source: 'global' }),
     skill({ name: 'p1', source: 'agents' }),
@@ -51,19 +52,65 @@ describe('orderSkillsByRecency', () => {
     skill({ name: 'p2', source: 'ai' }),
   ]
 
-  it('keeps locality first, then sorts most-recent within each half', () => {
-    // Recent = [g2, p2] newest first → g2 leads globals, p2 leads projects.
-    const ordered = orderSkillsByRecency(skills, ['g2', 'p2'])
+  it('#1: sorts most-selected first within each locality half', () => {
+    const ordered = orderSkillsByUsage(skills, { g2: 5, p2: 9, p1: 1 })
+    // Locality first (project before global), frequency descending within each half.
     expect(ordered.map((s) => s.name)).toEqual(['p2', 'p1', 'g2', 'g1'])
   })
 
-  it('never-run skills keep server order after the recent ones', () => {
-    const ordered = orderSkillsByRecency(skills, ['g2'])
-    expect(ordered.map((s) => s.name)).toEqual(['p1', 'p2', 'g2', 'g1'])
+  it('#2: with no usage data, keeps the plain project-first fallback (stable ties)', () => {
+    expect(orderSkillsByUsage(skills, undefined).map((s) => s.name)).toEqual(['p1', 'p2', 'g1', 'g2'])
+    expect(orderSkillsByUsage(skills, {}).map((s) => s.name)).toEqual(['p1', 'p2', 'g1', 'g2'])
   })
 
-  it('falls back to plain locality order with no recency', () => {
-    expect(orderSkillsByRecency(skills, []).map((s) => s.name)).toEqual(['p1', 'p2', 'g1', 'g2'])
+  it('#2: ties (equal counts) also keep locality-then-server order, never flattened', () => {
+    const ordered = orderSkillsByUsage(skills, { g1: 3, p1: 3, g2: 3, p2: 3 })
+    expect(ordered.map((s) => s.name)).toEqual(['p1', 'p2', 'g1', 'g2'])
+  })
+
+  it('an unselected skill sorts below any selected one in its half', () => {
+    const ordered = orderSkillsByUsage(skills, { g1: 2 })
+    expect(ordered.map((s) => s.name)).toEqual(['p1', 'p2', 'g1', 'g2'])
+  })
+
+  it('a skill named after an Object.prototype member counts 0, not the inherited function', () => {
+    // `usage` comes from JSON.parse (the ui-state GET), so it carries Object.prototype: a plain
+    // `usage[name]` lookup returns the INHERITED function for these names, `??` does not catch a
+    // non-nullish function, and the comparator goes NaN — which silently corrupts the order.
+    const usage = JSON.parse('{"p1": 5}') as Record<string, number>
+    const ordered = orderSkillsByUsage(
+      [
+        skill({ name: 'constructor', source: 'ai' }),
+        skill({ name: 'toString', source: 'ai' }),
+        skill({ name: 'p1', source: 'ai' }),
+      ],
+      usage,
+    )
+    expect(ordered.map((s) => s.name)).toEqual(['p1', 'constructor', 'toString'])
+  })
+})
+
+describe('bumpSkillUsage (#408: the ui-state skillUsage reducer)', () => {
+  it('starts a fresh count at 1 from an undefined map', () => {
+    expect(bumpSkillUsage(undefined, 'om-fix')).toEqual({ 'om-fix': 1 })
+  })
+
+  it('increments an existing count without touching other entries', () => {
+    expect(bumpSkillUsage({ 'om-fix': 2, 'om-review': 7 }, 'om-fix')).toEqual({
+      'om-fix': 3,
+      'om-review': 7,
+    })
+  })
+
+  it('adds a new entry alongside existing ones', () => {
+    expect(bumpSkillUsage({ 'om-fix': 1 }, 'om-review')).toEqual({ 'om-fix': 1, 'om-review': 1 })
+  })
+
+  it('a skill named after an Object.prototype member starts at 1, not string garbage', () => {
+    // Same inherited-property trap as the sort: `usage['toString'] ?? 0` would yield the
+    // function, and `fn + 1` a string — which the server's bounded schema now rejects with a 400.
+    expect(bumpSkillUsage(JSON.parse('{}') as Record<string, number>, 'toString')).toEqual({ toString: 1 })
+    expect(bumpSkillUsage(undefined, 'constructor')).toEqual({ constructor: 1 })
   })
 })
 

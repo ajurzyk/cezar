@@ -11,7 +11,7 @@ import {
   TagIcon,
   TriangleAlertIcon,
 } from 'lucide-react'
-import { useState, type DragEvent, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type DragEvent, type ReactNode } from 'react'
 import { Link, Navigate, useParams } from 'react-router'
 
 import { getGithub, putUiState } from '@/api/client'
@@ -27,12 +27,14 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { toast } from '@/components/ui/toaster'
 import { shortAge } from '@/lib/format'
 import { githubTaskPrompt } from '@/lib/github-task'
+import { orderSkillsByUsage } from '@/lib/skills'
 import { cn, isHttpUrl } from '@/lib/utils'
 
 import { Markdown } from '../task-thread/markdown'
 import { allLabels, filterGithubItems, labelChipStyle } from './github-filter'
 import { GithubLoading } from './github-loading'
 import { HandToAgent } from './hand-to-agent'
+import { readFollowupSelection, writeFollowupSelection } from './hand-to-agent-draft'
 
 /**
  * `/github` — the forge tab rebuilt in React (R6 Step 1.1, spec §"GitHub tab (forge tab)"):
@@ -118,11 +120,40 @@ export function GithubRoute({ view }: { view: GithubView }) {
   })
 
   // Pickers + queued-run bookkeeping live at the route so they survive switching items
-  // (legacy parity) — see HandToAgent's doc block.
+  // (legacy parity) — see HandToAgent's doc block. Initial value comes from the localStorage
+  // "remembered last selection" (#408): a repeat hand-off is one action, and it now survives a
+  // page reload too — previously this was plain route state, gone on refresh.
   const workflows = useWorkflows()
   const skills = useSkills()
-  const [workflow, setWorkflow] = useState<string | null>(null)
-  const [selectedSkills, setSelectedSkills] = useState<readonly string[]>([])
+  const uiState = useUiState()
+  const [workflow, setWorkflow] = useState<string | null>(() => readFollowupSelection().workflow)
+  const [selectedSkills, setSelectedSkills] = useState<readonly string[]>(
+    () => readFollowupSelection().skills,
+  )
+  useEffect(() => {
+    writeFollowupSelection({ workflow, skills: [...selectedSkills] })
+  }, [workflow, selectedSkills])
+  // A workflow that no longer exists must not reach the server — the same legacy rule
+  // `validSkills` applies to skills (hand-to-agent.tsx). Remembering the pick (#408) gave this
+  // state a lifetime beyond the `.ai/workflows/` file that justified it: rename the workflow and
+  // every reload restores a name the server 404s on, with no obvious way to clear it. Cockpits
+  // for different repos also share one `localhost:<port>` origin (`pickPort`, src/index.ts) and
+  // therefore this localStorage key, so the name can arrive from a repo where it does exist.
+  // Drop it only once the list has LOADED — an in-flight fetch is not evidence of absence.
+  const workflowDefs = workflows.data?.workflows
+  useEffect(() => {
+    if (!workflowDefs) return
+    if (workflow !== null && !workflowDefs.some((def) => def.name === workflow)) setWorkflow(null)
+  }, [workflowDefs, workflow])
+  // Frequency sort (#408, shared with /new's SourcePill): project-first, then most-selected.
+  // Memoized so the picker gets a STABLE array identity across renders that don't actually
+  // change the catalog or the usage stats (e.g. toggling a skill re-renders this route).
+  const skillsData = skills.data
+  const skillUsage = uiState.data?.skillUsage
+  const skillList = useMemo(
+    () => orderSkillsByUsage(skillsData ?? [], skillUsage),
+    [skillsData, skillUsage],
+  )
   const [queued, setQueued] = useState<ReadonlyMap<string, string>>(new Map())
   // List filtering (#gh-filter): free-text search (by #id or any text) + a label narrow.
   const [query, setQuery] = useState('')
@@ -293,7 +324,7 @@ export function GithubRoute({ view }: { view: GithubView }) {
               key={selected.url}
               item={selected}
               workflows={workflows.data?.workflows ?? []}
-              skills={skills.data ?? []}
+              skills={skillList}
               workflow={workflow}
               onWorkflowChange={setWorkflow}
               selectedSkills={selectedSkills}

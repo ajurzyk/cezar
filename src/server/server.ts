@@ -195,6 +195,11 @@ const parseWorkflowSchema = z.object({
 // DB): today just the last-used task source, so the form preselects what you
 // actually run. Unknown keys pass through — future prefs won't need a schema
 // dance.
+
+/** Entry cap on the `skillUsage` map (#408). A real skill catalog is dozens of entries; this
+ *  bounds the ui-state.json write without ever rejecting a legitimate one. */
+const SKILL_USAGE_MAX_ENTRIES = 200;
+
 const uiStateSchema = z
   .object({
     lastTask: z
@@ -209,6 +214,24 @@ const uiStateSchema = z
     lastWorktree: z.boolean().optional(),
     lastAutonomous: z.boolean().optional(),
     lastGenerateFollowups: z.boolean().optional(),
+    // Skill selection frequency (#408): name → times chosen, incremented on a successful run
+    // start from EITHER composer (`/new`'s SourcePill and the follow-up `SkillsPicker`). Drives
+    // the shared `orderSkillsByUsage` sort (web/app/src/lib/skills.ts) so both pickers float the
+    // skills a user actually reaches for above the rest, within the existing project-first
+    // grouping. ADDITIVE, like the rest of ui-state — the client always PUTs the whole map
+    // because the top-level merge below is shallow.
+    //
+    // Bounded on all three axes (key length, value, entry count) like every neighbour here: this
+    // map is written straight to `ui-state.json`, which the cockpit GETs on every load and this
+    // route re-reads on every PUT, so an unbounded map is an unbounded file write. Keys are skill
+    // names (`.min(1).max(200)`, matching `lastTask.ref`); SKILL_USAGE_MAX_ENTRIES sits far above
+    // any real catalog while capping the file at a few tens of KB.
+    skillUsage: z
+      .record(z.string().min(1).max(200), z.number().int().min(0).max(1_000_000))
+      .refine((usage) => Object.keys(usage).length <= SKILL_USAGE_MAX_ENTRIES, {
+        message: `skillUsage must have at most ${SKILL_USAGE_MAX_ENTRIES} entries`,
+      })
+      .optional(),
     // Runs area presentation (#348): the sidebar-list + detail pane, or the
     // full-width table ("task manager") view.
     runsView: z.enum(['list', 'table']).optional(),

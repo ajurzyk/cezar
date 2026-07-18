@@ -39,7 +39,14 @@ import {
   normalizePromptTemplates,
   resolveAutoApply,
 } from '@/lib/prompt-templates'
-import { isProjectSkill, orderSkillsByRecency, searchSkills, searchWorkflows, skillKeywords } from '@/lib/skills'
+import {
+  bumpSkillUsage,
+  isProjectSkill,
+  orderSkillsByUsage,
+  searchSkills,
+  searchWorkflows,
+  skillKeywords,
+} from '@/lib/skills'
 import { submitShortcutHint } from '@/lib/use-submit-shortcut'
 import { cn } from '@/lib/utils'
 
@@ -55,7 +62,6 @@ import {
   buildCreateRunBody,
   modelsForRunner,
   pushRecentSource,
-  recentSkillNames,
   resolveModel,
   resolveRunner,
   resolveSource,
@@ -117,7 +123,15 @@ export function NewTaskRoute() {
 
   // ---- effective picker values (rules in new-task-form.ts, mirrored from legacy) -----------
   const recentSources = uiState.data?.recentSources
-  const skillList = orderSkillsByRecency(skills.data ?? [], recentSkillNames(recentSources))
+  // Memoized so the picker gets a STABLE array identity across renders that don't actually
+  // change the catalog or the usage stats (#408 — a raw `orderSkillsByUsage(...)` call here
+  // would create a new array on EVERY render, including ones unrelated to skills/usage).
+  const skillsData = skills.data
+  const skillUsage = uiState.data?.skillUsage
+  const skillList = useMemo(
+    () => orderSkillsByUsage(skillsData ?? [], skillUsage),
+    [skillsData, skillUsage],
+  )
   const workflowList = workflows.data?.workflows ?? []
   const sourcesReady =
     skills.data !== undefined && workflows.data !== undefined && !uiState.isPending
@@ -302,6 +316,14 @@ export function NewTaskRoute() {
       ...(worktreeToggleShown ? { lastWorktree: worktreeOn } : {}),
       lastAutonomous: autonomousOn,
       ...(followupsToggleShown ? { lastGenerateFollowups: generateFollowupsOn } : {}),
+      // Frequency sort (#408): only a SKILL pick counts — the map is keyed by skill name, and a
+      // workflow choice here doesn't select one directly. Gated on the CURRENT map being known:
+      // the PUT merge is shallow, so bumping off an errored ui-state query (`sourcesReady` only
+      // rules out `isPending`, not a failed fetch) would send a one-entry map and wipe every
+      // accumulated count.
+      ...(source.source === 'skill' && uiState.data !== undefined
+        ? { skillUsage: bumpSkillUsage(uiState.data.skillUsage, source.ref) }
+        : {}),
     })
       .then(() => queryClient.invalidateQueries({ queryKey: queryKeys.uiState }))
       .catch(() => {})
