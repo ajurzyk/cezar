@@ -396,6 +396,10 @@ function NestedEntry({ entry, scope }: { entry: ThreadEntry; scope?: string }) {
       return <NoteLine note={entry} />
     case 'image':
       return <ImageItem image={entry} />
+    case 'ask':
+      // AskUser cards are always top-level turn entries (#473) — they never nest
+      // under a tool group, so there is nothing to render here.
+      return null
   }
 }
 
