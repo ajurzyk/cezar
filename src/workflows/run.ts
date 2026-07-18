@@ -24,8 +24,10 @@ import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff, worktreeS
 import { getRepoInfo } from '../server/git.js';
 import { loadWorkflows } from './load.js';
 import type { RunRecord, RunStore } from '../runs/store.js';
+import { reclaimWorktrees, rematerializeReclaimedWorktree } from '../runs/retention.js';
 import { extractTaskRefs, refineTaskRefs, titleRefNumber } from '../runs/task-refs.js';
 import { autoNamingActive, generateRunName, liveTitleUpdatesEnabled } from '../runs/auto-name.js';
+import { reviewGateEnabled } from '../runs/review-gate.js';
 import { UiEventSink } from '../runs/ui-event-sink.js';
 import { chainStepNote, DEFAULT_ALLOWED_TOOLS, stepKind, type WorkflowDef, type WorkflowStepDef } from './types.js';
 
@@ -40,11 +42,27 @@ export const IDLE_TIMEOUT_MS = 15 * 60_000;
  * (codex, opencode) can't split the marker across text events.
  */
 const DONE_MARKER_RE = /CEZ:DONE\s*$/;
+/**
+ * Still-working marker from the agent contract (spec
+ * 2026-07-18-subagent-monitoring-status, #490): a turn whose text ends with
+ * `CEZ:MONITORING` means "I ended this turn but I'm still working on my own
+ * downstream work (a sub-agent / a command I'm monitoring), not waiting on the
+ * user" — cezar parks it as `running`/`activity:'monitoring'` instead of
+ * `waiting`, so the cockpit shows a non-attention state. `CEZ:DONE` wins if both
+ * appear. Detected on accumulated turn text (like `CEZ:DONE`) so delta-streaming
+ * backends can't split the marker across text events.
+ */
+const MONITORING_MARKER_RE = /CEZ:MONITORING\s*$/;
 /** Strip a trailing marker from one text event so transcripts stay free of
  *  protocol noise. Delta backends may split the marker across events — then
  *  it stays visible; detection above is unaffected. */
 function stripDoneMarker(text: string): string {
   return text.replace(/\s*CEZ:DONE\s*$/, '');
+}
+/** Strip a trailing `CEZ:MONITORING` marker from one text event (see
+ *  `stripDoneMarker`; same delta-backend caveat). */
+function stripMonitoringMarker(text: string): string {
+  return text.replace(/\s*CEZ:MONITORING\s*$/, '');
 }
 /** Periodic "cezar autosave" commit in the task worktree (spec 006). */
 export const AUTOSAVE_INTERVAL_MS = 90_000;
@@ -265,6 +283,11 @@ export class RunManager {
       // at the HTTP route because `cezar run`, the inbox's own "▶ Run" and variants all reach
       // startRun directly — a route-level gate would leave those writing todos.json.
       generateFollowups: followupsEnabled() ? input.generateFollowups : false,
+      // Persist autonomy on the record (#489) so the terminal review gate
+      // (`settleSuccess`) and the group-pick winner-park can honor it — mid-run
+      // auto-nudge reads `input.autonomous` (`execute`), but the record is the
+      // only source those after-the-fact consumers have.
+      autonomous: input.autonomous === true,
       groupId: group?.groupId,
       variant: group?.variant,
       steps: workflow.steps.map((s) => ({ id: s.id, name: s.name ?? s.id, kind: stepKind(s) })),
@@ -390,6 +413,11 @@ export class RunManager {
               model: run.model,
               runner: run.runner,
               generateFollowups,
+              // Re-thread autonomy (#489): the rebuilt input feeds `execute`,
+              // whose mid-run auto-nudge reads `input.autonomous`. Without this a
+              // recovered queued autonomous run would run non-autonomously (no
+              // auto-nudge) and later wrongly park at `review`.
+              autonomous: run.autonomous,
             },
           });
           this.queue.push(run.id);
@@ -466,6 +494,24 @@ export class RunManager {
     this.active.delete(runId);
     this.memoryPausing.delete(runId);
     this.lastNamerKey.delete(runId);
+    // A run leaving the active registry is a terminal transition (done/review/
+    // failed/cancelled) — the one moment the finished-worktree count can grow.
+    // Enforce count-based retention (#483) here so a single hook covers every
+    // terminal path. Fire-and-forget: retention must never delay or throw into
+    // the lifecycle.
+    void this.enforceRetention();
+  }
+
+  /** Reclaim finished worktrees beyond the keep-limit (#483) — directory only,
+   *  `cez/<id8>` branch kept. Best-effort; a failure never affects run
+   *  lifecycle. `review`/live runs are excluded by the selector. */
+  private async enforceRetention(): Promise<void> {
+    try {
+      const keep = (await loadConfig(this.repoRoot)).worktreeRetention;
+      await reclaimWorktrees(this.repoRoot, this.store, keep);
+    } catch {
+      // retention is best-effort; swallow so terminal transitions never break.
+    }
   }
 
   /** Last live-refresh namer inputs per run — unchanged inputs skip the call. */
@@ -580,7 +626,9 @@ export class RunManager {
     if (delivered) {
       this.clearIdleTimer(state);
       this.waiting.delete(runId); // resumed — the run counts against slots again
-      this.store.updateRun(runId, { status: 'running' });
+      // Clear any `monitoring` activity — the agent is actively working again
+      // (spec 2026-07-18-subagent-monitoring-status, #490).
+      this.store.updateRun(runId, { status: 'running', activity: undefined });
       if (state.currentStepId) {
         this.store.updateStep(runId, state.currentStepId, { status: 'running' });
       }
@@ -679,6 +727,12 @@ export class RunManager {
   ): Promise<void> {
     // Continuation runs in the task's worktree when it still exists (spec
     // 006) — the resumed session sees exactly what the original run left.
+    // Retention (#483) may have reclaimed this run's worktree directory while
+    // keeping its branch and worktreePath. Re-materialize it on resume and clear
+    // the stamp so the session regains its isolated tree and the run is eligible
+    // for retention again — otherwise it keeps a dir on disk while staying
+    // invisible to the enforcer forever. Best-effort; falls back to repoRoot.
+    await rematerializeReclaimedWorktree(this.repoRoot, this.store, runId);
     const record = this.store.getRun(runId);
     // The env is a live ceiling: a run created while the inbox was on must not keep writing
     // follow-ups after it is switched off.
@@ -714,6 +768,7 @@ export class RunManager {
       error: undefined,
       finishedAt: undefined,
       currentStepId: stepId,
+      activity: undefined, // resuming a monitoring run — it's actively working again (#490)
     });
     this.store.updateStep(runId, stepId, {
       status: 'running',
@@ -735,7 +790,7 @@ export class RunManager {
       }
       if (event.type === 'text') {
         turnText += event.text;
-        const text = stripDoneMarker(event.text);
+        const text = stripMonitoringMarker(stripDoneMarker(event.text));
         if (text) this.store.appendEvent(runId, { type: 'text', text, stepId });
         return;
       }
@@ -758,6 +813,7 @@ export class RunManager {
         void this.recordTurnEnd(runId, turnText); // titleSummary + diffStat (#389)
         const sessionOpen = !state.cancelled && state.session?.open;
         const done = sessionOpen && DONE_MARKER_RE.test(turnText.trimEnd());
+        const monitoring = sessionOpen && !done && MONITORING_MARKER_RE.test(turnText.trimEnd());
         turnText = '';
         if (done) {
           // Goal achieved (agent contract, #347) — same as in runAgentStep.
@@ -784,14 +840,27 @@ export class RunManager {
               return true;
             })();
           if (!autoContinued) {
-            this.store.updateRun(runId, { status: 'waiting' });
-            this.store.updateStep(runId, stepId, { status: 'waiting' });
+            // `CEZ:MONITORING` → non-attention `running`/`activity:'monitoring'`
+            // instead of `waiting` (spec 2026-07-18-subagent-monitoring-status,
+            // #490). Same lifecycle as waiting (frees the slot, keeps the idle
+            // timer). The autonomous nudge above still wins over monitoring.
+            if (monitoring) {
+              this.store.updateRun(runId, { status: 'running', activity: 'monitoring' });
+              this.store.updateStep(runId, stepId, { status: 'running' });
+            } else {
+              this.store.updateRun(runId, { status: 'waiting', activity: undefined });
+              this.store.updateStep(runId, stepId, { status: 'waiting' });
+            }
             this.waiting.add(runId);
             this.armIdleTimer(runId, state);
             void this.pump();
           }
         }
-        appendHandoffHeartbeat(this.dataDir, runId, `turn complete — status=${sessionOpen ? 'waiting' : 'running'}`);
+        appendHandoffHeartbeat(
+          this.dataDir,
+          runId,
+          `turn complete — status=${monitoring ? 'monitoring' : sessionOpen ? 'waiting' : 'running'}`,
+        );
       }
     };
 
@@ -1173,7 +1242,7 @@ export class RunManager {
       }
       if (event.type === 'text') {
         turnText += event.text;
-        const text = stripDoneMarker(event.text);
+        const text = stripMonitoringMarker(stripDoneMarker(event.text));
         if (text) emit({ type: 'text', text, stepId: step.id });
         return;
       }
@@ -1196,6 +1265,8 @@ export class RunManager {
         void this.recordTurnEnd(runId, turnText); // titleSummary + diffStat (#389)
         const sessionOpen = !state.cancelled && state.session?.open;
         const done = interactive && sessionOpen && DONE_MARKER_RE.test(turnText.trimEnd());
+        const monitoring =
+          interactive && sessionOpen && !done && MONITORING_MARKER_RE.test(turnText.trimEnd());
         turnText = '';
         if (done) {
           // Goal achieved (agent contract, #347): close the session instead
@@ -1207,16 +1278,31 @@ export class RunManager {
         }
         const waiting = interactive && sessionOpen;
         if (waiting) {
-          // Turn over, session open: the ball is in the user's court.
-          this.store.updateRun(runId, { status: 'waiting' });
-          this.store.updateStep(runId, step.id, { status: 'waiting' });
+          // Turn over, session open. Either the ball is in the user's court
+          // (`waiting`), or the agent declared it is still working on its own
+          // downstream work with `CEZ:MONITORING` — then park as
+          // `running`/`activity:'monitoring'`, a non-attention state, instead of
+          // raising "needs you" (spec 2026-07-18-subagent-monitoring-status, #490).
+          // Lifecycle is identical either way: the run frees its slot and keeps
+          // the idle timer, so even a stalled monitoring run is reclaimed.
+          if (monitoring) {
+            this.store.updateRun(runId, { status: 'running', activity: 'monitoring' });
+            this.store.updateStep(runId, step.id, { status: 'running' });
+          } else {
+            this.store.updateRun(runId, { status: 'waiting', activity: undefined });
+            this.store.updateStep(runId, step.id, { status: 'waiting' });
+          }
           this.waiting.add(runId);
           this.armIdleTimer(runId, state);
           void this.pump(); // the freed slot can start a queued run right away
         }
         // Cez's own heartbeat — the handoff stays current even when the
         // agent forgets to write (spec 007).
-        appendHandoffHeartbeat(this.dataDir, runId, `turn complete — status=${waiting ? 'waiting' : 'running'}`);
+        appendHandoffHeartbeat(
+          this.dataDir,
+          runId,
+          `turn complete — status=${monitoring ? 'monitoring' : waiting ? 'waiting' : 'running'}`,
+        );
       }
     };
 
@@ -1406,13 +1492,20 @@ export class RunManager {
    * at `review` instead of `done` — the user inspects the diff first, then
    * sends feedback back, opens a draft PR, or just finishes. Failed/cancelled
    * runs never enter review; no worktree or an empty diff means plain `done`.
+   *
+   * The gate is opt-in (#489): the review park happens only when it is enabled
+   * (`reviewGateEnabled` — config toggle over the `CEZ_REVIEW_GATE` env, default
+   * OFF) AND the run is not autonomous. Autonomous runs — and runs with the gate
+   * off — settle straight to `done`, leaving the diff in the worktree untouched.
    */
   private async settleSuccess(runId: string): Promise<void> {
     const run = this.store.getRun(runId);
     let review = false;
     if (run?.worktreePath && existsSync(run.worktreePath)) {
       const diff = await worktreeDiff(run.worktreePath, run.baseBranch ?? 'HEAD');
-      review = diff.trim().length > 0 && !diff.startsWith('(diff failed');
+      const hasDiff = diff.trim().length > 0 && !diff.startsWith('(diff failed');
+      const config = await loadConfig(this.repoRoot);
+      review = hasDiff && reviewGateEnabled(config) && run.autonomous !== true;
     }
     this.store.updateRun(runId, {
       status: review ? 'review' : 'done',

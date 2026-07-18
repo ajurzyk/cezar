@@ -58,6 +58,56 @@ describe('RunStore — titleSummary + diffStat (#389)', () => {
     expect(run?.titleSummary).toBeUndefined();
     expect(run?.diffStat).toBeUndefined();
     expect(run?.generateFollowups).toBeUndefined();
+    // Retention field (#483) is additive: a record without it parses and reads undefined.
+    expect(run?.worktreeReclaimedAt).toBeUndefined();
+  });
+
+  it('round-trips worktreeReclaimedAt and lets updateRun clear it (retention #483)', () => {
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    store.updateRun(run.id, { worktreeReclaimedAt: '2026-07-18T00:00:00.000Z' });
+    store.flush();
+
+    const reopened = RunStore.open(dataDir);
+    expect(reopened.getRun(run.id)?.worktreeReclaimedAt).toBe('2026-07-18T00:00:00.000Z');
+    // Re-materialization clears the stamp so retention sees the run again.
+    reopened.updateRun(run.id, { worktreeReclaimedAt: undefined });
+    reopened.flush();
+    expect(RunStore.open(dataDir).getRun(run.id)?.worktreeReclaimedAt).toBeUndefined();
+  });
+
+  it("round-trips activity:'monitoring' and lets updateRun clear it (#490)", () => {
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    // A fresh record has no activity (additive/optional).
+    expect(run.activity).toBeUndefined();
+    store.updateRun(run.id, { status: 'running', activity: 'monitoring' });
+    store.flush();
+
+    const reopened = RunStore.open(dataDir);
+    expect(reopened.getRun(run.id)?.activity).toBe('monitoring');
+    // Resume/terminal transitions clear it back to a plain running/other state.
+    reopened.updateRun(run.id, { status: 'running', activity: undefined });
+    reopened.flush();
+    expect(RunStore.open(dataDir).getRun(run.id)?.activity).toBeUndefined();
+  });
+
+  it('still loads an old runs.json that predates activity (#490)', () => {
+    writeFileSync(join(dataDir, 'runs.json'), JSON.stringify([LEGACY_RUN]), 'utf8');
+    const store = RunStore.open(dataDir);
+    expect(store.getRun('legacy-1')?.activity).toBeUndefined();
+  });
+
+  it('rejects an unknown activity value at the schema boundary (#490)', () => {
+    writeFileSync(
+      join(dataDir, 'runs.json'),
+      JSON.stringify([{ ...LEGACY_RUN, id: 'bad-activity', status: 'running', activity: 'bogus' }]),
+      'utf8',
+    );
+    // A corrupt/unknown activity must not smuggle a run in with an invalid value:
+    // the schema drops the bad record (degrade-to-fresh), so it does not load.
+    const store = RunStore.open(dataDir);
+    expect(store.getRun('bad-activity')?.activity).not.toBe('bogus');
   });
 
   it('persists an explicit follow-up opt-out while omission stays compatible', () => {
@@ -80,6 +130,29 @@ describe('RunStore — titleSummary + diffStat (#389)', () => {
     const reopened = RunStore.open(dataDir);
     expect(reopened.getRun(disabled.id)?.generateFollowups).toBe(false);
     expect(reopened.getRun(defaulted.id)?.generateFollowups).toBeUndefined();
+  });
+
+  it('round-trips the autonomous flag while omission stays compatible (#489)', () => {
+    const store = RunStore.open(dataDir);
+    const autonomous = store.createRun({
+      title: 'autonomous task',
+      workflow: 'quick-task',
+      task: 'autonomous task',
+      autonomous: true,
+      steps: [],
+    });
+    const interactive = store.createRun({
+      title: 'interactive task',
+      workflow: 'quick-task',
+      task: 'interactive task',
+      steps: [],
+    });
+    store.flush();
+
+    const reopened = RunStore.open(dataDir);
+    expect(reopened.getRun(autonomous.id)?.autonomous).toBe(true);
+    // Absent = falsy = "not autonomous" — old records and interactive runs alike.
+    expect(reopened.getRun(interactive.id)?.autonomous).toBeUndefined();
   });
 
   it('updateRun fans the new fields out on the run channel (the SSE feed)', () => {
@@ -150,6 +223,27 @@ describe('RunStore — PR auto-link only on real creation (#fake-pr)', () => {
       },
     });
     expect(store.getRun(run.id)?.pullRequestUrl).toBe('https://github.com/open-mercato/cezar/pull/9');
+  });
+
+  it('adopts the CREATED PR, not one referenced earlier in the same event (#495)', () => {
+    const { store, run } = freshRun();
+    store.appendEvent(run.id, {
+      type: 'result',
+      result:
+        'Read the linked PR https://github.com/open-mercato/cezar/pull/1 for context, then ' +
+        'opened a draft pull request: https://github.com/open-mercato/cezar/pull/500',
+    } as never);
+    // The first URL in the text is the referenced one — the created URL wins.
+    expect(store.getRun(run.id)?.pullRequestUrl).toBe('https://github.com/open-mercato/cezar/pull/500');
+  });
+
+  it('falls back to the URL before the phrase when gh prints it first', () => {
+    const { store, run } = freshRun();
+    store.appendEvent(run.id, {
+      type: 'result',
+      result: 'https://github.com/open-mercato/cezar/pull/321\nDraft pull request created.',
+    } as never);
+    expect(store.getRun(run.id)?.pullRequestUrl).toBe('https://github.com/open-mercato/cezar/pull/321');
   });
 });
 

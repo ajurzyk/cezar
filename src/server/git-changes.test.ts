@@ -8,12 +8,15 @@ import { RunStore, type RunRecord } from '../runs/store.js';
 import type { RunManager } from '../workflows/run.js';
 import {
   FILE_CONTENT_CAP,
+  assemblePayload,
   collectChanges,
   collectRunCommits,
   commitAll,
   imageMimeType,
+  patchByPath,
   pushCurrentBranch,
   readWorktreePath,
+  splitPatch,
   type ChangesPayload,
 } from './git-changes.js';
 import { createApp } from './server.js';
@@ -130,6 +133,78 @@ describe('collectChanges — structured diff vs base', () => {
     const withAdd = await collectChanges(dir, 'main');
     expect(withAdd.ok).toBe(true);
     if (withAdd.ok) expect(withAdd.changes.files.some((f) => f.path === 'untracked.txt')).toBe(true);
+  });
+});
+
+describe('assemblePayload — patches attach to files by path, not by position (#488)', () => {
+  // `-z` name-status: `X NUL path NUL`. Two modified files, in this order.
+  const nameStatus = 'M\0a.txt\0M\0b.txt\0';
+  const numstat = '1\t0\ta.txt\x002\t1\tb.txt\x00';
+  const patchA = ['diff --git a/a.txt b/a.txt', '--- a/a.txt', '+++ b/a.txt', '@@ -1 +1 @@', '-old-a', '+new-a', ''].join(
+    '\n',
+  );
+  const patchB = [
+    'diff --git a/b.txt b/b.txt',
+    '--- a/b.txt',
+    '+++ b/b.txt',
+    '@@ -1 +1,2 @@',
+    '-old-b',
+    '+new-b',
+    '+extra-b',
+    '',
+  ].join('\n');
+
+  it('keeps a file’s patch when name-status and patch file counts disagree', () => {
+    // The regression: a status entry (a.txt) emits no `diff --git` block, so the patch has
+    // one section for two files. The old `patches.length === statuses.length` guard blanked
+    // EVERY patch; now b.txt keeps its diff and only the genuinely patch-less a.txt is empty.
+    const payload = assemblePayload(nameStatus, numstat, patchB, 10_000);
+    const byPath = new Map(payload.files.map((f) => [f.path, f]));
+    expect(byPath.get('b.txt')?.patch).toContain('+new-b');
+    expect(byPath.get('b.txt')?.patch).toContain('+extra-b');
+    expect(byPath.get('a.txt')?.patch).toBe('');
+    // Counts/stats stay driven by numstat, untouched by the patch association.
+    expect(byPath.get('b.txt')).toMatchObject({ adds: 2, dels: 1 });
+  });
+
+  it('associates by path even when patch sections are ordered differently than name-status', () => {
+    // Both listings have two entries (counts agree), but the patch lists b before a. Positional
+    // matching would cross the patches over; path matching keeps each with its own file.
+    const payload = assemblePayload(nameStatus, numstat, `${patchB}${patchA}`, 10_000);
+    const byPath = new Map(payload.files.map((f) => [f.path, f]));
+    expect(byPath.get('a.txt')?.patch).toContain('+new-a');
+    expect(byPath.get('a.txt')?.patch).not.toContain('new-b');
+    expect(byPath.get('b.txt')?.patch).toContain('+new-b');
+  });
+});
+
+describe('patchByPath — maps a diff section to the file it describes', () => {
+  it('keys ordinary, deleted and renamed sections by their name-status path', () => {
+    const patch = [
+      'diff --git a/mod.txt b/mod.txt',
+      '--- a/mod.txt',
+      '+++ b/mod.txt',
+      '@@ -1 +1 @@',
+      '-a',
+      '+b',
+      'diff --git a/gone.txt b/gone.txt',
+      'deleted file mode 100644',
+      '--- a/gone.txt',
+      '+++ /dev/null',
+      '@@ -1 +0,0 @@',
+      '-bye',
+      'diff --git a/old.txt b/new.txt',
+      'similarity index 100%',
+      'rename from old.txt',
+      'rename to new.txt',
+      '',
+    ].join('\n');
+    const map = patchByPath(splitPatch(patch));
+    // deletion → its removed path (what --name-status reports for the `D` entry)
+    expect(map.get('gone.txt')).toContain('+++ /dev/null');
+    // rename → its target path (the `R` entry's new path)
+    expect(map.get('new.txt')).toContain('rename to new.txt');
+    expect(map.get('mod.txt')).toContain('+b');
   });
 });
 

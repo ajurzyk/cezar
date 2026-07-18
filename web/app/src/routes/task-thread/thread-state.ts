@@ -155,10 +155,11 @@ function str(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined
 }
 
-/** The engine's completion marker (`CEZ:DONE`). v1 `text` lines arrive pre-stripped by the
- *  server; v2 message items carry the raw text, so display strips it here. */
+/** The engine's turn-end markers (`CEZ:DONE`, and `CEZ:MONITORING` from #490). v1 `text` lines
+ *  arrive pre-stripped by the server; v2 message items carry the raw text, so display strips it
+ *  here. Named `stripDoneMarker` for continuity — it now strips either trailing marker. */
 function stripDoneMarker(text: string): string {
-  return text.replace(/\s*CEZ:DONE\s*$/, '')
+  return text.replace(/\s*CEZ:DONE\s*$/, '').replace(/\s*CEZ:MONITORING\s*$/, '')
 }
 
 /** v1 tool results are strings today; anything else is rendered as JSON rather than dropped. */
@@ -175,7 +176,10 @@ function resultText(value: unknown): string {
 const isUiItem = (entry: ThreadEntry): entry is UiItem =>
   entry.kind === 'message' || entry.kind === 'reasoning' || entry.kind === 'tool'
 
-const PLAN_STATUSES: ReadonlySet<string> = new Set<PlanStatus>(['pending', 'in_progress', 'completed'])
+/** Every `PlanStatus`, so an unrecognized status is the only thing that falls back to
+ *  `pending` below. `Set<PlanStatus>` accepts a subset without complaint, so this list
+ *  has to be kept honest by hand when the union grows. */
+const PLAN_STATUSES: ReadonlySet<string> = new Set<PlanStatus>(['pending', 'in_progress', 'completed', 'cancelled'])
 
 /**
  * Pre-v2 transcripts carry the plan only as TodoWrite input (`{todos: [{content, status,

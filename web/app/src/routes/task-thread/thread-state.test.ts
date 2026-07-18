@@ -232,6 +232,17 @@ describe('reduceThread — live-stream mechanics', () => {
     expect((turns[0]!.items[0] as UiMessageItem).text).toBe('All done.')
   })
 
+  it('strips a trailing CEZ:MONITORING from assistant messages too (#490)', () => {
+    const events: RunEvent[] = [
+      line(1, 'turn.started', { turnId: 'turn_1' }),
+      line(2, 'item.completed', {
+        item: { kind: 'message', id: 'm1', role: 'assistant', text: 'Spawned the reviewer, waiting on it.\n\nCEZ:MONITORING' },
+      }),
+    ]
+    const { turns } = reduceThread(events)
+    expect((turns[0]!.items[0] as UiMessageItem).text).toBe('Spawned the reviewer, waiting on it.')
+  })
+
   it('a malformed line costs itself, not the fold', () => {
     const events: RunEvent[] = [
       line(1, 'item.delta', { itemId: 'ghost', field: 'text', delta: 'x' }), // delta before any item

@@ -75,6 +75,10 @@ describe('bucketOf', () => {
   it.each(cases)('%s → Archived in the archived view', (status) => {
     expect(bucketOf(run({ status, archived: true }), 'archived')).toBe('Archived')
   })
+
+  it("a monitoring run stays in Working, not Needs you (#490)", () => {
+    expect(bucketOf(run({ status: 'running', activity: 'monitoring' }), 'active')).toBe('Working')
+  })
 })
 
 describe('sortRuns', () => {

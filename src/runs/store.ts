@@ -5,6 +5,14 @@ import { join } from 'node:path';
 import { z } from 'zod';
 
 export type RunStatus = 'queued' | 'running' | 'waiting' | 'review' | 'done' | 'failed' | 'cancelled';
+/**
+ * A sub-state of `running` (spec 2026-07-18-subagent-monitoring-status, #490):
+ * the agent ended its turn still working on its own downstream work (a sub-agent
+ * or a monitored command) and declared it with the `CEZ:MONITORING` marker — so
+ * the cockpit shows a non-attention "monitoring" label instead of "needs you".
+ * Only ever set while `status === 'running'`; cleared on resume/terminal.
+ */
+export type RunActivity = 'monitoring';
 export type StepStatus =
   | 'pending'
   | 'running'
@@ -60,7 +68,17 @@ const runRecordSchema = z.object({
   /** Per-task follow-up inbox contract (spec 007, #444). Missing on old runs
    *  means enabled — the historical behavior. */
   generateFollowups: z.boolean().optional(),
+  /** Autonomous mode (#489): the run was started with the "autonomous" checkbox,
+   *  so it never parks at `waiting` (auto-nudge) and — once persisted here —
+   *  never parks at the terminal `review` gate either (`settleSuccess` + the
+   *  group-pick winner-park read it). Additive-safe: absent = falsy = not
+   *  autonomous. Set at creation from `WorkflowInput.autonomous`. */
+  autonomous: z.boolean().optional(),
   status: z.enum(['queued', 'running', 'waiting', 'review', 'done', 'failed', 'cancelled']),
+  /** Sub-state of `running` (spec 2026-07-18-subagent-monitoring-status, #490):
+   *  `monitoring` while the agent is still working on its own downstream work.
+   *  Optional/absent on old runs; cleared when the run resumes or ends. */
+  activity: z.enum(['monitoring']).optional(),
   createdAt: z.string(),
   startedAt: z.string().optional(),
   finishedAt: z.string().optional(),
@@ -92,6 +110,11 @@ const runRecordSchema = z.object({
   branch: z.string().optional(),
   /** Branch (or commit, when HEAD was detached) the worktree was forked from. */
   baseBranch: z.string().optional(),
+  /** Set when count-based retention (#483) reclaimed this run's worktree
+   *  *directory* (the `cez/<id8>` branch is kept). Presence means "materialized
+   *  dir gone, recoverable via `git worktree add`"; it excludes the run from the
+   *  retention budget until the dir is re-materialized (resume clears it). */
+  worktreeReclaimedAt: z.string().optional(),
   /** Parallel variants (spec 010): tasks sharing a groupId are one group. */
   groupId: z.string().optional(),
   /** Variant letter within the group — 'A' | 'B' | 'C' (kept as a string). */
@@ -188,6 +211,26 @@ function resolveReferencedPr(candidates: string[], task: string): string | undef
 }
 
 /**
+ * The PR URL a creation phrase *introduces*, or undefined. The created URL is
+ * the first one at or after the `CREATED_PR_RE` phrase — a PR the same event
+ * merely referenced *earlier* (e.g. the issue's own linked `…/pull/1`) must not
+ * be mistaken for the one just created (#495). Falls back to the last URL
+ * *before* the phrase for `gh` orderings that print the URL first. Selection
+ * only — the caller decides whether creation phrasing is present.
+ */
+function createdPrUrl(haystack: string): string | undefined {
+  const phrase = CREATED_PR_RE.exec(haystack);
+  if (!phrase) return undefined;
+  const after = PR_URL_RE.exec(haystack.slice(phrase.index));
+  if (after) return after[0];
+  let before: string | undefined;
+  for (const m of haystack.slice(0, phrase.index).matchAll(new RegExp(PR_URL_RE.source, 'g'))) {
+    before = m[0];
+  }
+  return before;
+}
+
+/**
  * File-backed run store: `runs.json` index (atomic tmp+rename writes, the
  * pattern from @cezar/core's IssueStore) plus one append-only NDJSON event
  * file per run. Also the in-process event bus the SSE endpoints subscribe to:
@@ -261,6 +304,7 @@ export class RunStore extends EventEmitter {
     model?: string;
     runner?: 'claude' | 'codex' | 'opencode';
     generateFollowups?: boolean;
+    autonomous?: boolean;
     groupId?: string;
     variant?: string;
     steps: Array<Pick<StepState, 'id' | 'name' | 'kind'>>;
@@ -273,6 +317,7 @@ export class RunStore extends EventEmitter {
       model: input.model,
       runner: input.runner,
       generateFollowups: input.generateFollowups,
+      autonomous: input.autonomous,
       groupId: input.groupId,
       variant: input.variant,
       status: 'queued',
@@ -362,10 +407,10 @@ export class RunStore extends EventEmitter {
     if (!run.pullRequestUrl) {
       const haystack = eventTextFragments(full).join(' ');
       if (haystack.length > 0) {
-        const match = PR_URL_RE.exec(haystack);
-        if (match && CREATED_PR_RE.test(haystack)) {
-          this.updateRun(runId, { pullRequestUrl: match[0] });
-        } else if (match && this.trackReferencedPrs(run, haystack)) {
+        const created = createdPrUrl(haystack);
+        if (created) {
+          this.updateRun(runId, { pullRequestUrl: created });
+        } else if (PR_URL_RE.test(haystack) && this.trackReferencedPrs(run, haystack)) {
           this.touch(run);
         }
       }

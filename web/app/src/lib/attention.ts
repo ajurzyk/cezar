@@ -70,8 +70,9 @@ function isUnseen(_run: AttentionInput): boolean {
 
 /** What attention derivation actually reads. `Pick`ed rather than the full `RunRecord` so
  *  surfaces that only have a status — the compare view's `GroupVariant` columns — can use the
- *  same canonical function instead of inventing a second status-to-tone mapping. */
-export type AttentionInput = Pick<RunRecord, 'status'>
+ *  same canonical function instead of inventing a second status-to-tone mapping. `activity` is
+ *  optional (#490), so status-only callers keep working unchanged. */
+export type AttentionInput = Pick<RunRecord, 'status' | 'activity'>
 
 /**
  * `RunRecord` → attention.
@@ -98,6 +99,12 @@ export function deriveAttention(run: AttentionInput): Attention {
   }
   if (run.status === 'review') {
     return { bucket: 'waiting', tone: 'violet', pulse: true, label: 'needs review' }
+  }
+  if (run.status === 'running' && run.activity === 'monitoring') {
+    // Still working, but on its OWN downstream work (a sub-agent / a monitored
+    // command), not on you (#490). A sub-state of `running`, so it stays in the
+    // `running` bucket — no notification, no "Needs you" — with its own label.
+    return { bucket: 'running', tone: 'violet', pulse: true, label: 'monitoring' }
   }
   if (run.status === 'running') {
     return { bucket: 'running', tone: 'violet', pulse: true, label: 'running' }

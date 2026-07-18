@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { branchFor, createWorktree, parseShortstat, worktreeShortstat } from './git-worktree.js';
+import { branchFor, createWorktree, parseShortstat, worktreeShortstat, worktreeSizeBytes } from './git-worktree.js';
 
 const run = promisify(execFile);
 
@@ -71,6 +71,19 @@ describe('parseShortstat', () => {
   // localizes, so matching the English words is stable by contract.
   it.each(cases)('$name', ({ input, expected }) => {
     expect(parseShortstat(input)).toEqual(expected);
+  });
+});
+
+describe('worktreeSizeBytes (#483)', () => {
+  it('returns a positive byte count for a real directory', async () => {
+    const repo = await fixtureRepo('cez-du-');
+    const size = await worktreeSizeBytes(repo);
+    expect(size).not.toBeNull();
+    expect(size!).toBeGreaterThan(0);
+  });
+
+  it('degrades to null for a path that does not exist (du errors)', async () => {
+    expect(await worktreeSizeBytes(join(tmpdir(), 'cez-du-nope-does-not-exist-12345'))).toBeNull();
   });
 });
 

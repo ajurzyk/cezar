@@ -101,4 +101,37 @@ describe('loadConfig systemPrompt', () => {
       expect(config.maxParallel).toBe(6);
     });
   });
+
+  /** `worktreeRetention` (#483): count-based, always materialized (default 10),
+   *  `.catch(10)` so a bad value degrades to the default. `0` = unlimited. */
+  describe('worktreeRetention', () => {
+    it('defaults to 10 when absent (old config files load unchanged)', async () => {
+      write({ maxParallel: 5 });
+      const config = await loadConfig(repoRoot);
+      expect(config.worktreeRetention).toBe(10);
+      expect(config.maxParallel).toBe(5);
+    });
+
+    it('round-trips a configured count', async () => {
+      write({ worktreeRetention: 3 });
+      expect((await loadConfig(repoRoot)).worktreeRetention).toBe(3);
+    });
+
+    it('keeps 0 as a meaningful value (unlimited)', async () => {
+      write({ worktreeRetention: 0 });
+      expect((await loadConfig(repoRoot)).worktreeRetention).toBe(0);
+    });
+
+    it('degrades a bad value to the default (10) via .catch', async () => {
+      write({ worktreeRetention: -4, maxParallel: 6 });
+      const config = await loadConfig(repoRoot);
+      expect(config.worktreeRetention).toBe(10);
+      expect(config.maxParallel).toBe(6);
+    });
+
+    it('degrades a wrong-typed value to the default (10)', async () => {
+      write({ worktreeRetention: 'lots' });
+      expect((await loadConfig(repoRoot)).worktreeRetention).toBe(10);
+    });
+  });
 });
