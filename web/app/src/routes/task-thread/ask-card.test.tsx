@@ -44,6 +44,24 @@ const multiAsk: ThreadAsk = {
   ],
 }
 
+const twoQuestionAsk: ThreadAsk = {
+  kind: 'ask',
+  id: 'ask_3',
+  resolved: false,
+  questions: [
+    {
+      header: 'Library',
+      question: 'Which library?',
+      options: [{ label: 'date-fns' }, { label: 'Luxon' }],
+    },
+    {
+      header: 'Style',
+      question: 'Which style?',
+      options: [{ label: 'ISO' }, { label: 'Relative' }],
+    },
+  ],
+}
+
 describe('AskCard', () => {
   it('renders the header, question and each option with its description', () => {
     render(<AskCard ask={singleAsk} runId="r1" />)
@@ -53,10 +71,26 @@ describe('AskCard', () => {
     expect(screen.getByText('Tree-shakeable')).toBeTruthy()
   })
 
-  it('single-select: clicking an option sends "header: label"', () => {
+  it('a single single-select question sends "header: label" on one tap (no Send button)', () => {
     render(<AskCard ask={singleAsk} runId="r1" />)
+    expect(screen.queryByRole('button', { name: 'Send answer' })).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: /date-fns/ }))
     expect(mutateAsync).toHaveBeenCalledWith({ text: 'Library: date-fns' })
+  })
+
+  it('multiple questions: one Send posts every answer in one combined message', () => {
+    render(<AskCard ask={twoQuestionAsk} runId="r1" />)
+    const send = screen.getByRole('button', { name: 'Send answer' }) as HTMLButtonElement
+    // Answering only the first question does NOT send, and does not resolve.
+    fireEvent.click(screen.getByRole('button', { name: /date-fns/ }))
+    expect(send.disabled).toBe(true)
+    expect(mutateAsync).not.toHaveBeenCalled()
+    // Both answered → one combined message.
+    fireEvent.click(screen.getByRole('button', { name: /Relative/ }))
+    expect(send.disabled).toBe(false)
+    fireEvent.click(send)
+    expect(mutateAsync).toHaveBeenCalledTimes(1)
+    expect(mutateAsync).toHaveBeenCalledWith({ text: 'Library: date-fns\nStyle: Relative' })
   })
 
   it('multi-select: Send is disabled until options are picked, then sends the comma-joined labels', () => {
