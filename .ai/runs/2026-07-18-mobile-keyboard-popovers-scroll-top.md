@@ -109,4 +109,4 @@ PR: #504
 ### Phase 4: validation + PR
 
 - [x] 4.1 Full validation gate, self-review, draft PR + labels — PR #504
-- [ ] 4.2 om-auto-verify-pr-ui QA + om-auto-review-pr autofix loop
+- [x] 4.2 om-auto-verify-pr-ui QA (PASS 8/8, evidence on PR) + om-auto-review-pr (APPROVED, 0 autofix iterations)
