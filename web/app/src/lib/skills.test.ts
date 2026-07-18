@@ -10,6 +10,9 @@ import {
   multiWordFilter,
   orderSkills,
   orderSkillsByRecency,
+  queryScore,
+  searchSkills,
+  searchWorkflows,
   skillKeywords,
   skillUsedBy,
 } from './skills'
@@ -187,6 +190,57 @@ describe('#484: an (almost-)exact match sorts to the top', () => {
     ]
     // Both match 'review' as a word-boundary hit → tie → project (ai) stays first.
     expect(filterSkills(skills, 'review').map((s) => s.name)).toEqual(['project-review', 'global-review'])
+  })
+})
+
+describe('searchSkills / searchWorkflows (#484: the pickers rank in JS, not via cmdk)', () => {
+  const skills = [
+    skill({ name: 'om-auto-fix-issue', source: 'ai', description: 'Fix an issue; runs om-fix internally' }),
+    skill({ name: 'om-fix', source: 'ai', description: 'Apply the minimal fix' }),
+    skill({ name: 'om-open-pr', source: 'global', description: 'Open a PR' }),
+  ]
+
+  it('ranks the (almost-)exact name match first, even when it comes later in the input', () => {
+    // The picker bug: "om-fix" typed, but "om-auto-fix-issue" (only a description hit) sat on top.
+    expect(searchSkills(skills, 'om-fix').map((s) => s.name)).toEqual(['om-fix', 'om-auto-fix-issue'])
+  })
+
+  it('keeps the caller-supplied order for an empty query (project-first / recency survives)', () => {
+    expect(searchSkills(skills, '').map((s) => s.name)).toEqual([
+      'om-auto-fix-issue',
+      'om-fix',
+      'om-open-pr',
+    ])
+  })
+
+  it('drops non-matches and never throws on no match', () => {
+    expect(searchSkills(skills, 'zzz')).toEqual([])
+  })
+
+  it('a name match outranks a description-only match', () => {
+    // "issue": om-auto-fix-issue matches on the name (whole word), om-open-pr only via description.
+    const s2 = [
+      skill({ name: 'om-open-pr', source: 'ai', description: 'Open a PR for an issue' }),
+      skill({ name: 'om-auto-fix-issue', source: 'ai' }),
+    ]
+    expect(searchSkills(s2, 'issue').map((s) => s.name)).toEqual(['om-auto-fix-issue', 'om-open-pr'])
+  })
+
+  it('searchWorkflows ranks workflows by match quality too', () => {
+    const workflows: WorkflowDef[] = [
+      { name: 'ship-it', source: 'file', description: 'review then deploy', steps: [] },
+      { name: 'review', source: 'file', steps: [] },
+    ]
+    expect(searchWorkflows(workflows, 'review').map((w) => w.name)).toEqual(['review', 'ship-it'])
+  })
+})
+
+describe('queryScore (#484)', () => {
+  it('a name hit always outranks a description-only hit', () => {
+    expect(queryScore('deploy', 'unrelated', 'deploy')).toBeGreaterThan(queryScore('other', 'deploy tool', 'deploy'))
+  })
+  it('0 when neither name nor description matches', () => {
+    expect(queryScore('alpha', 'beta', 'zzz')).toBe(0)
   })
 })
 

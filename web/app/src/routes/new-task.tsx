@@ -39,7 +39,7 @@ import {
   normalizePromptTemplates,
   resolveAutoApply,
 } from '@/lib/prompt-templates'
-import { isProjectSkill, multiWordFilter, orderSkillsByRecency, skillKeywords } from '@/lib/skills'
+import { isProjectSkill, orderSkillsByRecency, searchSkills, searchWorkflows, skillKeywords } from '@/lib/skills'
 import { submitShortcutHint } from '@/lib/use-submit-shortcut'
 import { cn } from '@/lib/utils'
 
@@ -609,10 +609,16 @@ function SourcePill({
   onPick: (source: TaskSource) => void
 }) {
   const [open, setOpen] = useState(false)
+  const [search, setSearch] = useState('')
   const [preview, setPreview] = useState<Skill | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
-  const project = skills.filter(isProjectSkill)
-  const global = skills.filter((skill) => !isProjectSkill(skill))
+  // #484: rank in JS (cmdk's own score-sort does not re-order reliably here), then split the
+  // ranked matches into the Project/Global groups so each group stays match-ordered.
+  const matched = searchSkills(skills, search)
+  const project = matched.filter(isProjectSkill)
+  const global = matched.filter((skill) => !isProjectSkill(skill))
+  const matchedWorkflows = searchWorkflows(workflows, search)
+  const nothingMatches = project.length === 0 && global.length === 0 && matchedWorkflows.length === 0
   const pick = (next: TaskSource) => {
     onPick(next)
     setOpen(false)
@@ -663,7 +669,13 @@ function SourcePill({
   return (
     <>
       <SkillPreviewDialog skill={preview} onClose={() => setPreview(null)} />
-      <Popover open={open} onOpenChange={setOpen}>
+      <Popover
+        open={open}
+        onOpenChange={(next) => {
+          setOpen(next)
+          if (!next) setSearch('')
+        }}
+      >
         <PopoverTrigger asChild>
           <button
             type="button"
@@ -686,10 +698,15 @@ function SourcePill({
           sideOffset={8}
           className="w-[336px] max-w-[calc(100vw-2rem)] p-0"
         >
-          <Command filter={multiWordFilter}>
-            <CommandInput placeholder="search skills & workflows…" onInput={() => listRef.current?.scrollTo(0, 0)} />
+          <Command shouldFilter={false}>
+            <CommandInput
+              placeholder="search skills & workflows…"
+              value={search}
+              onValueChange={setSearch}
+              onInput={() => listRef.current?.scrollTo(0, 0)}
+            />
             <CommandList ref={listRef} data-slot="source-menu" className="max-h-72">
-              <CommandEmpty>Nothing matches.</CommandEmpty>
+              {nothingMatches ? <CommandEmpty>Nothing matches.</CommandEmpty> : null}
               {/* Project skills lead, Global trails everything — the closer a skill lives
                   to the repo, the more likely it's the one being picked. */}
               {project.length > 0 ? (
@@ -697,9 +714,9 @@ function SourcePill({
                   {project.map((skill) => skillItem(skill, true))}
                 </CommandGroup>
               ) : null}
-              {workflows.length > 0 ? (
+              {matchedWorkflows.length > 0 ? (
                 <CommandGroup heading="Workflows">
-                  {workflows.map((workflow) => {
+                  {matchedWorkflows.map((workflow) => {
                     const selected = source.source === 'workflow' && source.ref === workflow.name
                     return (
                       <CommandItem

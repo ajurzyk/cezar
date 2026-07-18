@@ -145,26 +145,67 @@ export function skillKeywords(name: string, description?: string | null): string
   return description ? [...parts, description] : parts
 }
 
-/** A skill's match score for a typed query: a name hit always outranks a description-only
- *  hit (the +10 offset), and within each the stronger `matchScore` wins. 0 = no match. */
-function skillMatchScore(skill: Skill, query: string): number {
-  const nameScore = matchScore(skill.name, query)
-  if (nameScore > 0) return nameScore + 10
-  return skill.description ? matchScore(skill.description, query) : 0
+/** A name hit outranks a description-only hit by this much, so an (almost-)exact name match
+ *  always sorts above a skill that merely mentions the query in its description (#484). */
+const NAME_MATCH_BONUS = 10
+
+/** How well a name/description pair matches a typed query. The query is split on whitespace
+ *  and EVERY word must appear in the name or the description (the multi-keyword rule from #411:
+ *  "fix project" finds `om-fix` "project fixer"); a query that misses any word scores 0. Each
+ *  word contributes its `matchScore` quality (exact > prefix > word-boundary > substring >
+ *  subsequence), and a word that lands in the NAME is boosted over one that only lands in the
+ *  description — so the total ranks (almost-)exact name matches to the top (#484). Empty query
+ *  is a neutral match (1). The shared match signal behind every skill/workflow search surface. */
+export function queryScore(name: string, description: string | null | undefined, query: string): number {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean)
+  if (words.length === 0) return 1
+  let total = 0
+  for (const word of words) {
+    const nameScore = matchScore(name, word)
+    const descScore = description ? matchScore(description, word) : 0
+    if (nameScore === 0 && descScore === 0) return 0 // every word must match somewhere
+    total += nameScore > 0 ? nameScore + NAME_MATCH_BONUS : descScore
+  }
+  return total
+}
+
+/** Filter a name/description list down to matches and rank them by match quality (#484),
+ *  preserving the incoming order for an empty query and for equally-scored ties — so a
+ *  caller's project-first or recency order survives. This is the shared ranking engine behind
+ *  both the composer `/` autocomplete and the cmdk pickers: the pickers rank in JS through
+ *  this rather than trusting cmdk's built-in score-sort, which does not reliably re-order the
+ *  list in this app (React re-renders reset cmdk's imperative DOM ordering), so before #484 an
+ *  (almost-)exact match could sit below weaker ones. */
+function rankByQuery<T extends { name: string; description?: string | null }>(
+  items: readonly T[],
+  query: string,
+): T[] {
+  if (query.trim() === '') return [...items]
+  return items
+    .map((item, index) => ({ item, index, score: queryScore(item.name, item.description, query) }))
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .map((entry) => entry.item)
+}
+
+/** Rank skills for a grouped picker by match quality, keeping the caller's incoming order
+ *  (project-first / recency) for ties and the empty query. Callers split the result into their
+ *  own Project/Global groups; each group stays match-ranked. */
+export function searchSkills(skills: readonly Skill[], query: string): Skill[] {
+  return rankByQuery(skills, query)
+}
+
+/** Rank workflows for a picker by match quality — the workflow counterpart of `searchSkills`. */
+export function searchWorkflows(workflows: readonly WorkflowDef[], query: string): WorkflowDef[] {
+  return rankByQuery(workflows, query)
 }
 
 /** The `/` autocomplete's list for a typed query: ordered project-first, then filtered and
  *  **ranked by match quality** (#484 — an (almost-)exact match must sort to the top, the same
- *  rule the cmdk pickers follow; supersedes the old #380 "filter without re-sorting"). Matches
+ *  rule the pickers now follow; supersedes the old #380 "filter without re-sorting"). Matches
  *  on the name and, as a fallback, the description ("review" should find `om-code-review` even
  *  when the name says less than the description does). Ties keep the project-first order, so an
  *  empty query and equally-good matches still render project skills before global/team. */
 export function filterSkills(skills: readonly Skill[], query: string): Skill[] {
-  const ordered = orderSkills(skills)
-  if (query.trim() === '') return ordered
-  return ordered
-    .map((skill, index) => ({ skill, index, score: skillMatchScore(skill, query) }))
-    .filter((entry) => entry.score > 0)
-    .sort((a, b) => b.score - a.score || a.index - b.index)
-    .map((entry) => entry.skill)
+  return rankByQuery(orderSkills(skills), query)
 }
