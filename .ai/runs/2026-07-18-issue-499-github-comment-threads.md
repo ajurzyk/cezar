@@ -7,9 +7,9 @@ Branch: `cez/d59e473a`
 ## Progress
 
 ### Phase 1 — counts + icons
-- [ ] 1. `github.ts`: `fetchCommentCounts` (GraphQL, zod, ≤10-page pagination) as 4th `Promise.all` entry in `fetchGithub`; degrade-to-empty on failure; merge into issue/PR mappers (replace `comments: 0`). Unit tests.
-- [ ] 2. `github.tsx`: `MessageSquareIcon` + count in `GithubRow` meta (only when `> 0`) and `GithubDetail` meta. Component tests.
-- [ ] 3. Verify `mockGithub()` counts flow under `CEZ_DRY_RUN=1`.
+- [x] 1. `github.ts`: `fetchCommentCounts` (GraphQL, zod, ≤10-page pagination) + merge into mappers. Unit tests. — 45c1c05
+- [x] 2. `github.tsx`: `MessageSquareIcon` + count in `GithubRow`/`GithubDetail` meta. Component tests. — 45c1c05
+- [x] 3. `mockGithub()` counts flow under `CEZ_DRY_RUN=1` (fixtures already carry counts). — 45c1c05
 
 ### Phase 2 — comment threads
 - [ ] 4. `types.ts`: `ForgeComment`/`ForgeCommentsData`. `github.ts`: `fetchGithubComments` (gh calls, zod, review filter, caps, 60s LRU cache, mock). Unit tests.
