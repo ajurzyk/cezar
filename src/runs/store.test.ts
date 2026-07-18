@@ -167,6 +167,27 @@ describe('RunStore — PR auto-link only on real creation (#fake-pr)', () => {
     });
     expect(store.getRun(run.id)?.pullRequestUrl).toBe('https://github.com/open-mercato/cezar/pull/9');
   });
+
+  it('adopts the CREATED PR, not one referenced earlier in the same event (#495)', () => {
+    const { store, run } = freshRun();
+    store.appendEvent(run.id, {
+      type: 'result',
+      result:
+        'Read the linked PR https://github.com/open-mercato/cezar/pull/1 for context, then ' +
+        'opened a draft pull request: https://github.com/open-mercato/cezar/pull/500',
+    } as never);
+    // The first URL in the text is the referenced one — the created URL wins.
+    expect(store.getRun(run.id)?.pullRequestUrl).toBe('https://github.com/open-mercato/cezar/pull/500');
+  });
+
+  it('falls back to the URL before the phrase when gh prints it first', () => {
+    const { store, run } = freshRun();
+    store.appendEvent(run.id, {
+      type: 'result',
+      result: 'https://github.com/open-mercato/cezar/pull/321\nDraft pull request created.',
+    } as never);
+    expect(store.getRun(run.id)?.pullRequestUrl).toBe('https://github.com/open-mercato/cezar/pull/321');
+  });
 });
 
 describe('RunStore — referenced-PR discovery (#407, spec 2026-07-16-pr-autodiscovery)', () => {
