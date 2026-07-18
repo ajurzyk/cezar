@@ -385,6 +385,10 @@ export interface WorkflowsResponse {
  *  a missing CLI, a timeout or an unparseable answer degrade to the one-step quick-task plan
  *  with `fallback: true`, which the UI surfaces as a dim note. */
 export interface PlanResponse {
+  /** A short kebab-case workflow title the planner proposed (spec 008 follow-up / #414). The
+   *  workflow builder's auto chain creator pre-fills its name field with it. Absent on the
+   *  degraded fallback, and on older servers that never sent one. */
+  name?: string
   steps: WorkflowStepDef[]
   rationale: string
   fallback: boolean

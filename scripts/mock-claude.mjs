@@ -161,6 +161,7 @@ async function respond(userText, imageCount) {
   // its prompt — which is exactly the path worth exercising in dry runs.
   if (userText.includes('[cez-planner]')) {
     const plan = JSON.stringify({
+      title: 'implement-verify-review',
       steps: [
         { name: 'Implement', prompt: '{{task}}' },
         { name: 'Verify', command: 'npm test' },
