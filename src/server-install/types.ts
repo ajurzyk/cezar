@@ -70,6 +70,16 @@ export const serverStateSchema = z
      * is where "unknown platform" is decided, with the ledger intact.
      */
     platform: z.string().min(1).optional().catch(undefined),
+    /**
+     * Instance id (slug) this record belongs to — `default` for the original
+     * single-cockpit host, or a domain-derived slug for a named instance under
+     * `~/.cezar/server-instances/`. Self-describing so tooling can list what a
+     * host runs without re-deriving it from the filename.
+     */
+    instance: z.string().min(1).optional().catch(undefined),
+    /** Public domain this instance answers on (drives nginx `server_name` +
+     * the SSL cert). Absent for a plain HTTP / default install. */
+    domain: z.string().optional().catch(undefined),
     /** Flips true only when every required step is `done`. */
     installed: z.boolean().default(false).catch(false),
     /** True when this record was written by a CEZ_DRY_RUN preview — a real
@@ -187,7 +197,14 @@ export interface InstallContext {
   state: ServerState;
   ui: Ui;
   runner: Runner;
-  /** Atomically persist `state` to `~/.cezar/server.json`. */
+  /**
+   * Instance id (slug) this run targets. `default` (the original single-cockpit
+   * flow) keeps every legacy path unchanged; a domain-derived slug suffixes the
+   * nginx site, htpasswd, and systemd unit so instances never collide on one
+   * host. Steps read this to build their instance-scoped paths.
+   */
+  instance: string;
+  /** Atomically persist `state` to this instance's `~/.cezar` record. */
   save(): Promise<void>;
   /** CEZ_DRY_RUN — no real sudo, package installs, or network. */
   dryRun: boolean;

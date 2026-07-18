@@ -27,6 +27,12 @@ npx cezar-cli server-uninstall --platform <id>   # reverse it
 Same engine, different steps — each strategy is a small registry entry, so new
 platforms slot in without touching the engine.
 
+> **Several domains on one box?** `ubuntu-vps` can host multiple independent
+> cockpits — add `--domain <host>` to install/deploy/uninstall a separate
+> instance (its own port, nginx site, login and service). A new `--domain` never
+> resumes the first install. See
+> [Hosting several cockpits on one box](./ubuntu-vps.md#hosting-several-cockpits-on-one-box-multiple-domains).
+
 ## How it works (all providers)
 
 1. **Dependencies** — detect the agent CLIs (`claude`/`codex`/`opencode`),

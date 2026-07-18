@@ -422,7 +422,14 @@ and verified, and it ends with a real authenticated end-to-end check.
 npx cezar-cli server-install   --platform ubuntu-vps   # stand it up
 npx cezar-cli server-deploy    --platform ubuntu-vps   # roll out a new version (reload the service)
 npx cezar-cli server-uninstall --platform ubuntu-vps   # reverse it
+
+# host a SECOND cockpit for another domain on the same box (ubuntu-vps):
+npx cezar-cli server-install   --platform ubuntu-vps --domain shop.example.com
 ```
+
+On `ubuntu-vps` a single host can run several independent cockpits — add
+`--domain <host>` and each gets its own port, nginx site, login and service; a
+new domain never resumes or clobbers the first install.
 
 | Provider | `--platform` | Public front | Guide |
 |----------|--------------|--------------|-------|

@@ -14,9 +14,33 @@ import { depCheckStep, generatePassword, owned, shared, shquote, StepAborted, St
  * Phase 2 appends the optional SSL and autostart steps to `steps()`.
  */
 
-const VHOST_AVAILABLE = '/etc/nginx/sites-available/cezar';
-const VHOST_ENABLED = '/etc/nginx/sites-enabled/cezar';
-const HTPASSWD = '/etc/cezar/htpasswd';
+/**
+ * Instance-scoped artifact paths. The `default` instance (a host with no
+ * `--domain`, i.e. every pre-multi-instance install) keeps the original,
+ * un-suffixed names so it upgrades in place; a named (domain-keyed) instance
+ * suffixes the nginx site, htpasswd, and systemd unit with its slug so several
+ * cockpits coexist on one host without colliding. `undefined`/`'default'` both
+ * resolve to the legacy names.
+ */
+function inst(ctx: InstallContext): string {
+  return ctx.instance && ctx.instance !== 'default' ? ctx.instance : 'default';
+}
+function vhostAvailable(ctx: InstallContext): string {
+  const i = inst(ctx);
+  return i === 'default' ? '/etc/nginx/sites-available/cezar' : `/etc/nginx/sites-available/cezar-${i}`;
+}
+function vhostEnabled(ctx: InstallContext): string {
+  const i = inst(ctx);
+  return i === 'default' ? '/etc/nginx/sites-enabled/cezar' : `/etc/nginx/sites-enabled/cezar-${i}`;
+}
+function htpasswdPath(ctx: InstallContext): string {
+  const i = inst(ctx);
+  return i === 'default' ? '/etc/cezar/htpasswd' : `/etc/cezar/htpasswd-${i}`;
+}
+function unitName(ctx: InstallContext): string {
+  const i = inst(ctx);
+  return i === 'default' ? 'cezar.service' : `cezar-${i}.service`;
+}
 
 /** Best-effort current OS username, suggested as the default cockpit login. */
 function currentUsername(): string {
@@ -92,7 +116,7 @@ async function confirmCezarRunning(ctx: InstallContext, statusCmd: string, logsC
  * `serverName` defaults to the catch-all `_`; the SSL step rewrites it to the
  * real domain so the `certbot --nginx` plugin can find this vhost to edit.
  */
-export function nginxVhost(port: number, serverName = '_'): string {
+export function nginxVhost(port: number, serverName = '_', htpasswd = '/etc/cezar/htpasswd'): string {
   return `# Managed by cezar server-install — do not edit by hand.
 server {
     listen 80;
@@ -100,7 +124,7 @@ server {
     server_name ${serverName};
 
     auth_basic "cezar";
-    auth_basic_user_file ${HTPASSWD};
+    auth_basic_user_file ${htpasswd};
 
     location / {
         proxy_pass http://127.0.0.1:${port};
@@ -158,7 +182,7 @@ const nginxProxyStep: InstallStep = {
   async check(ctx) {
     if (ctx.dryRun) return false;
     const nginxOk = await verifyCommand(ctx, 'nginx', ['-v']);
-    const vhostOk = await verifyCommand(ctx, 'test', ['-f', VHOST_ENABLED]);
+    const vhostOk = await verifyCommand(ctx, 'test', ['-f', vhostEnabled(ctx)]);
     return nginxOk && vhostOk;
   },
   async run(ctx): Promise<{ artifacts: StepArtifact[] }> {
@@ -253,27 +277,33 @@ const nginxProxyStep: InstallStep = {
     // every request 500. 0640 root:www-data: readable by nginx, not by others.
     // The credential line travels on STDIN (`cat > file`), never in argv — the
     // apr1 hash is offline-crackable, and argv is world-readable via `ps`.
+    const htpasswd = htpasswdPath(ctx);
     await sudoStep(ctx, {
       description: 'Write the htpasswd identity file that nginx checks on every request.',
-      note: `${HTPASSWD}\n\n${user}:<apr1 hash of your password>`,
-      command: `install -d -m 0755 /etc/cezar && cat > ${HTPASSWD} && chown root:www-data ${HTPASSWD} && chmod 0640 ${HTPASSWD}`,
+      note: `${htpasswd}\n\n${user}:<apr1 hash of your password>`,
+      command: `install -d -m 0755 /etc/cezar && cat > ${htpasswd} && chown root:www-data ${htpasswd} && chmod 0640 ${htpasswd}`,
       input: `${user}:${hash}\n`,
       inputLabel: 'credential line (username:hash)',
-      verify: (c) => verifyCommand(c, 'test', ['-f', HTPASSWD]),
+      verify: (c) => verifyCommand(c, 'test', ['-f', htpasswd]),
     });
 
     // Record whether the distro's default site was enabled *before* we disable
     // it, so undo only re-enables it if we were the one who removed it.
     const defaultWasEnabled = await verifyCommand(ctx, 'test', ['-L', '/etc/nginx/sites-enabled/default']);
 
-    // 4) vhost + enable + reload
-    const vhost = nginxVhost(ctx.state.primaryPort);
+    // 4) vhost + enable + reload. A named instance already knows its domain, so
+    //    stamp it into server_name from the start (Host-based routing works
+    //    immediately and certbot --nginx can find the vhost later). The default
+    //    instance keeps the catch-all `_` until the SSL step sets a domain.
+    const vhostAvail = vhostAvailable(ctx);
+    const vhostEnbl = vhostEnabled(ctx);
+    const vhost = nginxVhost(ctx.state.primaryPort, ctx.state.domain ?? '_', htpasswd);
     await writeFileStep(ctx, {
       description: 'Write the cezar nginx site, enable it, and reload nginx.',
-      path: VHOST_AVAILABLE,
+      path: vhostAvail,
       content: vhost,
-      extra: `ln -sf ${VHOST_AVAILABLE} ${VHOST_ENABLED} && rm -f /etc/nginx/sites-enabled/default && nginx -t && systemctl reload nginx`,
-      verify: (c) => verifyCommand(c, 'test', ['-f', VHOST_ENABLED]),
+      extra: `ln -sf ${vhostAvail} ${vhostEnbl} && rm -f /etc/nginx/sites-enabled/default && nginx -t && systemctl reload nginx`,
+      verify: (c) => verifyCommand(c, 'test', ['-f', vhostEnbl]),
     });
 
     // 5) firewall: if ufw is active, the cockpit is unreachable until 80/443 are
@@ -317,9 +347,9 @@ const nginxProxyStep: InstallStep = {
     }
 
     const artifacts: StepArtifact[] = [
-      owned('file', { path: VHOST_AVAILABLE }),
-      owned('symlink', { path: VHOST_ENABLED }),
-      owned('htpasswd', { path: HTPASSWD, name: user }),
+      owned('file', { path: vhostAvail }),
+      owned('symlink', { path: vhostEnbl }),
+      owned('htpasswd', { path: htpasswd, name: user }),
     ];
     if (defaultWasEnabled) artifacts.push(owned('nginx-default', { path: '/etc/nginx/sites-enabled/default' }));
     if (!nginxWasPresent) {
@@ -344,14 +374,17 @@ const nginxProxyStep: InstallStep = {
         'Installed for cezar but possibly used elsewhere — remove manually if unwanted',
       );
     }
+    // rmdir /etc/cezar only succeeds when empty, so removing one instance's
+    // htpasswd never nukes another instance's credentials in the same dir.
+    const vhostEnbl = vhostEnabled(ctx);
     await sudoStep(ctx, {
       description: 'Remove the cezar nginx site + htpasswd, reload nginx.',
       command:
-        `rm -f ${VHOST_ENABLED} ${VHOST_AVAILABLE} ${HTPASSWD}` +
+        `rm -f ${vhostEnbl} ${vhostAvailable(ctx)} ${htpasswdPath(ctx)}` +
         restoreClause +
         ` && { rmdir /etc/cezar 2>/dev/null || true; }` +
         ` && { nginx -t && systemctl reload nginx || true; }`,
-      verify: (c) => verifyCommand(c, 'sh', ['-c', `! test -f ${VHOST_ENABLED}`]),
+      verify: (c) => verifyCommand(c, 'sh', ['-c', `! test -f ${vhostEnbl}`]),
     });
   },
 };
@@ -367,11 +400,16 @@ const sslStep: InstallStep = {
     return false; // optional — the engine gates it with a confirm; certbot is idempotent
   },
   async run(ctx): Promise<{ artifacts: StepArtifact[] }> {
-    const domain = await ctx.ui.text({
-      message: 'Domain pointing at this server (an A/AAAA record must resolve here)',
-      placeholder: 'cezar.example.com',
-      validate: (v) => (HOSTNAME_RE.test(v.trim()) ? undefined : 'enter a valid domain'),
-    });
+    // A named instance already captured its domain up front (it is the instance
+    // key) — reuse it instead of asking again. The default instance still
+    // prompts here, since it may be HTTP-only until this step runs.
+    const domain = ctx.state.domain
+      ? ctx.state.domain
+      : await ctx.ui.text({
+          message: 'Domain pointing at this server (an A/AAAA record must resolve here)',
+          placeholder: 'cezar.example.com',
+          validate: (v) => (HOSTNAME_RE.test(v.trim()) ? undefined : 'enter a valid domain'),
+        });
     if (domain === CANCEL) throw new StepCancelled();
     const email = await ctx.ui.text({
       message: 'Email for Let’s Encrypt renewal notices',
@@ -401,23 +439,29 @@ const sslStep: InstallStep = {
     // when TLS config is present, only the `server_name` lines are updated
     // in place; the hostname regex bars every sed/shell metacharacter.
     const trimmedDomain = String(domain).trim();
-    const vhostHasTls = await verifyCommand(ctx, 'sh', ['-c', `grep -qs ssl_certificate ${VHOST_AVAILABLE}`]);
+    // Record the domain on the instance record so a resume / redeploy / verify
+    // (and the nginx server_name) all agree on it, even for the default instance
+    // that entered its domain here rather than up front.
+    ctx.state.domain = trimmedDomain;
+    const vhostAvail = vhostAvailable(ctx);
+    const vhostEnbl = vhostEnabled(ctx);
+    const vhostHasTls = await verifyCommand(ctx, 'sh', ['-c', `grep -qs ssl_certificate ${vhostAvail}`]);
     if (vhostHasTls) {
       await sudoStep(ctx, {
         description: `Update server_name to ${trimmedDomain} in the existing TLS-enabled nginx site (certbot config preserved).`,
-        command: `sed -i 's/^\\([[:space:]]*\\)server_name .*;/\\1server_name ${trimmedDomain};/' ${VHOST_AVAILABLE} && nginx -t && systemctl reload nginx`,
+        command: `sed -i 's/^\\([[:space:]]*\\)server_name .*;/\\1server_name ${trimmedDomain};/' ${vhostAvail} && nginx -t && systemctl reload nginx`,
         verify: (c) =>
-          verifyCommand(c, 'sh', ['-c', `grep -qF ${shquote(`server_name ${trimmedDomain}`)} ${VHOST_AVAILABLE}`]),
+          verifyCommand(c, 'sh', ['-c', `grep -qF ${shquote(`server_name ${trimmedDomain}`)} ${vhostAvail}`]),
       });
     } else {
-      const domainVhost = nginxVhost(ctx.state.primaryPort, trimmedDomain);
+      const domainVhost = nginxVhost(ctx.state.primaryPort, trimmedDomain, htpasswdPath(ctx));
       await writeFileStep(ctx, {
         description: `Point the nginx site at ${trimmedDomain} so certbot can configure TLS for it.`,
-        path: VHOST_AVAILABLE,
+        path: vhostAvail,
         content: domainVhost,
-        extra: `ln -sf ${VHOST_AVAILABLE} ${VHOST_ENABLED} && nginx -t && systemctl reload nginx`,
+        extra: `ln -sf ${vhostAvail} ${vhostEnbl} && nginx -t && systemctl reload nginx`,
         verify: (c) =>
-          verifyCommand(c, 'sh', ['-c', `grep -qF ${shquote(`server_name ${trimmedDomain}`)} ${VHOST_AVAILABLE}`]),
+          verifyCommand(c, 'sh', ['-c', `grep -qF ${shquote(`server_name ${trimmedDomain}`)} ${vhostAvail}`]),
       });
     }
 
@@ -435,7 +479,7 @@ const sslStep: InstallStep = {
       // with permission-denied and reports a false failure even when the cert was
       // issued. certbot --nginx writes `ssl_certificate …` into the vhost, which
       // is world-readable, so grepping it works without root.
-      verify: (c) => verifyCommand(c, 'sh', ['-c', `grep -qs ssl_certificate ${VHOST_AVAILABLE} ${VHOST_ENABLED}`]),
+      verify: (c) => verifyCommand(c, 'sh', ['-c', `grep -qs ssl_certificate ${vhostAvail} ${vhostEnbl}`]),
     });
 
     ctx.state.publicUrl = `https://${trimmedDomain}`;
@@ -473,8 +517,6 @@ const sslStep: InstallStep = {
     // The vhost (with certbot’s edits) is removed by the nginx-proxy step’s undo.
   },
 };
-
-const UNIT_NAME = 'cezar.service';
 
 /**
  * systemd unit that runs cezar loopback-bound with CEZ_REMOTE=1.
@@ -585,6 +627,7 @@ const autostartStep: InstallStep = {
     return false; // always (re)assert the service is installed and running
   },
   async run(ctx): Promise<{ artifacts: StepArtifact[] }> {
+    const UNIT_NAME = unitName(ctx);
     const execStart = await resolveExecStart(ctx);
     // Prefer a rootless `systemd --user` service + linger; fall back to a system
     // unit (via sudoStep) when the user bus is not reachable. `show-environment`
@@ -639,6 +682,7 @@ const autostartStep: InstallStep = {
     return { artifacts: [owned('service', { name: UNIT_NAME, scope: 'system', path: `/etc/systemd/system/${UNIT_NAME}` })] };
   },
   async undo(ctx, created) {
+    const UNIT_NAME = unitName(ctx);
     const svc = (created?.artifacts ?? []).find((a) => a.type === 'service');
     // Reverse linger only when install recorded that it enabled it.
     const linger = (created?.artifacts ?? []).find((a) => a.type === 'linger');
@@ -685,6 +729,10 @@ const identityStep: InstallStep = {
     const https = ctx.state.publicUrl?.startsWith('https://') ?? false;
     const base = https ? 'https://127.0.0.1/' : 'http://127.0.0.1/';
     const tls = https ? ['-k'] : [];
+    // When several instances share nginx, a bare 127.0.0.1 request hits whatever
+    // vhost nginx treats as default. Send this instance's own Host header so the
+    // probe verifies THIS cockpit's vhost, not a sibling's.
+    const host = ctx.state.domain ? ['-H', `Host: ${ctx.state.domain}`] : [];
 
     // 1) Is cezar actually listening on the loopback upstream? nginx challenges
     //    auth *before* proxying, so an anonymous 401 alone does NOT prove the
@@ -692,7 +740,7 @@ const identityStep: InstallStep = {
     const upstreamUp = await isCezarUp(ctx, port);
 
     // 2) An anonymous request through nginx must be challenged (auth is active).
-    const anonCode = await curlCode(ctx, [...tls, base]);
+    const anonCode = await curlCode(ctx, [...tls, ...host, base]);
     const authEnforced = anonCode === '401';
 
     // 3) The real proof: an AUTHENTICATED request reaches cezar (2xx/3xx — not
@@ -706,7 +754,7 @@ const identityStep: InstallStep = {
       // value — both are legal password characters; unescaped they break the
       // config parse and fail a WORKING install with "bad credentials".
       const curlCfgQuote = (s: string) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-      const code = await curlCode(ctx, [...tls, '-K', '-', base], {
+      const code = await curlCode(ctx, [...tls, ...host, '-K', '-', base], {
         input: `user = "${curlCfgQuote(cred.user)}:${curlCfgQuote(cred.password)}"\n`,
       });
       authedOk = /^[23]\d\d$/.test(code);
@@ -775,6 +823,7 @@ export const ubuntuVps: PlatformStrategy = {
     return [depCheckStep(), nginxProxyStep, sslStep, autostartStep, identityStep];
   },
   async redeploy(ctx: InstallContext) {
+    const UNIT_NAME = unitName(ctx);
     // Restart the systemd service so it picks up the new cezar (a fresh local
     // build the unit runs from, or a newly published cezar-cli via npx), then
     // re-run the same end-to-end verify install uses.
