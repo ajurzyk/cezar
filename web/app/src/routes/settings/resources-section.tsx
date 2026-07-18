@@ -88,12 +88,15 @@ function ResourcesForm({ config }: { config: ConfigResponse }) {
     save.mutate(
       { worktreeRetention: retentionNum },
       {
-        onSuccess: () =>
+        onSuccess: () => {
+          // Keep the worktrees panel's keep-limit footer in step with the new value.
+          void queryClient.invalidateQueries({ queryKey: queryKeys.worktrees })
           toast(
             retentionNum === 0
               ? 'Keeping all worktrees (unlimited)'
               : `Keeping the last ${retentionNum} finished worktree${retentionNum === 1 ? '' : 's'}`,
-          ),
+          )
+        },
       },
     )
 

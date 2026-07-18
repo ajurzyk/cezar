@@ -26,6 +26,7 @@ Tracking PR: #486
 | 2 | 2.3 | Worktrees management table in Settings → Resources + component test | done | 0ffa056 |
 | 2 | 2.4 | Docs: README settings table + spec citations at touch sites | done | 4cc6ed8 |
 | 3 | 3.1 | Integration/E2E: Settings → Resources retention smoke (`web/app/e2e`) | done | 32f8950 |
+| 3 | 3.2 | UI-QA polish: sync worktrees-panel keep footer on retention save; Resources subtitle | done | pending |
 
 ## Notes
 
