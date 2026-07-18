@@ -38,8 +38,10 @@ export type ToolKind =
 /** Why a turn (or the session) stopped. */
 export type StopReason = 'end_turn' | 'max_tokens' | 'refusal' | 'cancelled' | 'timeout' | 'error'
 
-/** Status of one plan/todo entry. */
-export type PlanStatus = 'pending' | 'in_progress' | 'completed'
+/** Status of one plan/todo entry. `cancelled` ("no longer needed") is
+ *  opencode-only today — it renders struck through and drops out of the
+ *  odometer's denominator rather than reading as unfinished work. */
+export type PlanStatus = 'pending' | 'in_progress' | 'completed' | 'cancelled'
 
 /** One entry of the session plan — full-replacement semantics (ACP style). */
 export interface PlanEntry {

@@ -297,7 +297,7 @@ describe('mapOpencodeEvent edge cases', () => {
         tool: 'todowrite',
         state: {
           status: 'completed',
-          input: { todos: [{ content: 'ok', status: 'pending' }, { status: 'pending' }, 'junk', { content: 'bad status', status: 'later' }] },
+          input: { todos: [{ content: 'ok', status: 'pending' }, { status: 'pending' }, 'junk'] },
         },
       }),
       state,
@@ -308,6 +308,58 @@ describe('mapOpencodeEvent edge cases', () => {
       state,
     );
     expect(noPlan.events.filter((e) => e.type === 'plan.updated')).toHaveLength(0);
+  });
+
+  // opencode types `status` as a free-form string (`Schema.String`), not an enum;
+  // its documented vocabulary is pending|in_progress|completed|cancelled.
+  it('keeps cancelled todos — an abandoned row stays visible instead of vanishing', () => {
+    const mapped = mapOpencodeEvent(
+      part({
+        id: 'prt_td',
+        type: 'tool',
+        tool: 'todowrite',
+        state: {
+          status: 'completed',
+          input: {
+            todos: [
+              { content: 'Ship the fix', status: 'completed', priority: 'high' },
+              { content: 'Rework the parser', status: 'cancelled', priority: 'low' },
+            ],
+          },
+        },
+      }),
+      startedState(),
+    );
+    expect(mapped.events).toContainEqual({
+      type: 'plan.updated',
+      entries: [
+        { content: 'Ship the fix', status: 'completed', priority: 'high' },
+        { content: 'Rework the parser', status: 'cancelled', priority: 'low' },
+      ],
+    });
+  });
+
+  it('falls back to pending for a status outside the documented vocabulary', () => {
+    const mapped = mapOpencodeEvent(
+      part({
+        id: 'prt_td',
+        type: 'tool',
+        tool: 'todowrite',
+        state: { status: 'completed', input: { todos: [{ content: 'Odd one', status: 'later' }] } },
+      }),
+      startedState(),
+    );
+    expect(mapped.events).toContainEqual({ type: 'plan.updated', entries: [{ content: 'Odd one', status: 'pending' }] });
+  });
+
+  // opencode publishes the tool part BEFORE the arguments finish parsing, with
+  // `input: {}` — that must not wipe the plan the previous snapshot established.
+  it('a pending part with unparsed input emits no plan', () => {
+    const mapped = mapOpencodeEvent(
+      part({ id: 'prt_td', type: 'tool', tool: 'todowrite', state: { status: 'pending', input: {}, raw: '' } }),
+      startedState(),
+    );
+    expect(mapped.events.filter((e) => e.type === 'plan.updated')).toHaveLength(0);
   });
 
   it('patch parts accept the paths-only wire shape too (diff entries without unified content)', () => {

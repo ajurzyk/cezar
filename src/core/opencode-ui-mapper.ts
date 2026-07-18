@@ -381,15 +381,26 @@ function mapTool(
   return { events, state: next };
 }
 
-/** todowrite input `{todos:[{content,status,priority}]}` → plan entries
- *  (an empty list is a valid plan; malformed rows are filtered). */
+/**
+ * todowrite input `{todos:[{content,status,priority}]}` → plan entries
+ * (an empty list is a valid plan; malformed rows are filtered).
+ *
+ * `status` is a free-form string upstream (`Schema.String`, not an enum) — its
+ * documented vocabulary is pending|in_progress|completed|cancelled. Rows with
+ * an unrecognized status fall back to `pending` rather than being dropped: a
+ * todo the agent wrote must stay on screen, and dropping it silently shrinks
+ * the plan mid-run for no visible reason.
+ *
+ * A `pending` tool part carries `input: {}` (opencode publishes the part before
+ * the arguments finish parsing), which lands on the `!Array.isArray` guard and
+ * maps to zero events — so a streaming part cannot clobber a good plan.
+ */
 function planEntriesOf(input: unknown): PlanEntry[] | undefined {
   if (!isRecord(input) || !Array.isArray(input.todos)) return undefined;
   const entries: PlanEntry[] = [];
   for (const todo of input.todos) {
     if (!isRecord(todo) || typeof todo.content !== 'string') continue;
-    const status = PLAN_STATUSES.find((s) => s === todo.status);
-    if (status === undefined) continue;
+    const status = PLAN_STATUSES.find((s) => s === todo.status) ?? 'pending';
     const entry: PlanEntry = { content: todo.content, status };
     if (todo.priority === 'high' || todo.priority === 'medium' || todo.priority === 'low') {
       entry.priority = todo.priority;
@@ -399,7 +410,7 @@ function planEntriesOf(input: unknown): PlanEntry[] | undefined {
   return entries;
 }
 
-const PLAN_STATUSES: readonly PlanStatus[] = ['pending', 'in_progress', 'completed'];
+const PLAN_STATUSES: readonly PlanStatus[] = ['pending', 'in_progress', 'completed', 'cancelled'];
 
 /** `patch` parts snapshot applied file changes → a completed edit-tool item
  *  carrying `diffs` (unified when the wire includes content; the older

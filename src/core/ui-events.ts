@@ -66,9 +66,18 @@ export type ToolKind =
  */
 export type StopReason = 'end_turn' | 'max_tokens' | 'refusal' | 'cancelled' | 'timeout' | 'error';
 
-/** Status of one plan/todo entry (claude TodoWrite uses these words verbatim;
- *  codex todoList and opencode todowrite map 1:1). */
-export type PlanStatus = 'pending' | 'in_progress' | 'completed';
+/**
+ * Status of one plan/todo entry. claude TodoWrite/TaskUpdate use the first
+ * three words verbatim; codex `turn/plan/updated` sends camelCase
+ * (`inProgress`) and is normalized here; opencode `todowrite` adds
+ * `cancelled` ("no longer needed") — its status field is a free-form string
+ * whose documented vocabulary is pending|in_progress|completed|cancelled.
+ *
+ * `cancelled` is opencode-only today. It is a first-class status rather than a
+ * dropped row: an abandoned todo must stay visible (struck through) instead of
+ * silently vanishing from the dock mid-run.
+ */
+export type PlanStatus = 'pending' | 'in_progress' | 'completed' | 'cancelled';
 
 /** One entry of the session plan — full-replacement semantics (ACP style). */
 export interface PlanEntry {
@@ -285,8 +294,13 @@ export interface UiItemCompletedEvent {
 
 /**
  * Full-replacement plan snapshot (ACP semantics).
- * claude: `TodoWrite` tool input; codex: `todoList`/`plan` items;
- * opencode: `todowrite` tool — identical semantics across all three.
+ * claude: `TodoWrite` tool input, or a snapshot folded from the incremental
+ * `TaskCreate`/`TaskUpdate`/`TaskList` calls (keyed by the task id the harness
+ * reports in each tool's RESULT — see `claude-ui-mapper`); codex: the
+ * `turn/plan/updated` notification carrying the whole `update_plan` list (it is
+ * a turn-level notification, NOT an item — the app-server `ThreadItem` union has
+ * no todo variant); opencode: `todowrite` tool input — identical
+ * full-replacement semantics across all three.
  */
 export interface UiPlanUpdatedEvent {
   type: 'plan.updated';

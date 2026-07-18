@@ -9,7 +9,7 @@ import { cn } from '@/lib/utils'
  * latest `plan.updated` snapshot, pinned above the composer area — NOT in the thread (the
  * plan-kind tool cards are hidden there; this is their surface). Collapsed it is a one-line
  * "Plan · N/M" odometer plus the current item; expanded it is the checkbox list with the
- * three entry states (✓ strikethrough / ◐ pulsing "in progress" / ○ pending).
+ * entry states (✓ strikethrough / ◐ pulsing "in progress" / ○ pending / ⊘ cancelled).
  *
  * The caller keys this component by run id, so the collapse default re-derives per task.
  */
@@ -24,13 +24,21 @@ function defaultOpen(): boolean {
   return typeof window.matchMedia !== 'function' || window.matchMedia('(min-width: 768px)').matches
 }
 
-/** The "N/M" odometer math: completed entries over all entries. */
+/** The "N/M" odometer math: completed entries over all entries the agent still
+ *  intends to do. `cancelled` entries leave the denominator — they are work that
+ *  was dropped on purpose, so counting them would strand the odometer below N/N
+ *  for the rest of the run. They stay in the list (struck through), just not in
+ *  the score. */
 export function planCounts(entries: PlanEntry[]): { done: number; total: number } {
-  return { done: entries.filter((entry) => entry.status === 'completed').length, total: entries.length }
+  return {
+    done: entries.filter((entry) => entry.status === 'completed').length,
+    total: entries.filter((entry) => entry.status !== 'cancelled').length,
+  }
 }
 
 /** What the collapsed head names: the in-progress entry, else the next pending one. A fully
- *  completed plan has no current item — the odometer alone says it all. */
+ *  completed plan has no current item — the odometer alone says it all. (`cancelled` is
+ *  neither, so it is never named as the current item.) */
 export function planActiveEntry(entries: PlanEntry[]): PlanEntry | undefined {
   return entries.find((entry) => entry.status === 'in_progress') ?? entries.find((entry) => entry.status === 'pending')
 }
@@ -96,6 +104,8 @@ function PlanRow({ entry }: { entry: PlanEntry }) {
         entry.status === 'completed' && 'text-soft-foreground line-through',
         entry.status === 'in_progress' && 'font-medium',
         entry.status === 'pending' && 'text-muted-foreground',
+        // Struck through like a done row, but faded further: abandoned, not achieved.
+        entry.status === 'cancelled' && 'text-soft-foreground/70 line-through',
       )}
     >
       <PlanIcon status={entry.status} />
@@ -113,8 +123,25 @@ function PlanRow({ entry }: { entry: PlanEntry }) {
 }
 
 /** The mockup's three checkbox glyphs, verbatim paths: ✓ in a faint circle / a pulsing
- *  half-filled ◐ / an empty ○. Inline because lucide has no half-filled circle. */
+ *  half-filled ◐ / an empty ○ — plus a ⊘ for `cancelled`, which the mockup predates.
+ *  Inline because lucide has no half-filled circle. */
 function PlanIcon({ status }: { status: PlanStatus }) {
+  if (status === 'cancelled') {
+    return (
+      <svg
+        aria-hidden
+        className="size-[15px] shrink-0 text-soft-foreground/70"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+      >
+        <circle cx="12" cy="12" r="8.5" opacity=".5" />
+        <path d="m8.5 15.5 7-7" />
+      </svg>
+    )
+  }
   if (status === 'completed') {
     return (
       <svg

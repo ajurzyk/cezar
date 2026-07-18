@@ -1,8 +1,10 @@
 /**
  * Golden tests for the codex app-server → v2 mapper: each fixture in
- * `__fixtures__/codex/` is a wire-faithful JSONL frame transcript (shapes
- * from `.ai/analysis/cockpit-ui-redesign/agent-event-protocols.md` §3); its
+ * `__fixtures__/codex/` is a JSONL frame transcript (shapes from
+ * `.ai/analysis/cockpit-ui-redesign/agent-event-protocols.md` §3); its
  * `.expected.json` is the EXACT `UiEvent` sequence the mapper must produce.
+ * All are wire-faithful except `todo-list`, which pins the tolerance arm for
+ * codex's non-app-server transports — see the note on GOLDEN_FIXTURES.
  * Plus edge cases (never-throw, status map, state carry-over, no fabricated
  * cost) and a live wiring test through the real runner against the bundled
  * mock app-server.
@@ -51,7 +53,11 @@ const GOLDEN_FIXTURES = [
   'text-turn',
   'command-lifecycle',
   'file-change-and-mcp',
+  // NOT app-server wire truth: codex has no `todoList` item and no `item/updated`
+  // method. It pins the mapper's tolerance arm for codex's other transports only.
+  // `turn-plan-updated` is the real app-server plan channel.
   'todo-list',
+  'turn-plan-updated',
   'turn-failed',
   'review-mode',
 ] as const;
@@ -92,6 +98,11 @@ describe('mapCodexNotification edge cases', () => {
       { method: 'item/agentMessage/delta', params: { itemId: 'a', delta: '' } }, // empty delta
       { method: 'thread/tokenUsage/updated', params: {} }, // no tokenUsage.total
       { method: 'thread/started', params: {} }, // no thread id
+      // A garbled plan frame must not wipe a good plan — no `plan` array at all,
+      // or one that is not an array, maps to zero events (not an empty plan).
+      { method: 'turn/plan/updated', params: {} },
+      { method: 'turn/plan/updated', params: { plan: 'oops' } },
+      { method: 'turn/plan/updated', params: { plan: null } },
     ];
     for (const frame of frames) {
       const mapped = mapCodexNotification(frame, state);
@@ -356,6 +367,147 @@ describe('mapCodexNotification edge cases', () => {
       state,
     );
     expect(mapped.events).toEqual([]);
+  });
+
+  // `turn/plan/updated` is the ONLY channel codex's `update_plan` reaches the
+  // client on: the app-server v2 `ThreadItem` union has no todo variant, so a
+  // plan that is not read off this notification never renders at all.
+  describe('turn/plan/updated (the real update_plan channel)', () => {
+    const planFrame = (plan: unknown) => ({
+      method: 'turn/plan/updated',
+      params: { threadId: 'th_1', turnId: 'turn_1', explanation: null, plan },
+    });
+
+    it('normalizes the wire status vocabulary, which is camelCase on app-server', () => {
+      // `inProgress` is what the app-server layer re-serializes to, even though
+      // codex's core protocol type spells it `in_progress` — accept both.
+      const events = mapCodexNotification(
+        planFrame([
+          { step: 'a', status: 'pending' },
+          { step: 'b', status: 'inProgress' },
+          { step: 'c', status: 'in_progress' },
+          { step: 'd', status: 'completed' },
+        ]),
+        state,
+      ).events;
+      expect(events).toEqual([
+        {
+          type: 'plan.updated',
+          entries: [
+            { content: 'a', status: 'pending' },
+            { content: 'b', status: 'in_progress' },
+            { content: 'c', status: 'in_progress' },
+            { content: 'd', status: 'completed' },
+          ],
+        },
+      ]);
+    });
+
+    it('treats an unknown or missing status as pending rather than dropping the step', () => {
+      const events = mapCodexNotification(
+        planFrame([{ step: 'a', status: 'sideways' }, { step: 'b' }]),
+        state,
+      ).events;
+      expect(events).toEqual([
+        { type: 'plan.updated', entries: [{ content: 'a', status: 'pending' }, { content: 'b', status: 'pending' }] },
+      ]);
+    });
+
+    it('filters malformed steps but keeps the good ones', () => {
+      const events = mapCodexNotification(
+        planFrame(['oops', null, 42, { status: 'pending' }, { step: 5 }, { step: 'real', status: 'pending' }]),
+        state,
+      ).events;
+      expect(events).toEqual([{ type: 'plan.updated', entries: [{ content: 'real', status: 'pending' }] }]);
+    });
+
+    it('emits an empty plan for an empty list — a cleared plan is a real snapshot', () => {
+      expect(mapCodexNotification(planFrame([]), state).events).toEqual([{ type: 'plan.updated', entries: [] }]);
+    });
+
+    // "the agent cleared its plan" and "we could not parse the steps" both end up
+    // as `[]` downstream, where the dock unmounts — so only the former may emit.
+    it('a list whose every row is unreadable emits nothing rather than wiping the plan', () => {
+      // e.g. a wire revision that renamed `step`, which would otherwise blank the dock.
+      for (const plan of [[{ text: 'a' }, { text: 'b' }], ['junk'], [null], [{ step: 5 }], [{}]]) {
+        expect(mapCodexNotification(planFrame(plan), state).events).toEqual([]);
+      }
+    });
+
+    it('is full-replacement: the frame is the whole plan, with no entries accumulated', () => {
+      // Contrast claude's id-keyed task map: nothing from the first frame may
+      // survive into the second. The only state kept is the precedence latch.
+      const first = mapCodexNotification(planFrame([{ step: 'a', status: 'completed' }]), state);
+      const second = mapCodexNotification(planFrame([{ step: 'b', status: 'pending' }]), first.state);
+      expect(second.events).toEqual([{ type: 'plan.updated', entries: [{ content: 'b', status: 'pending' }] }]);
+      expect({ ...second.state, planFromNotification: false }).toEqual(state);
+
+      // The latch settles after the first frame rather than churning state.
+      const third = mapCodexNotification(planFrame([{ step: 'c', status: 'pending' }]), second.state);
+      expect(third.state).toBe(second.state);
+    });
+
+    // Both this notification and the `plan`/`todoList` item arm write plan.updated.
+    // Without precedence the last frame wins, flattening a real checklist into the
+    // single prose entry the plan-MODE item carries.
+    it('outranks the prose plan item: once it has spoken, the item arm stands down', () => {
+      const afterPlan = mapCodexNotification(
+        planFrame([{ step: 'one', status: 'completed' }, { step: 'two', status: 'inProgress' }]),
+        state,
+      );
+      expect(afterPlan.state.planFromNotification).toBe(true);
+
+      const prose = mapCodexNotification(
+        { method: 'item/completed', params: { item: { type: 'plan', id: 'item_p', text: 'Here is my prose plan…' } } },
+        afterPlan.state,
+      );
+      expect(prose.events).toEqual([]);
+
+      // …and a stray todoList snapshot is ignored for the same reason.
+      const stray = mapCodexNotification(
+        { method: 'item/started', params: { item: { type: 'todoList', id: 'item_t', items: [{ text: 'x', completed: false }] } } },
+        afterPlan.state,
+      );
+      expect(stray.events).toEqual([]);
+    });
+
+    // The latch is turn-scoped. If it outlived its turn it would gag the item arm
+    // for the rest of the session, stranding the dock on the previous turn's plan.
+    it('re-opens the item arm on the next turn', () => {
+      const latched = mapCodexNotification(planFrame([{ step: 'turn one', status: 'completed' }]), state);
+      expect(latched.state.planFromNotification).toBe(true);
+
+      const nextTurn = mapCodexNotification(
+        { method: 'turn/started', params: { turn: { id: 'turn_2', status: 'inProgress' } } },
+        latched.state,
+      );
+      expect(nextTurn.state.planFromNotification).toBe(false);
+
+      const prose = mapCodexNotification(
+        { method: 'item/completed', params: { item: { type: 'plan', id: 'item_p', text: 'Turn two plan' } } },
+        nextTurn.state,
+      );
+      expect(prose.events).toEqual([
+        { type: 'plan.updated', entries: [{ content: 'Turn two plan', status: 'in_progress' }] },
+      ]);
+    });
+
+    it('leaves the item arm alone until the notification actually arrives', () => {
+      // The tolerance arm still works for transports that never send the notification.
+      const prose = mapCodexNotification(
+        { method: 'item/completed', params: { item: { type: 'plan', id: 'item_p', text: 'Prose plan' } } },
+        state,
+      );
+      expect(prose.events).toEqual([{ type: 'plan.updated', entries: [{ content: 'Prose plan', status: 'in_progress' }] }]);
+    });
+
+    it('ignores the explanation prose (the dock renders entries only)', () => {
+      const events = mapCodexNotification(
+        { method: 'turn/plan/updated', params: { threadId: 'th_1', turnId: 'turn_1', explanation: 'why', plan: [{ step: 'a', status: 'pending' }] } },
+        state,
+      ).events;
+      expect(events).toEqual([{ type: 'plan.updated', entries: [{ content: 'a', status: 'pending' }] }]);
+    });
   });
 });
 
