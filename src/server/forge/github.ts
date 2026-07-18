@@ -216,13 +216,18 @@ export async function fetchGithub(repoRoot: string, refresh = false, limit = 30)
       for (const [key, value] of Object.entries(variables)) args.push('-f', `${key}=${value}`);
       return gh(repoRoot, args, timeout);
     };
+    // Bound the counts pagination to the rows actually being fetched: a page is 100, so
+    // `ceil(capped / 100)` pages (still capped at GH_COUNTS_MAX_PAGES) cover exactly the visible
+    // window and no more — the default 30-item load pays ONE counts round-trip, not ten. Rows
+    // beyond the window keep `comments: 0`, which the UI reads as "no badge" (same as before).
+    const countsMaxPages = Math.min(GH_COUNTS_MAX_PAGES, Math.max(1, Math.ceil(capped / 100)));
     const [issuesOut, prsOut, counts] = await Promise.all([
       gh(repoRoot, ['issue', 'list', '--limit', String(capped), '--json', fields], timeout),
       gh(repoRoot, ['pr', 'list', '--limit', String(capped), '--json', `${fields},isDraft,additions,deletions,statusCheckRollup`], timeout),
       // Real comment counts (#499). Degrades to empty maps on its own — a failure here leaves
       // every count at 0, never fails the tab. Skipped entirely if the handle isn't parseable.
       ownerName
-        ? fetchCommentCounts(runGraphql, ownerName.owner, ownerName.name)
+        ? fetchCommentCounts(runGraphql, ownerName.owner, ownerName.name, countsMaxPages)
         : Promise.resolve<{ issues: Record<number, number>; prs: Record<number, number> }>({ issues: {}, prs: {} }),
     ]);
     // One repo-wide label→color map, filled as we flatten each item's labels.
