@@ -49,9 +49,8 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { toast } from '@/components/ui/toaster'
-import { isProjectSkill, orderSkillsByRecency } from '@/lib/skills'
+import { isProjectSkill, orderSkillsByUsage } from '@/lib/skills'
 import { cn } from '@/lib/utils'
-import { recentSkillNames } from '@/routes/new-task-form'
 import {
   WB_MAX_STEPS,
   draftFromPlan,
@@ -144,8 +143,8 @@ function WorkflowsBuilder({ routeName }: { routeName: string | undefined }) {
   const workflows = workflowsQuery.data?.workflows ?? []
   const skills = skillsQuery.data ?? []
   // The palette lists skills the way every other picker does (#408/#414): project skills first,
-  // then most-recently-run within each locality — so what you reach for floats to the top.
-  const paletteSkills = orderSkillsByRecency(skills, recentSkillNames(uiStateQuery.data?.recentSources))
+  // then most-used within each locality — so what you reach for floats to the top.
+  const paletteSkills = orderSkillsByUsage(skills, uiStateQuery.data?.skillUsage)
 
   // First visit seeds the canvas with the deep-linked workflow when the URL names one, else
   // the repo's first saved workflow — "open the tab, see your flow" (legacy rule). No files
