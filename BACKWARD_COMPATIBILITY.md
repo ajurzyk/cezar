@@ -1,6 +1,6 @@
 # Backward compatibility — protected surfaces
 
-cezar is a published npm CLI (`@pat-lewczuk/cezar`, currently 0.x) whose state lives as plain files inside users' repos. Users upgrade with `npx cezar@latest` against `.ai/cezar/` directories written by older versions, and they script the CLI and hand-edit the files — the README promises "plain JSON, NDJSON and Markdown you can `cat` and fix by hand." That promise is the compatibility contract.
+cezar is a published npm CLI (`@open-mercato/cezar`, currently 0.x — renamed from the now-deprecated `@pat-lewczuk/cezar` when the package moved to the open-mercato org; the unscoped `npx cezar-cli` alias is unchanged) whose state lives as plain files inside users' repos. Users upgrade with `npx cezar@latest` against `.ai/cezar/` directories written by older versions, and they script the CLI and hand-edit the files — the README promises "plain JSON, NDJSON and Markdown you can `cat` and fix by hand." That promise is the compatibility contract.
 
 **General rule for every surface below:** additive changes (new optional field, new flag, new route) are fine; anything that makes an existing input rejected, an existing output disappear, or an existing file unreadable is breaking. While the package is 0.x, a breaking change requires: a deprecation note in the README + CHANGELOG, a migration path (code that reads the old shape, or a documented manual fix), and a **minor** version bump called out as breaking. From 1.0 on, breaking = major bump.
 
@@ -60,7 +60,7 @@ Breaking: requiring frontmatter, dropping a discovery directory, or inverting pr
 
 ## 6. npm package surface (`package.json`)
 
-- Name `@pat-lewczuk/cezar` (plus the `cezar-cli` npx alias documented in the README); `bin` entries `cezar` + `cez`; published `files`: `dist`, `web/dist`, `web/open-mercato.svg`, `scripts`, `README.md`; `engines.node >= 20`; `"type": "module"`.
+- Name `@open-mercato/cezar` (plus the `cezar-cli` npx alias documented in the README); `bin` entries `cezar` + `cez`; published `files`: `dist`, `web/dist`, `web/open-mercato.svg`, `scripts`, `README.md`; `engines.node >= 20`; `"type": "module"`.
 - There is **no** `exports`/library API — the package is CLI-only. Keep it that way deliberately: adding one creates a new compatibility surface; if it happens, this document gains a section first.
 - `dist/index.js` must remain the bin entry, and `web/` must stay resolvable relative to `dist/server` (`resolveWebDir` walks `../../web`; the built cockpit lives at `web/dist`).
 - The tarball MUST contain the built UI (`web/dist/index.html` + hashed `web/dist/assets/*`) — `npm run check:pack` (`scripts/check-pack.mjs`, run as the last leg of `npm run build`, hence by `prepublishOnly`) enforces this; do not remove it from the build chain.
