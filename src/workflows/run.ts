@@ -1446,10 +1446,12 @@ export class RunManager {
     if (markers.title && run.titleOrigin !== 'user') {
       const current = this.store.getRun(runId);
       const refNumber = current?.prNumber ?? current?.issueNumber;
-      this.store.updateRun(runId, {
-        titleSummary: postValidateTitle(markers.title, refNumber),
-        titleOrigin: 'marker',
-      });
+      const validated = postValidateTitle(markers.title, refNumber);
+      // Same junk guard as composeNameResult: a declaration that validates to
+      // nothing (or to a bare number prefix) must not blank the title.
+      if (validated && validated !== `${refNumber}:`) {
+        this.store.updateRun(runId, { titleSummary: validated, titleOrigin: 'marker' });
+      }
     }
   }
 

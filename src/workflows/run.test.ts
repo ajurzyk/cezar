@@ -124,6 +124,15 @@ describe('RunManager.recordTurnEnd', () => {
     expect(after?.prNumber).toBe(500);
   });
 
+  it('a junk CEZ:TITLE never blanks the title', async () => {
+    const record = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    await manager.recordTurnEnd(record.id, 'CEZ:PR=500\nCEZ:TITLE=...');
+    const after = store.getRun(record.id);
+    expect(after?.titleSummary).toBeUndefined();
+    expect(after?.titleOrigin).toBeUndefined();
+    expect(after?.prNumber).toBe(500); // the number still lands
+  });
+
   it('prose that merely mentions a marker changes nothing', async () => {
     const record = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
     await manager.recordTurnEnd(record.id, 'I will emit CEZ:PR=442 once the PR exists.');
