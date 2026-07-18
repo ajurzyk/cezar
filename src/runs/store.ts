@@ -193,6 +193,26 @@ function resolveReferencedPr(candidates: string[], task: string): string | undef
 }
 
 /**
+ * The PR URL a creation phrase *introduces*, or undefined. The created URL is
+ * the first one at or after the `CREATED_PR_RE` phrase — a PR the same event
+ * merely referenced *earlier* (e.g. the issue's own linked `…/pull/1`) must not
+ * be mistaken for the one just created (#495). Falls back to the last URL
+ * *before* the phrase for `gh` orderings that print the URL first. Selection
+ * only — the caller decides whether creation phrasing is present.
+ */
+function createdPrUrl(haystack: string): string | undefined {
+  const phrase = CREATED_PR_RE.exec(haystack);
+  if (!phrase) return undefined;
+  const after = PR_URL_RE.exec(haystack.slice(phrase.index));
+  if (after) return after[0];
+  let before: string | undefined;
+  for (const m of haystack.slice(0, phrase.index).matchAll(new RegExp(PR_URL_RE.source, 'g'))) {
+    before = m[0];
+  }
+  return before;
+}
+
+/**
  * File-backed run store: `runs.json` index (atomic tmp+rename writes, the
  * pattern from @cezar/core's IssueStore) plus one append-only NDJSON event
  * file per run. Also the in-process event bus the SSE endpoints subscribe to:
@@ -367,10 +387,10 @@ export class RunStore extends EventEmitter {
     if (!run.pullRequestUrl) {
       const haystack = eventTextFragments(full).join(' ');
       if (haystack.length > 0) {
-        const match = PR_URL_RE.exec(haystack);
-        if (match && CREATED_PR_RE.test(haystack)) {
-          this.updateRun(runId, { pullRequestUrl: match[0] });
-        } else if (match && this.trackReferencedPrs(run, haystack)) {
+        const created = createdPrUrl(haystack);
+        if (created) {
+          this.updateRun(runId, { pullRequestUrl: created });
+        } else if (PR_URL_RE.test(haystack) && this.trackReferencedPrs(run, haystack)) {
           this.touch(run);
         }
       }
