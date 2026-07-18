@@ -53,6 +53,11 @@ platforms slot in without touching the engine.
 roll out a new cezar: it restarts the service and re-verifies. See each guide's
 **Updating / redeploying** section for the checkout-vs-npx details.
 
+To test an unreleased build on a server, pin a preview version
+(see [Preview builds](../publishing.md)) — for example roll a box to a PR's
+exact snapshot with `npx cezar-cli@<version> server-deploy --platform <id>`,
+or track a branch with `npx cezar-cli@develop server-deploy --platform <id>`.
+
 ---
 
 Guides: **[Ubuntu / Debian VPS](./ubuntu-vps.md)** · **[macOS + ngrok](./macosx-ngrok.md)**
