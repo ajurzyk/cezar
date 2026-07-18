@@ -397,6 +397,109 @@ describe('RunStore — referenced-PR discovery (#407, spec 2026-07-16-pr-autodis
   });
 });
 
+describe('RunStore — agent-declared marker refs (spec 2026-07-18-task-ref-markers)', () => {
+  let dataDir: string;
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), 'cez-store-'));
+  });
+  afterEach(() => {
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  const freshRun = (task = 'task') => {
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({ title: 't', workflow: 'w', task, steps: [] });
+    return { store, run };
+  };
+
+  it('marker numbers land on the record and persist', () => {
+    const { store, run } = freshRun();
+    store.applyMarkerRefs(run.id, { pr: 442, issue: 433 });
+    store.flush();
+    const loaded = RunStore.open(dataDir).getRun(run.id);
+    expect(loaded?.prNumber).toBe(442);
+    expect(loaded?.issueNumber).toBe(433);
+    expect(loaded?.markerRefs).toEqual({ pr: 442, issue: 433 });
+  });
+
+  it('a declared PR picks the matching candidate among several — where fuzzy resolution gave up', () => {
+    const { store, run } = freshRun();
+    store.appendEvent(run.id, {
+      type: 'result',
+      result:
+        'Comparing https://github.com/open-mercato/cezar/pull/500 with https://github.com/open-mercato/cezar/pull/777',
+    });
+    expect(store.getRun(run.id)?.referencedPullRequestUrl).toBeUndefined(); // ambiguous
+    store.applyMarkerRefs(run.id, { pr: 500 });
+    expect(store.getRun(run.id)?.referencedPullRequestUrl).toBe(
+      'https://github.com/open-mercato/cezar/pull/500',
+    );
+  });
+
+  it('a declared PR clears a fuzzily-adopted chip that contradicts it (the #777 failure)', () => {
+    const { store, run } = freshRun();
+    store.appendEvent(run.id, {
+      type: 'result',
+      result: 'Related work: https://github.com/open-mercato/cezar/pull/777',
+    });
+    expect(store.getRun(run.id)?.referencedPullRequestUrl).toBe(
+      'https://github.com/open-mercato/cezar/pull/777',
+    );
+    store.applyMarkerRefs(run.id, { pr: 500 });
+    const loaded = store.getRun(run.id);
+    expect(loaded?.referencedPullRequestUrl).toBeUndefined();
+    expect(loaded?.prNumber).toBe(500);
+  });
+
+  it('later candidates resolve against the declared number, not the fuzzy rules', () => {
+    const { store, run } = freshRun();
+    store.applyMarkerRefs(run.id, { pr: 500 });
+    store.appendEvent(run.id, {
+      type: 'result',
+      result: 'See https://github.com/open-mercato/cezar/pull/777 for prior art.',
+    });
+    expect(store.getRun(run.id)?.referencedPullRequestUrl).toBeUndefined();
+    store.appendEvent(run.id, {
+      type: 'result',
+      result: 'Now updating https://github.com/open-mercato/cezar/pull/500.',
+    });
+    expect(store.getRun(run.id)?.referencedPullRequestUrl).toBe(
+      'https://github.com/open-mercato/cezar/pull/500',
+    );
+  });
+
+  it('an issue-only declaration leaves the referenced tier alone', () => {
+    const { store, run } = freshRun();
+    store.appendEvent(run.id, {
+      type: 'result',
+      result: 'See https://github.com/open-mercato/cezar/pull/777',
+    });
+    store.applyMarkerRefs(run.id, { issue: 500 });
+    const loaded = store.getRun(run.id);
+    expect(loaded?.referencedPullRequestUrl).toBe('https://github.com/open-mercato/cezar/pull/777');
+    expect(loaded?.issueNumber).toBe(500);
+    expect(loaded?.prNumber).toBeUndefined();
+  });
+
+  it('the created tier is untouched by markers', () => {
+    const { store, run } = freshRun();
+    store.appendEvent(run.id, {
+      type: 'result',
+      result: 'Opened a draft pull request: https://github.com/open-mercato/cezar/pull/42',
+    });
+    store.applyMarkerRefs(run.id, { pr: 500 });
+    expect(store.getRun(run.id)?.pullRequestUrl).toBe(
+      'https://github.com/open-mercato/cezar/pull/42',
+    );
+  });
+
+  it('an empty declaration is a no-op', () => {
+    const { store, run } = freshRun();
+    store.applyMarkerRefs(run.id, {});
+    expect(store.getRun(run.id)?.markerRefs).toBeUndefined();
+  });
+});
+
 describe('RunStore — seq survives a restart (#424 symptom class)', () => {
   let dataDir: string;
 
