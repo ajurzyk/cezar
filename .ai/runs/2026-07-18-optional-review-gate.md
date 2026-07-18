@@ -37,4 +37,4 @@ to `done` (diff stays in the worktree) unless the gate applies.
 `npm run typecheck` · `npm test` · `npm run test:unit` · `npm run build` · `npm run test:package`
 
 ## PR
-PR: (pending)
+PR: #494 — https://github.com/open-mercato/cezar/pull/494 (ready, all phases done, gate green, self-review approved)
