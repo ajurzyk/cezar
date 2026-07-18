@@ -15,3 +15,14 @@ const twMerge = extendTailwindMerge({
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
+
+/**
+ * True only for `http:`/`https:` URLs (#431 — href protocol guard). React does
+ * NOT sanitize `href` at runtime, so a `javascript:`/`data:`/`vbscript:` value
+ * would execute on click. Most link URLs are server-minted GitHub links, but a
+ * few are scraped from the agent transcript (PR URLs), i.e. agent-influenceable
+ * — so components render a link only when this passes, and inert text otherwise.
+ */
+export function isHttpUrl(url: string | null | undefined): url is string {
+  return typeof url === 'string' && /^https?:\/\//i.test(url)
+}

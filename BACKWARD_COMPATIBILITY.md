@@ -1,6 +1,6 @@
 # Backward compatibility — protected surfaces
 
-cezar is a published npm CLI (`@pat-lewczuk/cezar`, currently 0.x) whose state lives as plain files inside users' repos. Users upgrade with `npx cezar@latest` against `.ai/cezar/` directories written by older versions, and they script the CLI and hand-edit the files — the README promises "plain JSON, NDJSON and Markdown you can `cat` and fix by hand." That promise is the compatibility contract.
+cezar is a published npm CLI (`@open-mercato/cezar`, currently 0.x — renamed from the now-deprecated `@pat-lewczuk/cezar` when the package moved to the open-mercato org; the unscoped `npx cezar-cli` alias is unchanged) whose state lives as plain files inside users' repos. Users upgrade with `npx cezar@latest` against `.ai/cezar/` directories written by older versions, and they script the CLI and hand-edit the files — the README promises "plain JSON, NDJSON and Markdown you can `cat` and fix by hand." That promise is the compatibility contract.
 
 **General rule for every surface below:** additive changes (new optional field, new flag, new route) are fine; anything that makes an existing input rejected, an existing output disappear, or an existing file unreadable is breaking. While the package is 0.x, a breaking change requires: a deprecation note in the README + CHANGELOG, a migration path (code that reads the old shape, or a documented manual fix), and a **minor** version bump called out as breaking. From 1.0 on, breaking = major bump.
 
@@ -10,7 +10,7 @@ cezar is a published npm CLI (`@pat-lewczuk/cezar`, currently 0.x) whose state l
 - **Commands:** bare invocation = `serve` (cockpit); `cezar run "<task>"`; `cezar init`.
 - **Flags:** `-p/--port` (default 4321, auto-picks the next free port), `--repo <dir>`, `--workflow <name>` (default `quick-task`), `--model <model>`, `--no-open`, `-h/--help`.
 - **Exit codes:** `run` exits 0 on `done` **and** `review` (spec 009 — headless runs must not hang on the review gate), 1 on `failed`/`cancelled`/unknown workflow. CI scripts depend on this.
-- **Env vars:** `CEZ_DRY_RUN`, `CEZ_CLAUDE_BIN`, `CEZ_CODEX_BIN`, `CEZ_OPENCODE_BIN`, `GITHUB_TOKEN`.
+- **Env vars:** `CEZ_DRY_RUN`, `CEZ_APPROVAL_GATE`, `CEZ_FOLLOWUPS`, `CEZ_CLAUDE_BIN`, `CEZ_CODEX_BIN`, `CEZ_OPENCODE_BIN`, `GITHUB_TOKEN`.
 
 Breaking: renaming/removing a command, flag, alias or env var; changing a default (port, workflow); changing `run` exit-code semantics. Required path: keep the old spelling as a deprecated alias for at least one minor release, print a one-line deprecation warning, document the replacement.
 
@@ -20,12 +20,13 @@ Consumed by the bundled React cockpit (`web/dist`, shipped in lockstep — low r
 
 - Static/GUI: `GET /` and every SPA shell route, `/new` (bookmarklet deep-link, query `?skill=&ref=&auto=&key=`), `/assets/:file`, `/open-mercato.svg`
 - Meta: `GET /api/health` (the **only** CORS-open route — bookmarklets probe it cross-origin; its shape `{version, latestVersion, repoRoot, repo, checks, defaultRunner}` is the most externally-depended-on JSON in the app), `GET /api/launch-key`
+  - `repoRoot` is the absolute checkout path in local mode (the shape the saved bookmarklets read) but only the checkout's **basename** in hosted mode (`CEZ_REMOTE`), where health is CORS-open off the loopback and the absolute path would leak the developer's username (#431). Always present, always a string — but a hosted consumer must not treat it as a filesystem path.
 - Skills: `GET /api/skills`, `POST /api/skills/refresh`
 - Workflows: `GET/POST /api/workflows`, `DELETE /api/workflows/:name`, `POST /api/workflows/parse`, `POST /api/plan`
 - Runs: `GET/POST /api/runs`, `GET /api/runs/:id`, `PATCH /api/runs/:id`, `POST /api/runs/:id/{cancel,messages,finish,continue,open-in-cli,open-in,pr,archive,remove-worktree,git/commit,git/push}`, `POST /api/runs/archive-finished`, `DELETE /api/runs/:id`, `GET /api/runs/:id/{handoff,diff,changes,files,commits,events}`, `GET /api/runs/:id/commit/:sha`, `GET /api/runs/:id/images/:file`
 - Open-in: `GET /api/open-targets`
 - Variants: `GET /api/groups/:groupId`, `POST /api/groups/:groupId/pick`
-- Inbox: `GET /api/todos`, `DELETE /api/todos/:id`, `POST /api/todos/:id/start`
+- Inbox: `GET /api/todos`, `DELETE /api/todos/:id`, `POST /api/todos/:id/start` — present always, but **gated** on `CEZ_FOLLOWUPS=1` (#471, off by default): the GET degrades to `200 []` and the two mutators answer `409`. The routes themselves must keep existing and must behave exactly as before once the flag is on.
 - SSE: `GET /api/events` (global), `GET /api/runs/:id/events` (replay + live, dedup by `seq`)
 - Repo/GitHub: `GET /api/github`, `GET /api/repo`, `GET /api/repo/{diff,changes}`, `GET /api/repo/commit/:sha`, `POST /api/repo/branch`, `GET/PUT /api/config`, `GET/PUT /api/ui-state`
 - SSE event names: `run-event` (v1), `ui-event` (v2 dotted types)
@@ -41,7 +42,7 @@ Written by one version, read by the next, and hand-editable by design:
 - **`runs/<id>.handoff.md`**, **`runs/<id>-images/`** — Markdown journal and screenshots; deleted with the run.
 - **`ui-state.json`** — GUI prefs; schema is `.passthrough()` so unknown keys survive round-trips. Keep it that way — never strip keys you don't know.
 - **`config.json`** — user-owned (`src/config.ts`): missing/invalid degrades to defaults; the `PUT /api/config` handler merges into the raw file so user keys survive and defaults are never materialized. Renaming a key (`skillsRepos`, `maxParallel`, `defaultRunner`, `plannerModel`, `baseBranch`) or changing a default is breaking; accept the old key as an alias during migration.
-- **`todos.json`**, **`launch-key`** — inbox entries (spec 007) and the bookmarklet secret.
+- **`todos.json`**, **`launch-key`** — inbox entries (spec 007) and the bookmarklet secret. The inbox is opt-in since #471, but the file's format is unchanged and its entries are **never** deleted by the gate: turning `CEZ_FOLLOWUPS=1` back on must surface exactly what was there before.
 - **`.gitignore`** — maintained by `ensureDataGitignore` in `src/index.ts`; any new run-data file must be added there in the same PR.
 
 Breaking: any change that makes an existing file unparseable, silently discarded, or rewritten into a new shape without reading the old one. Required path: read old + new shapes for at least one minor release (a lazy upgrade-on-read is fine since writes go through the schema), or ship an explicit migration; never require the user to delete `.ai/cezar/`.
@@ -60,12 +61,37 @@ Breaking: requiring frontmatter, dropping a discovery directory, or inverting pr
 
 ## 6. npm package surface (`package.json`)
 
-- Name `@pat-lewczuk/cezar` (plus the `cezar-cli` npx alias documented in the README); `bin` entries `cezar` + `cez`; published `files`: `dist`, `web/dist`, `web/open-mercato.svg`, `scripts`, `README.md`; `engines.node >= 20`; `"type": "module"`.
+- Name `@open-mercato/cezar` (plus the `cezar-cli` npx alias documented in the README); `bin` entries `cezar` + `cez`; published `files`: `dist`, `web/dist`, `web/open-mercato.svg`, `scripts`, `README.md`; `engines.node >= 20`; `"type": "module"`.
 - There is **no** `exports`/library API — the package is CLI-only. Keep it that way deliberately: adding one creates a new compatibility surface; if it happens, this document gains a section first.
 - `dist/index.js` must remain the bin entry, and `web/` must stay resolvable relative to `dist/server` (`resolveWebDir` walks `../../web`; the built cockpit lives at `web/dist`).
 - The tarball MUST contain the built UI (`web/dist/index.html` + hashed `web/dist/assets/*`) — `npm run check:pack` (`scripts/check-pack.mjs`, run as the last leg of `npm run build`, hence by `prepublishOnly`) enforces this; do not remove it from the build chain.
 
 Breaking: dropping a bin alias, raising `engines.node`, removing `web/dist/` or `scripts/` from `files`, renaming the package. Required path: raise `engines` only in a version bump flagged as breaking; keep old aliases through a deprecation release.
+
+## 7. Agent event protocol (`src/core/agent-runner.ts`, `src/core/ui-events.ts`)
+
+The normalized streams every runner emits — persisted to `runs/<id>.ndjson` and replayed by both the cockpit and `cezar run`'s console. Two layers ship together and both are contracts; `AGENT_PROTOCOL.md` is the full spec.
+
+- **v1 `AgentEvent`** (`agent-runner.ts`) — the flat stream. Its `type` strings (`text`, `tool-call`, `tool-result`, `image`, `token-usage`, `cost`, `session`, `turn-end`, `note`, `done`, `error`) are part of the on-disk NDJSON format and of the console renderer. Old recordings must keep replaying forever, so a v1 type is never removed or renamed.
+- **v2 `UiEvent`** (`ui-events.ts`) — the normalized item-lifecycle protocol, emitted **alongside** v1 (never replacing it; a mixed v1+v2 NDJSON file is valid by design). Its dotted `type` discriminators (`session.started`, `session.ended`, `session.error`, `turn.started`, `turn.completed`, `item.started`, `item.delta`, `item.updated`, `item.completed`, `plan.updated`, `usage.updated`, `image`, plus the reserved `permission.requested` / `permission.resolved`), the `UiItem` kinds (`message`/`reasoning`/`tool`), and the enum vocabularies (`ToolStatus`, `ToolKind`, `StopReason`, `PlanStatus`) are the wire shape the cockpit renders and the golden fixtures pin.
+- **Golden fixtures + parity** — `src/core/__fixtures__/<backend>/*.expected.json` are the hand-verified contract per mapper, and `src/core/ui-parity.test.ts` makes "every capability is emitted by **all three** backends" executable. The cockpit degrades per-capability, never per-backend; a change that lets one backend stop emitting a matrix capability is a regression, not a per-backend nicety.
+- **Cross-refs** — the SSE event names carrying these (`run-event` v1, `ui-event` v2) are in section 2; the `runs/<id>.ndjson` append-only format is in section 3. The web bundle's mirror (`web/app/src/protocol/ui-events.ts`) is held type-exact by `src/server/api-types.test.ts`.
+
+Breaking: removing or renaming a v1 `AgentEvent` type or a v2 `UiEvent` `type`/`UiItem` kind; removing a field consumers read; narrowing an enum so a previously emitted value disappears; or dropping a parity capability from a backend. Additive is fine (new optional field, new event type — protocol v2 event types are additive by design; a new `ToolKind`/`StopReason` member is additive). Required path: read old + new shapes for at least one minor release (old NDJSON must still replay), and follow the parity requirement when adding a backend — a new runner is not compatible until it emits every matrix capability (`AGENT_PROTOCOL.md` §9). See also `AGENT_PROTOCOL.md` for the full schema, per-backend mapping, and new-runner checklist.
+
+## 8. In-band agent marker vocabulary (`src/handoff.ts`, `src/runs/task-markers.ts`)
+
+The plain-text markers the handoff contract asks every agent to emit and the engine parses from
+turn text: `CEZ:DONE` (#347), `CEZ:MONITORING` (#490), and the task-reference markers
+`CEZ:PR=<n>` / `CEZ:ISSUE=<n>` / `CEZ:TITLE=<phrase>` (spec 2026-07-18-task-ref-markers). These
+are an agent-facing contract: skills, prompts, and running agents rely on an emitted marker
+meaning what it meant when their session started.
+
+Breaking: removing or renaming a marker, or changing what an emitted marker does (e.g. making
+`CEZ:PR` gate an action instead of steering display). Additive is fine — a new `CEZ:*` marker is
+inert prose to older cezars, which is the property that keeps the vocabulary forward-compatible.
+Required path for a change: keep parsing the old spelling for at least one minor release while
+the instructions emit the new one.
 
 ## Cockpit UI redesign waiver (spec `.ai/specs/2026-07-14-cockpit-ui-redesign.md`) — EXPIRED at R7
 
@@ -78,6 +104,26 @@ The UI redesign was a deliberate generational change (approved 2026-07-14): whil
 - **Required path for each waived break**: called out in the phase PR body under "Breaking changes", release-notes entry, minor version bump (pre-1.0). No deprecation window required.
 
 The waiver expired when phase R7 landed; this document is back in full force with the then-current surfaces described above.
+
+## Follow-up inbox default flip (#471) — deliberate, 2026-07-17
+
+The global follow-up inbox shipped enabled (spec 007; #444 added the per-run `generateFollowups`
+opt-out). Issue #471 turns it **off by default**, re-enabled with `CEZ_FOLLOWUPS=1`: agents kept
+hanging on stale, pre-saved follow-ups, which made skill behavior unpredictable — the feature is a
+carry-over from the `GitHub janitor` era and is not wanted as a default.
+
+This is a deliberate break of section 2's endpoint list and of the "changing a default is breaking"
+rule in section 1, taken on the repo owner's explicit instruction rather than silently:
+
+- **Broken**: the *default* answers of `GET /api/todos` (now `200 []`), `DELETE /api/todos/:id` and
+  `POST /api/todos/:id/start` (now `409`); the default value of `POST /api/runs`
+  `generateFollowups` (now `false`, and the capability is a hard ceiling on it).
+- **Not broken**: every route still exists and behaves exactly as before under `CEZ_FOLLOWUPS=1`;
+  `todos.json`'s format is unchanged and its entries are never deleted by the gate; the per-task
+  handoff journal (`runs/<id>.handoff.md`, the "Notes" card) and the `CEZ:DONE` marker are
+  untouched — #471 keeps those explicitly.
+- **No deprecation alias**: the flag *is* the migration path — one env var restores the old
+  behavior wholesale, which the "keep the old spelling for a minor release" rule exists to provide.
 
 ## When in doubt
 

@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { isLoopbackHost, isLoopbackHostHeader, normalizeHostname, resolveCapabilities } from './capabilities.js';
 
 /**
+ * `resolveCapabilities` takes its env as a parameter, so these drive it
+ * directly rather than mutating `process.env`.
+ *
  * The two loopback predicates sit at different trust seams and must not be
  * collapsed into one (#426 / #467 review):
  *   - `isLoopbackHost(bindHost)`   — our own config. Undefined = "we defaulted
@@ -13,7 +16,16 @@ import { isLoopbackHost, isLoopbackHostHeader, normalizeHostname, resolveCapabil
  * bypass this pair replaced.
  */
 
-const REAL_LOOPBACK = ['localhost', '127.0.0.1', '127.0.0.2', '127.255.255.255', '::1', '0:0:0:0:0:0:0:1'];
+const REAL_LOOPBACK = [
+  'localhost',
+  'LOCALHOST',
+  '127.0.0.1',
+  '127.1.2.3',
+  '127.255.255.255',
+  '::1',
+  '[::1]',
+  '0:0:0:0:0:0:0:1',
+];
 
 // Every one of these is registrable by an attacker and resolvable to 127.0.0.1.
 const NOT_LOOPBACK = [
@@ -24,9 +36,10 @@ const NOT_LOOPBACK = [
   '127.0.0.1x',
   '127.0.0.256',
   '127.0.0',
-  'evil.com',
-  '10.0.0.1',
   'localhost.evil.com',
+  '0.0.0.0',
+  '192.168.1.10',
+  'example.com',
   '::2',
   '::1:1',
 ];
@@ -66,33 +79,57 @@ describe('isLoopbackHostHeader (untrusted request header)', () => {
 });
 
 describe('isLoopbackHost (our own bind host)', () => {
-  it.each(REAL_LOOPBACK)('accepts the real loopback bind %s', (host) => {
+  it('treats the default bind (undefined) as loopback', () => {
+    expect(isLoopbackHost(undefined)).toBe(true);
+  });
+
+  it.each(REAL_LOOPBACK)('accepts %s', (host) => {
     expect(isLoopbackHost(host)).toBe(true);
   });
 
-  it.each(NOT_LOOPBACK)('rejects the non-loopback bind %s', (host) => {
+  it.each(NOT_LOOPBACK)('rejects %s', (host) => {
     expect(isLoopbackHost(host)).toBe(false);
-  });
-
-  it('keeps its contract: an undefined bind host means the default loopback bind', () => {
-    expect(isLoopbackHost(undefined)).toBe(true);
   });
 });
 
-describe('resolveCapabilities', () => {
-  it('keeps local handoff for the defaulted (undefined) bind host', () => {
-    expect(resolveCapabilities({} as NodeJS.ProcessEnv, undefined).localHandoff).toBe(true);
+describe('resolveCapabilities — localHandoff', () => {
+  it('is on for a default local bind', () => {
+    expect(resolveCapabilities({}, undefined).localHandoff).toBe(true);
   });
 
-  it('keeps local handoff for an explicit loopback bind', () => {
-    expect(resolveCapabilities({} as NodeJS.ProcessEnv, '127.0.0.1').localHandoff).toBe(true);
+  it('is on for an explicit loopback bind', () => {
+    expect(resolveCapabilities({}, '127.0.0.1').localHandoff).toBe(true);
   });
 
-  it('drops local handoff for a non-loopback bind', () => {
-    expect(resolveCapabilities({} as NodeJS.ProcessEnv, '0.0.0.0').localHandoff).toBe(false);
+  it('is off when CEZ_REMOTE=1', () => {
+    expect(resolveCapabilities({ CEZ_REMOTE: '1' }, undefined).localHandoff).toBe(false);
   });
 
-  it('drops local handoff when CEZ_REMOTE=1 even on a loopback bind', () => {
-    expect(resolveCapabilities({ CEZ_REMOTE: '1' } as NodeJS.ProcessEnv, '127.0.0.1').localHandoff).toBe(false);
+  it('is off for a non-loopback bind host', () => {
+    expect(resolveCapabilities({}, '0.0.0.0').localHandoff).toBe(false);
+  });
+});
+
+describe('resolveCapabilities — followups (#471)', () => {
+  it('is OFF by default — the global inbox is opt-in', () => {
+    expect(resolveCapabilities({}, undefined).followups).toBe(false);
+  });
+
+  it('is on with CEZ_FOLLOWUPS=1', () => {
+    expect(resolveCapabilities({ CEZ_FOLLOWUPS: '1' }, undefined).followups).toBe(true);
+  });
+
+  it.each(['0', 'true', 'yes', '', 'on'])(
+    'stays off for CEZ_FOLLOWUPS=%j — only an exact "1" opts in',
+    (value) => {
+      expect(resolveCapabilities({ CEZ_FOLLOWUPS: value }, undefined).followups).toBe(false);
+    },
+  );
+
+  it('is independent of the deployment mode', () => {
+    expect(resolveCapabilities({ CEZ_FOLLOWUPS: '1', CEZ_REMOTE: '1' }, '0.0.0.0')).toEqual({
+      localHandoff: false,
+      followups: true,
+    });
   });
 });

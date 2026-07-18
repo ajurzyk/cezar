@@ -232,6 +232,33 @@ describe('reduceThread — live-stream mechanics', () => {
     expect((turns[0]!.items[0] as UiMessageItem).text).toBe('All done.')
   })
 
+  it('strips a trailing CEZ:MONITORING from assistant messages too (#490)', () => {
+    const events: RunEvent[] = [
+      line(1, 'turn.started', { turnId: 'turn_1' }),
+      line(2, 'item.completed', {
+        item: { kind: 'message', id: 'm1', role: 'assistant', text: 'Spawned the reviewer, waiting on it.\n\nCEZ:MONITORING' },
+      }),
+    ]
+    const { turns } = reduceThread(events)
+    expect((turns[0]!.items[0] as UiMessageItem).text).toBe('Spawned the reviewer, waiting on it.')
+  })
+
+  it('strips CEZ:PR/CEZ:ISSUE/CEZ:TITLE marker lines but keeps prose mentions (spec 2026-07-18-task-ref-markers)', () => {
+    const events: RunEvent[] = [
+      line(1, 'turn.started', { turnId: 'turn_1' }),
+      line(2, 'item.completed', {
+        item: {
+          kind: 'message',
+          id: 'm1',
+          role: 'assistant',
+          text: 'Opened the PR.\nCEZ:PR=442\nCEZ:ISSUE=433\nCEZ:TITLE=implementing marker refs\nI will keep CEZ:PR=442 updated.',
+        },
+      }),
+    ]
+    const { turns } = reduceThread(events)
+    expect((turns[0]!.items[0] as UiMessageItem).text).toBe('Opened the PR.\nI will keep CEZ:PR=442 updated.')
+  })
+
   it('a malformed line costs itself, not the fold', () => {
     const events: RunEvent[] = [
       line(1, 'item.delta', { itemId: 'ghost', field: 'text', delta: 'x' }), // delta before any item

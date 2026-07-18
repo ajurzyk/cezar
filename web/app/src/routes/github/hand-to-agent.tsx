@@ -9,11 +9,11 @@ import {
   XIcon,
   ZapIcon,
 } from 'lucide-react'
-import { useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { Link } from 'react-router'
 
-import { createRun } from '@/api/client'
-import { queryKeys } from '@/api/queries'
+import { createRun, putUiState } from '@/api/client'
+import { queryKeys, useUiState } from '@/api/queries'
 import type { GithubItem, Skill, WorkflowDef } from '@/api/types'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
@@ -27,10 +27,20 @@ import {
 } from '@/components/ui/command'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { toast } from '@/components/ui/toaster'
+import { PromptTemplateMenu } from '@/components/prompt-template-menu'
 import { SkillPreviewDialog } from '@/components/skill-detail'
 import { githubRunBody } from '@/lib/github-task'
-import { isProjectSkill, multiWordFilter, skillKeywords } from '@/lib/skills'
+import {
+  autoApplyText,
+  insertTemplate,
+  normalizePromptTemplates,
+  resolveAutoApply,
+} from '@/lib/prompt-templates'
+import { bumpSkillUsage, isProjectSkill, searchSkills, searchWorkflows, skillKeywords } from '@/lib/skills'
+import { isSubmitShortcut, submitShortcutHint } from '@/lib/use-submit-shortcut'
 import { cn } from '@/lib/utils'
+
+import { readFollowupPrompt, writeFollowupPrompt } from './hand-to-agent-draft'
 
 /**
  * The detail pane's "Hand this to the agent" panel: the legacy chip walls replaced by
@@ -40,11 +50,19 @@ import { cn } from '@/lib/utils'
  * the POST is exactly the legacy tab's.
  *
  * Picker state lives in the ROUTE, not here (legacy parity: your workflow/skill selection
- * survives switching between issues — it is a way of working, not a property of one item).
+ * survives switching between issues — it is a way of working, not a property of one item) —
+ * `github.tsx` also persists it to localStorage (#408) so it survives a reload and pre-fills a
+ * hand-off you have never touched (`hand-to-agent-draft.ts`). `skills` arrives already ordered
+ * project-first-then-frequency (`orderSkillsByUsage`, #408) — this component just renders it.
  *
  * The selected skills render as an always-visible chip row OUTSIDE the dropdown — the legacy
  * invariant "the filter can't hide your selection", carried over: cmdk may filter the list,
  * never the selection.
+ *
+ * The custom prompt persists per-item to localStorage as you type (#408 — keyed by `item.url`
+ * so distinct hand-off targets never collide) and submits on ⌘/Ctrl+Enter — deliberately NOT
+ * on a bare Enter, unlike the thread composer's `isSubmitShortcut`: this is a multi-line
+ * instructions box, so Enter alone inserts a newline (the textarea's own default).
  */
 export function HandToAgent({
   item,
@@ -69,11 +87,55 @@ export function HandToAgent({
   onQueued: (url: string, runId: string) => void
 }) {
   const queryClient = useQueryClient()
+  const uiState = useUiState()
   // A skill deleted since it was toggled must not reach the server (legacy rule).
   const validSkills = selectedSkills.filter((name) => skills.some((skill) => skill.name === name))
   // Optional custom prompt (#gh-custom-prompt): empty → the default "Fix GitHub issue #N …"
-  // text. Local + reset per item (the route remounts this via key={item.url}).
-  const [prompt, setPrompt] = useState('')
+  // text. The route remounts this component per item (key={item.url}); the DRAFT — not plain
+  // component state (#408) — restores whatever was typed for THIS item, so switching away and
+  // back (or a page refresh) never loses it.
+  const [prompt, setPrompt] = useState(() => readFollowupPrompt(item.url))
+  const promptRef = useRef<HTMLTextAreaElement>(null)
+  useEffect(() => {
+    writeFollowupPrompt(item.url, prompt)
+  }, [item.url, prompt])
+
+  // Follow-up prompt templates (#413): built-in unless the user has edited them in Settings →
+  // Prompt templates (`ui-state.json`'s `promptTemplates`).
+  const templates = useMemo(
+    () => normalizePromptTemplates(uiState.data?.promptTemplates),
+    [uiState.data?.promptTemplates],
+  )
+  const insertPromptTemplate = (snippet: string) => {
+    const el = promptRef.current
+    const caret = el?.selectionStart ?? prompt.length
+    const result = insertTemplate(prompt, caret, snippet)
+    setPrompt(result.text)
+    // Restore focus + caret after the state update repaints the textarea. The menu's Popover
+    // suppresses its own focus-return (`onCloseAutoFocus`), so this is the last word on focus.
+    requestAnimationFrame(() => {
+      promptRef.current?.focus()
+      promptRef.current?.setSelectionRange(result.caret, result.caret)
+    })
+  }
+
+  // Auto-apply (#413 follow-up): picking a skill fills the prompt with the templates assigned to
+  // it — but only while the box is untouched, per `resolveAutoApply`. Deselecting takes the
+  // auto-applied text back out again, so the box always reflects the current selection until the
+  // moment the user types, after which it is theirs.
+  const autoText = autoApplyText(templates, validSkills)
+  const promptRefValue = useRef(prompt)
+  promptRefValue.current = prompt
+  const autoAppliedRef = useRef('')
+  useEffect(() => {
+    // Reads/writes go through refs, never a setState updater: StrictMode double-invokes those in
+    // dev, which would double-apply the ref bookkeeping (the composer's #double-paste hazard).
+    const resolved = resolveAutoApply(promptRefValue.current, autoAppliedRef.current, autoText)
+    autoAppliedRef.current = resolved.applied
+    if (resolved.text !== promptRefValue.current) setPrompt(resolved.text)
+    // `autoText` is a derived STRING, so this fires only when the assigned set really changes —
+    // not on every render that rebuilds the skills array.
+  }, [autoText])
 
   const start = useMutation({
     mutationFn: () => createRun(githubRunBody(item, workflow, validSkills, prompt)),
@@ -81,10 +143,47 @@ export function HandToAgent({
       // The GitHub tab never starts variants, so the answer is a single record.
       const run = 'runs' in created ? created.runs[0] : created
       if (run) onQueued(item.url, run.id)
+      // Frequency sort (#408): every hand-off skill counts, mirroring the /new composer.
+      // Only bump once the CURRENT map is actually known (`uiState.data` present). The PUT
+      // merge is shallow (`uiStateSchema` passthrough, src/server/server.ts), so the client
+      // must send the WHOLE map — bumping off an unresolved or errored query would send a
+      // one-entry map and REPLACE every count the user has accumulated. Skipping the bump
+      // costs one count; sending it would cost the whole history. Fire-and-forget either way.
+      if (validSkills.length > 0 && uiState.data !== undefined) {
+        const nextUsage = validSkills.reduce(
+          (usage, name) => bumpSkillUsage(usage, name),
+          uiState.data.skillUsage,
+        )
+        void putUiState({ skillUsage: nextUsage })
+          .then(() => queryClient.invalidateQueries({ queryKey: queryKeys.uiState }))
+          .catch(() => {})
+      }
+      // The prompt is spent; the picker choices remain (legacy keeps its pills too, #408).
+      // Clear BOTH the store and the state: the persist effect keys on `prompt`, so spending
+      // only the store would leave the textarea showing text that no longer exists anywhere —
+      // text that then vanishes on the next remount.
+      writeFollowupPrompt(item.url, '')
+      setPrompt('')
       void queryClient.invalidateQueries({ queryKey: queryKeys.runs.all })
     },
     onError: (error) => toast(error.message, { tone: 'danger' }),
   })
+
+  const submitShortcut = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    const shouldSubmit =
+      isSubmitShortcut({
+        key: event.key,
+        shiftKey: event.shiftKey,
+        metaKey: event.metaKey,
+        ctrlKey: event.ctrlKey,
+        altKey: event.altKey,
+        repeat: event.repeat,
+        isComposing: event.nativeEvent.isComposing,
+      }) && (event.metaKey || event.ctrlKey) // multi-line box: bare Enter inserts a newline
+    if (!shouldSubmit) return
+    event.preventDefault()
+    if (!start.isPending) start.mutate()
+  }
 
   const toggleSkill = (name: string) =>
     onSkillsChange(
@@ -102,12 +201,16 @@ export function HandToAgent({
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <WorkflowPicker workflows={workflows} value={workflow} onChange={onWorkflowChange} />
-        <SkillsPicker skills={skills} selected={selectedSkills} onToggle={toggleSkill} />
+        <SkillsPicker skills={skills} selected={validSkills} onToggle={toggleSkill} />
+        <PromptTemplateMenu templates={templates} onInsert={insertPromptTemplate} />
       </div>
 
-      {selectedSkills.length > 0 ? (
+      {/* Chips and the trigger's count render from `validSkills`, not `selectedSkills`: the run
+          POSTs `validSkills`, so showing a deleted skill here would promise the run a skill it
+          will not use. What the composer shows and what it sends are the same list. */}
+      {validSkills.length > 0 ? (
         <div data-slot="gh-skill-chips" className="mt-2.5 flex flex-wrap gap-1.5">
-          {selectedSkills.map((name) => (
+          {validSkills.map((name) => (
             <button
               key={name}
               type="button"
@@ -125,10 +228,13 @@ export function HandToAgent({
       ) : null}
 
       <Textarea
+        ref={promptRef}
         data-slot="gh-custom-prompt"
         aria-label="Custom prompt"
+        aria-keyshortcuts="Control+Enter Meta+Enter"
         value={prompt}
         onChange={(event) => setPrompt(event.target.value)}
+        onKeyDown={submitShortcut}
         placeholder={`Add instructions for the agent… (empty uses the default "${item.kind === 'pr' ? 'Address' : 'Fix'} #${item.number}" prompt)`}
         className="mt-3 min-h-20 text-[13px]"
       />
@@ -143,6 +249,12 @@ export function HandToAgent({
           <PlayIcon aria-hidden="true" className="size-3.5" />
           Run agent on this {item.kind === 'pr' ? 'PR' : 'issue'}
         </Button>
+        <kbd
+          aria-hidden="true"
+          className="rounded-[5px] border border-b-2 border-border bg-card px-[5px] py-px font-mono text-[10.5px] font-medium text-muted-foreground"
+        >
+          {submitShortcutHint()}
+        </kbd>
         {queuedRunId ? (
           <>
             <span data-slot="gh-queued" className="flex items-center gap-1 text-xs font-medium text-success">
@@ -181,9 +293,18 @@ function WorkflowPicker({
   onChange: (workflow: string | null) => void
 }) {
   const [open, setOpen] = useState(false)
+  const [search, setSearch] = useState('')
   const listRef = useRef<HTMLDivElement>(null)
+  // #484: rank matches in JS rather than trusting cmdk's built-in score-sort.
+  const matched = searchWorkflows(workflows, search)
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next)
+        if (!next) setSearch('')
+      }}
+    >
       <PopoverTrigger asChild>
         <button
           type="button"
@@ -197,12 +318,17 @@ function WorkflowPicker({
         </button>
       </PopoverTrigger>
       <PopoverContent align="start" sideOffset={8} className="w-[320px] max-w-[calc(100vw-2rem)] p-0">
-        <Command filter={multiWordFilter}>
-          <CommandInput placeholder="search workflows…" onInput={() => listRef.current?.scrollTo(0, 0)} />
-          <CommandList ref={listRef} data-slot="gh-workflow-menu" className="max-h-64">
-            <CommandEmpty>Nothing matches.</CommandEmpty>
+        <Command shouldFilter={false}>
+          <CommandInput
+            placeholder="search workflows…"
+            value={search}
+            onValueChange={setSearch}
+            onInput={() => listRef.current?.scrollTo(0, 0)}
+          />
+          <CommandList ref={listRef} data-slot="gh-workflow-menu" className="max-h-[min(16rem,calc(var(--radix-popover-content-available-height)-3rem))]">
+            {matched.length === 0 ? <CommandEmpty>Nothing matches.</CommandEmpty> : null}
             <CommandGroup>
-              {workflows.map((workflowDef) => {
+              {matched.map((workflowDef) => {
                 const selected = value === workflowDef.name
                 return (
                   <CommandItem
@@ -252,10 +378,13 @@ function SkillsPicker({
   onToggle: (name: string) => void
 }) {
   const [open, setOpen] = useState(false)
+  const [search, setSearch] = useState('')
   const [preview, setPreview] = useState<Skill | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
-  const project = skills.filter(isProjectSkill)
-  const global = skills.filter((skill) => !isProjectSkill(skill))
+  // #484: rank matches in JS, then split into Project/Global groups (cmdk's own sort is unreliable here).
+  const matched = searchSkills(skills, search)
+  const project = matched.filter(isProjectSkill)
+  const global = matched.filter((skill) => !isProjectSkill(skill))
 
   const skillItem = (skill: Skill, emphasized: boolean) => {
     const isSelected = selected.includes(skill.name)
@@ -298,7 +427,13 @@ function SkillsPicker({
   return (
     <>
       <SkillPreviewDialog skill={preview} onClose={() => setPreview(null)} />
-      <Popover open={open} onOpenChange={setOpen}>
+      <Popover
+        open={open}
+        onOpenChange={(next) => {
+          setOpen(next)
+          if (!next) setSearch('')
+        }}
+      >
         <PopoverTrigger asChild>
           <button
             type="button"
@@ -312,10 +447,15 @@ function SkillsPicker({
           </button>
         </PopoverTrigger>
         <PopoverContent align="start" sideOffset={8} className="w-[336px] max-w-[calc(100vw-2rem)] p-0">
-          <Command filter={multiWordFilter}>
-            <CommandInput placeholder="search skills…" onInput={() => listRef.current?.scrollTo(0, 0)} />
-            <CommandList ref={listRef} data-slot="gh-skill-menu" className="max-h-64">
-              <CommandEmpty>Nothing matches.</CommandEmpty>
+          <Command shouldFilter={false}>
+            <CommandInput
+              placeholder="search skills…"
+              value={search}
+              onValueChange={setSearch}
+              onInput={() => listRef.current?.scrollTo(0, 0)}
+            />
+            <CommandList ref={listRef} data-slot="gh-skill-menu" className="max-h-[min(16rem,calc(var(--radix-popover-content-available-height)-3rem))]">
+              {project.length === 0 && global.length === 0 ? <CommandEmpty>Nothing matches.</CommandEmpty> : null}
               {project.length > 0 ? (
                 <CommandGroup heading="Project skills">{project.map((skill) => skillItem(skill, true))}</CommandGroup>
               ) : null}

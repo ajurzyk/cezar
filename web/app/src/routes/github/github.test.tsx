@@ -1,13 +1,14 @@
 import { QueryClientProvider } from '@tanstack/react-query'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
-import type { GithubData, GithubItem, Skill, WorkflowsResponse } from '@/api/types'
+import type { GithubComment, GithubCommentsData, GithubData, GithubItem, Skill, WorkflowsResponse } from '@/api/types'
 import { Toaster, resetToasts } from '@/components/ui/toaster'
 
-import { GithubRoute } from './github'
+import { GithubIndexRoute, GithubRoute } from './github'
+import { readFollowupPrompt, readFollowupSelection, writeFollowupSelection } from './hand-to-agent-draft'
 
 beforeAll(() => {
   // cmdk scrolls the selected item into view; jsdom has no scrollIntoView.
@@ -24,6 +25,9 @@ beforeEach(() => {
       disconnect() {}
     },
   )
+  // The #408 follow-up persistence (remembered selection + per-item draft) is localStorage-
+  // backed and jsdom's localStorage survives across tests in this file — start every test clean.
+  localStorage.clear()
 })
 
 afterEach(() => {
@@ -81,6 +85,38 @@ const GITHUB: GithubData = {
   prs: [PR_137],
 }
 
+const COMMENT_TEXT: GithubComment = {
+  id: 1,
+  author: 'maya',
+  avatarUrl: 'https://avatars.githubusercontent.com/u/1?v=4',
+  createdAt: '2026-07-12T08:00:00.000Z',
+  body: 'Confirmed on my end too — nice catch.',
+  kind: 'comment',
+  url: 'https://github.com/acme/demo/issues/142#issuecomment-1',
+}
+
+const COMMENT_IMAGE: GithubComment = {
+  id: 2,
+  author: 'noAvatar',
+  createdAt: '2026-07-12T09:00:00.000Z',
+  body: 'Screenshot:\n\n![shot](https://example.com/shot.png)',
+  kind: 'comment',
+  url: 'https://github.com/acme/demo/issues/142#issuecomment-2',
+}
+
+const REVIEW_CHANGES: GithubComment = {
+  id: 3,
+  author: 'rev',
+  avatarUrl: 'https://avatars.githubusercontent.com/u/3?v=4',
+  createdAt: '2026-07-12T10:00:00.000Z',
+  body: 'Please add a test.',
+  kind: 'review',
+  reviewState: 'changes_requested',
+  url: 'https://github.com/acme/demo/pull/137#pullrequestreview-3',
+}
+
+const THREAD: GithubCommentsData = { available: true, comments: [COMMENT_TEXT, COMMENT_IMAGE] }
+
 const WORKFLOWS: WorkflowsResponse = {
   workflows: [
     { name: 'quick-task', description: 'one step', steps: [], source: 'built-in' },
@@ -117,6 +153,9 @@ function stubFetch(overrides: Record<string, () => Response> = {}): SentRequest[
       sent.push({ path, method, body: typeof init.body === 'string' ? JSON.parse(init.body) : undefined })
       const override = overrides[`${method} ${path}`]
       if (override) return override()
+      // Any comment-thread request defaults to the two-comment THREAD fixture; a test overrides a
+      // specific `GET /api/github/comments/<kind>/<n>` key to serve a different thread.
+      if (method === 'GET' && path.startsWith('/api/github/comments/')) return jsonResponse(THREAD)
       if (method === 'GET' && path === '/api/github') return jsonResponse(GITHUB)
       if (method === 'GET' && path === '/api/github?limit=1000') return jsonResponse(GITHUB)
       if (method === 'GET' && path === '/api/workflows') return jsonResponse(WORKFLOWS)
@@ -140,13 +179,15 @@ function stubFetch(overrides: Record<string, () => Response> = {}): SentRequest[
   return sent
 }
 
-/** Cold-load the tab at a URL, with the same route map routes.tsx registers. */
+/** Cold-load the tab at a URL, with the same route map routes.tsx registers — `/github` goes
+ *  through `GithubIndexRoute` (#417) exactly like production, so the remembered-tab redirect
+ *  is exercised the same way a real navigation would hit it. */
 function renderAt(entry: string) {
   render(
     <QueryClientProvider client={createQueryClient()}>
       <MemoryRouter initialEntries={[entry]}>
         <Routes>
-          <Route path="/github" element={<GithubRoute view="issues" />} />
+          <Route path="/github" element={<GithubIndexRoute />} />
           <Route path="/github/prs" element={<GithubRoute view="prs" />} />
           <Route path="/github/issues/:n" element={<GithubRoute view="issues" />} />
           <Route path="/github/prs/:n" element={<GithubRoute view="prs" />} />
@@ -159,6 +200,9 @@ function renderAt(entry: string) {
 
 const rows = () => [...document.querySelectorAll<HTMLElement>('[data-slot="gh-row"]')]
 const detail = () => document.querySelector('[data-slot="gh-detail-inner"]')
+const promptField = () =>
+  document.querySelector<HTMLTextAreaElement>('[data-slot="gh-custom-prompt"]')!
+const promptValue = () => promptField().value
 
 // ---- lists + detail ---------------------------------------------------------------------------
 
@@ -197,6 +241,50 @@ describe('the GitHub tab lists', () => {
 
     await waitFor(() => expect(rows()).toHaveLength(1))
     expect(rows()[0]?.getAttribute('href')).toBe('/github/prs/137')
+  })
+
+  it('a PR row shows a checks glyph tinted by outcome (#400); an issue row shows none', async () => {
+    const passing: GithubItem = { ...PR_137, number: 201, url: 'u201', checks: 'passing' }
+    const pending: GithubItem = { ...PR_137, number: 202, url: 'u202', checks: 'pending' }
+    const none: GithubItem = { ...PR_137, number: 203, url: 'u203', checks: null }
+    stubFetch({
+      'GET /api/github': () => jsonResponse({ ...GITHUB, prs: [PR_137, passing, pending, none] }),
+    })
+    renderAt('/github/prs')
+
+    await waitFor(() => expect(rows()).toHaveLength(4))
+    const glyph = (number: string) =>
+      document.querySelector(`[data-slot="gh-row"][data-number="${number}"] [data-slot="gh-row-checks"]`)
+
+    expect(glyph('137')?.getAttribute('data-checks')).toBe('failing')
+    expect(glyph('137')?.textContent).toBe('✗')
+    expect(glyph('201')?.getAttribute('data-checks')).toBe('passing')
+    expect(glyph('201')?.textContent).toBe('✓')
+    expect(glyph('202')?.getAttribute('data-checks')).toBe('pending')
+    expect(glyph('202')?.textContent).toBe('○')
+    expect(glyph('203')).toBeNull()
+
+    // Issues never carry `checks` — no glyph on their rows either.
+    cleanup()
+    stubFetch()
+    renderAt('/github')
+    await waitFor(() => expect(rows().length).toBeGreaterThan(0))
+    expect(document.querySelector('[data-slot="gh-row-checks"]')).toBeNull()
+  })
+
+  it('shows a comment-count badge only on rows with comments (#499)', async () => {
+    stubFetch()
+    renderAt('/github')
+
+    await waitFor(() => expect(rows()).toHaveLength(2))
+    const badge = (number: string) =>
+      document.querySelector(`[data-slot="gh-row"][data-number="${number}"] [data-slot="gh-comment-count"]`)
+
+    // #142 has 3 comments → a labelled badge; #139 has 0 → none, so quiet rows look untouched.
+    expect(badge('142')?.getAttribute('data-count')).toBe('3')
+    expect(badge('142')?.getAttribute('aria-label')).toBe('3 comments')
+    expect(badge('142')?.textContent).toContain('3')
+    expect(badge('139')).toBeNull()
   })
 
   it('counts at the fast-batch cap render as 30+ until the full fetch lands', async () => {
@@ -249,6 +337,54 @@ describe('the GitHub tab lists', () => {
   })
 })
 
+describe('remembering the last-selected tab (#417)', () => {
+  it('clicking Pull requests persists the choice via PUT /api/ui-state', async () => {
+    const sent = stubFetch()
+    renderAt('/github')
+    await waitFor(() => expect(rows()).toHaveLength(2))
+
+    fireEvent.click(screen.getByRole('link', { name: /Pull requests/ }))
+
+    await waitFor(() =>
+      expect(sent.some((request) => request.method === 'PUT' && request.path === '/api/ui-state')).toBe(
+        true,
+      ),
+    )
+    const put = sent.find((request) => request.method === 'PUT' && request.path === '/api/ui-state')
+    expect(put?.body).toEqual({ githubView: 'prs' })
+  })
+
+  it('opening /github restores "prs" when that was the last-selected tab', async () => {
+    stubFetch({ 'GET /api/ui-state': () => jsonResponse({ githubView: 'prs' }) })
+    renderAt('/github')
+
+    await waitFor(() => expect(rows()).toHaveLength(1))
+    expect(rows()[0]?.getAttribute('href')).toBe('/github/prs/137')
+  })
+
+  it('opening /github falls back to Issues when nothing was ever remembered', async () => {
+    stubFetch({ 'GET /api/ui-state': () => jsonResponse({}) })
+    renderAt('/github')
+
+    await waitFor(() => expect(rows()).toHaveLength(2))
+    expect(rows()[0]?.getAttribute('href')).toBe('/github/issues/142')
+  })
+
+  it('clicking Issues while "prs" is remembered switches to Issues instead of bouncing back', async () => {
+    // The regression this guards: without eagerly patching the query cache on click, the
+    // index route would still read the stale "prs" remembered choice and redirect the click
+    // straight back to /github/prs, making the Issues tab unclickable.
+    stubFetch({ 'GET /api/ui-state': () => jsonResponse({ githubView: 'prs' }) })
+    renderAt('/github/prs')
+    await waitFor(() => expect(rows()).toHaveLength(1))
+
+    fireEvent.click(screen.getByRole('link', { name: /^Issues/ }))
+
+    await waitFor(() => expect(rows()).toHaveLength(2))
+    expect(rows().map((row) => row.dataset.number)).toEqual(['142', '139'])
+  })
+})
+
 describe('the GitHub detail pane', () => {
   it('a PR renders the meta line, ± stat, label chips and the checks badge', async () => {
     stubFetch()
@@ -259,7 +395,10 @@ describe('the GitHub detail pane', () => {
     expect(meta).toContain('#137')
     expect(meta).toContain('pull request')
     expect(meta).toContain('opened by grace')
-    expect(meta).toContain('1 comments')
+    // The comment count renders as an icon+count badge (#499), labelled for screen readers.
+    const detailCount = document.querySelector('[data-slot="gh-meta"] [data-slot="gh-comment-count"]')
+    expect(detailCount?.getAttribute('data-count')).toBe('1')
+    expect(detailCount?.getAttribute('aria-label')).toBe('1 comment')
     expect(document.querySelector('[data-slot="gh-diffstat"]')?.textContent).toBe('+120 −30')
     expect(document.querySelector('[data-slot="gh-open-link"]')?.getAttribute('href')).toBe(PR_137.url)
 
@@ -267,6 +406,18 @@ describe('the GitHub detail pane', () => {
     const checks = document.querySelector('[data-slot="gh-checks"]')
     expect(checks?.getAttribute('data-checks')).toBe('failing')
     expect(checks?.textContent).toContain('checks failing')
+  })
+
+  it('the checks badge links to the PR checks tab on GitHub, open in a new tab (#415)', async () => {
+    stubFetch()
+    renderAt('/github/prs/137')
+
+    await waitFor(() => expect(detail()).not.toBeNull())
+    const checks = document.querySelector('[data-slot="gh-checks"]')
+    expect(checks?.tagName).toBe('A')
+    expect(checks?.getAttribute('href')).toBe(`${PR_137.url}/checks`)
+    expect(checks?.getAttribute('target')).toBe('_blank')
+    expect(checks?.getAttribute('rel')).toBe('noopener noreferrer')
   })
 
   it('renders the issue body through the markdown pipeline', async () => {
@@ -278,6 +429,93 @@ describe('the GitHub detail pane', () => {
         'Repro: log in, hit reload',
       ),
     )
+  })
+})
+
+// ---- comment thread (#499) --------------------------------------------------------------------
+
+describe('the comment thread', () => {
+  const thread = (kind: 'issue' | 'pr', n: number, data: GithubCommentsData) => ({
+    [`GET /api/github/comments/${kind}/${n}`]: () => jsonResponse(data),
+  })
+  const threadSection = () => document.querySelector('[data-slot="gh-thread"]')
+  const entries = () => [...document.querySelectorAll<HTMLElement>('[data-slot="gh-thread-entry"]')]
+
+  it('renders a "Comments · N" section with each body through the markdown pipeline', async () => {
+    stubFetch(thread('issue', 142, { available: true, comments: [COMMENT_TEXT, COMMENT_IMAGE] }))
+    renderAt('/github/issues/142')
+
+    await waitFor(() => expect(threadSection()).not.toBeNull())
+    expect(document.querySelector('[data-slot="gh-thread-header"]')?.textContent).toBe('Comments · 2')
+    expect(entries()).toHaveLength(2)
+    expect(entries()[0]?.textContent).toContain('maya')
+    expect(entries()[0]?.querySelector('[data-slot="gh-thread-body"]')?.textContent).toContain(
+      'Confirmed on my end too',
+    )
+  })
+
+  it('renders an image comment as an <img> through the shared Markdown component', async () => {
+    stubFetch(thread('issue', 142, { available: true, comments: [COMMENT_IMAGE] }))
+    renderAt('/github/issues/142')
+
+    await waitFor(() => expect(threadSection()).not.toBeNull())
+    const img = document.querySelector<HTMLImageElement>('[data-slot="gh-thread-body"] img')
+    expect(img?.getAttribute('src')).toBe('https://example.com/shot.png')
+  })
+
+  it('renders nothing for an empty thread — the count badge already said there were none', async () => {
+    stubFetch(thread('issue', 139, { available: true, comments: [] }))
+    renderAt('/github/issues/139')
+
+    await waitFor(() => expect(detail()?.textContent).toContain('Add --json flag'))
+    expect(threadSection()).toBeNull()
+    expect(document.querySelector('[data-slot="gh-thread-error"]')).toBeNull()
+  })
+
+  it('shows a one-line reason + open-on-GitHub link when the thread is unavailable', async () => {
+    stubFetch(thread('issue', 142, { available: false, reason: 'gh not installed', comments: [] }))
+    renderAt('/github/issues/142')
+
+    await waitFor(() => expect(document.querySelector('[data-slot="gh-thread-error"]')).not.toBeNull())
+    const error = document.querySelector('[data-slot="gh-thread-error"]')!
+    expect(error.textContent).toContain('gh not installed')
+    expect(error.querySelector('a')?.getAttribute('href')).toBe(ISSUE_142.url)
+  })
+
+  it('renders a review entry with a state chip (green/red tone tables)', async () => {
+    stubFetch(thread('pr', 137, { available: true, comments: [COMMENT_TEXT, REVIEW_CHANGES] }))
+    renderAt('/github/prs/137')
+
+    await waitFor(() => expect(entries()).toHaveLength(2))
+    const review = document.querySelector('[data-slot="gh-thread-entry"][data-kind="review"]')
+    const chip = review?.querySelector('[data-slot="gh-review-chip"]')
+    expect(chip?.getAttribute('data-review-state')).toBe('changes_requested')
+    expect(chip?.textContent).toBe('changes requested')
+    expect(chip?.className).toContain('text-danger')
+  })
+
+  it('uses the real avatar when present and a letter fallback when absent', async () => {
+    stubFetch(thread('issue', 142, { available: true, comments: [COMMENT_TEXT, COMMENT_IMAGE] }))
+    renderAt('/github/issues/142')
+
+    await waitFor(() => expect(entries()).toHaveLength(2))
+    // COMMENT_TEXT has an avatarUrl → an <img>; COMMENT_IMAGE has none → a letter block.
+    expect(entries()[0]?.querySelector('[data-slot="gh-avatar"]')?.getAttribute('src')).toBe(
+      COMMENT_TEXT.avatarUrl,
+    )
+    const fallback = entries()[1]?.querySelector('[data-slot="gh-avatar-fallback"]')
+    expect(fallback).not.toBeNull()
+    expect(fallback?.textContent).toBe('n') // first letter of "noAvatar"
+  })
+
+  it('shows a truncation row linking to GitHub when the thread was trimmed', async () => {
+    stubFetch(thread('issue', 142, { available: true, comments: [COMMENT_TEXT], truncated: true }))
+    renderAt('/github/issues/142')
+
+    await waitFor(() => expect(threadSection()).not.toBeNull())
+    const trunc = document.querySelector('[data-slot="gh-thread-truncated"]')
+    expect(trunc?.textContent).toContain('thread truncated')
+    expect(trunc?.getAttribute('href')).toBe(ISSUE_142.url)
   })
 })
 
@@ -311,6 +549,28 @@ describe('the unavailable forge state', () => {
 async function openDetail(entry = '/github/issues/142') {
   renderAt(entry)
   await waitFor(() => expect(document.querySelector('[data-slot="gh-hand"]')).not.toBeNull())
+}
+
+/**
+ * Toggle a skill ON through its picker, robustly. cmdk re-renders the option list while the
+ * popover opens, so an option `waitFor` just saw can be detached a tick later — clicking a node
+ * from a prior poll then hits `null` (#413 flake). Query-and-click atomically on each poll, and
+ * key completion on the skill's CHIP appearing so this multi-select toggle can never fire twice
+ * and flip it back off. Opens the picker only when neither the option nor the chip is showing
+ * yet (clicking the trigger while it is open would close it).
+ */
+async function selectSkill(name: string): Promise<void> {
+  const chip = `[data-slot="gh-skill-chip"][data-skill="${name}"]`
+  const opt = `[data-slot="gh-skill-option"][data-skill="${name}"]`
+  if (!document.querySelector(chip) && !document.querySelector(opt)) {
+    fireEvent.click(document.querySelector('[data-slot="gh-skills-trigger"]')!)
+  }
+  await waitFor(() => {
+    if (document.querySelector(chip)) return
+    const node = document.querySelector<HTMLElement>(opt)
+    if (node) fireEvent.click(node)
+    throw new Error(`skill "${name}" not selected yet`)
+  })
 }
 
 describe('the hand-to-agent pickers (#385)', () => {
@@ -458,9 +718,7 @@ describe('the hand-to-agent run (legacy three-way body)', () => {
     await waitFor(() => expect(document.querySelector('[data-workflow="ship-it"]')).not.toBeNull())
     fireEvent.click(document.querySelector('[data-workflow="ship-it"]')!)
 
-    fireEvent.click(document.querySelector('[data-slot="gh-skills-trigger"]')!)
-    await waitFor(() => expect(document.querySelector('[data-skill="om-fix"]')).not.toBeNull())
-    fireEvent.click(document.querySelector('[data-slot="gh-skill-option"][data-skill="om-fix"]')!)
+    await selectSkill('om-fix')
 
     fireEvent.click(screen.getByRole('button', { name: /Run agent on this issue/ }))
 
@@ -476,9 +734,7 @@ describe('the hand-to-agent run (legacy three-way body)', () => {
     const sent = stubFetch()
     await openDetail()
 
-    fireEvent.click(document.querySelector('[data-slot="gh-skills-trigger"]')!)
-    await waitFor(() => expect(document.querySelector('[data-skill="om-fix"]')).not.toBeNull())
-    fireEvent.click(document.querySelector('[data-slot="gh-skill-option"][data-skill="om-fix"]')!)
+    await selectSkill('om-fix')
     fireEvent.click(document.querySelector('[data-slot="gh-skill-option"][data-skill="g-review"]')!)
 
     fireEvent.click(screen.getByRole('button', { name: /Run agent on this issue/ }))
@@ -505,5 +761,525 @@ describe('the hand-to-agent run (legacy three-way body)', () => {
 
     await waitFor(() => expect(screen.getByText('a task is already running')).toBeTruthy())
     expect(document.querySelector('[data-slot="gh-queued"]')).toBeNull()
+  })
+})
+
+// ---- #408: frequency sort ----------------------------------------------------------------------
+
+describe('the skills dropdown frequency sort (#408 item 1, shared with project-first #2)', () => {
+  it('orders skills by usage count within each locality group', async () => {
+    stubFetch({
+      'GET /api/ui-state': () => jsonResponse({ skillUsage: { 'team-x': 9, 'g-review': 1 } }),
+    })
+    await openDetail()
+
+    fireEvent.click(document.querySelector('[data-slot="gh-skills-trigger"]')!)
+    await waitFor(() =>
+      expect(document.querySelectorAll('[data-slot="gh-skill-option"]')).toHaveLength(3),
+    )
+    const options = [...document.querySelectorAll<HTMLElement>('[data-slot="gh-skill-option"]')]
+    // Project skill still leads (locality wins, #2) — frequency only reorders WITHIN "Global":
+    // team-x (9 picks) now leads g-review (1 pick), reversing the fixture's server order.
+    expect(options.map((option) => option.dataset.skill)).toEqual(['om-fix', 'team-x', 'g-review'])
+  })
+
+  it('no usage stats at all falls back to the plain project-first order (#2)', async () => {
+    stubFetch() // the default GET /api/ui-state answers {}
+    await openDetail()
+
+    fireEvent.click(document.querySelector('[data-slot="gh-skills-trigger"]')!)
+    await waitFor(() =>
+      expect(document.querySelectorAll('[data-slot="gh-skill-option"]')).toHaveLength(3),
+    )
+    const options = [...document.querySelectorAll<HTMLElement>('[data-slot="gh-skill-option"]')]
+    expect(options.map((option) => option.dataset.skill)).toEqual(['om-fix', 'g-review', 'team-x'])
+  })
+
+  it('a successful hand-off run bumps skillUsage for every selected skill', async () => {
+    const sent = stubFetch({
+      'GET /api/ui-state': () => jsonResponse({ skillUsage: { 'om-fix': 2 } }),
+    })
+    await openDetail()
+
+    await selectSkill('om-fix')
+    fireEvent.click(document.querySelector('[data-slot="gh-skill-option"][data-skill="g-review"]')!)
+
+    fireEvent.click(screen.getByRole('button', { name: /Run agent on this issue/ }))
+
+    await waitFor(() =>
+      expect(sent.some((request) => request.method === 'PUT' && request.path === '/api/ui-state')).toBe(
+        true,
+      ),
+    )
+    const put = sent.find((request) => request.method === 'PUT' && request.path === '/api/ui-state')
+    expect(put?.body).toMatchObject({ skillUsage: { 'om-fix': 3, 'g-review': 1 } })
+  })
+
+  it('a run started while ui-state is unavailable skips the bump rather than wiping the map', async () => {
+    // The PUT merge is shallow, so a bump computed off an unresolved/errored ui-state query
+    // would send a ONE-ENTRY map and replace every count the user has accumulated. The bump is
+    // a convenience; the stored history is not — so the bump is what gives way.
+    const sent = stubFetch({
+      // 404, not a 5xx: the query client never retries a 4xx (query-client.ts), so the query
+      // lands in its errored state immediately and the test stays deterministic.
+      'GET /api/ui-state': () => jsonResponse({ error: 'nope' }, 404),
+    })
+    await openDetail()
+
+    await selectSkill('om-fix')
+
+    fireEvent.click(screen.getByRole('button', { name: /Run agent on this issue/ }))
+    // The run itself still goes through — persistence is fire-and-forget.
+    await waitFor(() => expect(document.querySelector('[data-slot="gh-queued"]')).not.toBeNull())
+
+    expect(sent.some((request) => request.method === 'PUT' && request.path === '/api/ui-state')).toBe(
+      false,
+    )
+  })
+
+  it('picking a workflow only (no skills) never touches skillUsage', async () => {
+    const sent = stubFetch()
+    await openDetail()
+
+    fireEvent.click(document.querySelector('[data-slot="gh-workflow-trigger"]')!)
+    await waitFor(() => expect(document.querySelector('[data-workflow="ship-it"]')).not.toBeNull())
+    fireEvent.click(document.querySelector('[data-workflow="ship-it"]')!)
+
+    fireEvent.click(screen.getByRole('button', { name: /Run agent on this issue/ }))
+    await waitFor(() => expect(document.querySelector('[data-slot="gh-queued"]')).not.toBeNull())
+
+    expect(sent.some((request) => request.method === 'PUT' && request.path === '/api/ui-state')).toBe(
+      false,
+    )
+  })
+})
+
+// ---- #408: remembered last selection -----------------------------------------------------------
+
+describe('the remembered last selection (#408 item 3)', () => {
+  it('a repeat hand-off pre-selects the previous workflow + skills on a fresh mount', async () => {
+    stubFetch()
+    await openDetail()
+
+    fireEvent.click(document.querySelector('[data-slot="gh-workflow-trigger"]')!)
+    await waitFor(() => expect(document.querySelector('[data-workflow="ship-it"]')).not.toBeNull())
+    fireEvent.click(document.querySelector('[data-workflow="ship-it"]')!)
+
+    await selectSkill('om-fix')
+    await waitFor(() =>
+      expect(document.querySelectorAll('[data-slot="gh-skill-chip"]')).toHaveLength(1),
+    )
+
+    // Simulate a full page reload: unmount everything and mount fresh — only localStorage (not
+    // React state) can carry the pick across this boundary.
+    cleanup()
+    stubFetch()
+    await openDetail()
+
+    await waitFor(() =>
+      expect(document.querySelector('[data-slot="gh-workflow-trigger"]')?.textContent).toContain(
+        'ship-it',
+      ),
+    )
+    expect(
+      [...document.querySelectorAll<HTMLElement>('[data-slot="gh-skill-chip"]')].map(
+        (chip) => chip.dataset.skill,
+      ),
+    ).toEqual(['om-fix'])
+  })
+})
+
+// ---- #408: a remembered pick that no longer exists ----------------------------------------------
+
+/**
+ * Remembering the pick gave it a lifetime beyond the files that justify it. A workflow can be
+ * renamed, a skill deleted — and because every cockpit shares one `localhost:<port>` origin
+ * (`pickPort`, src/index.ts), a name can even arrive from a DIFFERENT repo's cockpit, where it
+ * never existed here. What is restored must be checked against the catalog, or Run POSTs a name
+ * the server 404s on, on every press and every reload.
+ */
+describe('a remembered pick the catalog no longer has (#408)', () => {
+  const WITHOUT_SHIP_IT: WorkflowsResponse = {
+    workflows: [{ name: 'quick-task', description: 'one step', steps: [], source: 'built-in' }],
+    issues: [],
+  }
+
+  it('a workflow deleted since it was remembered is dropped from the trigger, the POST and storage', async () => {
+    writeFollowupSelection({ workflow: 'ship-it', skills: [] })
+    const sent = stubFetch({ 'GET /api/workflows': () => jsonResponse(WITHOUT_SHIP_IT) })
+    await openDetail()
+
+    const trigger = () => document.querySelector('[data-slot="gh-workflow-trigger"]')
+    await waitFor(() => expect(trigger()?.textContent).not.toContain('ship-it'))
+    expect(trigger()?.textContent).toContain('workflow') // back to the unselected placeholder
+
+    fireEvent.click(screen.getByRole('button', { name: /Run agent on this issue/ }))
+    await waitFor(() => expect(document.querySelector('[data-slot="gh-queued"]')).not.toBeNull())
+    // The run falls back to quick-task instead of 404-ing on a workflow that is gone.
+    expect(sent.find((request) => request.method === 'POST' && request.path === '/api/runs')?.body)
+      .toMatchObject({ workflow: 'quick-task' })
+    // Dropped from storage too — otherwise the next reload restores it right back.
+    expect(readFollowupSelection().workflow).toBeNull()
+  })
+
+  it('a remembered workflow that still exists survives — the guard only drops the unknown', async () => {
+    writeFollowupSelection({ workflow: 'ship-it', skills: [] })
+    const sent = stubFetch()
+    await openDetail()
+
+    await waitFor(() =>
+      expect(document.querySelector('[data-slot="gh-workflow-trigger"]')?.textContent).toContain('ship-it'),
+    )
+    fireEvent.click(screen.getByRole('button', { name: /Run agent on this issue/ }))
+    await waitFor(() =>
+      expect(sent.some((request) => request.method === 'POST' && request.path === '/api/runs')).toBe(true),
+    )
+    expect(sent.find((request) => request.method === 'POST' && request.path === '/api/runs')?.body)
+      .toMatchObject({ workflow: 'ship-it' })
+  })
+
+  it('a deleted skill is dropped from the chips, the counter AND the POST — never shown but unsent', async () => {
+    writeFollowupSelection({ workflow: null, skills: ['om-fix', 'deleted-skill'] })
+    const sent = stubFetch()
+    await openDetail()
+
+    await waitFor(() => expect(document.querySelectorAll('[data-slot="gh-skill-chip"]')).toHaveLength(1))
+    expect(
+      [...document.querySelectorAll<HTMLElement>('[data-slot="gh-skill-chip"]')].map((chip) => chip.dataset.skill),
+    ).toEqual(['om-fix'])
+    // The counter must agree with the chips and the POST — not report the phantom.
+    expect(document.querySelector('[data-slot="gh-skills-trigger"]')?.textContent).toContain('· 1')
+
+    fireEvent.click(screen.getByRole('button', { name: /Run agent on this issue/ }))
+    await waitFor(() =>
+      expect(sent.some((request) => request.method === 'POST' && request.path === '/api/runs')).toBe(true),
+    )
+    const body = sent.find((request) => request.method === 'POST' && request.path === '/api/runs')?.body as {
+      steps?: Array<{ skill: string }>
+    }
+    expect(body.steps?.map((step) => step.skill)).toEqual(['om-fix'])
+  })
+})
+
+// ---- #408: draft persistence -------------------------------------------------------------------
+
+describe('the follow-up prompt draft (#408 item 4)', () => {
+  it('typed instructions persist when navigating away and back to the same item', async () => {
+    stubFetch()
+    await openDetail()
+
+    fireEvent.change(promptField(), { target: { value: 'Also add a test.' } })
+    await waitFor(() => expect(promptValue()).toBe('Also add a test.'))
+
+    // Switch to a different item — HandToAgent remounts (key={item.url}); its OWN draft is empty.
+    fireEvent.click(document.querySelector('[data-slot="gh-row"][data-number="139"]')!)
+    await waitFor(() =>
+      expect(document.querySelector('[data-slot="gh-detail-inner"]')?.textContent).toContain(
+        'Add --json flag',
+      ),
+    )
+    expect(promptValue()).toBe('')
+
+    // Switch back — the first item's draft is restored.
+    fireEvent.click(document.querySelector('[data-slot="gh-row"][data-number="142"]')!)
+    await waitFor(() => expect(promptValue()).toBe('Also add a test.'))
+  })
+
+  it('a page reload restores the draft too (localStorage, not just component state)', async () => {
+    stubFetch()
+    await openDetail()
+    fireEvent.change(promptField(), { target: { value: 'do not lose me' } })
+    await waitFor(() => expect(promptValue()).toBe('do not lose me'))
+
+    cleanup()
+    stubFetch()
+    await openDetail()
+    await waitFor(() => expect(promptValue()).toBe('do not lose me'))
+  })
+
+  it('a successful run spends that item’s draft', async () => {
+    stubFetch()
+    await openDetail()
+    fireEvent.change(promptField(), { target: { value: 'spend me' } })
+    await waitFor(() => expect(promptValue()).toBe('spend me'))
+
+    fireEvent.click(screen.getByRole('button', { name: /Run agent on this issue/ }))
+    await waitFor(() => expect(document.querySelector('[data-slot="gh-queued"]')).not.toBeNull())
+
+    cleanup()
+    stubFetch()
+    await openDetail()
+    expect(promptValue()).toBe('')
+  })
+
+  it('spending the draft clears the textarea THERE AND THEN, not only on the next mount', async () => {
+    stubFetch()
+    await openDetail()
+    fireEvent.change(promptField(), { target: { value: 'spend me' } })
+    await waitFor(() => expect(promptValue()).toBe('spend me'))
+
+    fireEvent.click(screen.getByRole('button', { name: /Run agent on this issue/ }))
+    await waitFor(() => expect(document.querySelector('[data-slot="gh-queued"]')).not.toBeNull())
+
+    // Storage and UI must agree without a remount: leaving the text on screen while the entry is
+    // gone from storage means it silently vanishes the next time you come back.
+    await waitFor(() => expect(promptValue()).toBe(''))
+    expect(readFollowupPrompt(ISSUE_142.url)).toBe('')
+  })
+})
+
+// ---- #408: ⌘/Ctrl+Enter submit ------------------------------------------------------------------
+
+describe('⌘/Ctrl+Enter submits the follow-up composer (#408 item 5)', () => {
+  it('Ctrl+Enter runs the agent', async () => {
+    const sent = stubFetch()
+    await openDetail()
+
+    const textarea = screen.getByLabelText('Custom prompt')
+    fireEvent.change(textarea, { target: { value: 'go' } })
+    fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true })
+
+    await waitFor(() =>
+      expect(sent.some((request) => request.method === 'POST' && request.path === '/api/runs')).toBe(
+        true,
+      ),
+    )
+  })
+
+  it('⌘+Enter (metaKey) also runs the agent', async () => {
+    const sent = stubFetch()
+    await openDetail()
+
+    const textarea = screen.getByLabelText('Custom prompt')
+    fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true })
+
+    await waitFor(() =>
+      expect(sent.some((request) => request.method === 'POST' && request.path === '/api/runs')).toBe(
+        true,
+      ),
+    )
+  })
+
+  it('a bare Enter does NOT submit — it is a multi-line instructions box', async () => {
+    const sent = stubFetch()
+    await openDetail()
+
+    const textarea = screen.getByLabelText('Custom prompt')
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    // Give any (wrongly) scheduled submit a tick to happen before asserting its absence.
+    await act(() => new Promise((resolve) => setTimeout(resolve, 0)))
+    expect(sent.some((request) => request.method === 'POST' && request.path === '/api/runs')).toBe(
+      false,
+    )
+  })
+
+  it('Shift+Ctrl+Enter does not submit — Shift wins, same rule as the thread composer', async () => {
+    const sent = stubFetch()
+    await openDetail()
+
+    const textarea = screen.getByLabelText('Custom prompt')
+    fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true, shiftKey: true })
+
+    await act(() => new Promise((resolve) => setTimeout(resolve, 0)))
+    expect(sent.some((request) => request.method === 'POST' && request.path === '/api/runs')).toBe(
+      false,
+    )
+  })
+})
+
+// ---- prompt templates (#413) --------------------------------------------------------------------
+
+describe('the follow-up prompt template menu (#413)', () => {
+  /** The menu is a Popover + cmdk (like the skills picker beside it), so it opens on click. */
+  async function openTemplateMenu(): Promise<void> {
+    fireEvent.click(document.querySelector('[data-slot="prompt-template-trigger"]')!)
+    await waitFor(() =>
+      expect(document.querySelector('[data-slot="prompt-template-option"]')).not.toBeNull(),
+    )
+  }
+
+  const option = (id: string) =>
+    document.querySelector<HTMLElement>(`[data-slot="prompt-template-option"][data-template="${id}"]`)
+
+  /**
+   * Open the menu and pick a specific template. A single click on a *just-mounted*
+   * cmdk item can land before cmdk has wired its `onSelect`, so it silently no-ops —
+   * the race that made this suite flake in CI (#413). Rather than capture a node that
+   * may go stale, re-query and click on each poll until the insertion actually lands
+   * (the custom prompt's value grows). This can't double-insert: `fireEvent.click`
+   * flushes React synchronously, so the very next poll sees the changed value and stops
+   * before a second click can fire.
+   */
+  async function chooseTemplate(id: string): Promise<void> {
+    const textarea = () => screen.getByLabelText('Custom prompt') as HTMLTextAreaElement
+    const before = textarea().value
+    fireEvent.click(document.querySelector('[data-slot="prompt-template-trigger"]')!)
+    await waitFor(() => {
+      if (textarea().value !== before) return // the click already landed
+      const node = option(id)
+      if (!node) throw new Error(`template option "${id}" not mounted yet`)
+      fireEvent.click(node)
+      throw new Error(`template "${id}" not inserted yet`)
+    })
+  }
+
+  it('an untouched ui-state shows the built-in templates, and inserting one fills the custom prompt', async () => {
+    stubFetch()
+    await openDetail()
+
+    await openTemplateMenu()
+    expect(document.querySelectorAll('[data-slot="prompt-template-option"]').length).toBeGreaterThan(1)
+    expect(option('add-tests')).not.toBeNull()
+
+    fireEvent.click(option('add-tests')!)
+    await waitFor(() =>
+      expect(screen.getByLabelText('Custom prompt')).toHaveProperty(
+        'value',
+        'Also add or update tests covering this change.',
+      ),
+    )
+  })
+
+  it('a user-edited ui-state templates list replaces the built-ins in the menu', async () => {
+    stubFetch({
+      'GET /api/ui-state': () =>
+        jsonResponse({ promptTemplates: [{ id: 'custom-1', label: 'My snippet', text: 'Custom instructions.' }] }),
+    })
+    await openDetail()
+
+    await openTemplateMenu()
+    expect(document.querySelectorAll('[data-slot="prompt-template-option"]')).toHaveLength(1)
+    expect(option('custom-1')?.textContent).toContain('My snippet')
+
+    fireEvent.click(option('custom-1')!)
+    await waitFor(() =>
+      expect(screen.getByLabelText('Custom prompt')).toHaveProperty('value', 'Custom instructions.'),
+    )
+  })
+
+  it('inserting a second template stacks it below the first, separated by a blank line', async () => {
+    stubFetch()
+    await openDetail()
+
+    await chooseTemplate('add-tests')
+    await waitFor(() =>
+      expect(screen.getByLabelText('Custom prompt')).toHaveProperty(
+        'value',
+        'Also add or update tests covering this change.',
+      ),
+    )
+
+    await chooseTemplate('update-docs')
+
+    await waitFor(() =>
+      expect(screen.getByLabelText('Custom prompt')).toHaveProperty(
+        'value',
+        'Also add or update tests covering this change.\n\nAlso update any relevant documentation or comments.',
+      ),
+    )
+  })
+
+  it('the menu is searchable — typing narrows it to the matching template', async () => {
+    stubFetch()
+    await openDetail()
+
+    await openTemplateMenu()
+    const all = document.querySelectorAll('[data-slot="prompt-template-option"]').length
+    expect(all).toBeGreaterThan(1)
+
+    fireEvent.change(screen.getByPlaceholderText('search templates…'), { target: { value: 'docs' } })
+    await waitFor(() =>
+      expect(document.querySelectorAll('[data-slot="prompt-template-option"]')).toHaveLength(1),
+    )
+    expect(option('update-docs')).not.toBeNull()
+  })
+
+  it('search matches a template by its TEXT, not just the label someone gave it', async () => {
+    stubFetch()
+    await openDetail()
+
+    await openTemplateMenu()
+    // "unrelated refactors" appears only in the body of the keep-minimal template.
+    fireEvent.change(screen.getByPlaceholderText('search templates…'), {
+      target: { value: 'unrelated refactors' },
+    })
+    await waitFor(() =>
+      expect(document.querySelectorAll('[data-slot="prompt-template-option"]')).toHaveLength(1),
+    )
+    expect(option('keep-minimal')).not.toBeNull()
+  })
+})
+
+// ---- auto-apply on skill selection (#413 follow-up) ---------------------------------------------
+
+describe('templates assigned to a skill auto-apply when a skill is picked', () => {
+  const ASSIGNED = {
+    'GET /api/ui-state': () =>
+      jsonResponse({
+        promptTemplates: [
+          { id: 'assigned', label: 'Fix rules', text: 'Follow the fix rules.', skills: ['om-fix'] },
+          { id: 'manual', label: 'Manual', text: 'Never auto.' },
+        ],
+      }),
+  }
+
+  /** Toggle a skill. The picker is multi-select and STAYS open after a toggle, so only open it
+   *  when it is not already showing — clicking the trigger again would close it instead. */
+  const pickSkill = async (name: string) => {
+    const selector = `[data-slot="gh-skill-option"][data-skill="${name}"]`
+    if (document.querySelector(selector) === null) {
+      fireEvent.click(document.querySelector('[data-slot="gh-skills-trigger"]')!)
+      await waitFor(() => expect(document.querySelector(selector)).not.toBeNull())
+    }
+    fireEvent.click(document.querySelector(selector)!)
+  }
+
+  it('fills an untouched prompt box with the assigned template, and only that one', async () => {
+    stubFetch(ASSIGNED)
+    await openDetail()
+
+    await pickSkill('om-fix')
+    await waitFor(() =>
+      expect(screen.getByLabelText('Custom prompt')).toHaveProperty('value', 'Follow the fix rules.'),
+    )
+  })
+
+  it('deselecting the skill takes the auto-applied text back out again', async () => {
+    stubFetch(ASSIGNED)
+    await openDetail()
+
+    await pickSkill('om-fix')
+    await waitFor(() =>
+      expect(screen.getByLabelText('Custom prompt')).toHaveProperty('value', 'Follow the fix rules.'),
+    )
+
+    await pickSkill('om-fix')
+    await waitFor(() => expect(screen.getByLabelText('Custom prompt')).toHaveProperty('value', ''))
+  })
+
+  it('NEVER overwrites a prompt the user already typed in', async () => {
+    stubFetch(ASSIGNED)
+    await openDetail()
+
+    fireEvent.change(screen.getByLabelText('Custom prompt'), { target: { value: 'my own words' } })
+    await pickSkill('om-fix')
+
+    // Give the effect every chance to misbehave before asserting it did not.
+    await waitFor(() =>
+      expect(document.querySelector('[data-slot="gh-skill-chip"][data-skill="om-fix"]')).not.toBeNull(),
+    )
+    expect(screen.getByLabelText('Custom prompt')).toHaveProperty('value', 'my own words')
+  })
+
+  it('a skill with no template assigned to it leaves the box alone', async () => {
+    stubFetch(ASSIGNED)
+    await openDetail()
+
+    await pickSkill('g-review')
+    await waitFor(() =>
+      expect(document.querySelector('[data-slot="gh-skill-chip"][data-skill="g-review"]')).not.toBeNull(),
+    )
+    expect(screen.getByLabelText('Custom prompt')).toHaveProperty('value', '')
   })
 })

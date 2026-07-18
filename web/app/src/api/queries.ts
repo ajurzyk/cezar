@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   getConfig,
   getGithub,
+  getGithubComments,
   getGroup,
   getHealth,
   getLaunchKey,
@@ -22,6 +23,7 @@ import {
   getTodos,
   getUiState,
   getWorkflows,
+  getWorktrees,
   patchRun,
   sendMessage,
 } from './client'
@@ -64,16 +66,28 @@ export const queryKeys = {
   uiState: ['ui-state'] as const,
   /** The Settings → Agents knobs (`GET /api/config`, R6 1.5). */
   config: ['config'] as const,
+  /** The worktree management panel (`GET /api/worktrees`, #483). */
+  worktrees: ['worktrees'] as const,
   github: (params: { limit?: number } = {}) => ['github', params.limit ?? null] as const,
+  githubComments: (kind: 'issue' | 'pr', number: number) => ['github', 'comments', kind, number] as const,
   openTargets: ['open-targets'] as const,
 } as const
 
 /** Version + update check + repo/branch + tool probes. Feeds the sidebar's repo and version
- *  chips and (Step 4.2) the Tools menu. */
+ *  chips and (Step 4.2) the Tools menu.
+ *
+ * Polled on a `useRunChanges`-style interval rather than left to reconnect/visibility alone
+ * (#369): a `git checkout` in a terminal, in a foreground tab whose SSE connection never drops,
+ * fires none of those triggers, so the branch chip would sit stale until something else woke the
+ * query up. The stream still carries nothing for this — no server-side watcher on `.git/HEAD` —
+ * so a light poll is the honest fix, the same trade `useRunChanges` already makes for the
+ * Changes tab. `git rev-parse` is cheap enough that a few-second interval per open tab is not
+ * worth a heavier watch mechanism. */
 export function useHealth() {
   return useQuery({
     queryKey: queryKeys.health,
     queryFn: ({ signal }) => getHealth({ signal }),
+    refetchInterval: 5000,
   })
 }
 
@@ -124,6 +138,13 @@ export function useRunChanges(id: string | undefined, live = false) {
     // While the run is active the agent is still writing — poll so the Changes tab keeps up
     // instead of showing a stale empty snapshot from before the first write (#changes-live).
     refetchInterval: live ? 4000 : false,
+    // Once a run finishes, polling stops (live === false) — but final agent/post-run-hook
+    // writes and the user editing files in the worktree still change the diff. Scope a
+    // focus refetch and a zero staleTime to THIS query (the global client keeps
+    // refetchOnWindowFocus off + a 5-min staleTime, #query-client) so returning to a finished
+    // task's Changes tab re-fetches instead of serving the last, possibly-empty snapshot.
+    refetchOnWindowFocus: true,
+    staleTime: 0,
   })
 }
 
@@ -185,10 +206,15 @@ export function useRunHandoff(id: string | undefined, enabled = true) {
 }
 
 /** The follow-up inbox. Drives the nav badge. */
-export function useTodos() {
+/** The follow-up inbox. `enabled: false` (the caller passing `false` while
+ *  `capabilities.followups` is off, #471) parks the query instead of polling an
+ *  endpoint that can only answer `[]` — `data` stays undefined, which the inbox
+ *  badge already reads as "no badge". */
+export function useTodos(enabled = true) {
   return useQuery({
     queryKey: queryKeys.todos,
     queryFn: ({ signal }) => getTodos({ signal }),
+    enabled,
   })
 }
 
@@ -259,6 +285,15 @@ export function useConfig() {
   })
 }
 
+/** The worktree management panel (#483). Invalidated by the global event stream when a run
+ *  finishes or is reclaimed, so the on-disk list and total stay live while the panel is open. */
+export function useWorktrees() {
+  return useQuery({
+    queryKey: queryKeys.worktrees,
+    queryFn: ({ signal }) => getWorktrees({ signal }),
+  })
+}
+
 export function useUiState() {
   return useQuery({
     queryKey: queryKeys.uiState,
@@ -297,5 +332,17 @@ export function useGithub(params: { limit?: number } = {}, enabled = true) {
     queryKey: queryKeys.github(params),
     queryFn: ({ signal }) => getGithub({ limit: params.limit }, { signal }),
     enabled,
+  })
+}
+
+/** The comment thread for one issue/PR (`/api/github/comments/…`, #499). Fetched only while a
+ *  detail view is mounted (`enabled`); `staleTime` aligns with the 60 s server cache so switching
+ *  back to an item doesn't re-hit gh. */
+export function useGithubComments(kind: 'issue' | 'pr', number: number, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.githubComments(kind, number),
+    queryFn: ({ signal }) => getGithubComments(kind, number, { signal }),
+    enabled,
+    staleTime: 60_000,
   })
 }

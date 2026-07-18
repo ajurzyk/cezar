@@ -155,10 +155,19 @@ function str(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined
 }
 
-/** The engine's completion marker (`CEZ:DONE`). v1 `text` lines arrive pre-stripped by the
- *  server; v2 message items carry the raw text, so display strips it here. */
+/** The engine's turn-end markers (`CEZ:DONE`, `CEZ:MONITORING` from #490) plus the in-band
+ *  task-reference marker lines (`CEZ:PR=` / `CEZ:ISSUE=` / `CEZ:TITLE=`, spec
+ *  2026-07-18-task-ref-markers). v1 `text` lines arrive pre-stripped by the server; v2 message
+ *  items carry the raw text, so display strips them here. Named `stripDoneMarker` for
+ *  continuity — it now strips every protocol marker. Mirrors `stripTaskMarkers` in
+ *  `src/runs/task-markers.ts`. */
 function stripDoneMarker(text: string): string {
-  return text.replace(/\s*CEZ:DONE\s*$/, '')
+  const trailing = text.replace(/\s*CEZ:DONE\s*$/, '').replace(/\s*CEZ:MONITORING\s*$/, '')
+  if (!trailing.includes('CEZ:')) return trailing
+  return trailing
+    .split('\n')
+    .filter((line) => !/^CEZ:(?:PR=\d+|ISSUE=\d+|TITLE=.+)\s*$/.test(line))
+    .join('\n')
 }
 
 /** v1 tool results are strings today; anything else is rendered as JSON rather than dropped. */
@@ -175,7 +184,10 @@ function resultText(value: unknown): string {
 const isUiItem = (entry: ThreadEntry): entry is UiItem =>
   entry.kind === 'message' || entry.kind === 'reasoning' || entry.kind === 'tool'
 
-const PLAN_STATUSES: ReadonlySet<string> = new Set<PlanStatus>(['pending', 'in_progress', 'completed'])
+/** Every `PlanStatus`, so an unrecognized status is the only thing that falls back to
+ *  `pending` below. `Set<PlanStatus>` accepts a subset without complaint, so this list
+ *  has to be kept honest by hand when the union grows. */
+const PLAN_STATUSES: ReadonlySet<string> = new Set<PlanStatus>(['pending', 'in_progress', 'completed', 'cancelled'])
 
 /**
  * Pre-v2 transcripts carry the plan only as TodoWrite input (`{todos: [{content, status,

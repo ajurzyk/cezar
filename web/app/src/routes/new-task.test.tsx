@@ -52,7 +52,7 @@ const HEALTH: HealthResponse = {
     { name: 'git', available: true, version: '2.43.0' },
   ],
   forge: null,
-  capabilities: { localHandoff: true },
+  capabilities: { localHandoff: true, followups: true },
 }
 
 const HEALTH_MULTI: HealthResponse = {
@@ -121,6 +121,8 @@ function serve(overrides: {
   workflows?: WorkflowsResponse
   repo?: RepoResponse
   uiState?: Record<string, unknown>
+  /** Non-2xx `GET /api/ui-state` answers (the query-errored path: `data` stays undefined). */
+  uiStateStatus?: number
   createRun?: unknown
   /** Non-2xx `POST /api/runs` answers (the auto-start failure path). */
   createRunStatus?: number
@@ -137,6 +139,7 @@ function serve(overrides: {
     workflows: WORKFLOWS,
     repo: REPO,
     uiState: {},
+    uiStateStatus: 200,
     createRun: { id: 'r1' },
     createRunStatus: 201,
     launchKey: 'k-real',
@@ -168,7 +171,7 @@ function serve(overrides: {
       }
       if (url === '/api/repo') return json(data.repo)
       if (url === '/api/launch-key') return json({ key: data.launchKey })
-      if (url === '/api/ui-state' && method === 'GET') return json(data.uiState)
+      if (url === '/api/ui-state' && method === 'GET') return json(data.uiState, data.uiStateStatus)
       if (url === '/api/ui-state' && method === 'PUT') return json(body ?? {})
       if (url === '/api/runs' && method === 'POST') return json(data.createRun, data.createRunStatus)
       if (url === '/api/config' && method === 'GET')
@@ -406,8 +409,30 @@ describe('submit', () => {
         // (skills default autonomous on).
         lastWorktree: true,
         lastAutonomous: true,
+        lastGenerateFollowups: true,
+        // ...and bumps its usage count for the #408 frequency sort (a workflow source would
+        // NOT carry a skillUsage key at all — see the WORKFLOW test below).
+        skillUsage: { 'om-fix': 1 },
       }),
     )
+  })
+
+  it('a SKILL run with ui-state unavailable omits skillUsage rather than wiping the map', async () => {
+    // `sourcesReady` only rules out `isPending`, so an ERRORED ui-state query still lets the
+    // form submit with `uiState.data === undefined`. The PUT merge is shallow, so bumping off
+    // that would send a one-entry map and replace every stored count.
+    // 404, not a 5xx: the query client never retries a 4xx (query-client.ts), so the query
+    // lands in its errored state immediately and the test stays deterministic.
+    serve({ createRun: { id: 'run-9' }, uiStateStatus: 404 })
+    renderNewTask()
+    await pillReady('om-fix')
+    fireEvent.change(textarea(), { target: { value: 'Fix the flaky worktree test' } })
+    await startTask()
+
+    await waitFor(() => expect(location()).toBe('/tasks/run-9'))
+    const put = requests.find((r) => r.method === 'PUT' && r.url === '/api/ui-state')
+    // The other prefs still persist — only the unknowable map is left alone.
+    expect(put?.body).not.toHaveProperty('skillUsage')
   })
 
   it('a WORKFLOW source posts { workflow, task }', async () => {
@@ -458,6 +483,89 @@ describe('submit', () => {
     await startTask()
     expect((postedBody() as Record<string, unknown>).runner).toBeUndefined()
   })
+
+  it('defaults follow-up generation on, but posts and remembers an explicit opt-out', async () => {
+    serve()
+    renderNewTask()
+    await pillReady()
+    const toggle = document.querySelector(
+      '[data-slot="generate-followups-toggle"]',
+    ) as HTMLButtonElement
+    expect(toggle.getAttribute('aria-checked')).toBe('true')
+
+    fireEvent.click(toggle)
+    expect(toggle.getAttribute('aria-checked')).toBe('false')
+    fireEvent.change(textarea(), { target: { value: 'No follow-up inbox items' } })
+    await startTask()
+
+    expect((postedBody() as Record<string, unknown>).generateFollowups).toBe(false)
+    await waitFor(() =>
+      expect(requests.find((r) => r.method === 'PUT' && r.url === '/api/ui-state')?.body).toMatchObject({
+        lastGenerateFollowups: false,
+      }),
+    )
+  })
+
+  it('uses the remembered follow-up preference when the draft has no choice', async () => {
+    serve({ uiState: { lastGenerateFollowups: false } })
+    renderNewTask()
+    await pillReady()
+    expect(
+      document
+        .querySelector('[data-slot="generate-followups-toggle"]')
+        ?.getAttribute('aria-checked'),
+    ).toBe('false')
+  })
+
+  // #471 — the composer must not offer a switch the server overrides anyway.
+  const inboxOffHealth: HealthResponse = {
+    ...HEALTH,
+    capabilities: { localHandoff: true, followups: false },
+  }
+  const followupsToggle = () =>
+    document.querySelector('[data-slot="generate-followups-toggle"]')
+
+  it('hides the follow-up toggle when the server has the inbox off', async () => {
+    serve({ health: inboxOffHealth })
+    renderNewTask()
+    await pillReady()
+    await waitFor(() => expect(followupsToggle()).toBeNull())
+    // The neighbouring toggles are untouched — the gate owns exactly one control.
+    expect(document.querySelector('[data-slot="autonomous-toggle"]')).not.toBeNull()
+  })
+
+  it('posts generateFollowups:false from an inbox-less server', async () => {
+    serve({ health: inboxOffHealth })
+    renderNewTask()
+    await pillReady()
+    await waitFor(() => expect(followupsToggle()).toBeNull())
+
+    fireEvent.change(textarea(), { target: { value: 'No inbox on this server' } })
+    await startTask()
+
+    expect((postedBody() as Record<string, unknown>).generateFollowups).toBe(false)
+  })
+
+  it('does not overwrite the remembered preference it never offered', async () => {
+    // The user last chose "on". With the inbox off there is no toggle, so persisting the
+    // forced `false` would silently flip their choice for when CEZ_FOLLOWUPS comes back.
+    serve({ health: inboxOffHealth, uiState: { lastGenerateFollowups: true } })
+    renderNewTask()
+    await pillReady()
+    await waitFor(() => expect(followupsToggle()).toBeNull())
+
+    fireEvent.change(textarea(), { target: { value: 'Leave my preference alone' } })
+    await startTask()
+
+    await waitFor(() =>
+      expect(requests.some((r) => r.method === 'PUT' && r.url === '/api/ui-state')).toBe(true),
+    )
+    const persisted = requests
+      .filter((r) => r.method === 'PUT' && r.url === '/api/ui-state')
+      .map((r) => r.body as Record<string, unknown>)
+    for (const body of persisted) expect(body).not.toHaveProperty('lastGenerateFollowups')
+  })
+
 })
 
 // ---- drafts & prefill ---------------------------------------------------------------------------
@@ -491,6 +599,43 @@ describe('drafts and prefill', () => {
     await pillReady('deploy')
     expect(textarea().value).toBe('https://github.com/o/r/issues/5')
     expect(requests.some((r) => r.method === 'POST' && r.url === '/api/runs')).toBe(false)
+  })
+
+  // #374: the composer is the middle of the inbox round trip — the Run link carries `todo=`,
+  // and the started run must carry it back so the entry is marked started and leaves the inbox.
+  it('?todo= prefill: the entry id rides along to POST /api/runs so the inbox entry is marked', async () => {
+    serve()
+    renderNewTask('/new?skill=deploy&ref=ship%20it&todo=t1')
+    await pillReady('deploy')
+    await startTask()
+
+    expect((postedBody() as Record<string, unknown>).todoId).toBe('t1')
+  })
+
+  it('a plain launch (no ?todo=) sends no todoId — the inbox is left alone', async () => {
+    serve()
+    renderNewTask()
+    await pillReady()
+    fireEvent.change(textarea(), { target: { value: 'unrelated task' } })
+    await startTask()
+
+    expect((postedBody() as Record<string, unknown>).todoId).toBeUndefined()
+  })
+
+  // The two are orthogonal concerns (#374 vs #444): turning follow-up generation OFF for the
+  // NEW task must never stop the entry it was launched FROM being marked started.
+  it('carries todoId even when follow-up generation is switched off', async () => {
+    serve()
+    renderNewTask('/new?skill=deploy&ref=ship%20it&todo=t1')
+    await pillReady('deploy')
+    fireEvent.click(
+      document.querySelector('[data-slot="generate-followups-toggle"]') as HTMLElement,
+    )
+    await startTask()
+
+    const body = postedBody() as Record<string, unknown>
+    expect(body.todoId).toBe('t1')
+    expect(body.generateFollowups).toBe(false)
   })
 
   it('submit spends the draft text', async () => {
@@ -809,6 +954,24 @@ describe('the plan flow', () => {
     await waitFor(() => expect(location()).toBe('/tasks/planned-1'))
   })
 
+  it('▶ Start carries the follow-up opt-out from the composer and remembers it', async () => {
+    serve({ createRun: { id: 'planned-no-followups' } })
+    renderNewTask()
+    await pillReady()
+    fireEvent.click(
+      document.querySelector('[data-slot="generate-followups-toggle"]') as HTMLElement,
+    )
+    await planTask('Plan without follow-ups')
+    fireEvent.click(document.querySelector('[data-slot="plan-start"]') as HTMLElement)
+
+    await waitFor(() => expect((postedBody() as Record<string, unknown>).generateFollowups).toBe(false))
+    await waitFor(() =>
+      expect(requests.find((r) => r.method === 'PUT' && r.url === '/api/ui-state')?.body).toEqual({
+        lastGenerateFollowups: false,
+      }),
+    )
+  })
+
   it('Discard closes the overlay and hands back the draft untouched', async () => {
     serve()
     renderNewTask()
@@ -881,5 +1044,108 @@ describe('save as chain', () => {
 
     await screen.findByText('step 2: needs prompt or command')
     expect(screen.getByLabelText('Chain name')).toBeTruthy()
+  })
+})
+
+// ---- prompt templates on /new (#413 follow-up) ---------------------------------------------------
+
+describe('prompt templates on the new-task composer', () => {
+  const ASSIGNED = [
+    { id: 'assigned', label: 'Fix rules', text: 'Follow the fix rules.', skills: ['om-fix'] },
+    { id: 'manual', label: 'Manual', text: 'Never auto.' },
+  ]
+
+  const templateTrigger = () => screen.getByRole('button', { name: 'Insert a prompt template' })
+  const option = (id: string) =>
+    document.querySelector<HTMLElement>(`[data-slot="prompt-template-option"][data-template="${id}"]`)
+
+  const pickSource = async (ref: string) => {
+    fireEvent.click(sourcePill())
+    await screen.findByPlaceholderText('search skills & workflows…')
+    fireEvent.click(document.querySelector(`[data-slot="source-option"][data-source-ref="${ref}"]`)!)
+  }
+
+  it('the trigger is icon-only here — the footer pill row is already full', async () => {
+    serve()
+    renderNewTask()
+    await pillReady()
+
+    // No "templates" word next to the icon, unlike the roomier GitHub/Inbox composers.
+    expect(templateTrigger().textContent).toBe('')
+    expect(templateTrigger().querySelector('svg')).not.toBeNull()
+  })
+
+  it('inserts a template into the composer draft at the caret', async () => {
+    serve()
+    renderNewTask()
+    await pillReady()
+
+    fireEvent.change(textarea(), { target: { value: 'Ship it' } })
+    fireEvent.click(templateTrigger())
+    await waitFor(() => expect(option('add-tests')).not.toBeNull())
+    fireEvent.click(option('add-tests')!)
+
+    await waitFor(() =>
+      expect(textarea().value).toBe('Ship it\n\nAlso add or update tests covering this change.'),
+    )
+  })
+
+  it('picking a skill auto-applies the templates assigned to it into an empty composer', async () => {
+    serve({ uiState: { promptTemplates: ASSIGNED } })
+    renderNewTask()
+    await pillReady()
+
+    await pickSource('om-fix')
+    await waitFor(() => expect(textarea().value).toBe('Follow the fix rules.'))
+  })
+
+  it('switching to a skill with nothing assigned takes the auto-applied text back out', async () => {
+    serve({ uiState: { promptTemplates: ASSIGNED } })
+    renderNewTask()
+    await pillReady()
+
+    await pickSource('om-fix')
+    await waitFor(() => expect(textarea().value).toBe('Follow the fix rules.'))
+
+    await pickSource('deploy')
+    await waitFor(() => expect(textarea().value).toBe(''))
+  })
+
+  it('NEVER overwrites a draft the user already typed', async () => {
+    serve({ uiState: { promptTemplates: ASSIGNED } })
+    renderNewTask()
+    await pillReady()
+
+    fireEvent.change(textarea(), { target: { value: 'my own words' } })
+    await pickSource('om-fix')
+
+    await waitFor(() => expect(sourcePill().textContent).toContain('om-fix'))
+    expect(textarea().value).toBe('my own words')
+  })
+
+  it('a workflow never auto-applies — assignment is a skill concept', async () => {
+    serve({ uiState: { promptTemplates: ASSIGNED } })
+    renderNewTask()
+    await pillReady()
+
+    await pickSource('quick-task')
+    await waitFor(() => expect(sourcePill().textContent).toContain('quick-task'))
+    expect(textarea().value).toBe('')
+  })
+
+  it('the auto-applied text is what actually gets submitted', async () => {
+    serve({ uiState: { promptTemplates: ASSIGNED } })
+    renderNewTask()
+    await pillReady()
+
+    await pickSource('om-fix')
+    await waitFor(() => expect(textarea().value).toBe('Follow the fix rules.'))
+
+    await startTask()
+    // The auto-applied text is the real task text on the wire, not just something on screen.
+    expect(postedBody()).toMatchObject({
+      task: 'Follow the fix rules.',
+      steps: [{ id: 'task', name: 'om-fix', skill: 'om-fix', prompt: '{{task}}' }],
+    })
   })
 })

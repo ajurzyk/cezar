@@ -239,7 +239,7 @@ describe('actions hit their endpoints', () => {
 
     expect(sent.some((r) => r.method === 'DELETE')).toBe(false)
     const dialog = await screen.findByRole('alertdialog')
-    fireEvent.click(within(dialog).getByRole('button', { name: /^Delete / }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }))
     await waitFor(() => {
       expect(sent.some((r) => r.method === 'DELETE' && r.path === '/api/runs/r1')).toBe(true)
     })
@@ -247,6 +247,16 @@ describe('actions hit their endpoints', () => {
     await waitFor(() => {
       expect(document.querySelector('[data-slot="home-probe"]')).not.toBeNull()
     })
+  })
+
+  it('the delete confirm button stays "Delete" even for a long task name, which appears in the description instead (#403)', async () => {
+    const longTitle = 'create a github issue for saving unsuccessfully finished tasks automatically'
+    renderHeader(run('failed', { titleSummary: longTitle }))
+    fireEvent.click(actionBar().getByRole('button', { name: 'Delete' }))
+
+    const dialog = await screen.findByRole('alertdialog')
+    expect(within(dialog).getByRole('button', { name: 'Delete' })).not.toBeNull()
+    expect(within(dialog).getByText(longTitle)).not.toBeNull()
   })
 
   it('dismissing the confirm keeps the run', async () => {
@@ -324,6 +334,83 @@ describe('Terminal — the copy-command 409 fallback', () => {
   })
 })
 
+describe('Open in… menu — agent CLI resume labeling (#402)', () => {
+  const CLI_LABELS: Record<string, string> = {
+    'cli:claude': 'Claude CLI',
+    'cli:codex': 'Codex CLI',
+    'cli:opencode': 'OpenCode',
+  }
+  const openTargets = (ids: string[]) => ({
+    targets: ids.map((id) => ({ id, label: CLI_LABELS[id] ?? id })),
+  })
+
+  async function openMenu(): Promise<HTMLElement> {
+    // Without a resumable Terminal item, the button itself only appears once the async
+    // worktreeTargets query resolves (empty-until-loaded) — findByRole waits it in.
+    const trigger = await actionBar().findByRole('button', { name: 'Open in…' })
+    fireEvent.pointerDown(trigger)
+    return screen.findByRole('menu')
+  }
+
+  it('labels the CLI matching the run\'s own runner "(resume)"; a foreign CLI stays plain', async () => {
+    stubFetch({ '/api/open-targets': () => jsonResponse(openTargets(['cli:claude', 'cli:codex'])) })
+    renderHeader(run('done', { runner: 'claude', worktreePath: '/tmp/wt' }))
+    const menu = await openMenu()
+    // The CLI targets load async (useOpenTargets) — findByRole waits them in, unlike the
+    // static Terminal/Copy items already asserted synchronously elsewhere in this file.
+    expect(await within(menu).findByRole('menuitem', { name: 'Claude CLI (resume)' })).not.toBeNull()
+    expect(within(menu).getByRole('menuitem', { name: 'Codex CLI' })).not.toBeNull()
+  })
+
+  it('a run with no session yet: not even the matching CLI claims to resume', async () => {
+    stubFetch({ '/api/open-targets': () => jsonResponse(openTargets(['cli:claude'])) })
+    renderHeader(run('done', { runner: 'claude', worktreePath: '/tmp/wt', steps: [step()] }))
+    const menu = await openMenu()
+    expect(await within(menu).findByRole('menuitem', { name: 'Claude CLI' })).not.toBeNull()
+  })
+
+  it('picking a CLI target POSTs /open-in with that target id, resuming or not', async () => {
+    const sent = stubFetch({ '/api/open-targets': () => jsonResponse(openTargets(['cli:codex'])) })
+    renderHeader(run('done', { runner: 'claude', worktreePath: '/tmp/wt' }))
+    const menu = await openMenu()
+    // Cross-runner (this run is Claude): Codex opens fresh, not "(resume)".
+    fireEvent.click(await within(menu).findByRole('menuitem', { name: 'Codex CLI' }))
+    await waitFor(() => {
+      expect(sent.find((r) => r.path === '/api/runs/r1/open-in')?.body).toEqual({ target: 'cli:codex' })
+    })
+  })
+})
+
+describe('Open in… menu per-target icons (#361)', () => {
+  it('renders a known target with its mapped icon, falls back for an unrecognized icon key, and POSTs the clicked id', async () => {
+    const sent = stubFetch({
+      '/api/open-targets': () =>
+        jsonResponse({
+          targets: [
+            { id: 'idea', label: 'IntelliJ IDEA', icon: 'idea' },
+            { id: 'mystery-app', label: 'Mystery App', icon: 'not-a-real-icon' },
+            { id: 'no-icon-app', label: 'No Icon App' },
+          ],
+        }),
+    })
+    renderHeader(run('done', { worktreePath: '/tmp/wt' }))
+    fireEvent.pointerDown(actionBar().getByRole('button', { name: 'Open in…' }))
+    const menu = await screen.findByRole('menu')
+
+    // The menu opens immediately; the worktree targets only appear once useOpenTargets resolves.
+    const ideaItem = await within(menu).findByRole('menuitem', { name: 'IntelliJ IDEA' })
+    expect(ideaItem.querySelector('svg')).not.toBeNull()
+    // Unknown/missing icon keys still render the generic fallback glyph — never bare text only.
+    expect(within(menu).getByRole('menuitem', { name: 'Mystery App' }).querySelector('svg')).not.toBeNull()
+    expect(within(menu).getByRole('menuitem', { name: 'No Icon App' }).querySelector('svg')).not.toBeNull()
+
+    fireEvent.click(ideaItem)
+    await waitFor(() => {
+      expect(sent.find((r) => r.path === '/api/runs/r1/open-in')?.body).toEqual({ target: 'idea' })
+    })
+  })
+})
+
 describe('notes panel', () => {
   it('toggles open, fetches the handoff and renders it as markdown', async () => {
     stubFetch({
@@ -358,7 +445,7 @@ describe('notes panel', () => {
 })
 
 describe('meta line, tabs, pill and resume hint', () => {
-  it('meta shows workflow · model · branch chip · ± · tokens · cost; runner only when not claude', () => {
+  it('meta shows workflow · branch chip · ± · tokens · cost, with runner/model tucked into the agent badge', () => {
     stubFetch()
     renderHeader(
       run('done', {
@@ -371,20 +458,49 @@ describe('meta line, tabs, pill and resume hint', () => {
     )
     const meta = document.querySelector('[data-slot="run-meta"]') as HTMLElement
     expect(meta.textContent).toContain('quick-task')
-    expect(meta.textContent).toContain('codex')
-    expect(meta.textContent).toContain('gpt-5.2-codex')
+    // Runner/model are no longer loose text next to the workflow — they live in the badge.
+    expect(meta.textContent).not.toContain('codex')
+    expect(meta.textContent).not.toContain('gpt-5.2-codex')
     expect(within(meta).getByText('cez/r1').getAttribute('data-slot')).toBe('branch-chip')
     expect(meta.querySelector('[data-slot="diff-stat"]')?.textContent).toBe('+42 −7')
     expect(meta.textContent).toContain('27.0k tokens')
     expect(meta.textContent).toContain('$0.04')
     // No context gauge: RunRecord carries no context-window data to draw one from.
     expect(meta.querySelector('[data-slot="context-gauge"]')).toBeNull()
+
+    const badge = within(meta).getByRole('button', { name: /Agent: codex, model gpt-5.2-codex/ })
+    expect(badge.getAttribute('data-slot')).toBe('agent-badge')
   })
 
-  it('a claude run keeps the runner out of the meta line', () => {
+  it('the agent badge reveals runner and model on click, reading "auto" when the model is unset', async () => {
+    stubFetch()
+    renderHeader(run('done', { runner: 'opencode' }))
+    const meta = document.querySelector('[data-slot="run-meta"]') as HTMLElement
+    fireEvent.pointerDown(within(meta).getByRole('button', { name: /Agent: opencode/ }))
+    const menu = await screen.findByRole('menu')
+    expect(within(menu).getByText('runner: opencode')).not.toBeNull()
+    expect(within(menu).getByText('model: auto')).not.toBeNull()
+  })
+
+  // #416: the record persists only the runner the caller ASKED for (`src/runs/store.ts`), while
+  // the run executes as `input.runner ?? config.defaultRunner` (`src/workflows/run.ts`). So a
+  // record without a runner must name the repo's DEFAULT agent — hardcoding 'claude' here would
+  // confidently name the wrong agent on a codex/opencode repo, which is the exact question the
+  // badge exists to answer.
+  it('a run with no explicit runner names the repo default from health, not a hardcoded claude', async () => {
+    stubFetch({ '/api/health': () => jsonResponse({ defaultRunner: 'codex' }) })
+    renderHeader(run('done', { runner: undefined }))
+    const meta = document.querySelector('[data-slot="run-meta"]') as HTMLElement
+    const badge = await within(meta).findByRole('button', { name: /Agent: codex, model auto/ })
+    expect(badge.getAttribute('data-slot')).toBe('agent-badge')
+  })
+
+  it('a claude run still gets an agent badge — Claude is the default, not a hidden runner', () => {
     stubFetch()
     renderHeader(run('done', { runner: 'claude' }))
-    expect(document.querySelector('[data-slot="run-meta"]')?.textContent).not.toContain('claude')
+    const meta = document.querySelector('[data-slot="run-meta"]') as HTMLElement
+    expect(meta.textContent).not.toContain('claude')
+    expect(within(meta).getByRole('button', { name: /Agent: claude, model auto/ })).not.toBeNull()
   })
 
   it('tabs: Session is current; Changes and Files link to the routed surfaces', () => {

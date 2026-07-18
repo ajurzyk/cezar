@@ -7,8 +7,10 @@ import { onUsage, registerRunProcess, unregisterRunProcess, type ProcessUsage } 
 import { createRunner } from '../core/runner-factory.js';
 import type { RunnerId } from '../core/agent-runner.js';
 import {
+  HANDOFF_ONLY_INSTRUCTIONS,
   HANDOFF_INSTRUCTIONS,
   appendHandoffHeartbeat,
+  followupsEnabled,
   handoffPath,
   seedHandoffFile,
 } from '../handoff.js';
@@ -21,9 +23,13 @@ import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff, worktreeS
 import { getRepoInfo } from '../server/git.js';
 import { loadWorkflows } from './load.js';
 import type { RunRecord, RunStore } from '../runs/store.js';
-import { deriveTitleSummary } from '../runs/title-summary.js';
+import { reclaimWorktrees, rematerializeReclaimedWorktree } from '../runs/retention.js';
+import { extractTaskRefs, refineTaskRefs, titleRefNumber } from '../runs/task-refs.js';
+import { parseTaskMarkers, stripTaskMarkers } from '../runs/task-markers.js';
+import { autoNamingActive, generateRunName, liveTitleUpdatesEnabled, postValidateTitle } from '../runs/auto-name.js';
+import { reviewGateEnabled } from '../runs/review-gate.js';
 import { UiEventSink } from '../runs/ui-event-sink.js';
-import { DEFAULT_ALLOWED_TOOLS, stepKind, type WorkflowDef, type WorkflowStepDef } from './types.js';
+import { chainStepNote, DEFAULT_ALLOWED_TOOLS, stepKind, type WorkflowDef, type WorkflowStepDef } from './types.js';
 
 const CHECK_OUTPUT_CAP = 20_000;
 /** An interactive session that hears nothing from the user closes itself. */
@@ -36,14 +42,38 @@ export const IDLE_TIMEOUT_MS = 15 * 60_000;
  * (codex, opencode) can't split the marker across text events.
  */
 const DONE_MARKER_RE = /CEZ:DONE\s*$/;
+/**
+ * Still-working marker from the agent contract (spec
+ * 2026-07-18-subagent-monitoring-status, #490): a turn whose text ends with
+ * `CEZ:MONITORING` means "I ended this turn but I'm still working on my own
+ * downstream work (a sub-agent / a command I'm monitoring), not waiting on the
+ * user" — cezar parks it as `running`/`activity:'monitoring'` instead of
+ * `waiting`, so the cockpit shows a non-attention state. `CEZ:DONE` wins if both
+ * appear. Detected on accumulated turn text (like `CEZ:DONE`) so delta-streaming
+ * backends can't split the marker across text events.
+ */
+const MONITORING_MARKER_RE = /CEZ:MONITORING\s*$/;
 /** Strip a trailing marker from one text event so transcripts stay free of
  *  protocol noise. Delta backends may split the marker across events — then
  *  it stays visible; detection above is unaffected. */
 function stripDoneMarker(text: string): string {
   return text.replace(/\s*CEZ:DONE\s*$/, '');
 }
+/** Strip a trailing `CEZ:MONITORING` marker from one text event (see
+ *  `stripDoneMarker`; same delta-backend caveat). */
+function stripMonitoringMarker(text: string): string {
+  return text.replace(/\s*CEZ:MONITORING\s*$/, '');
+}
 /** Periodic "cezar autosave" commit in the task worktree (spec 006). */
 export const AUTOSAVE_INTERVAL_MS = 90_000;
+
+/** The periodic autosave timer is opt-in (#471): off, a task branch carries only the
+ *  agent's own commits plus the turn-end/pre-PR flushes — no mid-run "cezar autosave"
+ *  noise interleaving PR history. The flushes (`autosaveCommit` at turn end and before
+ *  a draft PR) are NOT gated: the branch must still end holding the finished state. */
+export function periodicAutosaveEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.CEZ_AUTOSAVE === '1';
+}
 
 interface ActiveRun {
   cancelled: boolean;
@@ -61,6 +91,9 @@ interface ActiveRun {
    *  going until it signals done or the safety cap is hit. */
   autonomous?: boolean;
   autoContinues?: number;
+  /** Release for exclusive execution in the user's repository working tree.
+   *  Worktree-backed runs never need it; every degradation/opt-out path does. */
+  releaseRepoRoot?: () => void;
 }
 
 /** Safety cap on autonomous auto-continues per run — stops a stuck agent from nudging forever. */
@@ -89,6 +122,9 @@ export interface StartRunInput {
    *  user — turn-ends auto-continue until the agent signals done or the safety
    *  cap is hit. No "needs you" is ever raised. */
   autonomous?: boolean;
+  /** Follow-up inbox generation (spec 007, #444). Omitted means enabled for
+   *  compatibility; the handoff journal runs either way. */
+  generateFollowups?: boolean;
 }
 
 /**
@@ -120,6 +156,43 @@ export function composeSystemPrompt(...parts: Array<string | undefined>): string
     .join('\n\n---\n\n');
 }
 
+/**
+ * Materialized pasted attachment: the on-disk name/serving-URL pair the
+ * transcript already used, plus the absolute path that lets the agent
+ * operate on the file itself — save it, `cp` it, attach it to a GitHub
+ * issue/PR (#357). `path` is only ever an absolute path under
+ * `.ai/cezar/runs/<runId>-images/` (see `RunManager.persistImage`).
+ */
+export interface PersistedAttachment {
+  name: string;
+  url: string;
+  path: string;
+}
+
+/**
+ * Plain-text note listing the absolute paths of pasted attachments, appended
+ * to the message that carries them (#357). The base64 image blocks stay in
+ * the message for the model to *view*; this note is what lets it *use* the
+ * files as files — and the only usable reference on backends (codex,
+ * opencode) whose `textOf()` drops image blocks before reaching the model.
+ */
+export function pastedAttachmentsText(attachments: PersistedAttachment[]): string {
+  const list = attachments.map((a) => `- ${a.path}`).join('\n');
+  return (
+    `The user attached ${attachments.length} pasted file${attachments.length > 1 ? 's' : ''}, ` +
+    `also saved on disk at:\n${list}\n` +
+    `When the task involves saving, uploading, attaching, or transforming the pasted content ` +
+    `(e.g. attaching to a GitHub issue/PR, copying into the repo), operate on these files — do ` +
+    `not attempt to reconstruct them from the conversation.`
+  );
+}
+
+/** Same note as `pastedAttachmentsText`, wrapped as a trailing `ContentBlock`
+ *  ready to append to a message's content array. */
+export function pastedAttachmentsNote(attachments: PersistedAttachment[]): ContentBlock {
+  return { type: 'text', text: pastedAttachmentsText(attachments) };
+}
+
 /** Variant letters + the fixed diversification hints (spec 010). A runs the
  *  task verbatim; B/C get one constant sentence each — zero configuration. */
 export const VARIANT_LETTERS = ['A', 'B', 'C'] as const;
@@ -136,8 +209,9 @@ const VARIANT_HINTS: Record<string, string | undefined> = {
  * checks with bounded retry loops, plus live sessions: the last agent step
  * stays open for follow-ups (`waiting`) until "finish", idle timeout, or
  * cancel. Runs queue behind `maxParallel` slots and each run executes in its
- * own git worktree on a `cez/<id8>` branch (spec 006), autosave-committed
- * every 90 s — the user's working tree is never touched.
+ * own git worktree on a `cez/<id8>` branch (spec 006), autosave-committed at
+ * turn end and before a draft PR — plus every 90 s when opted in via
+ * CEZ_AUTOSAVE=1 (#471). The user's working tree is never touched.
  */
 export class RunManager {
   private readonly active = new Map<string, ActiveRun>();
@@ -154,6 +228,12 @@ export class RunManager {
   private readonly waiting = new Set<string>();
   private readonly pendingJobs = new Map<string, { workflow: WorkflowDef; input: StartRunInput }>();
   private pumping = false;
+  /**
+   * Runs normally isolate in worktrees and may execute in parallel. When that
+   * isolation is unavailable (or explicitly disabled), serialize access to
+   * `repoRoot` so two agents can never edit/revert the same files (#438).
+   */
+  private repoRootTail: Promise<void> = Promise.resolve();
 
   /** `.ai/cezar` — where the per-task handoff files and todos.json live. */
   private readonly dataDir: string;
@@ -209,12 +289,19 @@ export class RunManager {
   }
 
   /** Env the spawned claude gets so the agent can find its handoff file and
-   *  the global inbox (spec 007). */
-  private agentEnv(runId: string): Record<string, string> {
+   *  the global inbox (spec 007; the inbox only when the run opted in).
+   *
+   *  `CEZ_TODOS_FILE` is set to `''` rather than omitted when follow-ups are
+   *  off: runners spawn with `{ ...process.env, ...spec.env }`, so omitting the
+   *  key would let a value inherited from *this* process through — a nested
+   *  cezar (an agent running `cez serve`/`cez run`/the test suite) would then
+   *  write follow-ups into the parent's inbox despite the opt-out. Empty is the
+   *  established "absent" spelling — consumers guard with `if (todosFile)`. */
+  private agentEnv(runId: string, generateFollowups = true): Record<string, string> {
     return {
       CEZ_HANDOFF_FILE: handoffPath(this.dataDir, runId),
-      CEZ_TODOS_FILE: todosPath(this.dataDir),
       CEZ_TASK_ID: runId,
+      CEZ_TODOS_FILE: generateFollowups ? todosPath(this.dataDir) : '',
     };
   }
 
@@ -224,11 +311,20 @@ export class RunManager {
     group?: { groupId: string; variant: string },
   ): RunRecord {
     const run = this.store.createRun({
-      title: makeTitle(input.task) + (group ? ` (${group.variant})` : ''),
+      title: makeRunTitle(input.task, workflow) + (group ? ` (${group.variant})` : ''),
       workflow: workflow.name,
       task: input.task,
       model: input.model,
       runner: input.runner,
+      // The global inbox is the ceiling on the per-run flag (#471). Enforced here rather than
+      // at the HTTP route because `cezar run`, the inbox's own "▶ Run" and variants all reach
+      // startRun directly — a route-level gate would leave those writing todos.json.
+      generateFollowups: followupsEnabled() ? input.generateFollowups : false,
+      // Persist autonomy on the record (#489) so the terminal review gate
+      // (`settleSuccess`) and the group-pick winner-park can honor it — mid-run
+      // auto-nudge reads `input.autonomous` (`execute`), but the record is the
+      // only source those after-the-fact consumers have.
+      autonomous: input.autonomous === true,
       groupId: group?.groupId,
       variant: group?.variant,
       steps: workflow.steps.map((s) => ({ id: s.id, name: s.name ?? s.id, kind: stepKind(s) })),
@@ -236,6 +332,20 @@ export class RunManager {
     // Persist the full definition so a queued run survives a restart (#367) —
     // ad-hoc "(planned)" chains exist nowhere else to re-resolve from.
     this.store.updateRun(run.id, { workflowDef: workflow as unknown as Record<string, unknown> });
+    // Step-0 reference extraction (task auto-naming spec): the regex layer's
+    // numbers persist immediately; the namer may add the kind it verified later.
+    const skillHint = workflow.steps.find((s) => stepKind(s) === 'agent' && s.skill)?.skill?.trim();
+    const refs = refineTaskRefs(extractTaskRefs(input.task), skillHint);
+    if (refs.prNumber !== undefined || refs.issueNumber !== undefined) {
+      this.store.updateRun(run.id, {
+        ...(refs.prNumber !== undefined ? { prNumber: refs.prNumber } : {}),
+        ...(refs.issueNumber !== undefined ? { issueNumber: refs.issueNumber } : {}),
+      });
+    }
+    // Fire-and-forget LLM naming (task auto-naming spec): the heuristic title
+    // above shows instantly; the namer's short title replaces it when (and if)
+    // the model answers. Never awaited, never fails the run.
+    void this.autoNameRun(run.id, skillHint, input.task);
     this.pendingJobs.set(run.id, { workflow, input });
     this.queue.push(run.id);
     void this.pump();
@@ -324,9 +434,28 @@ export class RunManager {
       if (run.status === 'queued') {
         const workflow = await this.reviveWorkflow(run);
         if (workflow) {
+          // Re-apply the inbox ceiling (#471). `execute()` gates again at spawn time, so the
+          // agent is safe either way — but a run queued while the inbox was on and recovered
+          // after it was switched off would otherwise keep echoing `generateFollowups: true`
+          // on a run that demonstrably produced none. Normalize the record, the way startRun
+          // does, so the stored answer matches what actually happens.
+          const generateFollowups = followupsEnabled() ? run.generateFollowups : false;
+          if (generateFollowups !== run.generateFollowups) {
+            this.store.updateRun(run.id, { generateFollowups });
+          }
           this.pendingJobs.set(run.id, {
             workflow,
-            input: { task: run.task, model: run.model, runner: run.runner },
+            input: {
+              task: run.task,
+              model: run.model,
+              runner: run.runner,
+              generateFollowups,
+              // Re-thread autonomy (#489): the rebuilt input feeds `execute`,
+              // whose mid-run auto-nudge reads `input.autonomous`. Without this a
+              // recovered queued autonomous run would run non-autonomously (no
+              // auto-nudge) and later wrongly park at `review`.
+              autonomous: run.autonomous,
+            },
           });
           this.queue.push(run.id);
           this.store.appendEvent(run.id, { type: 'lifecycle', message: 'cezar restarted — task re-queued' });
@@ -396,9 +525,89 @@ export class RunManager {
 
   /** Remove a run from the live registries — keeps `waiting ⊆ active`. */
   private dropActive(runId: string): void {
+    const state = this.active.get(runId);
+    state?.releaseRepoRoot?.();
+    if (state) state.releaseRepoRoot = undefined;
     this.waiting.delete(runId);
     this.active.delete(runId);
     this.memoryPausing.delete(runId);
+    this.lastNamerKey.delete(runId);
+    // A run leaving the active registry is a terminal transition (done/review/
+    // failed/cancelled) — the one moment the finished-worktree count can grow.
+    // Enforce count-based retention (#483) here so a single hook covers every
+    // terminal path. Fire-and-forget: retention must never delay or throw into
+    // the lifecycle.
+    void this.enforceRetention();
+  }
+
+  /** Reclaim finished worktrees beyond the keep-limit (#483) — directory only,
+   *  `cez/<id8>` branch kept. Best-effort; a failure never affects run
+   *  lifecycle. `review`/live runs are excluded by the selector. */
+  private async enforceRetention(): Promise<void> {
+    try {
+      const keep = (await loadConfig(this.repoRoot)).worktreeRetention;
+      await reclaimWorktrees(this.repoRoot, this.store, keep);
+    } catch {
+      // retention is best-effort; swallow so terminal transitions never break.
+    }
+  }
+
+  /** Last live-refresh namer inputs per run — unchanged inputs skip the call. */
+  private lastNamerKey = new Map<string, string>();
+
+  /**
+   * Acquire the one-at-a-time lease for runs executing in `repoRoot`.
+   *
+   * A lease waiter is idle, so it parks in `waiting` and gives its
+   * `maxParallel` slot back (the #347 rule): isolated worktrees keep using
+   * every configured slot while root runs line up. The store status stays
+   * `running` — only the queue's busy count changes, so the GUI never shows a
+   * lease-blocked run as awaiting user input.
+   *
+   * The lease is held for the run's whole lifetime, including the idle
+   * `waiting` parks between agent turns. A parked session is still live and
+   * writes to the working tree the moment it resumes, so handing the tree to
+   * another run there would reintroduce the concurrent-edit bug (#438) this
+   * lease exists to prevent.
+   *
+   * Returns false when the run was cancelled while waiting: the lease was
+   * never granted and the caller must not touch the working tree.
+   */
+  private async acquireRepoRoot(runId: string, state: ActiveRun): Promise<boolean> {
+    // `cancel()` can land between the run going `running` and reaching here,
+    // while `interrupt` is still the default no-op — never enter the chain.
+    if (state.cancelled) return false;
+    const previous = this.repoRootTail;
+    let release: () => void = () => undefined;
+    this.repoRootTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // Until `previous` resolves this run does not own the tree yet, so a drop
+    // during the wait must not hand the tree to the next waiter — chain our
+    // release behind `previous` instead of resolving the tail early.
+    state.releaseRepoRoot = () => {
+      void previous.then(release);
+    };
+    let abort: () => void = () => undefined;
+    const cancelled = new Promise<void>((resolve) => {
+      abort = resolve;
+    });
+    const parked = state.interrupt;
+    state.interrupt = () => {
+      parked();
+      abort();
+    };
+    this.waiting.add(runId);
+    void this.pump();
+    try {
+      await Promise.race([previous, cancelled]);
+    } finally {
+      state.interrupt = parked;
+      this.waiting.delete(runId);
+    }
+    if (state.cancelled) return false;
+    state.releaseRepoRoot = release;
+    return true;
   }
 
   cancel(runId: string): boolean {
@@ -437,12 +646,13 @@ export class RunManager {
       .map((b) => b.text)
       .join('\n');
     // Persist the attached images so the thread can render them (not just count them) — the same
-    // on-disk store + `/images/` route the agent's own screenshots use.
-    const images = content
+    // on-disk store + `/images/` route the agent's own screenshots use. `pasted` prefix marks
+    // these as user attachments (vs. agent tool screenshots) on disk (#357).
+    const persisted = content
       .filter((b): b is Extract<ContentBlock, { type: 'image' }> => b.type === 'image')
-      .map((b) => this.persistImage(runId, state, b.source.media_type, b.source.data))
-      .filter((saved): saved is { name: string; url: string } => saved !== null)
-      .map((saved) => saved.url);
+      .map((b) => this.persistImage(runId, state, b.source.media_type, b.source.data, 'pasted'))
+      .filter((saved): saved is PersistedAttachment => saved !== null);
+    const images = persisted.map((saved) => saved.url);
     this.store.appendEvent(runId, {
       type: 'user-message',
       stepId: state.currentStepId,
@@ -451,11 +661,18 @@ export class RunManager {
       images,
     });
 
-    const delivered = state.session.sendMessage(content);
+    // Tell the agent where the pasted files live on disk (#357): the base64 blocks below still
+    // ride along so the model can *view* them, but a real path is what lets it *operate* on them
+    // (save, `cp`, attach to a GitHub issue/PR) — and it's the only usable reference on backends
+    // (codex, opencode) that drop image blocks entirely before reaching the model.
+    const deliverable = persisted.length ? [...content, pastedAttachmentsNote(persisted)] : content;
+    const delivered = state.session.sendMessage(deliverable);
     if (delivered) {
       this.clearIdleTimer(state);
       this.waiting.delete(runId); // resumed — the run counts against slots again
-      this.store.updateRun(runId, { status: 'running' });
+      // Clear any `monitoring` activity — the agent is actively working again
+      // (spec 2026-07-18-subagent-monitoring-status, #490).
+      this.store.updateRun(runId, { status: 'running', activity: undefined });
       if (state.currentStepId) {
         this.store.updateStep(runId, state.currentStepId, { status: 'running' });
       }
@@ -528,13 +745,39 @@ export class RunManager {
   ): Promise<void> {
     // Continuation runs in the task's worktree when it still exists (spec
     // 006) — the resumed session sees exactly what the original run left.
+    // Retention (#483) may have reclaimed this run's worktree directory while
+    // keeping its branch and worktreePath. Re-materialize it on resume and clear
+    // the stamp so the session regains its isolated tree and the run is eligible
+    // for retention again — otherwise it keeps a dir on disk while staying
+    // invisible to the enforcer forever. Best-effort; falls back to repoRoot.
+    await rematerializeReclaimedWorktree(this.repoRoot, this.store, runId);
     const record = this.store.getRun(runId);
+    // The env is a live ceiling: a run created while the inbox was on must not keep writing
+    // follow-ups after it is switched off.
+    const generateFollowups = followupsEnabled() && record?.generateFollowups !== false;
     const cwd =
       record?.worktreePath && existsSync(record.worktreePath)
         ? record.worktreePath
         : this.repoRoot;
     const state: ActiveRun = { cancelled: false, interrupt: () => undefined, cwd };
     this.active.set(runId, state);
+    if (state.cwd === this.repoRoot) {
+      this.store.appendEvent(runId, {
+        type: 'note',
+        message: 'waiting for exclusive access to the repository working tree',
+      });
+      if (!(await this.acquireRepoRoot(runId, state))) {
+        this.store.updateRun(runId, {
+          status: 'cancelled',
+          finishedAt: new Date().toISOString(),
+          currentStepId: undefined,
+        });
+        this.store.appendEvent(runId, { type: 'lifecycle', message: 'run cancelled' });
+        this.dropActive(runId);
+        void this.pump();
+        return;
+      }
+    }
     this.armAutosave(state);
     if (record) seedHandoffFile(this.dataDir, record); // idempotent — normally already there
 
@@ -543,6 +786,7 @@ export class RunManager {
       error: undefined,
       finishedAt: undefined,
       currentStepId: stepId,
+      activity: undefined, // resuming a monitoring run — it's actively working again (#490)
     });
     this.store.updateStep(runId, stepId, {
       status: 'running',
@@ -564,7 +808,7 @@ export class RunManager {
       }
       if (event.type === 'text') {
         turnText += event.text;
-        const text = stripDoneMarker(event.text);
+        const text = stripTaskMarkers(stripMonitoringMarker(stripDoneMarker(event.text)));
         if (text) this.store.appendEvent(runId, { type: 'text', text, stepId });
         return;
       }
@@ -587,6 +831,7 @@ export class RunManager {
         void this.recordTurnEnd(runId, turnText); // titleSummary + diffStat (#389)
         const sessionOpen = !state.cancelled && state.session?.open;
         const done = sessionOpen && DONE_MARKER_RE.test(turnText.trimEnd());
+        const monitoring = sessionOpen && !done && MONITORING_MARKER_RE.test(turnText.trimEnd());
         turnText = '';
         if (done) {
           // Goal achieved (agent contract, #347) — same as in runAgentStep.
@@ -613,14 +858,27 @@ export class RunManager {
               return true;
             })();
           if (!autoContinued) {
-            this.store.updateRun(runId, { status: 'waiting' });
-            this.store.updateStep(runId, stepId, { status: 'waiting' });
+            // `CEZ:MONITORING` → non-attention `running`/`activity:'monitoring'`
+            // instead of `waiting` (spec 2026-07-18-subagent-monitoring-status,
+            // #490). Same lifecycle as waiting (frees the slot, keeps the idle
+            // timer). The autonomous nudge above still wins over monitoring.
+            if (monitoring) {
+              this.store.updateRun(runId, { status: 'running', activity: 'monitoring' });
+              this.store.updateStep(runId, stepId, { status: 'running' });
+            } else {
+              this.store.updateRun(runId, { status: 'waiting', activity: undefined });
+              this.store.updateStep(runId, stepId, { status: 'waiting' });
+            }
             this.waiting.add(runId);
             this.armIdleTimer(runId, state);
             void this.pump();
           }
         }
-        appendHandoffHeartbeat(this.dataDir, runId, `turn complete — status=${sessionOpen ? 'waiting' : 'running'}`);
+        appendHandoffHeartbeat(
+          this.dataDir,
+          runId,
+          `turn complete — status=${monitoring ? 'monitoring' : sessionOpen ? 'waiting' : 'running'}`,
+        );
       }
     };
 
@@ -630,12 +888,15 @@ export class RunManager {
         // The Continue step is a fresh agent session on the same run — the
         // run's extra system prompt (already resolved at execute time and
         // echoed on the record) rides along with the handoff contract.
-        systemPrompt: composeSystemPrompt(record?.systemPrompt, HANDOFF_INSTRUCTIONS),
+        systemPrompt: composeSystemPrompt(
+          record?.systemPrompt,
+          generateFollowups ? HANDOFF_INSTRUCTIONS : HANDOFF_ONLY_INSTRUCTIONS,
+        ),
         userPrompt: prompt,
         cwd: state.cwd,
         allowedTools: DEFAULT_ALLOWED_TOOLS,
         additionalDirectories: [join(this.dataDir, 'runs')],
-        env: this.agentEnv(runId),
+        env: this.agentEnv(runId, generateFollowups),
         sessionId,
         resume: true,
         timeoutMs: 0,
@@ -716,8 +977,9 @@ export class RunManager {
     emit({ type: 'lifecycle', message: `run started — workflow "${workflow.name}" (runner: ${taskBackend})` });
 
     // Worktree per task (spec 006): the agent works on its own branch in
-    // `.ai/cezar/worktrees/<id>`, never in the user's working tree. Not a git
-    // repo, or worktree creation failed → degrade to running in place.
+    // `.ai/cezar/worktrees/<id>`, never in the user's working tree. A Git task
+    // that requests isolation fails closed if the worktree cannot be
+    // established; only explicit opt-out and non-Git modes run in place.
     const repo = await getRepoInfo(this.repoRoot);
     if (repo && input.worktree === false) {
       // Composer opt-out: run in the repo working tree, no branch/worktree
@@ -727,8 +989,14 @@ export class RunManager {
       // Fork from the configured base branch (config.json `baseBranch`, e.g.
       // `develop`) — also the target of the eventual draft PR. Unresolvable
       // (typo, not fetched) → note + the currently checked-out branch.
-      let base = repo.branch;
-      const configured = config.baseBranch;
+      //
+      // A task that already recorded a fork point keeps it: its worktree is
+      // reused as-is, and re-resolving against a since-changed config would
+      // silently re-anchor the `merge-base` every diff/shortstat is measured
+      // from, shifting "what did this task change" under an existing task.
+      const recorded = this.store.getRun(runId)?.baseBranch;
+      let base = recorded ?? repo.branch;
+      const configured = recorded ? undefined : config.baseBranch;
       if (configured) {
         const resolved = await resolveBaseRef(this.repoRoot, configured);
         if (resolved) {
@@ -752,10 +1020,32 @@ export class RunManager {
         this.armAutosave(state);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        emit({ type: 'note', message: `worktree creation failed (${message}) — running in the repo working tree` });
+        const error = `worktree creation failed: ${message}`;
+        emit({ type: 'note', message: `${error} — task stopped before workflow execution` });
+        this.store.updateRun(runId, {
+          status: 'failed',
+          error,
+          finishedAt: new Date().toISOString(),
+          currentStepId: undefined,
+        });
+        emit({ type: 'lifecycle', message: `run failed — ${error}` });
+        this.dropActive(runId);
+        void this.pump();
+        return;
       }
     } else {
       emit({ type: 'note', message: 'not a git repository — running in place, one task at a time' });
+    }
+
+    if (state.cwd === this.repoRoot) {
+      emit({
+        type: 'note',
+        message: 'waiting for exclusive access to the repository working tree',
+      });
+      // A cancel during the wait leaves the lease ungranted; the step loop
+      // below breaks on `cancelled` before touching the tree and settles the
+      // run through the usual path.
+      await this.acquireRepoRoot(runId, state);
     }
 
     // Handoff journal (spec 007) — seeded after the worktree exists so the
@@ -769,13 +1059,18 @@ export class RunManager {
     let runError: string | null = null;
     // Persist the task's attached images so the thread's initial bubble can render them
     // (#image-display); they still ride the first agent step's opening message below.
+    // `pasted` prefix (#357) marks these as user attachments on disk and keeps their
+    // absolute paths so runAgentStep can tell the agent where to find the real files.
+    let startAttachments: PersistedAttachment[] = [];
     if (input.images?.length) {
-      const urls = input.images
+      const persisted = input.images
         .filter((b): b is Extract<ContentBlock, { type: 'image' }> => b.type === 'image')
-        .map((b) => this.persistImage(runId, state, b.source.media_type, b.source.data))
-        .filter((saved): saved is { name: string; url: string } => saved !== null)
-        .map((saved) => saved.url);
-      if (urls.length) this.store.updateRun(runId, { taskImages: urls });
+        .map((b) => this.persistImage(runId, state, b.source.media_type, b.source.data, 'pasted'))
+        .filter((saved): saved is PersistedAttachment => saved !== null);
+      if (persisted.length) {
+        this.store.updateRun(runId, { taskImages: persisted.map((p) => p.url) });
+        startAttachments = persisted;
+      }
     }
     // Task screenshots go with the FIRST agent step's opening message only —
     // later steps and retry loops run in fresh sessions without them.
@@ -816,8 +1111,11 @@ export class RunManager {
           startImages,
           taskBackend,
           extraSystemPrompt,
+          chainStepNote(workflow.steps, i),
+          startAttachments,
         );
         startImages = undefined;
+        startAttachments = [];
         checkFailure = null;
         if (state.cancelled) break;
         if (failure) {
@@ -901,12 +1199,23 @@ export class RunManager {
     images: ContentBlock[] | undefined,
     taskBackend: RunnerId,
     extraSystemPrompt: string | undefined,
+    /** The chain-boundary note for this step (#410), or undefined when the
+     *  workflow has a single agent step and there is no boundary to explain. */
+    chainNote: string | undefined,
+    /** Pasted attachments already materialized to disk (#357) — their absolute
+     *  paths are appended to `userPrompt` so the agent can operate on the
+     *  real files, not just view the inline image blocks. */
+    attachments: PersistedAttachment[] = [],
   ): Promise<string | null> {
     let systemPrompt: string | undefined;
     if (step.skill) {
       const skill = skills.find((s) => s.name === step.skill);
       if (skill) {
-        systemPrompt = skill.body.trim();
+        // The body alone often does not identify the selected skill. Keep its
+        // name and catalog description in the normalized runner payload so a
+        // numeric task such as "432" still gives the model enough context to
+        // describe the work — and therefore derive a useful title (#432).
+        systemPrompt = skillSystemPrompt(skill);
         // Directory team skills (SKILL.md + references/) get materialized
         // into <cwd>/.claude/skills/<name>/ — the run's worktree when there
         // is one — so claude sees the companion files on disk; the shared
@@ -931,6 +1240,7 @@ export class RunManager {
     }
 
     let userPrompt = applyTemplate(step.prompt ?? '{{task}}', input.task);
+    if (chainNote) userPrompt = `${chainNote}\n\n---\n\n${userPrompt}`;
     if (checkFailure) {
       userPrompt += `\n\nA verification command failed after the previous attempt. Fix the cause. Failing output:\n\n${checkFailure}`;
     }
@@ -940,6 +1250,10 @@ export class RunManager {
         stepId: step.id,
         message: `${images.length} screenshot${images.length > 1 ? 's' : ''} attached to the task`,
       });
+      // Point the agent at the on-disk files for the pasted subset (#357) — the
+      // base64 blocks above still let it *view* the images; this is what lets it
+      // *use* them as files (save, attach to an issue/PR, copy into the repo).
+      if (attachments.length) userPrompt += `\n\n${pastedAttachmentsText(attachments)}`;
     }
 
     const sessionId = randomUUID();
@@ -958,7 +1272,7 @@ export class RunManager {
       }
       if (event.type === 'text') {
         turnText += event.text;
-        const text = stripDoneMarker(event.text);
+        const text = stripTaskMarkers(stripMonitoringMarker(stripDoneMarker(event.text)));
         if (text) emit({ type: 'text', text, stepId: step.id });
         return;
       }
@@ -981,6 +1295,8 @@ export class RunManager {
         void this.recordTurnEnd(runId, turnText); // titleSummary + diffStat (#389)
         const sessionOpen = !state.cancelled && state.session?.open;
         const done = interactive && sessionOpen && DONE_MARKER_RE.test(turnText.trimEnd());
+        const monitoring =
+          interactive && sessionOpen && !done && MONITORING_MARKER_RE.test(turnText.trimEnd());
         turnText = '';
         if (done) {
           // Goal achieved (agent contract, #347): close the session instead
@@ -992,16 +1308,31 @@ export class RunManager {
         }
         const waiting = interactive && sessionOpen;
         if (waiting) {
-          // Turn over, session open: the ball is in the user's court.
-          this.store.updateRun(runId, { status: 'waiting' });
-          this.store.updateStep(runId, step.id, { status: 'waiting' });
+          // Turn over, session open. Either the ball is in the user's court
+          // (`waiting`), or the agent declared it is still working on its own
+          // downstream work with `CEZ:MONITORING` — then park as
+          // `running`/`activity:'monitoring'`, a non-attention state, instead of
+          // raising "needs you" (spec 2026-07-18-subagent-monitoring-status, #490).
+          // Lifecycle is identical either way: the run frees its slot and keeps
+          // the idle timer, so even a stalled monitoring run is reclaimed.
+          if (monitoring) {
+            this.store.updateRun(runId, { status: 'running', activity: 'monitoring' });
+            this.store.updateStep(runId, step.id, { status: 'running' });
+          } else {
+            this.store.updateRun(runId, { status: 'waiting', activity: undefined });
+            this.store.updateStep(runId, step.id, { status: 'waiting' });
+          }
           this.waiting.add(runId);
           this.armIdleTimer(runId, state);
           void this.pump(); // the freed slot can start a queued run right away
         }
         // Cez's own heartbeat — the handoff stays current even when the
         // agent forgets to write (spec 007).
-        appendHandoffHeartbeat(this.dataDir, runId, `turn complete — status=${waiting ? 'waiting' : 'running'}`);
+        appendHandoffHeartbeat(
+          this.dataDir,
+          runId,
+          `turn complete — status=${monitoring ? 'monitoring' : waiting ? 'waiting' : 'running'}`,
+        );
       }
     };
 
@@ -1012,7 +1343,13 @@ export class RunManager {
         {
           // Skill body, then the run's extra prompt (POST override or config
           // default), then the handoff/todos contract — every agent step.
-          systemPrompt: composeSystemPrompt(systemPrompt, extraSystemPrompt, HANDOFF_INSTRUCTIONS),
+          systemPrompt: composeSystemPrompt(
+            systemPrompt,
+            extraSystemPrompt,
+            followupsEnabled() && input.generateFollowups !== false
+              ? HANDOFF_INSTRUCTIONS
+              : HANDOFF_ONLY_INSTRUCTIONS,
+          ),
           userPrompt,
           images,
           cwd: state.cwd,
@@ -1020,7 +1357,7 @@ export class RunManager {
           bashAllowlist: step.bashAllowlist,
           // The handoff file lives outside the worktree — grant access.
           additionalDirectories: [join(this.dataDir, 'runs')],
-          env: this.agentEnv(runId),
+          env: this.agentEnv(runId, followupsEnabled() && input.generateFollowups !== false),
           model: step.model ?? input.model,
           sessionId,
           // Interactive sessions have no wall clock — the idle timer rules.
@@ -1088,21 +1425,115 @@ export class RunManager {
    * Not `private` so the integration tests can drive a turn-end directly —
    * a real agent session is the only other way to reach this path.
    */
+  /**
+   * The namer's apply path (task auto-naming spec). Fire-and-forget: called
+   * without await from `startRun` (creation) and `recordTurnEnd` (live
+   * refresh). A user-owned title (`titleOrigin: 'user'`) is never overwritten;
+   * namer-owned titles may be replaced by fresher namer results.
+   */
+  private async autoNameRun(
+    runId: string,
+    skillName: string | undefined,
+    task: string,
+    live?: { turnText?: string; diffStat?: string },
+  ): Promise<void> {
+    // CEZ_AUTONAME=0 kills all LLM naming; dry-run skips it too unless
+    // CEZ_AUTONAME=1 forces the mock path — see autoNamingActive.
+    if (!autoNamingActive()) return;
+    try {
+      let skillDescription: string | undefined;
+      if (skillName) {
+        const skills = await discoverSkills(this.repoRoot).catch(() => [] as Skill[]);
+        skillDescription = skills.find((s) => s.name === skillName)?.description;
+      }
+      const result = await generateRunName(this.repoRoot, { task, skillName, skillDescription, ...live });
+      if (!result) return;
+      const run = this.store.getRun(runId);
+      // Marker-owned state outranks the namer (spec 2026-07-18-task-ref-markers):
+      // a declared title blocks the whole apply (this call raced the marker),
+      // and a declared pr/issue kind blocks that kind field-by-field.
+      if (!run || run.titleOrigin === 'user' || run.titleOrigin === 'marker') return;
+      this.store.updateRun(runId, {
+        titleSummary: result.titleSummary,
+        titleOrigin: 'auto',
+        ...(result.prNumber !== undefined && run.markerRefs?.pr === undefined
+          ? { prNumber: result.prNumber }
+          : {}),
+        ...(result.issueNumber !== undefined && run.markerRefs?.issue === undefined
+          ? { issueNumber: result.issueNumber }
+          : {}),
+      });
+    } catch {
+      // Naming is best-effort — nothing here may disturb the run.
+    }
+  }
+
   async recordTurnEnd(runId: string, turnText: string): Promise<void> {
     try {
       const run = this.store.getRun(runId);
       if (!run) return;
-      if (run.titleSummary === undefined) {
-        const summary = deriveTitleSummary(turnText, run.task);
-        if (summary) this.store.updateRun(runId, { titleSummary: summary });
+      this.applyTurnMarkers(runId, run, turnText);
+      // Titles are the namer's job (task auto-naming spec) — turn text is
+      // deliberately NEVER a title source; see maybeRefreshTitle below. The
+      // one exception is an explicit CEZ:TITLE declaration (applied above).
+      if (run.worktreePath && existsSync(run.worktreePath)) {
+        const stat = await worktreeShortstat(run.worktreePath, run.baseBranch ?? 'HEAD');
+        if (stat) this.store.updateRun(runId, { diffStat: stat });
+        else this.store.appendEvent(runId, { type: 'note', message: 'diff stat unavailable — git diff --shortstat failed in the worktree' });
       }
-      if (!run.worktreePath || !existsSync(run.worktreePath)) return;
-      const stat = await worktreeShortstat(run.worktreePath, run.baseBranch ?? 'HEAD');
-      if (stat) this.store.updateRun(runId, { diffStat: stat });
-      else this.store.appendEvent(runId, { type: 'note', message: 'diff stat unavailable — git diff --shortstat failed in the worktree' });
+      await this.maybeRefreshTitle(runId, turnText);
     } catch {
       // Bookkeeping only — nothing here may disturb the run.
     }
+  }
+
+  /**
+   * In-band declarations from the finished turn (spec
+   * 2026-07-18-task-ref-markers): the main thread's own `CEZ:PR=` /
+   * `CEZ:ISSUE=` / `CEZ:TITLE=` lines, parsed from the accumulated turn text
+   * like `CEZ:DONE` — never from tool output. Declared numbers overwrite the
+   * regex/namer display tier (the store re-resolves the referenced-PR chip);
+   * a declared title takes `titleOrigin: 'marker'`, which beats the namer but
+   * never a user rename, and silences the live refresh below.
+   */
+  private applyTurnMarkers(runId: string, run: RunRecord, turnText: string): void {
+    const markers = parseTaskMarkers(turnText);
+    if (markers.pr !== undefined || markers.issue !== undefined) {
+      this.store.applyMarkerRefs(runId, { pr: markers.pr, issue: markers.issue });
+    }
+    if (markers.title && run.titleOrigin !== 'user') {
+      const current = this.store.getRun(runId);
+      const refNumber = current?.prNumber ?? current?.issueNumber;
+      const validated = postValidateTitle(markers.title, refNumber);
+      // Same junk guard as composeNameResult: a declaration that validates to
+      // nothing (or to a bare number prefix) must not blank the title.
+      if (validated && validated !== `${refNumber}:`) {
+        this.store.updateRun(runId, { titleSummary: validated, titleOrigin: 'marker' });
+      }
+    }
+  }
+
+  /**
+   * Live title refresh (task auto-naming spec, step 3): re-run the namer with
+   * the turn's context. Skips: toggle off (`liveTitleUpdates` config over
+   * `CEZ_TITLE_UPDATES` env, default ON), user-owned title, marker-owned title
+   * (the agent declares via `CEZ:TITLE` — the token-saving fast path), dry-run
+   * mocks (canned answers add nothing), empty turn text, unchanged namer inputs.
+   */
+  private async maybeRefreshTitle(runId: string, turnText: string): Promise<void> {
+    if (!autoNamingActive()) return;
+    if (!turnText.trim()) return;
+    const config = await loadConfig(this.repoRoot);
+    if (!liveTitleUpdatesEnabled(config)) return;
+    const run = this.store.getRun(runId);
+    if (!run || run.titleOrigin === 'user' || run.titleOrigin === 'marker') return;
+    const statText = run.diffStat ? `${run.diffStat.files} files, +${run.diffStat.adds} -${run.diffStat.dels}` : undefined;
+    const key = `${turnText.slice(0, 200)}|${statText ?? ''}`;
+    if (this.lastNamerKey.get(runId) === key) return;
+    this.lastNamerKey.set(runId, key);
+    const workflow = await this.reviveWorkflow(run);
+    const skillName = workflow?.steps.find((s) => stepKind(s) === 'agent' && s.skill)?.skill?.trim();
+    void this.autoNameRun(runId, skillName, run.task, { turnText, diffStat: statText });
   }
 
   /**
@@ -1127,13 +1558,20 @@ export class RunManager {
    * at `review` instead of `done` — the user inspects the diff first, then
    * sends feedback back, opens a draft PR, or just finishes. Failed/cancelled
    * runs never enter review; no worktree or an empty diff means plain `done`.
+   *
+   * The gate is opt-in (#489): the review park happens only when it is enabled
+   * (`reviewGateEnabled` — config toggle over the `CEZ_REVIEW_GATE` env, default
+   * OFF) AND the run is not autonomous. Autonomous runs — and runs with the gate
+   * off — settle straight to `done`, leaving the diff in the worktree untouched.
    */
   private async settleSuccess(runId: string): Promise<void> {
     const run = this.store.getRun(runId);
     let review = false;
     if (run?.worktreePath && existsSync(run.worktreePath)) {
       const diff = await worktreeDiff(run.worktreePath, run.baseBranch ?? 'HEAD');
-      review = diff.trim().length > 0 && !diff.startsWith('(diff failed');
+      const hasDiff = diff.trim().length > 0 && !diff.startsWith('(diff failed');
+      const config = await loadConfig(this.repoRoot);
+      review = hasDiff && reviewGateEnabled(config) && run.autonomous !== true;
     }
     this.store.updateRun(runId, {
       status: review ? 'review' : 'done',
@@ -1149,18 +1587,23 @@ export class RunManager {
   }
 
   /**
-   * Agent screenshot (an image block inside a tool result): the base64 data
-   * never enters the NDJSON event log — it lands as a file under
-   * `.ai/cezar/runs/<id>-images/` and the transcript event carries only the
-   * name + serving URL. Best effort: on failure the screenshot is dropped,
-   * the transcript still shows the tool result's `[screenshot]` placeholder.
+   * Agent screenshot (an image block inside a tool result) or a user-pasted
+   * attachment: the base64 data never enters the NDJSON event log — it lands
+   * as a file under `.ai/cezar/runs/<id>-images/` and the transcript event
+   * carries only the name + serving URL. `namePrefix` distinguishes the two
+   * origins on disk (`screenshot-<n>.<ext>` for agent tool screenshots,
+   * `pasted-<n>.<ext>` for user-pasted attachments, #357) and the absolute
+   * `path` lets the agent operate on the file directly (save/attach/upload).
+   * Best effort: on failure the attachment is dropped, the transcript still
+   * shows the tool result's `[screenshot]` placeholder (or the image count).
    */
   private persistImage(
     runId: string,
     state: ActiveRun,
     mediaType: string,
     data: string,
-  ): { name: string; url: string } | null {
+    namePrefix: string = 'screenshot',
+  ): { name: string; url: string; path: string } | null {
     try {
       const ext =
         /png/.test(mediaType) ? 'png'
@@ -1169,11 +1612,12 @@ export class RunManager {
         : /gif/.test(mediaType) ? 'gif'
         : 'img';
       state.imageSeq = (state.imageSeq ?? 0) + 1;
-      const name = `screenshot-${state.imageSeq}.${ext}`;
+      const name = `${namePrefix}-${state.imageSeq}.${ext}`;
       const dir = join(this.dataDir, 'runs', `${runId}-images`);
       mkdirSync(dir, { recursive: true });
-      writeFileSync(join(dir, name), Buffer.from(data, 'base64'));
-      return { name, url: `/api/runs/${runId}/images/${name}` };
+      const path = join(dir, name);
+      writeFileSync(path, Buffer.from(data, 'base64'));
+      return { name, url: `/api/runs/${runId}/images/${name}`, path };
     } catch {
       return null;
     }
@@ -1200,8 +1644,10 @@ export class RunManager {
     }
   }
 
-  /** Autosave-commit the worktree every 90 s while the run lives (spec 006). */
+  /** Autosave-commit the worktree every 90 s while the run lives (spec 006).
+   *  Opt-in via CEZ_AUTOSAVE=1 (#471) — see periodicAutosaveEnabled. */
   private armAutosave(state: ActiveRun): void {
+    if (!periodicAutosaveEnabled()) return;
     if (state.cwd === this.repoRoot || state.autosaveTimer) return;
     state.autosaveTimer = setInterval(() => {
       void autosaveCommit(state.cwd);
@@ -1281,7 +1727,40 @@ function applyTemplate(template: string, task: string): string {
   return template.replaceAll('{{task}}', task);
 }
 
-function makeTitle(task: string): string {
+/**
+ * Immediate title shown while a run is queued. The namer's `titleSummary`
+ * replaces it once the model answers; this is the honest, permanent fallback
+ * when no model is available (#432, spec 2026-07-17-task-auto-naming). When
+ * the task references a PR/issue, the number leads: `469: /om-auto-review-pr`.
+ */
+export function makeRunTitle(task: string, workflow: WorkflowDef): string {
   const firstLine = task.trim().split('\n')[0] ?? '';
-  return firstLine.length > 80 ? `${firstLine.slice(0, 77)}…` : firstLine || '(untitled task)';
+  const skill = workflow.steps.find((step) => stepKind(step) === 'agent' && step.skill)?.skill?.trim();
+  const contextual = skill && !firstLine.startsWith(`/${skill}`)
+    ? `/${skill}${firstLine ? ` ${firstLine}` : ''}`
+    : firstLine;
+  const refNumber = titleRefNumber(refineTaskRefs(extractTaskRefs(task), skill));
+  // `469` or `/om-auto-review-pr 469` reads as `469: /om-auto-review-pr` — the
+  // number leads so it survives the tasks table's narrow truncation.
+  const skillArg = skill && contextual.startsWith(`/${skill}`) ? contextual.slice(skill.length + 1).trim() : null;
+  const body = refNumber !== undefined && skill && (skillArg === '' || /^#?\d+$/.test(skillArg ?? ''))
+    ? `/${skill}`
+    : contextual;
+  const prefixed =
+    refNumber !== undefined && !body.trimStart().replace(/^#/, '').startsWith(String(refNumber))
+      ? `${refNumber}: ${body}`
+      : body;
+  const chars = [...(prefixed || '(untitled task)')];
+  return chars.length > 80 ? `${chars.slice(0, 79).join('').trimEnd()}…` : chars.join('');
+}
+
+/** Skill identity is context, while the Markdown body remains instructions. */
+export function skillSystemPrompt(skill: Pick<Skill, 'name' | 'description' | 'body'>): string {
+  return [
+    `Selected skill: /${skill.name}`,
+    ...(skill.description ? [`Description: ${skill.description}`] : []),
+    '',
+    'Skill instructions:',
+    skill.body.trim(),
+  ].join('\n');
 }

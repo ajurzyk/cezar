@@ -14,7 +14,7 @@ import { z } from 'zod';
  * (tmp + rename, the runs.json pattern).
  */
 
-const todoSchema = z.object({
+export const todoSchema = z.object({
   id: z.string().min(1).optional(),
   ts: z.string().optional(),
   taskId: z.string().optional(),
@@ -24,6 +24,8 @@ const todoSchema = z.object({
   suggestedSkill: z.string().optional(),
   suggestedArgs: z.string().optional(),
   suggestedPrompt: z.string().optional(),
+  /** Explicit intent; legacy entries infer it from an executable suggestion. */
+  runnable: z.boolean().optional(),
   /** Set by the server when "▶ Run" turned this entry into a task. */
   startedTaskId: z.string().optional(),
 });
@@ -125,13 +127,29 @@ export async function removeTodo(dataDir: string, id: string): Promise<boolean> 
   });
 }
 
+/** The task text "▶ Run" turns an entry into: the suggested prompt (or the summary when the
+ *  entry carries none), plus the suggested args as a trailing line. The single server-side
+ *  source for `POST /api/todos/:id/start`; the cockpit's prefill copy
+ *  (`web/app/src/routes/inbox.tsx`, #374) lives in another process and cannot import this, so
+ *  the two are pinned to the shared cases in `test/fixtures/todo-task-text.json`. */
+export function todoTaskText(
+  todo: Pick<TodoItem, 'summary' | 'suggestedPrompt' | 'suggestedArgs'>,
+): string {
+  let task = (todo.suggestedPrompt ?? todo.summary).trim() || todo.summary;
+  if (todo.suggestedArgs) task += `\n\nArguments: ${todo.suggestedArgs}`;
+  return task;
+}
+
 /** Record that "▶ Run" turned the entry into task `taskId`. The entry stays
- *  in the file as an audit trail; the GUI hides started entries. */
+ *  in the file as an audit trail; the GUI hides started entries. First start wins: an entry
+ *  that already carries a `startedTaskId` is left untouched and answers false, so the
+ *  best-effort `todoId` bookkeeping on `POST /api/runs` (#374) can never overwrite the audit
+ *  trail — the check shares this lock, so two concurrent launches cannot both claim the entry. */
 export async function markStarted(dataDir: string, id: string, taskId: string): Promise<boolean> {
   return withLock(dataDir, async () => {
     const { items } = await readRaw(dataDir);
     const item = items.find((t) => t.id === id);
-    if (!item) return false;
+    if (!item || item.startedTaskId) return false;
     item.startedTaskId = taskId;
     await writeAtomic(dataDir, items);
     return true;

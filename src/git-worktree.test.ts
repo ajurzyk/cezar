@@ -1,15 +1,31 @@
 import { execFile } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { parseShortstat, worktreeShortstat } from './git-worktree.js';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { branchFor, createWorktree, parseShortstat, worktreeShortstat, worktreeSizeBytes } from './git-worktree.js';
 
 const run = promisify(execFile);
 
 /** Commit as a fixed identity so the fixture repo works on bare CI machines. */
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
+
+const worktreeRoots: string[] = [];
+
+async function fixtureRepo(prefix: string): Promise<string> {
+  const root = mkdtempSync(join(tmpdir(), prefix));
+  worktreeRoots.push(root);
+  await run('git', ['init', '-q', '-b', 'main'], { cwd: root });
+  writeFileSync(join(root, 'base.txt'), 'base\n');
+  await run('git', ['add', '-A'], { cwd: root });
+  await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: root });
+  return root;
+}
+
+afterEach(() => {
+  for (const root of worktreeRoots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
 
 describe('parseShortstat', () => {
   const cases: Array<{ name: string; input: string; expected: { adds: number; dels: number; files: number } }> = [
@@ -55,6 +71,65 @@ describe('parseShortstat', () => {
   // localizes, so matching the English words is stable by contract.
   it.each(cases)('$name', ({ input, expected }) => {
     expect(parseShortstat(input)).toEqual(expected);
+  });
+});
+
+describe('worktreeSizeBytes (#483)', () => {
+  it('returns a positive byte count for a real directory', async () => {
+    const repo = await fixtureRepo('cez-du-');
+    const size = await worktreeSizeBytes(repo);
+    expect(size).not.toBeNull();
+    expect(size!).toBeGreaterThan(0);
+  });
+
+  it('degrades to null for a path that does not exist (du errors)', async () => {
+    expect(await worktreeSizeBytes(join(tmpdir(), 'cez-du-nope-does-not-exist-12345'))).toBeNull();
+  });
+});
+
+describe('createWorktree recovery (real git)', () => {
+  it('is idempotent when the task worktree is already registered', async () => {
+    const repo = await fixtureRepo('cez-worktree-idempotent-');
+    const runId = '11111111-1111-4111-8111-111111111111';
+
+    const first = await createWorktree(repo, runId, 'main');
+    const second = await createWorktree(repo, runId, 'main');
+
+    expect(second).toEqual(first);
+    const listed = await run('git', ['worktree', 'list', '--porcelain'], { cwd: repo });
+    expect(listed.stdout.match(new RegExp(`branch refs/heads/${branchFor(runId)}`, 'g'))).toHaveLength(1);
+  });
+
+  it('reattaches a surviving task branch after its worktree directory is deleted', async () => {
+    const repo = await fixtureRepo('cez-worktree-reattach-');
+    const runId = '22222222-2222-4222-8222-222222222222';
+    const first = await createWorktree(repo, runId, 'main');
+    writeFileSync(join(first.path, 'progress.txt'), 'preserved\n');
+    await run('git', ['add', '-A'], { cwd: first.path });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'task progress'], { cwd: first.path });
+
+    rmSync(first.path, { recursive: true, force: true });
+    await run('git', ['worktree', 'prune'], { cwd: repo });
+
+    const recovered = await createWorktree(repo, runId, 'main');
+    const log = await run('git', ['log', '-1', '--format=%s'], { cwd: recovered.path });
+    expect(recovered.path).toBe(first.path);
+    expect(log.stdout.trim()).toBe('task progress');
+    expect(() => writeFileSync(join(recovered.path, 'still-usable.txt'), 'yes\n')).not.toThrow();
+  });
+
+  it('preserves an unregistered non-empty managed path instead of deleting it', async () => {
+    const repo = await fixtureRepo('cez-worktree-preserve-');
+    const runId = '33333333-3333-4333-8333-333333333333';
+    const path = join(repo, '.ai/cezar/worktrees', runId);
+    const marker = join(path, 'uncommitted.txt');
+    mkdirSync(path, { recursive: true });
+    writeFileSync(marker, 'do not delete\n');
+
+    await expect(createWorktree(repo, runId, 'main')).rejects.toThrow(
+      'managed worktree path already exists and could not be repaired',
+    );
+    expect(readFileSync(marker, 'utf8')).toBe('do not delete\n');
   });
 });
 

@@ -25,6 +25,14 @@ const configSchema = z.object({
   /** How many tasks may run at once (spec 006). Non-git dirs always run 1. */
   maxParallel: z.number().int().min(1).max(16).default(2),
   /**
+   * Count-based worktree retention (#483): keep the last N *finished*
+   * worktrees materialized on disk; reclaim older ones (directory only — the
+   * `cez/<id8>` branch is kept, so the work stays recoverable). 0 = unlimited
+   * (never auto-reclaim). Default 10. `.catch(10)` keeps it additive-safe: a
+   * bad value degrades to the default instead of discarding the rest.
+   */
+  worktreeRetention: z.number().int().min(0).max(1000).default(10).catch(10),
+  /**
    * Per-task memory ceiling in MiB (whole process tree). When a running task's
    * RSS crosses this the engine pauses it with a warning and lets the queue
    * advance (#memory-guard). 0 / unset = no limit. `.catch(undefined)` keeps
@@ -39,6 +47,18 @@ const configSchema = z.object({
   defaultRunner: z.enum(['claude', 'codex', 'opencode']).default('claude'),
   /** Model for the chain planner (spec 008) — cheap but reliable at JSON. */
   plannerModel: z.string().min(1).default('sonnet'),
+  /** Model for the task namer (spec 2026-07-17-task-auto-naming) — the cheapest
+   *  alias that answers strict JSON; naming is fire-and-forget and never blocks. */
+  namerModel: z.string().min(1).default('haiku'),
+  /** Live title updates: refresh the display title through the namer on each
+   *  turn end. Absent = the `CEZ_TITLE_UPDATES` env decides (default ON — owner
+   *  decision on PR #479). */
+  liveTitleUpdates: z.boolean().optional(),
+  /** Optional diff-first review gate (#489): when a successful run with changes
+   *  should park at `review` for a human. Absent = the `CEZ_REVIEW_GATE` env
+   *  decides (default OFF — the deliberate inverse of `liveTitleUpdates`).
+   *  Autonomous runs always skip the gate regardless of this. */
+  reviewGate: z.boolean().optional(),
   /**
    * Branch task worktrees fork from and draft PRs target (e.g. `develop`).
    * Unset = the branch currently checked out. Settable from the Repo tab.

@@ -75,3 +75,10 @@ The created tier always wins. Both fields are additive and optional — old
   subject PR. If discovery-by-reference proves too fuzzy, that is the next
   step; the two-tier record model already accommodates it (the declaration
   would simply write the referenced tier).
+
+> **That next step landed (2026-07-18):** discovery-by-reference did prove too
+> fuzzy (wrong-chip reports, e.g. #777 on an issue-#500 task). Spec
+> `2026-07-18-task-ref-markers.md` adds the in-band `CEZ:PR=<n>` declaration;
+> when present it owns the referenced tier's resolution (a candidate URL must
+> end in the declared number). The created tier and this spec's janitor rules
+> are unchanged for runs without markers.

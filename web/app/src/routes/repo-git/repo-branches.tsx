@@ -8,7 +8,7 @@ import type { GithubItem, RepoInfo, RepoResponse } from '@/api/types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { toast } from '@/components/ui/toaster'
-import { cn } from '@/lib/utils'
+import { cn, isHttpUrl } from '@/lib/utils'
 
 /**
  * The repo view's Branches segment (R5 Step 1.7): the branch list `GET /api/repo` already
@@ -178,19 +178,25 @@ function ForgePullRequests() {
 }
 
 function PullRequestRow({ pr }: { pr: GithubItem }) {
+  const inner = (
+    <>
+      <GitPullRequestIcon aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
+      <span className="shrink-0 font-mono text-[11px] text-muted-foreground">#{pr.number}</span>
+      <span className="min-w-0 flex-1 truncate text-[13px]">{pr.title}</span>
+      {pr.checks ? <ChecksBadge checks={pr.checks} /> : null}
+    </>
+  )
+  const rowClass = 'flex min-w-0 items-center gap-2 rounded-sm px-1.5 py-2'
   return (
     <li data-slot="pr-row" data-number={pr.number}>
-      <a
-        href={pr.url}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="flex min-w-0 items-center gap-2 rounded-sm px-1.5 py-2 hover:bg-muted"
-      >
-        <GitPullRequestIcon aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
-        <span className="shrink-0 font-mono text-[11px] text-muted-foreground">#{pr.number}</span>
-        <span className="min-w-0 flex-1 truncate text-[13px]">{pr.title}</span>
-        {pr.checks ? <ChecksBadge checks={pr.checks} /> : null}
-      </a>
+      {/* href protocol guard (#431): link only for http(s) URLs, else inert row. */}
+      {isHttpUrl(pr.url) ? (
+        <a href={pr.url} target="_blank" rel="noopener noreferrer" className={cn(rowClass, 'hover:bg-muted')}>
+          {inner}
+        </a>
+      ) : (
+        <span className={rowClass}>{inner}</span>
+      )}
     </li>
   )
 }

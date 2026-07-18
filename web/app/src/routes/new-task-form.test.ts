@@ -8,7 +8,6 @@ import {
   MODELS_BY_RUNNER,
   modelsForRunner,
   pushRecentSource,
-  recentSkillNames,
   resolveModel,
   resolveRunner,
   resolveSource,
@@ -196,6 +195,16 @@ describe('buildCreateRunBody — the exact POST /api/runs payloads legacy sends'
     expect(variant.worktree).toBeUndefined()
   })
 
+  it('generateFollowups=false is sent only when follow-up generation is disabled', () => {
+    const base = {
+      task: 't', source: { source: 'skill' as const, ref: 'om-review' }, model: '',
+      runner: 'claude' as const, runnerCount: 1, variants: 1, images: [],
+    }
+    expect(buildCreateRunBody({ ...base, generateFollowups: false }).generateFollowups).toBe(false)
+    expect(buildCreateRunBody({ ...base, generateFollowups: true }).generateFollowups).toBeUndefined()
+    expect(buildCreateRunBody(base).generateFollowups).toBeUndefined()
+  })
+
   it('variants > 1 and images ride along; ×1 and no images are omitted', () => {
     const body = buildCreateRunBody({
       task: 't', source: { source: 'workflow', ref: 'quick-task' }, model: '',
@@ -219,7 +228,7 @@ describe('startedRunPath (legacy handleStarted: select the first run)', () => {
   })
 })
 
-describe('pushRecentSource / recentSkillNames (recency, #picker)', () => {
+describe('pushRecentSource (recency, #picker)', () => {
   const s = (ref: string, source: TaskSource['source'] = 'skill'): TaskSource => ({ source, ref })
 
   it('prepends newest and dedups the same source+ref', () => {
@@ -242,10 +251,5 @@ describe('pushRecentSource / recentSkillNames (recency, #picker)', () => {
 
   it('handles an undefined starting list', () => {
     expect(pushRecentSource(undefined, s('a'))).toEqual([s('a')])
-  })
-
-  it('recentSkillNames keeps only skill refs, in order', () => {
-    expect(recentSkillNames([s('a'), s('w', 'workflow'), s('b')])).toEqual(['a', 'b'])
-    expect(recentSkillNames(undefined)).toEqual([])
   })
 })
