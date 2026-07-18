@@ -1,24 +1,40 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useState } from 'react'
 
 import { reclaimWorktrees, removeRunWorktree } from '@/api/client'
 import { queryKeys, useWorktrees } from '@/api/queries'
 import type { WorktreeInfo } from '@/api/types'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { toast } from '@/components/ui/toaster'
 import { formatMem } from '@/lib/tasks-table'
 import { shortAge } from '@/lib/format'
+
+/** What the confirm dialog is about — a bulk reclaim, or one row's delete. */
+type Confirming = { kind: 'reclaim' } | { kind: 'delete'; runId: string; title: string } | null
 
 /**
  * Settings → Resources: the worktrees management panel (#483). Lists every task
  * worktree materialized on disk with its size, age and retention state; a
  * per-row Delete (reclaims the directory AND branch, the spec-006 route), a
  * footer with the total disk used and the keep-limit, and a "Reclaim now" button
- * that runs the count-based enforcer immediately. Live-updates through the global
- * event stream (queryKeys.worktrees is invalidated on run/reclaim).
+ * that runs the count-based enforcer immediately. Both destructive actions
+ * confirm through the design-system AlertDialog (native confirm() is banned).
+ * Live-updates through the global event stream (queryKeys.worktrees).
  */
 export function WorktreesPanel() {
   const worktrees = useWorktrees()
   const queryClient = useQueryClient()
+  const [confirming, setConfirming] = useState<Confirming>(null)
   const refresh = () => queryClient.invalidateQueries({ queryKey: queryKeys.worktrees })
 
   const reclaim = useMutation({
@@ -61,6 +77,12 @@ export function WorktreesPanel() {
   const { worktrees: rows, totalBytes, keep } = worktrees.data
   const busy = reclaim.isPending || remove.isPending
 
+  const runConfirmed = () => {
+    if (confirming?.kind === 'reclaim') reclaim.mutate()
+    else if (confirming?.kind === 'delete') remove.mutate(confirming.runId)
+    setConfirming(null)
+  }
+
   return (
     <div data-slot="worktrees-panel" className="flex flex-col gap-3">
       {rows.length === 0 ? (
@@ -86,11 +108,7 @@ export function WorktreesPanel() {
                   key={w.runId}
                   worktree={w}
                   disabled={busy}
-                  onDelete={() => {
-                    if (window.confirm(`Delete the worktree and branch for “${w.title}”? This cannot be undone.`)) {
-                      remove.mutate(w.runId)
-                    }
-                  }}
+                  onDelete={() => setConfirming({ kind: 'delete', runId: w.runId, title: w.title })}
                 />
               ))}
             </tbody>
@@ -111,15 +129,44 @@ export function WorktreesPanel() {
           size="sm"
           data-action="worktrees-reclaim-now"
           disabled={busy}
-          onClick={() => {
-            if (window.confirm('Reclaim finished worktrees beyond the keep-limit? Their branches are kept, so the work stays recoverable.')) {
-              reclaim.mutate()
-            }
-          }}
+          onClick={() => setConfirming({ kind: 'reclaim' })}
         >
           Reclaim now
         </Button>
       </div>
+
+      <AlertDialog open={confirming !== null} onOpenChange={(open) => !open && setConfirming(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {confirming?.kind === 'delete' ? 'Delete this worktree?' : 'Reclaim old worktrees?'}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {confirming?.kind === 'delete' ? (
+                <>
+                  This removes the worktree directory and its branch — the local-only work is not
+                  recoverable afterwards.
+                  <span className="mt-1 block truncate font-medium text-foreground" title={confirming.title}>
+                    {confirming.title}
+                  </span>
+                </>
+              ) : (
+                'Finished worktrees beyond the keep-limit are reclaimed now (directory only). Their branches are kept, so the work stays recoverable.'
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep it</AlertDialogCancel>
+            <AlertDialogAction
+              data-action="worktrees-confirm"
+              className={confirming?.kind === 'delete' ? 'bg-danger text-danger-foreground hover:brightness-[0.96]' : undefined}
+              onClick={runConfirmed}
+            >
+              {confirming?.kind === 'delete' ? 'Delete' : 'Reclaim now'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

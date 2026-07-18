@@ -1,6 +1,6 @@
 import { QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
 import type { WorktreesResponse } from '@/api/types'
@@ -44,10 +44,7 @@ function renderPanel() {
 
 const rows = () => document.querySelectorAll('[data-slot="worktree-row"]')
 const posts = (match: RegExp) => requests.filter((r) => r.method === 'POST' && match.test(r.url))
-
-beforeEach(() => {
-  vi.spyOn(window, 'confirm').mockReturnValue(true)
-})
+const confirmButton = () => document.querySelector<HTMLButtonElement>('[data-action="worktrees-confirm"]')
 
 afterEach(() => {
   act(() => resetToasts())
@@ -93,29 +90,35 @@ describe('Settings → Resources: worktrees panel (#483)', () => {
     expect(document.querySelector('[data-slot="worktrees-footer"]')?.textContent).toContain('size unavailable')
   })
 
-  it('Delete calls the per-run remove-worktree route (after confirm)', async () => {
+  it('Delete calls the per-run remove-worktree route (after confirming the dialog)', async () => {
     serve(sample)
     renderPanel()
     await waitFor(() => expect(rows()).toHaveLength(2))
     fireEvent.click(document.querySelector('[data-action="worktree-delete"]')!)
+    await waitFor(() => expect(confirmButton()).not.toBeNull())
+    fireEvent.click(confirmButton()!)
     await waitFor(() => expect(posts(/\/remove-worktree$/)).toHaveLength(1))
   })
 
-  it('Reclaim now calls the reclaim route (after confirm)', async () => {
+  it('Reclaim now calls the reclaim route (after confirming the dialog)', async () => {
     serve(sample)
     renderPanel()
     await waitFor(() => expect(rows()).toHaveLength(2))
     fireEvent.click(document.querySelector('[data-action="worktrees-reclaim-now"]')!)
+    await waitFor(() => expect(confirmButton()).not.toBeNull())
+    fireEvent.click(confirmButton()!)
     await waitFor(() => expect(posts(/\/api\/worktrees\/reclaim$/)).toHaveLength(1))
   })
 
-  it('does not call the route when confirm is declined', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(false)
+  it('does not call the route when the confirm dialog is dismissed', async () => {
     serve(sample)
     renderPanel()
     await waitFor(() => expect(rows()).toHaveLength(2))
     fireEvent.click(document.querySelector('[data-action="worktrees-reclaim-now"]')!)
-    fireEvent.click(document.querySelector('[data-action="worktree-delete"]')!)
+    await waitFor(() => expect(confirmButton()).not.toBeNull())
+    // "Keep it" (AlertDialogCancel) closes without acting.
+    fireEvent.click(document.querySelector('[data-slot="alert-dialog-cancel"]')!)
+    await waitFor(() => expect(confirmButton()).toBeNull())
     expect(posts(/reclaim$|remove-worktree$/)).toHaveLength(0)
   })
 
