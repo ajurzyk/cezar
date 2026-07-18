@@ -9,6 +9,7 @@ import { createWorktree } from '../git-worktree.js';
 import { RunStore } from '../runs/store.js';
 import type { RunManager } from '../workflows/run.js';
 import { createApp } from './server.js';
+import { apiRequest } from './loopback-request.testkit.js';
 
 const run = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
@@ -53,7 +54,7 @@ describe('the worktrees API', () => {
 
   const getWorktrees = async () =>
     (await (
-      await app.request('/api/worktrees')
+      await apiRequest(app, '/api/worktrees')
     ).json()) as {
       worktrees: Array<{
         runId: string;
@@ -99,7 +100,7 @@ describe('the worktrees API', () => {
     const oldId = await seed('44444444-4444-4444-8444-444444444444', 'done', '2026-07-01T00:00:00Z');
     await seed('55555555-5555-4555-8555-555555555555', 'done', '2026-07-09T00:00:00Z');
 
-    const res = await app.request('/api/worktrees/reclaim', {
+    const res = await apiRequest(app, '/api/worktrees/reclaim', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: '{}',
@@ -114,7 +115,7 @@ describe('the worktrees API', () => {
   });
 
   it('POST /reclaim is a 200 no-op on empty state', async () => {
-    const res = await app.request('/api/worktrees/reclaim', { method: 'POST' });
+    const res = await apiRequest(app, '/api/worktrees/reclaim', { method: 'POST' });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ reclaimed: [] });
   });

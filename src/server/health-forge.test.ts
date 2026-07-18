@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { RunStore } from '../runs/store.js';
 import type { RunManager } from '../workflows/run.js';
 import { createApp, type ServerDeps } from './server.js';
+import { apiRequest } from './loopback-request.testkit.js';
 
 /**
  * Deployment modes + forge seam (cockpit-ui redesign spec): `/api/health`
@@ -174,7 +175,8 @@ describe('POST /api/runs/:id/open-in-cli — hosted-mode defense in depth', () =
   });
 
   const post = (over: Partial<ServerDeps> = {}) =>
-    createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test', ...over }).request(
+    apiRequest(
+      createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test', ...over }),
       `/api/runs/${runId}/open-in-cli`,
       { method: 'POST' },
     );
@@ -203,7 +205,7 @@ describe('POST /api/runs/:id/open-in-cli — hosted-mode defense in depth', () =
   it('unknown runs still 404 first', async () => {
     process.env.CEZ_REMOTE = '1';
     const app = createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test' });
-    const res = await app.request('/api/runs/nope/open-in-cli', { method: 'POST' });
+    const res = await apiRequest(app, '/api/runs/nope/open-in-cli', { method: 'POST' });
     expect(res.status).toBe(404);
   });
 });
