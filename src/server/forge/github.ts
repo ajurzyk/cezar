@@ -6,6 +6,8 @@ import type {
   DraftPrInput,
   DraftPrOutcome,
   ForgeAvailability,
+  ForgeComment,
+  ForgeCommentsData,
   ForgeDriver,
   ForgeItem,
   ForgePrStatus,
@@ -321,6 +323,188 @@ function mockGithub(): GithubData {
       draft: '6a737d',
     },
   };
+}
+
+// ---- comment threads (#499 Phase 2) ----------------------------------------
+// A lazy per-thread fetch behind `GET /api/github/comments/:kind/:number`: the
+// conversation comments (issues endpoint — GitHub serves PR conversation
+// comments there too), plus submitted reviews for PRs, normalized into one
+// chronological `ForgeComment[]`. Its own bounded 60 s cache keeps an open
+// detail view from re-fetching on every focus. Degrades to `available: false`
+// exactly like the list fetch — never a 5xx.
+
+const ghCommentUser = z.object({ login: z.string(), avatar_url: z.string().nullish() }).nullish();
+const ghIssueCommentSchema = z.object({
+  id: z.number(),
+  user: ghCommentUser,
+  created_at: z.string(),
+  body: z.string().nullish(),
+  html_url: z.string(),
+});
+const ghReviewSchema = z.object({
+  id: z.number(),
+  user: ghCommentUser,
+  body: z.string().nullish(),
+  state: z.string(),
+  submitted_at: z.string().nullish(),
+  html_url: z.string(),
+});
+
+const REVIEW_STATE: Record<string, ForgeComment['reviewState']> = {
+  APPROVED: 'approved',
+  CHANGES_REQUESTED: 'changes_requested',
+  COMMENTED: 'commented',
+  DISMISSED: 'dismissed',
+};
+
+/** First 200 thread entries, then `truncated`; each body sliced to 8 000 chars (same cap as
+ *  item bodies). */
+export const THREAD_ENTRY_CAP = 200;
+const COMMENT_BODY_CAP = 8_000;
+
+/** `gh api …/issues/{n}/comments` JSON → `ForgeComment[]`. Exported for unit tests. */
+export function normalizeComments(raw: unknown): ForgeComment[] {
+  return z.array(ghIssueCommentSchema).parse(raw).map((c) => ({
+    id: c.id,
+    author: c.user?.login ?? '?',
+    avatarUrl: c.user?.avatar_url ?? undefined,
+    createdAt: c.created_at,
+    body: (c.body ?? '').slice(0, COMMENT_BODY_CAP),
+    kind: 'comment' as const,
+    url: c.html_url,
+  }));
+}
+
+/** `gh api …/pulls/{n}/reviews` JSON → `ForgeComment[]`. Reviews with an empty body AND state
+ *  COMMENTED/PENDING carry no signal in a flat thread and are dropped; the rest map to
+ *  `kind: 'review'` (Q4). Exported for unit tests. */
+export function normalizeReviews(raw: unknown): ForgeComment[] {
+  return z
+    .array(ghReviewSchema)
+    .parse(raw)
+    .filter((r) => {
+      const state = r.state.toUpperCase();
+      const emptyBody = (r.body ?? '').trim().length === 0;
+      return !(emptyBody && (state === 'COMMENTED' || state === 'PENDING'));
+    })
+    .map((r) => ({
+      id: r.id,
+      author: r.user?.login ?? '?',
+      avatarUrl: r.user?.avatar_url ?? undefined,
+      createdAt: r.submitted_at ?? '',
+      body: (r.body ?? '').slice(0, COMMENT_BODY_CAP),
+      kind: 'review' as const,
+      reviewState: REVIEW_STATE[r.state.toUpperCase()],
+      url: r.html_url,
+    }));
+}
+
+/** Merge comment/review lists chronologically (oldest first) and apply the entry cap. Exported
+ *  for unit tests. */
+export function mergeThread(
+  parts: ForgeComment[][],
+  cap = THREAD_ENTRY_CAP,
+): { comments: ForgeComment[]; truncated: boolean } {
+  const all = parts.flat().sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const truncated = all.length > cap;
+  return { comments: truncated ? all.slice(0, cap) : all, truncated };
+}
+
+// Per-thread cache: keyed `kind#number`, same 60 s TTL as the list cache but BOUNDED — a long
+// browsing session can't grow it without limit (Map preserves insertion order → oldest first).
+const commentsCache = new Map<string, { at: number; data: ForgeCommentsData }>();
+const COMMENTS_CACHE_MAX = 50;
+
+function cacheComments(key: string, data: ForgeCommentsData): void {
+  commentsCache.delete(key); // re-insert so this key becomes the newest
+  commentsCache.set(key, { at: Date.now(), data });
+  while (commentsCache.size > COMMENTS_CACHE_MAX) {
+    const oldest = commentsCache.keys().next().value;
+    if (oldest === undefined) break;
+    commentsCache.delete(oldest);
+  }
+}
+
+/** Test-only: drop the per-thread cache so cases don't leak state into each other. */
+export function __clearCommentsCacheForTests(): void {
+  commentsCache.clear();
+}
+
+/**
+ * The conversation thread for one issue/PR, lazily. `{owner}`/`{repo}` in the gh api paths are
+ * filled from the worktree's remote by gh itself, so no extra handle lookup. Everything degrades:
+ * gh missing/offline → `{ available: false, reason }`, a 404 → a "not found" hint — never a throw.
+ */
+export async function fetchGithubComments(
+  repoRoot: string,
+  kind: 'issue' | 'pr',
+  number: number,
+  refresh = false,
+): Promise<ForgeCommentsData> {
+  if (process.env.CEZ_DRY_RUN === '1') return mockGithubComments(kind);
+  const key = `${kind}#${number}`;
+  const hit = commentsCache.get(key);
+  if (!refresh && hit && Date.now() - hit.at < CACHE_MS) return hit.data;
+  try {
+    // PR conversation comments live on the issues endpoint too — always use it for the body thread.
+    const commentsOut = await gh(repoRoot, ['api', `repos/{owner}/{repo}/issues/${number}/comments`, '--paginate']);
+    const parts: ForgeComment[][] = [normalizeComments(JSON.parse(commentsOut))];
+    if (kind === 'pr') {
+      const reviewsOut = await gh(repoRoot, ['api', `repos/{owner}/{repo}/pulls/${number}/reviews`, '--paginate']);
+      parts.push(normalizeReviews(JSON.parse(reviewsOut)));
+    }
+    const { comments, truncated } = mergeThread(parts);
+    const data: ForgeCommentsData = { available: true, comments, truncated: truncated || undefined };
+    cacheComments(key, data);
+    return data;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const reason = /ENOENT/.test(message)
+      ? 'gh CLI not found — install it and run `gh auth login`'
+      : /404|not found/i.test(message)
+        ? 'not found on GitHub — it may be closed or deleted'
+        : firstLine(message);
+    return { available: false, reason, comments: [] };
+  }
+}
+
+/** CEZ_DRY_RUN=1 — a small fixed thread (one image-bearing comment, plus a review for PRs) so
+ *  the whole feature is demoable and e2e-testable offline. */
+function mockGithubComments(kind: 'issue' | 'pr'): ForgeCommentsData {
+  const base = Date.now() - 3_600_000;
+  const at = (offset: number) => new Date(base + offset).toISOString();
+  const comments: ForgeComment[] = [
+    {
+      id: 1,
+      author: 'ada',
+      avatarUrl: 'https://avatars.githubusercontent.com/u/1?v=4',
+      createdAt: at(0),
+      body: 'Thanks for the report — I can reproduce. Which browser were you on?\n\n```\nchrome 126, macOS\n```',
+      kind: 'comment',
+      url: 'https://github.com/mock/repo/issues/1#issuecomment-1',
+    },
+    {
+      id: 2,
+      author: 'lin',
+      createdAt: at(600_000),
+      body: 'Here is the failing screen:\n\n![failure](https://avatars.githubusercontent.com/u/2?v=4)',
+      kind: 'comment',
+      url: 'https://github.com/mock/repo/issues/1#issuecomment-2',
+    },
+  ];
+  if (kind === 'pr') {
+    comments.push({
+      id: 3,
+      author: 'grace',
+      avatarUrl: 'https://avatars.githubusercontent.com/u/3?v=4',
+      createdAt: at(1_200_000),
+      body: 'Looks good overall — please add a regression test before this lands.',
+      kind: 'review',
+      reviewState: 'changes_requested',
+      url: 'https://github.com/mock/repo/pull/1#pullrequestreview-3',
+    });
+  }
+  return { available: true, comments };
 }
 
 // ---- draft-PR creation (review gate, spec 009) ------------------------------

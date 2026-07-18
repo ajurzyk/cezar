@@ -492,6 +492,27 @@ export interface GithubData {
   labelColors?: Record<string, string>
 }
 
+/** One comment or PR review summary in an issue/PR thread (`GET /api/github/comments/…`, #499). */
+export interface GithubComment {
+  id: number
+  author: string
+  avatarUrl?: string
+  createdAt: string
+  body: string
+  kind: 'comment' | 'review'
+  reviewState?: 'approved' | 'changes_requested' | 'commented' | 'dismissed'
+  url: string
+}
+
+/** `GET /api/github/comments/:kind/:number` — degrades to `{ available: false, reason }` like the
+ *  list fetch, never an error. */
+export interface GithubCommentsData {
+  available: boolean
+  reason?: string
+  comments: GithubComment[]
+  truncated?: boolean
+}
+
 // ---- GUI prefs (`PUT /api/ui-state`) -----------------------------------------------------------
 
 /** The keys the server's schema names. It is a passthrough schema, so unknown keys round-trip

@@ -47,7 +47,7 @@ import { reviewGateEnabled } from '../runs/review-gate.js';
 import { readUiState, uiStatePath } from '../ui-state.js';
 import { resolveCapabilities } from './capabilities.js';
 import { resolveForge } from './forge/index.js';
-import { fetchGithub } from './github.js';
+import { fetchGithub, fetchGithubComments } from './github.js';
 import { ensureLaunchKey } from './launch-key.js';
 import { openInTerminal } from './open-in-terminal.js';
 import { agentCliRunner, detectOpenTargets, openInApp } from './open-in-app.js';
@@ -1232,6 +1232,21 @@ export function createApp(deps: ServerDeps): Hono {
     const limit = Number.parseInt(c.req.query('limit') ?? '', 10);
     return c.json(
       await fetchGithub(repoRoot, c.req.query('refresh') === '1', Number.isFinite(limit) ? limit : 30),
+    );
+  });
+
+  // The full comment thread for one issue/PR (#499). Additive sibling of /api/github — lazy
+  // (fetched only while a detail view is open), zod-validated params, 400 on garbage, and the
+  // same in-payload availability degrade (gh missing / offline / 404 all render as a hint).
+  const commentsParams = z.object({
+    kind: z.enum(['issue', 'pr']),
+    number: z.coerce.number().int().positive(),
+  });
+  app.get('/api/github/comments/:kind/:number', async (c) => {
+    const parsed = commentsParams.safeParse({ kind: c.req.param('kind'), number: c.req.param('number') });
+    if (!parsed.success) return c.json({ error: 'invalid kind or number' }, 400);
+    return c.json(
+      await fetchGithubComments(repoRoot, parsed.data.kind, parsed.data.number, c.req.query('refresh') === '1'),
     );
   });
 

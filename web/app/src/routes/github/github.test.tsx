@@ -4,7 +4,7 @@ import { MemoryRouter, Route, Routes } from 'react-router'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
-import type { GithubData, GithubItem, Skill, WorkflowsResponse } from '@/api/types'
+import type { GithubComment, GithubCommentsData, GithubData, GithubItem, Skill, WorkflowsResponse } from '@/api/types'
 import { Toaster, resetToasts } from '@/components/ui/toaster'
 
 import { GithubIndexRoute, GithubRoute } from './github'
@@ -81,6 +81,38 @@ const GITHUB: GithubData = {
   prs: [PR_137],
 }
 
+const COMMENT_TEXT: GithubComment = {
+  id: 1,
+  author: 'maya',
+  avatarUrl: 'https://avatars.githubusercontent.com/u/1?v=4',
+  createdAt: '2026-07-12T08:00:00.000Z',
+  body: 'Confirmed on my end too — nice catch.',
+  kind: 'comment',
+  url: 'https://github.com/acme/demo/issues/142#issuecomment-1',
+}
+
+const COMMENT_IMAGE: GithubComment = {
+  id: 2,
+  author: 'noAvatar',
+  createdAt: '2026-07-12T09:00:00.000Z',
+  body: 'Screenshot:\n\n![shot](https://example.com/shot.png)',
+  kind: 'comment',
+  url: 'https://github.com/acme/demo/issues/142#issuecomment-2',
+}
+
+const REVIEW_CHANGES: GithubComment = {
+  id: 3,
+  author: 'rev',
+  avatarUrl: 'https://avatars.githubusercontent.com/u/3?v=4',
+  createdAt: '2026-07-12T10:00:00.000Z',
+  body: 'Please add a test.',
+  kind: 'review',
+  reviewState: 'changes_requested',
+  url: 'https://github.com/acme/demo/pull/137#pullrequestreview-3',
+}
+
+const THREAD: GithubCommentsData = { available: true, comments: [COMMENT_TEXT, COMMENT_IMAGE] }
+
 const WORKFLOWS: WorkflowsResponse = {
   workflows: [
     { name: 'quick-task', description: 'one step', steps: [], source: 'built-in' },
@@ -117,6 +149,9 @@ function stubFetch(overrides: Record<string, () => Response> = {}): SentRequest[
       sent.push({ path, method, body: typeof init.body === 'string' ? JSON.parse(init.body) : undefined })
       const override = overrides[`${method} ${path}`]
       if (override) return override()
+      // Any comment-thread request defaults to the two-comment THREAD fixture; a test overrides a
+      // specific `GET /api/github/comments/<kind>/<n>` key to serve a different thread.
+      if (method === 'GET' && path.startsWith('/api/github/comments/')) return jsonResponse(THREAD)
       if (method === 'GET' && path === '/api/github') return jsonResponse(GITHUB)
       if (method === 'GET' && path === '/api/github?limit=1000') return jsonResponse(GITHUB)
       if (method === 'GET' && path === '/api/workflows') return jsonResponse(WORKFLOWS)
@@ -387,6 +422,93 @@ describe('the GitHub detail pane', () => {
         'Repro: log in, hit reload',
       ),
     )
+  })
+})
+
+// ---- comment thread (#499) --------------------------------------------------------------------
+
+describe('the comment thread', () => {
+  const thread = (kind: 'issue' | 'pr', n: number, data: GithubCommentsData) => ({
+    [`GET /api/github/comments/${kind}/${n}`]: () => jsonResponse(data),
+  })
+  const threadSection = () => document.querySelector('[data-slot="gh-thread"]')
+  const entries = () => [...document.querySelectorAll<HTMLElement>('[data-slot="gh-thread-entry"]')]
+
+  it('renders a "Comments · N" section with each body through the markdown pipeline', async () => {
+    stubFetch(thread('issue', 142, { available: true, comments: [COMMENT_TEXT, COMMENT_IMAGE] }))
+    renderAt('/github/issues/142')
+
+    await waitFor(() => expect(threadSection()).not.toBeNull())
+    expect(document.querySelector('[data-slot="gh-thread-header"]')?.textContent).toBe('Comments · 2')
+    expect(entries()).toHaveLength(2)
+    expect(entries()[0]?.textContent).toContain('maya')
+    expect(entries()[0]?.querySelector('[data-slot="gh-thread-body"]')?.textContent).toContain(
+      'Confirmed on my end too',
+    )
+  })
+
+  it('renders an image comment as an <img> through the shared Markdown component', async () => {
+    stubFetch(thread('issue', 142, { available: true, comments: [COMMENT_IMAGE] }))
+    renderAt('/github/issues/142')
+
+    await waitFor(() => expect(threadSection()).not.toBeNull())
+    const img = document.querySelector<HTMLImageElement>('[data-slot="gh-thread-body"] img')
+    expect(img?.getAttribute('src')).toBe('https://example.com/shot.png')
+  })
+
+  it('renders nothing for an empty thread — the count badge already said there were none', async () => {
+    stubFetch(thread('issue', 139, { available: true, comments: [] }))
+    renderAt('/github/issues/139')
+
+    await waitFor(() => expect(detail()?.textContent).toContain('Add --json flag'))
+    expect(threadSection()).toBeNull()
+    expect(document.querySelector('[data-slot="gh-thread-error"]')).toBeNull()
+  })
+
+  it('shows a one-line reason + open-on-GitHub link when the thread is unavailable', async () => {
+    stubFetch(thread('issue', 142, { available: false, reason: 'gh not installed', comments: [] }))
+    renderAt('/github/issues/142')
+
+    await waitFor(() => expect(document.querySelector('[data-slot="gh-thread-error"]')).not.toBeNull())
+    const error = document.querySelector('[data-slot="gh-thread-error"]')!
+    expect(error.textContent).toContain('gh not installed')
+    expect(error.querySelector('a')?.getAttribute('href')).toBe(ISSUE_142.url)
+  })
+
+  it('renders a review entry with a state chip (green/red tone tables)', async () => {
+    stubFetch(thread('pr', 137, { available: true, comments: [COMMENT_TEXT, REVIEW_CHANGES] }))
+    renderAt('/github/prs/137')
+
+    await waitFor(() => expect(entries()).toHaveLength(2))
+    const review = document.querySelector('[data-slot="gh-thread-entry"][data-kind="review"]')
+    const chip = review?.querySelector('[data-slot="gh-review-chip"]')
+    expect(chip?.getAttribute('data-review-state')).toBe('changes_requested')
+    expect(chip?.textContent).toBe('changes requested')
+    expect(chip?.className).toContain('text-danger')
+  })
+
+  it('uses the real avatar when present and a letter fallback when absent', async () => {
+    stubFetch(thread('issue', 142, { available: true, comments: [COMMENT_TEXT, COMMENT_IMAGE] }))
+    renderAt('/github/issues/142')
+
+    await waitFor(() => expect(entries()).toHaveLength(2))
+    // COMMENT_TEXT has an avatarUrl → an <img>; COMMENT_IMAGE has none → a letter block.
+    expect(entries()[0]?.querySelector('[data-slot="gh-avatar"]')?.getAttribute('src')).toBe(
+      COMMENT_TEXT.avatarUrl,
+    )
+    const fallback = entries()[1]?.querySelector('[data-slot="gh-avatar-fallback"]')
+    expect(fallback).not.toBeNull()
+    expect(fallback?.textContent).toBe('n') // first letter of "noAvatar"
+  })
+
+  it('shows a truncation row linking to GitHub when the thread was trimmed', async () => {
+    stubFetch(thread('issue', 142, { available: true, comments: [COMMENT_TEXT], truncated: true }))
+    renderAt('/github/issues/142')
+
+    await waitFor(() => expect(threadSection()).not.toBeNull())
+    const trunc = document.querySelector('[data-slot="gh-thread-truncated"]')
+    expect(trunc?.textContent).toContain('thread truncated')
+    expect(trunc?.getAttribute('href')).toBe(ISSUE_142.url)
   })
 })
 

@@ -2,10 +2,15 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   fetchCommentCounts,
   ghCheckRunSchema,
+  mergeThread,
+  normalizeComments,
+  normalizeReviews,
   parseCountsPage,
   parseOwnerName,
   rollupToChecks,
+  THREAD_ENTRY_CAP,
 } from './github.js';
+import type { ForgeComment } from './types.js';
 
 /** `rollupToChecks` collapses a `gh … --json statusCheckRollup` array — already zod-validated
  *  via `ghCheckRunSchema` at the call site — down to the single enum the GitHub tab renders,
@@ -192,5 +197,108 @@ describe('fetchCommentCounts', () => {
       throw new Error('rate limited');
     });
     expect(await fetchCommentCounts(runGraphql, 'o', 'n')).toEqual({ issues: {}, prs: {} });
+  });
+});
+
+/** Comment threads (#499 Phase 2): the pure normalize/merge seam behind
+ *  `GET /api/github/comments/:kind/:number`. The `gh`-shelling in `fetchGithubComments` isn't
+ *  unit-tested (it degrades on any failure and is covered by the route + component tests); the
+ *  transforms below carry the real logic — review filtering, chronological merge, and caps. */
+
+describe('normalizeComments', () => {
+  it('maps gh issue-comment JSON into ForgeComment, capping the body and defaulting the author', () => {
+    const [c] = normalizeComments([
+      {
+        id: 7,
+        user: { login: 'ada', avatar_url: 'https://a/1.png' },
+        created_at: '2026-07-01T00:00:00Z',
+        body: 'hi',
+        html_url: 'https://gh/1',
+      },
+    ]);
+    expect(c).toEqual({
+      id: 7,
+      author: 'ada',
+      avatarUrl: 'https://a/1.png',
+      createdAt: '2026-07-01T00:00:00Z',
+      body: 'hi',
+      kind: 'comment',
+      url: 'https://gh/1',
+    });
+  });
+
+  it('falls back to "?" when gh omits the user and to "" for a null body', () => {
+    const [c] = normalizeComments([{ id: 1, user: null, created_at: 't', body: null, html_url: 'u' }]);
+    expect(c?.author).toBe('?');
+    expect(c?.body).toBe('');
+    expect(c?.avatarUrl).toBeUndefined();
+  });
+
+  it('slices an over-long body to 8 000 chars', () => {
+    const [c] = normalizeComments([
+      { id: 1, user: { login: 'x' }, created_at: 't', body: 'a'.repeat(9_000), html_url: 'u' },
+    ]);
+    expect(c?.body).toHaveLength(8_000);
+  });
+});
+
+describe('normalizeReviews', () => {
+  const review = (state: string, body: string | null) => ({
+    id: 1,
+    user: { login: 'rev' },
+    body,
+    state,
+    submitted_at: '2026-07-02T00:00:00Z',
+    html_url: 'https://gh/r',
+  });
+
+  it('keeps APPROVED / CHANGES_REQUESTED even with an empty body (the state is the signal)', () => {
+    expect(normalizeReviews([review('APPROVED', '')])).toHaveLength(1);
+    expect(normalizeReviews([review('CHANGES_REQUESTED', null)])).toHaveLength(1);
+    expect(normalizeReviews([review('APPROVED', '')])[0]).toMatchObject({
+      kind: 'review',
+      reviewState: 'approved',
+    });
+  });
+
+  it('drops empty-body COMMENTED and PENDING reviews (no signal in a flat thread)', () => {
+    expect(normalizeReviews([review('COMMENTED', '  ')])).toHaveLength(0);
+    expect(normalizeReviews([review('PENDING', '')])).toHaveLength(0);
+  });
+
+  it('keeps a COMMENTED review that carries a body', () => {
+    const out = normalizeReviews([review('COMMENTED', 'a note')]);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ kind: 'review', reviewState: 'commented', body: 'a note' });
+  });
+});
+
+describe('mergeThread', () => {
+  const at = (iso: string, over: Partial<ForgeComment> = {}): ForgeComment => ({
+    id: 1,
+    author: 'a',
+    createdAt: iso,
+    body: '',
+    kind: 'comment',
+    url: 'u',
+    ...over,
+  });
+
+  it('merges lists and sorts oldest-first by createdAt', () => {
+    const { comments, truncated } = mergeThread([
+      [at('2026-07-03T00:00:00Z', { id: 3 })],
+      [at('2026-07-01T00:00:00Z', { id: 1 }), at('2026-07-02T00:00:00Z', { id: 2 })],
+    ]);
+    expect(comments.map((c) => c.id)).toEqual([1, 2, 3]);
+    expect(truncated).toBe(false);
+  });
+
+  it('caps at the entry limit and flags truncation', () => {
+    const many = Array.from({ length: THREAD_ENTRY_CAP + 5 }, (_, i) =>
+      at(`2026-07-01T00:00:${String(i).padStart(2, '0')}Z`, { id: i }),
+    );
+    const { comments, truncated } = mergeThread([many], THREAD_ENTRY_CAP);
+    expect(comments).toHaveLength(THREAD_ENTRY_CAP);
+    expect(truncated).toBe(true);
   });
 });
