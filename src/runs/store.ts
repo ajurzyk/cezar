@@ -92,6 +92,11 @@ const runRecordSchema = z.object({
   branch: z.string().optional(),
   /** Branch (or commit, when HEAD was detached) the worktree was forked from. */
   baseBranch: z.string().optional(),
+  /** Set when count-based retention (#483) reclaimed this run's worktree
+   *  *directory* (the `cez/<id8>` branch is kept). Presence means "materialized
+   *  dir gone, recoverable via `git worktree add`"; it excludes the run from the
+   *  retention budget until the dir is re-materialized (resume clears it). */
+  worktreeReclaimedAt: z.string().optional(),
   /** Parallel variants (spec 010): tasks sharing a groupId are one group. */
   groupId: z.string().optional(),
   /** Variant letter within the group — 'A' | 'B' | 'C' (kept as a string). */
