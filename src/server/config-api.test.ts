@@ -58,6 +58,7 @@ describe('the config API', () => {
       memoryLimitMb: null,
       worktreeRetention: 10,
       liveTitleUpdates: null,
+      reviewGate: null,
     });
   });
 
@@ -115,6 +116,7 @@ describe('the config API', () => {
       memoryLimitMb: null,
       worktreeRetention: 10,
       liveTitleUpdates: null,
+      reviewGate: null,
     });
   });
 
@@ -188,5 +190,49 @@ describe('liveTitleUpdates round-trip (task auto-naming spec)', () => {
     const cleared = (await (await put({ liveTitleUpdates: null })).json()) as Record<string, unknown>;
     expect(cleared.liveTitleUpdates).toBeNull();
     expect(rawFile().liveTitleUpdates).toBeUndefined();
+  });
+});
+
+describe('reviewGate round-trip (optional review gate, #489)', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  let app: Hono;
+
+  beforeEach(() => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-configapi-gate-'));
+    mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    app = createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test' });
+  });
+
+  afterEach(() => {
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  const put = (body: unknown) =>
+    app.request('/api/config', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  const rawFile = () =>
+    JSON.parse(readFileSync(join(repoRoot, '.ai/cezar', 'config.json'), 'utf8')) as Record<string, unknown>;
+
+  it('GET exposes reviewGate; PUT true/false/null round-trips and clears the raw key', async () => {
+    // Default (no config key) is null — the CEZ_REVIEW_GATE env (OFF) decides.
+    expect(((await (await app.request('/api/config')).json()) as Record<string, unknown>).reviewGate).toBeNull();
+
+    const on = (await (await put({ reviewGate: true })).json()) as Record<string, unknown>;
+    expect(on.reviewGate).toBe(true);
+    expect(rawFile().reviewGate).toBe(true);
+
+    const off = (await (await put({ reviewGate: false })).json()) as Record<string, unknown>;
+    expect(off.reviewGate).toBe(false);
+    expect(rawFile().reviewGate).toBe(false);
+
+    const cleared = (await (await put({ reviewGate: null })).json()) as Record<string, unknown>;
+    expect(cleared.reviewGate).toBeNull();
+    expect(rawFile().reviewGate).toBeUndefined();
   });
 });

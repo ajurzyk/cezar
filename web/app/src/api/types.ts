@@ -588,6 +588,9 @@ export interface ConfigResponse {
   /** Live title updates (task auto-naming): null = no config key, the
    *  CEZ_TITLE_UPDATES env default (ON) decides. */
   liveTitleUpdates: boolean | null
+  /** Optional review gate (#489): null = no config key, the CEZ_REVIEW_GATE env
+   *  default (OFF) decides. */
+  reviewGate: boolean | null
 }
 
 /** `PUT /api/config` (Settings → Agents; the Repo tab's base-branch picker). `baseBranch: null`
@@ -607,6 +610,8 @@ export interface SetConfigInput {
   worktreeRetention?: number | null
   /** null clears the key back to the env-default behavior. */
   liveTitleUpdates?: boolean | null
+  /** null clears the key back to the env-default behavior (OFF). */
+  reviewGate?: boolean | null
 }
 
 /** The PUT answer: the same shape GET serves (the pre-R6 fields stayed, the rest is additive). */

@@ -43,6 +43,7 @@ import {
   readWorktreePath,
 } from './git-changes.js';
 import { loadConfig, type CezConfig } from '../config.js';
+import { reviewGateEnabled } from '../runs/review-gate.js';
 import { readUiState, uiStatePath } from '../ui-state.js';
 import { resolveCapabilities } from './capabilities.js';
 import { resolveForge } from './forge/index.js';
@@ -648,8 +649,17 @@ export function createApp(deps: ServerDeps): Hono {
     }
 
     // Winner: a non-review terminal state with a non-empty diff flips to
-    // `review` (the settleSuccess rule); an empty diff (or no worktree) stays.
-    if (winner.status !== 'review' && winner.worktreePath && existsSync(winner.worktreePath)) {
+    // `review` (the settleSuccess rule) — but only when the review gate applies
+    // (#489): it is enabled (`reviewGateEnabled`, default off) AND the winner is
+    // not autonomous. An autonomous / gate-off winner keeps its `done` state with
+    // the diff left in the worktree; an empty diff (or no worktree) stays too.
+    if (
+      winner.status !== 'review' &&
+      winner.worktreePath &&
+      existsSync(winner.worktreePath) &&
+      winner.autonomous !== true &&
+      reviewGateEnabled(await loadConfig(repoRoot))
+    ) {
       const diff = await worktreeDiff(winner.worktreePath, winner.baseBranch ?? 'HEAD');
       if (diff.trim().length > 0 && !diff.startsWith('(diff failed')) {
         store.updateRun(winner.id, { status: 'review' });
@@ -1253,6 +1263,9 @@ export function createApp(deps: ServerDeps): Hono {
     // Live title updates (task auto-naming spec): tri-state — null means "no
     // config key, the CEZ_TITLE_UPDATES env default (ON) decides".
     liveTitleUpdates: config.liveTitleUpdates ?? null,
+    // Optional review gate (#489): tri-state — null means "no config key, the
+    // CEZ_REVIEW_GATE env default (OFF) decides".
+    reviewGate: config.reviewGate ?? null,
   });
   app.get('/api/config', async (c) => c.json(configAnswer(await loadConfig(repoRoot))));
 
@@ -1285,6 +1298,9 @@ export function createApp(deps: ServerDeps): Hono {
     // Live title updates toggle (Settings → Agents): null clears the key back
     // to the env-default behavior.
     liveTitleUpdates: z.boolean().nullable().optional(),
+    // Optional review gate toggle (Settings → Agents, #489): null clears the key
+    // back to the env-default behavior (OFF).
+    reviewGate: z.boolean().nullable().optional(),
   });
   app.put('/api/config', async (c) => {
     const parsed = setConfigSchema.safeParse(await c.req.json().catch(() => null));
@@ -1322,6 +1338,10 @@ export function createApp(deps: ServerDeps): Hono {
     if (parsed.data.liveTitleUpdates !== undefined) {
       if (parsed.data.liveTitleUpdates === null) delete raw.liveTitleUpdates;
       else raw.liveTitleUpdates = parsed.data.liveTitleUpdates;
+    }
+    if (parsed.data.reviewGate !== undefined) {
+      if (parsed.data.reviewGate === null) delete raw.reviewGate;
+      else raw.reviewGate = parsed.data.reviewGate;
     }
     if (parsed.data.memoryLimitMb !== undefined) {
       // null or 0 both mean "no ceiling" — drop the key back to the default.

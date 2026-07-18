@@ -28,6 +28,7 @@ function serve(config: Partial<ConfigResponse> = {}) {
     memoryLimitMb: null,
     worktreeRetention: 10,
     liveTitleUpdates: null,
+    reviewGate: null,
     ...config,
   }
   const json = (payload: unknown, status = 200) =>

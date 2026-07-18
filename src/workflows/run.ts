@@ -26,6 +26,7 @@ import type { RunRecord, RunStore } from '../runs/store.js';
 import { reclaimWorktrees, rematerializeReclaimedWorktree } from '../runs/retention.js';
 import { extractTaskRefs, refineTaskRefs, titleRefNumber } from '../runs/task-refs.js';
 import { autoNamingActive, generateRunName, liveTitleUpdatesEnabled } from '../runs/auto-name.js';
+import { reviewGateEnabled } from '../runs/review-gate.js';
 import { UiEventSink } from '../runs/ui-event-sink.js';
 import { chainStepNote, DEFAULT_ALLOWED_TOOLS, stepKind, type WorkflowDef, type WorkflowStepDef } from './types.js';
 
@@ -281,6 +282,11 @@ export class RunManager {
       // at the HTTP route because `cezar run`, the inbox's own "▶ Run" and variants all reach
       // startRun directly — a route-level gate would leave those writing todos.json.
       generateFollowups: followupsEnabled() ? input.generateFollowups : false,
+      // Persist autonomy on the record (#489) so the terminal review gate
+      // (`settleSuccess`) and the group-pick winner-park can honor it — mid-run
+      // auto-nudge reads `input.autonomous` (`execute`), but the record is the
+      // only source those after-the-fact consumers have.
+      autonomous: input.autonomous === true,
       groupId: group?.groupId,
       variant: group?.variant,
       steps: workflow.steps.map((s) => ({ id: s.id, name: s.name ?? s.id, kind: stepKind(s) })),
@@ -406,6 +412,11 @@ export class RunManager {
               model: run.model,
               runner: run.runner,
               generateFollowups,
+              // Re-thread autonomy (#489): the rebuilt input feeds `execute`,
+              // whose mid-run auto-nudge reads `input.autonomous`. Without this a
+              // recovered queued autonomous run would run non-autonomously (no
+              // auto-nudge) and later wrongly park at `review`.
+              autonomous: run.autonomous,
             },
           });
           this.queue.push(run.id);
@@ -1452,13 +1463,20 @@ export class RunManager {
    * at `review` instead of `done` — the user inspects the diff first, then
    * sends feedback back, opens a draft PR, or just finishes. Failed/cancelled
    * runs never enter review; no worktree or an empty diff means plain `done`.
+   *
+   * The gate is opt-in (#489): the review park happens only when it is enabled
+   * (`reviewGateEnabled` — config toggle over the `CEZ_REVIEW_GATE` env, default
+   * OFF) AND the run is not autonomous. Autonomous runs — and runs with the gate
+   * off — settle straight to `done`, leaving the diff in the worktree untouched.
    */
   private async settleSuccess(runId: string): Promise<void> {
     const run = this.store.getRun(runId);
     let review = false;
     if (run?.worktreePath && existsSync(run.worktreePath)) {
       const diff = await worktreeDiff(run.worktreePath, run.baseBranch ?? 'HEAD');
-      review = diff.trim().length > 0 && !diff.startsWith('(diff failed');
+      const hasDiff = diff.trim().length > 0 && !diff.startsWith('(diff failed');
+      const config = await loadConfig(this.repoRoot);
+      review = hasDiff && reviewGateEnabled(config) && run.autonomous !== true;
     }
     this.store.updateRun(runId, {
       status: review ? 'review' : 'done',

@@ -101,6 +101,95 @@ describe('RunManager.recordTurnEnd', () => {
 });
 
 /**
+ * Optional review gate (#489, spec 2026-07-18-optional-review-gate): the
+ * terminal `settleSuccess` transition parks a changed run at `review` ONLY when
+ * the gate is enabled (config toggle over `CEZ_REVIEW_GATE`, default off) and the
+ * run is not autonomous. Driven directly through the private `settleSuccess`
+ * (the same method `execute`, `runContinuation`, and `recover`'s waiting-run path
+ * all call) against a real fixture worktree.
+ */
+describe('RunManager.settleSuccess — optional review gate', () => {
+  const savedGate = process.env.CEZ_REVIEW_GATE;
+  const savedAutoname = process.env.CEZ_AUTONAME;
+  let repoRoot: string;
+  let store: RunStore;
+  let manager: RunManager;
+
+  beforeAll(async () => {
+    process.env.CEZ_AUTONAME = '0';
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-reviewgate-'));
+    await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
+    writeFileSync(join(repoRoot, 'a.txt'), 'one\ntwo\nthree\n');
+    await run('git', ['add', '-A'], { cwd: repoRoot });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repoRoot });
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot);
+  });
+
+  afterAll(() => {
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+    if (savedGate === undefined) delete process.env.CEZ_REVIEW_GATE;
+    else process.env.CEZ_REVIEW_GATE = savedGate;
+    if (savedAutoname === undefined) delete process.env.CEZ_AUTONAME;
+    else process.env.CEZ_AUTONAME = savedAutoname;
+  });
+
+  afterEach(() => {
+    delete process.env.CEZ_REVIEW_GATE;
+    // Reset the config file each test so config.reviewGate never leaks across cases.
+    rmSync(join(repoRoot, '.ai/cezar', 'config.json'), { force: true });
+  });
+
+  /** A fresh run + worktree holding a real diff (edit + new file) vs main. */
+  async function changedRun(autonomous?: boolean): Promise<RunRecord> {
+    const record = store.createRun({ title: 't', workflow: 'w', task: 'task', autonomous, steps: [] });
+    const wt = await createWorktree(repoRoot, record.id, 'main');
+    store.updateRun(record.id, { worktreePath: wt.path, branch: wt.branch, baseBranch: wt.baseBranch });
+    writeFileSync(join(wt.path, 'a.txt'), 'one\nTWO\nthree\n');
+    writeFileSync(join(wt.path, 'new.txt'), 'x\n');
+    return store.getRun(record.id) as RunRecord;
+  }
+
+  /** A fresh run + worktree with no changes vs main (empty diff). */
+  async function cleanRun(): Promise<RunRecord> {
+    const record = store.createRun({ title: 't', workflow: 'w', task: 'task', steps: [] });
+    const wt = await createWorktree(repoRoot, record.id, 'main');
+    store.updateRun(record.id, { worktreePath: wt.path, branch: wt.branch, baseBranch: wt.baseBranch });
+    return store.getRun(record.id) as RunRecord;
+  }
+
+  const settle = (id: string) => (manager as unknown as { settleSuccess(id: string): Promise<void> }).settleSuccess(id);
+
+  it('gate off (default) + changes → done, diff left in the worktree', async () => {
+    const record = await changedRun();
+    await settle(record.id);
+    expect(store.getRun(record.id)?.status).toBe('done');
+  });
+
+  it('gate on (env) + non-autonomous + changes → review', async () => {
+    process.env.CEZ_REVIEW_GATE = '1';
+    const record = await changedRun();
+    await settle(record.id);
+    expect(store.getRun(record.id)?.status).toBe('review');
+  });
+
+  it('gate on + autonomous + changes → done (autonomous wins — the #489 fix)', async () => {
+    process.env.CEZ_REVIEW_GATE = '1';
+    const record = await changedRun(true);
+    await settle(record.id);
+    expect(store.getRun(record.id)?.status).toBe('done');
+  });
+
+  it('gate on + no changes → done (the diff check stays first)', async () => {
+    process.env.CEZ_REVIEW_GATE = '1';
+    const record = await cleanRun();
+    await settle(record.id);
+    expect(store.getRun(record.id)?.status).toBe('done');
+  });
+});
+
+/**
  * Regression for #410: the GitHub tab's "Hand over" panel lets a user select
  * several skills at once, which become one agent step per skill (spec 008 —
  * `skillChainSteps` / `skillsToSteps`) in a single run. The reported bug was
