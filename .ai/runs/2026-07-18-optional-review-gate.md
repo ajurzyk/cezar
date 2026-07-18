@@ -18,12 +18,12 @@ to `done` (diff stays in the worktree) unless the gate applies.
 
 ## Progress
 
-### Phase 1 — Engine + persistence (the #489 fix)
-- [ ] 1. Persist `autonomous?: boolean` on `runRecordSchema` (`src/runs/store.ts`) and write it from `startRun` (`src/workflows/run.ts`) as `autonomous: input.autonomous === true`. Test: record round-trips `autonomous`.
-- [ ] 2. Add `reviewGateEnabled(config, env)` (`src/runs/review-gate.ts`), default-off precedence. Unit-test the matrix (`src/runs/review-gate.test.ts`).
-- [ ] 3. Gate `settleSuccess` (`src/workflows/run.ts`) on `diff && reviewGateEnabled(config) && !run.autonomous`, else `done`. Engine test: gate-off / autonomous / gate-on+manual / no-diff.
-- [ ] 4. Re-thread `autonomous` through `recover()`'s rebuilt `input` (`src/workflows/run.ts`). Test: recovered queued autonomous run stays autonomous.
-- [ ] 5. Gate the group-pick winner-park (`POST /api/groups/:groupId/pick`, `src/server/server.ts`). Test: autonomous / gate-off winner stays `done`.
+### Phase 1 — Engine + persistence (the #489 fix) — done @ b958703
+- [x] 1. Persist `autonomous?: boolean` on `runRecordSchema` (`src/runs/store.ts`) and write it from `startRun` (`src/workflows/run.ts`) as `autonomous: input.autonomous === true`. Test: record round-trips `autonomous`.
+- [x] 2. Add `reviewGateEnabled(config, env)` (`src/runs/review-gate.ts`), default-off precedence. Unit-test the matrix (`src/runs/review-gate.test.ts`).
+- [x] 3. Gate `settleSuccess` (`src/workflows/run.ts`) on `diff && reviewGateEnabled(config) && !run.autonomous`, else `done`. Engine test: gate-off / autonomous / gate-on+manual / no-diff.
+- [x] 4. Re-thread `autonomous` through `recover()`'s rebuilt `input` (`src/workflows/run.ts`). Test: recovered queued autonomous run stays autonomous.
+- [x] 5. Gate the group-pick winner-park (`POST /api/groups/:groupId/pick`, `src/server/server.ts`). Test: autonomous / gate-off winner stays `done`. (Also added the additive `reviewGate` config schema key here — the engine's config path depends on it to typecheck.)
 
 ### Phase 2 — Config surface (env + Settings)
 - [ ] 6. Add `reviewGate` to config schema (`src/config.ts`), GET `/api/config` and PUT `/api/config` (`src/server/server.ts`). Test in `src/server/config-api.test.ts`.
