@@ -24,7 +24,7 @@ Tracking PR: #486
 | 2 | 2.1 | `GET /api/worktrees` (list + du sizes, degrade to null) + tests | done | 070f6ad |
 | 2 | 2.2 | `POST /api/worktrees/reclaim` (force enforce) + tests | done | 070f6ad |
 | 2 | 2.3 | Worktrees management table in Settings → Resources + component test | done | 0ffa056 |
-| 2 | 2.4 | Docs: README settings table + spec citations at touch sites | done | pending |
+| 2 | 2.4 | Docs: README settings table + spec citations at touch sites | done | 4cc6ed8 |
 | 3 | 3.1 | Integration/E2E: Settings → Resources retention smoke (`web/app/e2e`) | todo | — |
 
 ## Notes
