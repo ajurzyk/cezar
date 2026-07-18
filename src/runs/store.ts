@@ -96,10 +96,17 @@ const runRecordSchema = z.object({
    *  cross-checked output. Display tier — never gates actions. */
   prNumber: z.number().optional(),
   issueNumber: z.number().optional(),
-  /** Who owns the display title: `user` (PATCH rename — never auto-overwritten)
-   *  or `auto` (namer-owned — a later namer result may replace it). Missing on
-   *  old runs = legacy behavior (auto fills only an unset titleSummary). */
-  titleOrigin: z.enum(['user', 'auto']).optional(),
+  /** Who owns the display title: `user` (PATCH rename — never auto-overwritten),
+   *  `marker` (agent-declared via `CEZ:TITLE`, spec 2026-07-18-task-ref-markers —
+   *  beats the namer, silences live refresh) or `auto` (namer-owned — a later
+   *  namer result may replace it). Missing on old runs = legacy behavior (auto
+   *  fills only an unset titleSummary). Precedence: user > marker > auto. */
+  titleOrigin: z.enum(['user', 'auto', 'marker']).optional(),
+  /** References the agent itself declared via `CEZ:PR=` / `CEZ:ISSUE=` markers
+   *  (spec 2026-07-18-task-ref-markers). Presence of a kind makes it
+   *  authoritative: the namer may no longer write that kind, and a declared PR
+   *  owns the referenced tier's resolution. */
+  markerRefs: z.object({ pr: z.number().optional(), issue: z.number().optional() }).optional(),
   /** Distinct PR URLs spotted so far — the referenced tier's working set,
    *  persisted so a resumed run keeps disambiguating against the full history
    *  instead of re-adopting the next URL as "the only one". Capped. */
@@ -195,11 +202,15 @@ function eventTextFragments(event: Record<string, unknown>): string[] {
 }
 
 /**
- * The referenced tier's resolution rule: one distinct URL is the subject;
- * among several, the one whose PR number the task prompt names (and only when
- * exactly one matches); otherwise ambiguous — no chip beats a wrong chip.
+ * The referenced tier's resolution rule: a marker-declared PR number (spec
+ * 2026-07-18-task-ref-markers) owns the answer outright — only a candidate URL
+ * ending in that number resolves, and a contradiction clears the chip.
+ * Without a declaration: one distinct URL is the subject; among several, the
+ * one whose PR number the task prompt names (and only when exactly one
+ * matches); otherwise ambiguous — no chip beats a wrong chip.
  */
-function resolveReferencedPr(candidates: string[], task: string): string | undefined {
+function resolveReferencedPr(candidates: string[], task: string, markerPr?: number): string | undefined {
+  if (markerPr !== undefined) return candidates.find((url) => url.endsWith(`/${markerPr}`));
   if (candidates.length === 1) return candidates[0];
   const named = candidates.filter((url) => {
     const num = url.split('/').pop() ?? '';
@@ -433,8 +444,41 @@ export class RunStore extends EventEmitter {
     }
     if (seen.size === before) return false;
     run.referencedPrCandidates = [...seen];
-    run.referencedPullRequestUrl = resolveReferencedPr(run.referencedPrCandidates, run.task);
+    run.referencedPullRequestUrl = resolveReferencedPr(
+      run.referencedPrCandidates,
+      run.task,
+      run.markerRefs?.pr,
+    );
     return true;
+  }
+
+  /**
+   * Apply agent-declared reference markers (spec 2026-07-18-task-ref-markers).
+   * Marker values are authoritative for the display tier: they overwrite the
+   * regex/namer numbers, and a declared PR re-resolves the referenced URL
+   * against the candidate working set — including down to `undefined` when no
+   * candidate matches (a wrong chip is worse than no chip). The created tier
+   * (`pullRequestUrl`) is deliberately untouched.
+   */
+  applyMarkerRefs(runId: string, refs: { pr?: number; issue?: number }): RunRecord | undefined {
+    const run = this.runs.get(runId);
+    if (!run || (refs.pr === undefined && refs.issue === undefined)) return run;
+    run.markerRefs = {
+      ...run.markerRefs,
+      ...(refs.pr !== undefined ? { pr: refs.pr } : {}),
+      ...(refs.issue !== undefined ? { issue: refs.issue } : {}),
+    };
+    if (refs.pr !== undefined) run.prNumber = refs.pr;
+    if (refs.issue !== undefined) run.issueNumber = refs.issue;
+    if (run.markerRefs.pr !== undefined) {
+      run.referencedPullRequestUrl = resolveReferencedPr(
+        run.referencedPrCandidates ?? [],
+        run.task,
+        run.markerRefs.pr,
+      );
+    }
+    this.touch(run);
+    return run;
   }
 
   /**
