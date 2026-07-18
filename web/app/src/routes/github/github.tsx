@@ -5,6 +5,7 @@ import {
   CircleDotIcon,
   ExternalLinkIcon,
   GitPullRequestIcon,
+  MessageSquareIcon,
   RefreshCwIcon,
   SearchIcon,
   TagIcon,
@@ -377,6 +378,7 @@ function GithubRow({
           <span>#{item.number}</span>
           <span className="min-w-0 truncate">{item.author}</span>
           <span>{shortAge(item.createdAt)}</span>
+          <CommentCount count={item.comments} />
           {item.checks ? <ChecksGlyph checks={item.checks} /> : null}
           {queued ? (
             <span data-slot="gh-queued-flag" className="font-sans font-medium text-violet">
@@ -502,7 +504,7 @@ function GithubDetail({
         <span>{shortAge(item.createdAt)} ago</span>
         {item.comments ? (
           <>
-            ·<span>{item.comments} comments</span>
+            ·<CommentCount count={item.comments} />
           </>
         ) : null}
         {hasDiffStat ? (
@@ -559,6 +561,24 @@ const CHECKS_TONE: Record<Checks, string> = {
   passing: 'text-success',
   failing: 'text-danger',
   pending: 'text-muted-foreground',
+}
+
+/** The comment-count badge (#499): a muted speech-bubble glyph + count, shown on issue/PR rows
+ *  and in the detail meta line. Renders nothing for a zero (or absent) count, so quiet items look
+ *  exactly as they did before real counts arrived. Shared so the row and detail can't drift. */
+function CommentCount({ count }: { count: number }) {
+  if (!count) return null
+  return (
+    <span
+      data-slot="gh-comment-count"
+      data-count={count}
+      aria-label={`${count} comment${count === 1 ? '' : 's'}`}
+      className="inline-flex shrink-0 items-center gap-0.5"
+    >
+      <MessageSquareIcon aria-hidden="true" className="size-3" />
+      {count}
+    </span>
+  )
 }
 
 /** The checks badge — the legacy tab's three phrases, tinted by outcome. Links out

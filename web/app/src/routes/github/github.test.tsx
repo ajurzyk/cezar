@@ -230,6 +230,21 @@ describe('the GitHub tab lists', () => {
     expect(document.querySelector('[data-slot="gh-row-checks"]')).toBeNull()
   })
 
+  it('shows a comment-count badge only on rows with comments (#499)', async () => {
+    stubFetch()
+    renderAt('/github')
+
+    await waitFor(() => expect(rows()).toHaveLength(2))
+    const badge = (number: string) =>
+      document.querySelector(`[data-slot="gh-row"][data-number="${number}"] [data-slot="gh-comment-count"]`)
+
+    // #142 has 3 comments → a labelled badge; #139 has 0 → none, so quiet rows look untouched.
+    expect(badge('142')?.getAttribute('data-count')).toBe('3')
+    expect(badge('142')?.getAttribute('aria-label')).toBe('3 comments')
+    expect(badge('142')?.textContent).toContain('3')
+    expect(badge('139')).toBeNull()
+  })
+
   it('counts at the fast-batch cap render as 30+ until the full fetch lands', async () => {
     const many: GithubData = {
       ...GITHUB,
@@ -338,7 +353,10 @@ describe('the GitHub detail pane', () => {
     expect(meta).toContain('#137')
     expect(meta).toContain('pull request')
     expect(meta).toContain('opened by grace')
-    expect(meta).toContain('1 comments')
+    // The comment count renders as an icon+count badge (#499), labelled for screen readers.
+    const detailCount = document.querySelector('[data-slot="gh-meta"] [data-slot="gh-comment-count"]')
+    expect(detailCount?.getAttribute('data-count')).toBe('1')
+    expect(detailCount?.getAttribute('aria-label')).toBe('1 comment')
     expect(document.querySelector('[data-slot="gh-diffstat"]')?.textContent).toBe('+120 −30')
     expect(document.querySelector('[data-slot="gh-open-link"]')?.getAttribute('href')).toBe(PR_137.url)
 

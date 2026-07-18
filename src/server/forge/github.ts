@@ -94,6 +94,97 @@ async function gh(repoRoot: string, args: string[], timeout = 15_000): Promise<s
   return stdout;
 }
 
+// ---- comment counts (#499 Phase 1) -----------------------------------------
+// `gh … --json comments` is off the table for the list calls — it ships every
+// comment body for every row (the reason `comments` was hard-coded to 0). Real
+// counts come from one lightweight GraphQL query per kind returning only
+// `number → totalCount`, run in parallel with the list calls. This whole seam
+// degrades to empty maps on any failure, so the tab renders exactly as before
+// when the counts call fails (plan rule: counts never break the tab).
+
+/** Runs a GraphQL query with String variables — injected so pagination is unit-testable
+ *  without shelling to `gh`. */
+export type GraphqlRunner = (query: string, variables: Record<string, string>) => Promise<string>;
+
+/** GraphQL's max page size; pagination is capped at 10 pages/kind (1000 rows — the GUI's full
+ *  background shot). Rows past the window keep `comments: 0`, which the UI reads as "no badge". */
+export const GH_COUNTS_MAX_PAGES = 10;
+
+const countsQuery = (root: 'issues' | 'pullRequests'): string => `
+query ($owner: String!, $name: String!, $endCursor: String) {
+  repository(owner: $owner, name: $name) {
+    ${root}(first: 100, after: $endCursor, states: OPEN,
+           orderBy: {field: CREATED_AT, direction: DESC}) {
+      nodes { number comments { totalCount } }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}`;
+
+const ghCountsPageSchema = z.object({
+  nodes: z.array(z.object({ number: z.number(), comments: z.object({ totalCount: z.number() }) })),
+  pageInfo: z.object({ hasNextPage: z.boolean(), endCursor: z.string().nullish() }),
+});
+
+/** Validate + flatten one gh GraphQL counts response into a `number → count` map plus the page
+ *  cursor. Exported for unit tests (the zod boundary + shape). Throws on a malformed envelope. */
+export function parseCountsPage(
+  out: string,
+  root: 'issues' | 'pullRequests',
+): { counts: Record<number, number>; hasNextPage: boolean; endCursor: string | null } {
+  const parsed = JSON.parse(out) as { data?: { repository?: Record<string, unknown> | null } };
+  const page = ghCountsPageSchema.parse(parsed?.data?.repository?.[root]);
+  const counts: Record<number, number> = {};
+  for (const node of page.nodes) counts[node.number] = node.comments.totalCount;
+  return { counts, hasNextPage: page.pageInfo.hasNextPage, endCursor: page.pageInfo.endCursor ?? null };
+}
+
+async function paginateCounts(
+  runGraphql: GraphqlRunner,
+  owner: string,
+  name: string,
+  root: 'issues' | 'pullRequests',
+  maxPages: number,
+): Promise<Record<number, number>> {
+  const counts: Record<number, number> = {};
+  let cursor: string | null = null;
+  for (let page = 0; page < maxPages; page++) {
+    const variables: Record<string, string> = { owner, name };
+    if (cursor) variables.endCursor = cursor;
+    const res = parseCountsPage(await runGraphql(countsQuery(root), variables), root);
+    Object.assign(counts, res.counts);
+    if (!res.hasNextPage || !res.endCursor) break;
+    cursor = res.endCursor;
+  }
+  return counts;
+}
+
+/** Comment counts for open issues and PRs as `number → count` maps. Two independent paginated
+ *  queries (issues and PRs need separate cursors) run in parallel; any failure degrades the whole
+ *  thing to empty maps so the tab is never held up by counts. Exported for unit tests. */
+export async function fetchCommentCounts(
+  runGraphql: GraphqlRunner,
+  owner: string,
+  name: string,
+  maxPages = GH_COUNTS_MAX_PAGES,
+): Promise<{ issues: Record<number, number>; prs: Record<number, number> }> {
+  try {
+    const [issues, prs] = await Promise.all([
+      paginateCounts(runGraphql, owner, name, 'issues', maxPages),
+      paginateCounts(runGraphql, owner, name, 'pullRequests', maxPages),
+    ]);
+    return { issues, prs };
+  } catch {
+    return { issues: {}, prs: {} };
+  }
+}
+
+/** `owner/name` → `{ owner, name }`, or null when the handle isn't a clean two-part slug. */
+export function parseOwnerName(nameWithOwner: string): { owner: string; name: string } | null {
+  const [owner, name, ...rest] = nameWithOwner.trim().split('/');
+  return owner && name && rest.length === 0 ? { owner, name } : null;
+}
+
 /* Reads degrade to `available: false` with a hint — never an error (plan rule
    7): no `gh`, no remote, offline all land on the same quiet path. A short
    cache keeps tab switches from hammering the GitHub API; a cached fetch with
@@ -114,10 +205,23 @@ export async function fetchGithub(repoRoot: string, refresh = false, limit = 30)
     // longer wall clock — statusCheckRollup on hundreds of PRs is slow.
     const timeout = capped > 100 ? 60_000 : 15_000;
     const fields = 'number,title,author,createdAt,labels,body,url';
-    const [repoOut, issuesOut, prsOut] = await Promise.all([
-      gh(repoRoot, ['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner'], timeout),
+    // The repo handle first (cheap) so the counts GraphQL query — which needs owner/name —
+    // can run parallel to the two expensive list calls below.
+    const repoOut = await gh(repoRoot, ['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner'], timeout);
+    const ownerName = parseOwnerName(repoOut);
+    const runGraphql: GraphqlRunner = (query, variables) => {
+      const args = ['api', 'graphql', '-f', `query=${query}`];
+      for (const [key, value] of Object.entries(variables)) args.push('-f', `${key}=${value}`);
+      return gh(repoRoot, args, timeout);
+    };
+    const [issuesOut, prsOut, counts] = await Promise.all([
       gh(repoRoot, ['issue', 'list', '--limit', String(capped), '--json', fields], timeout),
       gh(repoRoot, ['pr', 'list', '--limit', String(capped), '--json', `${fields},isDraft,additions,deletions,statusCheckRollup`], timeout),
+      // Real comment counts (#499). Degrades to empty maps on its own — a failure here leaves
+      // every count at 0, never fails the tab. Skipped entirely if the handle isn't parseable.
+      ownerName
+        ? fetchCommentCounts(runGraphql, ownerName.owner, ownerName.name)
+        : Promise.resolve<{ issues: Record<number, number>; prs: Record<number, number> }>({ issues: {}, prs: {} }),
     ]);
     // One repo-wide label→color map, filled as we flatten each item's labels.
     const labelColors: Record<string, string> = {};
@@ -136,7 +240,7 @@ export async function fetchGithub(repoRoot: string, refresh = false, limit = 30)
           labels: i.labels.map((l) => l.name),
           body: (i.body ?? '').slice(0, 8_000),
           url: i.url,
-          comments: 0,
+          comments: counts.issues[i.number] ?? 0,
         };
       },
     );
@@ -152,7 +256,7 @@ export async function fetchGithub(repoRoot: string, refresh = false, limit = 30)
           labels: [...p.labels.map((l) => l.name), ...(p.isDraft ? ['draft'] : [])],
           body: (p.body ?? '').slice(0, 8_000),
           url: p.url,
-          comments: 0,
+          comments: counts.prs[p.number] ?? 0,
           isDraft: p.isDraft,
           additions: p.additions,
           deletions: p.deletions,
