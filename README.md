@@ -244,6 +244,12 @@ Five moves that make the cockpit worth the browser tab:
 - 🪞 **Parallel variants (×2 / ×3).** Run the same task as competing agents in
   separate worktrees, then compare their diffs side by side and **pick** one —
   the losers are archived and their worktrees cleaned up.
+- 🧹 **Bounded worktree disk.** Each task runs in its own full checkout, so a busy
+  cockpit would otherwise grow without limit. cezar keeps only the last
+  `worktreeRetention` **finished** worktrees on disk (default **10**; `0` =
+  unlimited) and reclaims the rest — directory only, the `cez/<id8>` branch is
+  always kept, so the work stays recoverable. Settings → Resources shows every
+  worktree's disk use with per-row delete and a **Reclaim now** button.
 - 🛡️ **Review gate.** A finished run with changes waits in `review`. Read the diff,
   type notes that go straight back into the agent's session, or push a
   `gh pr create --draft`. You stay the merge button.
@@ -430,6 +436,7 @@ never blocks startup):
 {
   "skillsRepos": [{ "repo": "open-mercato/skills", "ref": "main" }], // team skills; [] disables
   "maxParallel": 2,          // how many tasks may run at once (non-git dirs always run 1)
+  "worktreeRetention": 10,   // keep the last N finished worktrees on disk; 0 = unlimited (branch always kept)
   "defaultRunner": "claude", // agent backend: "claude" (default) · "codex" · "opencode"
   "plannerModel": "sonnet",  // model the "Plan first" button uses to draft chains
   "baseBranch": "develop"    // branch worktrees fork from + PRs target (also settable in the Git tab)
