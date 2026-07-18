@@ -47,7 +47,7 @@ with the spec as `Source doc:`.
 ### Phase 1: Draft the spec
 
 - [x] 1.1 Write `.ai/specs/2026-07-18-npm-preview-publish.md` — 4abe17c
-- [ ] 1.2 Self-review the spec against BACKWARD_COMPATIBILITY.md and issue #482
+- [x] 1.2 Self-review the spec against BACKWARD_COMPATIBILITY.md and issue #482 — a2c0154 (full validation gate: 5/5 pass)
 
 ### Phase 2: PR
 
