@@ -93,16 +93,16 @@ no route resets it on navigation, so a deep scroll on one page carries into the 
 
 ### Phase 1: visual-viewport insets utility
 
-- [ ] 1.1 viewportInsets + useViewportInsets hook with tests
+- [x] 1.1 viewportInsets + useViewportInsets hook with tests — bde09e9
 
 ### Phase 2: keyboard-safe menus
 
-- [ ] 2.1 Composer autocomplete collision padding + height clamp
-- [ ] 2.2 SourcePill skills picker collision padding + height clamp
+- [x] 2.1 Composer autocomplete collision padding + height clamp — 17537ad
+- [x] 2.2 SourcePill skills picker collision padding + height clamp — 17537ad
 
 ### Phase 3: scroll-to-top on navigation
 
-- [ ] 3.1 App shell scrolls main to top on pathname change
+- [x] 3.1 App shell scrolls main to top on pathname change — 933272d
 
 ### Phase 4: validation + PR
 
