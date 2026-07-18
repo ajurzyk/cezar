@@ -336,6 +336,22 @@ describe('CEZ:MONITORING parks as running/monitoring, not waiting (#490)', () =>
     expect(store.getRun(record.id)?.activity).toBeUndefined();
   }, 30_000);
 
+  it('strips the CEZ:MONITORING marker from server-emitted v1 text events', async () => {
+    const record = manager.startRun(SINGLE_STEP, { task: 'mock:monitoring keep going', worktree: false });
+    currentId = record.id;
+    await waitFor(record.id, (r) => r?.activity === 'monitoring');
+    // v1 `text` events are stripped server-side (like CEZ:DONE); v2 message items carry
+    // the raw text and the thread reducer strips it on display (thread-state.test.ts).
+    const ndjson = readFileSync(join(repoRoot, '.ai/cezar/runs', `${record.id}.ndjson`), 'utf8');
+    const v1Text = ndjson
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l))
+      .filter((e) => e.type === 'text');
+    expect(v1Text.length).toBeGreaterThan(0);
+    expect(v1Text.some((e) => String(e.text).includes('CEZ:MONITORING'))).toBe(false);
+  }, 30_000);
+
   it('resuming a monitoring run clears the activity', async () => {
     const record = manager.startRun(SINGLE_STEP, { task: 'mock:monitoring keep going', worktree: false });
     currentId = record.id;

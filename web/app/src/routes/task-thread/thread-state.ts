@@ -155,10 +155,11 @@ function str(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined
 }
 
-/** The engine's completion marker (`CEZ:DONE`). v1 `text` lines arrive pre-stripped by the
- *  server; v2 message items carry the raw text, so display strips it here. */
+/** The engine's turn-end markers (`CEZ:DONE`, and `CEZ:MONITORING` from #490). v1 `text` lines
+ *  arrive pre-stripped by the server; v2 message items carry the raw text, so display strips it
+ *  here. Named `stripDoneMarker` for continuity — it now strips either trailing marker. */
 function stripDoneMarker(text: string): string {
-  return text.replace(/\s*CEZ:DONE\s*$/, '')
+  return text.replace(/\s*CEZ:DONE\s*$/, '').replace(/\s*CEZ:MONITORING\s*$/, '')
 }
 
 /** v1 tool results are strings today; anything else is rendered as JSON rather than dropped. */

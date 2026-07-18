@@ -753,7 +753,7 @@ export class RunManager {
       }
       if (event.type === 'text') {
         turnText += event.text;
-        const text = stripDoneMarker(event.text);
+        const text = stripMonitoringMarker(stripDoneMarker(event.text));
         if (text) this.store.appendEvent(runId, { type: 'text', text, stepId });
         return;
       }
@@ -1202,7 +1202,7 @@ export class RunManager {
       }
       if (event.type === 'text') {
         turnText += event.text;
-        const text = stripDoneMarker(event.text);
+        const text = stripMonitoringMarker(stripDoneMarker(event.text));
         if (text) emit({ type: 'text', text, stepId: step.id });
         return;
       }
