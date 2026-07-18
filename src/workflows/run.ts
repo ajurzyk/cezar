@@ -23,6 +23,7 @@ import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff, worktreeS
 import { getRepoInfo } from '../server/git.js';
 import { loadWorkflows } from './load.js';
 import type { RunRecord, RunStore } from '../runs/store.js';
+import { reclaimWorktrees } from '../runs/retention.js';
 import { extractTaskRefs, refineTaskRefs, titleRefNumber } from '../runs/task-refs.js';
 import { autoNamingActive, generateRunName, liveTitleUpdatesEnabled } from '../runs/auto-name.js';
 import { UiEventSink } from '../runs/ui-event-sink.js';
@@ -466,6 +467,24 @@ export class RunManager {
     this.active.delete(runId);
     this.memoryPausing.delete(runId);
     this.lastNamerKey.delete(runId);
+    // A run leaving the active registry is a terminal transition (done/review/
+    // failed/cancelled) — the one moment the finished-worktree count can grow.
+    // Enforce count-based retention (#483) here so a single hook covers every
+    // terminal path. Fire-and-forget: retention must never delay or throw into
+    // the lifecycle.
+    void this.enforceRetention();
+  }
+
+  /** Reclaim finished worktrees beyond the keep-limit (#483) — directory only,
+   *  `cez/<id8>` branch kept. Best-effort; a failure never affects run
+   *  lifecycle. `review`/live runs are excluded by the selector. */
+  private async enforceRetention(): Promise<void> {
+    try {
+      const keep = (await loadConfig(this.repoRoot)).worktreeRetention;
+      await reclaimWorktrees(this.repoRoot, this.store, keep);
+    } catch {
+      // retention is best-effort; swallow so terminal transitions never break.
+    }
   }
 
   /** Last live-refresh namer inputs per run — unchanged inputs skip the call. */
