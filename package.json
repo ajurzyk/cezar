@@ -1,12 +1,13 @@
 {
-  "name": "@pat-lewczuk/cezar",
+  "name": "@open-mercato/cezar",
   "version": "0.1.5",
   "description": "Local cockpit for running and tracking AI agent tasks in your repo. Uses your logged-in `claude` CLI and `gh` — zero config, zero database.",
   "license": "MIT",
   "type": "module",
   "bin": {
     "cezar": "dist/index.js",
-    "cez": "dist/index.js"
+    "cez": "dist/index.js",
+    "cezar-cli": "dist/index.js"
   },
   "files": [
     "dist",
@@ -23,6 +24,9 @@
     "build:web": "vite build --config web/app/vite.config.ts",
     "check:pack": "node scripts/check-pack.mjs",
     "dev": "node scripts/dev.mjs",
+    "install-as-command": "node scripts/install-as-command.mjs --mode link",
+    "install-as-command:global": "node scripts/install-as-command.mjs --mode global",
+    "uninstall-as-command": "node scripts/install-as-command.mjs --mode uninstall",
     "dev:server": "tsx src/index.ts",
     "server-install": "tsx src/index.ts server-install",
     "server-deploy": "tsx src/index.ts server-deploy",

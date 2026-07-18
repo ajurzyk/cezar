@@ -146,7 +146,7 @@ the [`codex` CLI](https://github.com/openai/codex), or
 ```bash
 cd your-repo
 npx cezar-cli              # start the cockpit for the current repo
-#   or: npx @pat-lewczuk/cezar
+#   or: npx @open-mercato/cezar
 ```
 
 The cockpit opens at `http://localhost:4321` (auto-picks the next free port if
@@ -160,6 +160,10 @@ npx cezar-cli init                                            # scaffold .ai/cez
 Both the `cezar` and `cez` commands are installed, so once it's on your PATH you
 can run either. No API key is ever used — cezar shells out to whichever agent
 CLIs you are already logged into, `claude` by default.
+
+> **Contributing?** [Local development](#local-development) shows how to get a
+> global `cezar` command straight off your checkout (`npm run install-as-command`)
+> — no publish needed.
 
 > **Just kicking the tires?** Set `CEZ_DRY_RUN=1` to run against a bundled mock
 > instead of the real CLI — the whole cockpit works with no `claude` login, so
@@ -448,10 +452,74 @@ git-ignored automatically; your workflows and skills stay committable.
 
 ---
 
-## Development
+## Local development
+
+End-to-end, from a fresh clone to a global `cezar` command you can run in **any**
+repo on your machine — no npm publish required.
+
+**1. Prerequisites** — Node 20+ and `git` (plus at least one logged-in agent CLI,
+as in [Quick start](#quick-start)).
+
+**2. Clone & install**
 
 ```bash
+git clone https://github.com/open-mercato/cezar.git
+cd cezar
 npm install
+```
+
+**3. Build** — compiles the server (`tsc → dist/`) and the cockpit
+(`vite build → web/dist/`), then runs the pack gate:
+
+```bash
+npm run build
+```
+
+**4. Install as a global command** — build + put `cezar` / `cez` / `cezar-cli` on
+your PATH pointing at *this checkout*:
+
+```bash
+npm run install-as-command            # live link (default) — see the change loop below
+#   or: npm run install-as-command:global   # self-contained snapshot copy
+```
+
+Now `cd` into any other repo and run it:
+
+```bash
+cd ~/some-other-project
+cezar            # cockpit for that repo, straight off your checkout
+cezar-cli --help # same binary; the name matches `npx cezar-cli`
+```
+
+**5. The change loop**
+
+- **Link mode** (default): edit source → `npm run build` → the global command
+  reflects it immediately. No relink needed. (It is a live symlink into this
+  checkout — don't move or delete the checkout while it's linked.)
+- **Snapshot mode** (`:global`): re-run `npm run install-as-command:global` to
+  refresh the installed copy. It survives moving/deleting the checkout.
+
+**6. Uninstall**
+
+```bash
+npm run uninstall-as-command    # removes cezar / cez / cezar-cli (either flavor)
+```
+
+**7. Troubleshooting**
+
+- **`cezar: command not found`** after install → your npm global bin dir isn't on
+  PATH. The script prints the exact dir; add it to your shell profile
+  (`export PATH="$(npm prefix -g)/bin:$PATH"`).
+- **`EACCES` / permission denied** → your global prefix is root-owned. Point npm
+  at a user-writable one and retry — **never** sudo:
+  `npm config set prefix ~/.npm-global`.
+- **Already installed the published `@open-mercato/cezar` globally?** The
+  link/snapshot install replaces it; `uninstall-as-command` removes ours, and
+  `npm i -g @open-mercato/cezar` brings the published one back.
+
+### In-checkout scripts
+
+```bash
 npm run dev          # server (API :4321) + Vite dev server, opens the cockpit in the browser
 npm run dev:server   # tsx src/index.ts — the API server alone
 npm run dev:web      # Vite dev server alone (proxies /api to :4321)

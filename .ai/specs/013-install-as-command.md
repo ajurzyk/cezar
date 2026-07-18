@@ -48,11 +48,11 @@ npm scripts:
 | --- | --- | --- |
 | `install-as-command` | build → `npm link` | Default. Live dev loop: after the first link, a plain `npm run build` refreshes the global command; no relink. |
 | `install-as-command:global` | build → `npm install --global .` | Self-contained snapshot. Survives moving/deleting the checkout; a source change needs re-running this script. |
-| `uninstall-as-command` | `npm rm --global @pat-lewczuk/cezar` | Removes whichever flavor is installed (both register globally under the package name). Best-effort, idempotent. |
+| `uninstall-as-command` | `npm rm --global @open-mercato/cezar` | Removes whichever flavor is installed (both register globally under the package name). Best-effort, idempotent. |
 
 Alternatives considered and rejected:
 - **Link/globally-install the `alias-cezar/` shim to get `cezar-cli`.** Its bin
-  `import()`s `@pat-lewczuk/cezar`; resolving that to the *local* build requires a
+  `import()`s `@open-mercato/cezar`; resolving that to the *local* build requires a
   3-step link chain (link mode) and is impossible without publishing in snapshot
   mode (`npm i -g ./alias-cezar` pulls the dependency from the registry). The
   additive-bin approach avoids all of it.
@@ -138,7 +138,7 @@ that reads top-to-bottom for a fresh clone:
    `EACCES` on a root-owned global prefix (set a user-writable prefix, e.g.
    `npm config set prefix ~/.npm-global`; **never** sudo — consistent with
    `server-install`'s no-auto-sudo stance); how this interacts with a real
-   published `npm i -g @pat-lewczuk/cezar` (link/install replaces it; uninstall
+   published `npm i -g @open-mercato/cezar` (link/install replaces it; uninstall
    removes ours; reinstall the published one normally).
 8. Keep the existing in-checkout script table (`npm run dev`, `test`, `typecheck`,
    …) directly beneath, so both "run from the checkout" and "install globally"
@@ -156,7 +156,7 @@ development for a global command off your checkout, no publish needed").
 | Windows | Verification checks `cezar.cmd` (npm-generated shim); spawn pattern already `.cmd`-safe. |
 | `--no-build` with no `dist/` (link mode) | Fail fast: "no build found — run without `--no-build` first." |
 | Stale link after moving/deleting the checkout (link mode only) | Global `cezar` errors on the dangling target; fix = re-run `install-as-command` or `uninstall-as-command`. Snapshot mode is immune (documented as the trade-off). |
-| Collision with a published global `@pat-lewczuk/cezar` | link/global-install replaces it (npm's own behavior); `uninstall-as-command` removes ours; documented. |
+| Collision with a published global `@open-mercato/cezar` | link/global-install replaces it (npm's own behavior); `uninstall-as-command` removes ours; documented. |
 | Re-running install (already linked) | Idempotent — npm relinks; no error. |
 | `uninstall-as-command` when nothing is installed | Idempotent no-op success: `npm rm --global` of an absent package is treated as success; the script does not hard-fail. |
 
@@ -166,7 +166,7 @@ development for a global command off your checkout, no publish needed").
   script aliases, one added bin, and docs. No runtime code path of the shipped CLI
   changes.
 - **Public surface:** adding `cezar-cli` to the published package's `bin` means
-  `npm i -g @pat-lewczuk/cezar` would *also* expose `cezar-cli`. This is additive
+  `npm i -g @open-mercato/cezar` would *also* expose `cezar-cli`. This is additive
   and consistent with the README already advertising `cezar-cli`; per
   `BACKWARD_COMPATIBILITY.md` adding a bin is non-breaking (only *removal* is).
   Flag it in the PR body regardless so the maintainer signs off.
@@ -175,7 +175,7 @@ development for a global command off your checkout, no publish needed").
   also assert `manifest.bin['cezar-cli'] === 'dist/index.js'`.
 - **Rollback:** revert the PR — nothing installed on a user's machine is affected;
   a contributor who ran the script removes the global command with
-  `npm run uninstall-as-command` (or `npm rm -g @pat-lewczuk/cezar`).
+  `npm run uninstall-as-command` (or `npm rm -g @open-mercato/cezar`).
 
 ## Phasing & Implementation Plan
 
