@@ -71,7 +71,7 @@ describe('worktree retention fires on a terminal transition (#483)', () => {
     const workflow: WorkflowDef = {
       name: '(planned)',
       source: 'built-in',
-      steps: [{ id: 'task', name: 'Do it', kind: 'agent', prompt: '{{task}}' }],
+      steps: [{ id: 'task', name: 'Do it', prompt: '{{task}}' }],
     };
     const record = manager.startRun(workflow, { task: 'mock:done tidy up', worktree: false });
 
@@ -82,9 +82,11 @@ describe('worktree retention fires on a terminal transition (#483)', () => {
       await new Promise((r) => setTimeout(r, 100));
     }
 
-    // Retention fires fire-and-forget from dropActive; wait for the reclaim.
+    // Retention fires fire-and-forget from dropActive. The stamp is the true
+    // "reclaim complete" signal (the directory disappears one git call earlier),
+    // so wait on that to avoid racing the enforcer mid-reclaim.
     const reclaimDeadline = Date.now() + 10_000;
-    while (existsSync(older.path)) {
+    while (!store.getRun(older.recId)?.worktreeReclaimedAt) {
       if (Date.now() > reclaimDeadline) break;
       await new Promise((r) => setTimeout(r, 100));
     }

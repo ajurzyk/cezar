@@ -5,7 +5,7 @@
 // recoverable) and the thin I/O enforcer that performs the reclaim. The selector
 // is pure and unit-testable; the enforcer never throws (helper discipline).
 import { existsSync } from 'node:fs';
-import { removeWorktree } from '../git-worktree.js';
+import { createWorktree, removeWorktree } from '../git-worktree.js';
 import type { RunRecord, RunStatus } from './store.js';
 
 /** The "finished" status set — mirrors `RunStore.archiveFinished`. A run at the
@@ -47,6 +47,38 @@ export function selectReclaimableWorktrees(runs: readonly RunRecord[], keep: num
 export interface RetentionStore {
   listRuns(): RunRecord[];
   updateRun(id: string, patch: { worktreeReclaimedAt?: string }): unknown;
+}
+
+/** The slice of the store the re-materializer needs. */
+export interface RematerializeStore {
+  getRun(id: string): RunRecord | undefined;
+  updateRun(id: string, patch: { worktreeReclaimedAt?: string }): unknown;
+}
+
+/**
+ * If retention (#483) reclaimed this run's worktree — branch kept, directory
+ * gone, `worktreeReclaimedAt` stamped — re-materialize the directory (via the
+ * idempotent `createWorktree`, which reattaches the surviving `cez/<id8>`
+ * branch) and CLEAR the stamp. Called on the resume/continue path so a resumed
+ * run regains its isolated tree and becomes eligible for retention again;
+ * without it the run would keep a directory on disk while staying invisible to
+ * the enforcer forever (a leak). Returns true when it re-materialized.
+ * Best-effort: never throws (the caller falls back to the repo root).
+ */
+export async function rematerializeReclaimedWorktree(
+  repoRoot: string,
+  store: RematerializeStore,
+  runId: string,
+): Promise<boolean> {
+  const run = store.getRun(runId);
+  if (!run?.worktreePath || !run.worktreeReclaimedAt || existsSync(run.worktreePath)) return false;
+  try {
+    await createWorktree(repoRoot, runId, run.baseBranch ?? 'HEAD');
+    store.updateRun(runId, { worktreeReclaimedAt: undefined });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
