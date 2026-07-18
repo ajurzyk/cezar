@@ -76,8 +76,8 @@ additive-only.
 
 ### Phase 1: Spec
 
-- [ ] 1.1 Write spec `.ai/specs/2026-07-18-task-ref-markers.md`
-- [ ] 1.2 Cross-reference notes in `2026-07-17-task-auto-naming.md` and `2026-07-16-pr-autodiscovery.md`
+- [x] 1.1 Write spec `.ai/specs/2026-07-18-task-ref-markers.md` — b912b05
+- [x] 1.2 Cross-reference notes in `2026-07-17-task-auto-naming.md` and `2026-07-16-pr-autodiscovery.md` — b912b05
 
 ### Phase 2: Parsing core + record model
 
