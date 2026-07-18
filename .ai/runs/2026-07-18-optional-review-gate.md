@@ -25,13 +25,13 @@ to `done` (diff stays in the worktree) unless the gate applies.
 - [x] 4. Re-thread `autonomous` through `recover()`'s rebuilt `input` (`src/workflows/run.ts`). Test: recovered queued autonomous run stays autonomous.
 - [x] 5. Gate the group-pick winner-park (`POST /api/groups/:groupId/pick`, `src/server/server.ts`). Test: autonomous / gate-off winner stays `done`. (Also added the additive `reviewGate` config schema key here — the engine's config path depends on it to typecheck.)
 
-### Phase 2 — Config surface (env + Settings)
-- [ ] 6. Add `reviewGate` to config schema (`src/config.ts`), GET `/api/config` and PUT `/api/config` (`src/server/server.ts`). Test in `src/server/config-api.test.ts`.
-- [ ] 7. Add `reviewGate` to client GET/PUT config types (`web/app/src/api/types.ts`).
-- [ ] 8. Add the Settings → Agents Switch (`web/app/src/routes/settings/agents-section.tsx`), `checked={config.reviewGate ?? false}`. Test in `agents-section.test.tsx`.
+### Phase 2 — Config surface (env + Settings) — done @ 17aaf8f
+- [x] 6. Add `reviewGate` to config schema (`src/config.ts` — landed in Phase 1), GET `/api/config` and PUT `/api/config` (`src/server/server.ts`). Test in `src/server/config-api.test.ts`.
+- [x] 7. Add `reviewGate` to client GET/PUT config types (`web/app/src/api/types.ts`).
+- [x] 8. Add the Settings → Agents Switch (`web/app/src/routes/settings/agents-section.tsx`), `checked={config.reviewGate ?? false}`. Test in `agents-section.test.tsx`.
 
 ### Phase 3 — Docs
-- [ ] 9. Document `CEZ_REVIEW_GATE` (default off) in `.env.example` and the `README.md` env table.
+- [x] 9. Document `CEZ_REVIEW_GATE` (default off) in `.env.example` and the `README.md` env table.
 
 ## Validation gate (before marking ready)
 `npm run typecheck` · `npm test` · `npm run test:unit` · `npm run build` · `npm run test:package`
