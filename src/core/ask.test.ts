@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseAskRequest, type AskRequest } from './ask.js';
+import { parseAskMarker, parseAskRequest, stripAskMarker, type AskRequest } from './ask.js';
 
 const valid: AskRequest = {
   questions: [
@@ -118,5 +118,44 @@ describe('parseAskRequest', () => {
     expect(parseAskRequest(null)).toBeNull();
     expect(parseAskRequest('CEZ:ASK')).toBeNull();
     expect(parseAskRequest(42)).toBeNull();
+  });
+});
+
+const askJson = JSON.stringify(valid);
+
+describe('parseAskMarker', () => {
+  it('extracts a valid request from a trailing CEZ:ASK marker', () => {
+    const turn = `Here are the options.\nCEZ:ASK ${askJson}`;
+    expect(parseAskMarker(turn)).toEqual(valid);
+  });
+
+  it('tolerates trailing whitespace/newlines after the JSON', () => {
+    expect(parseAskMarker(`text\nCEZ:ASK ${askJson}\n  \n`)).toEqual(valid);
+  });
+
+  it('returns null when there is no marker', () => {
+    expect(parseAskMarker('just a normal answer, no marker')).toBeNull();
+  });
+
+  it('returns null on malformed JSON', () => {
+    expect(parseAskMarker('CEZ:ASK {not json')).toBeNull();
+  });
+
+  it('returns null when the JSON is valid but fails the schema', () => {
+    expect(parseAskMarker('CEZ:ASK {"questions":[]}')).toBeNull();
+  });
+
+  it('ignores a marker that is not at the end of the turn', () => {
+    expect(parseAskMarker(`CEZ:ASK ${askJson}\nand then more text after`)).toBeNull();
+  });
+});
+
+describe('stripAskMarker', () => {
+  it('removes a trailing CEZ:ASK marker for display', () => {
+    expect(stripAskMarker(`Pick one.\nCEZ:ASK ${askJson}`)).toBe('Pick one.');
+  });
+
+  it('leaves text without a marker untouched', () => {
+    expect(stripAskMarker('no marker here')).toBe('no marker here');
   });
 });

@@ -66,3 +66,40 @@ export function parseAskRequest(value: unknown): AskRequest | null {
   const parsed = askRequestSchema.safeParse(value);
   return parsed.success ? parsed.data : null;
 }
+
+/**
+ * The AskUser control marker: a trailing `CEZ:ASK <compact-json>` line (a
+ * sibling of `CEZ:DONE` / `CEZ:MONITORING`). Detected on the *assembled* turn
+ * text so delta-streaming backends can't split it — uniform across all three
+ * backends. The JSON is greedily captured from the first `{` after the keyword
+ * to the last `}` at end-of-text.
+ */
+export const ASK_MARKER_RE = /CEZ:ASK[ \t]+(\{[\s\S]*\})\s*$/;
+
+/**
+ * Extract and validate a trailing `CEZ:ASK <json>` marker from assembled turn
+ * text. Returns the validated `AskRequest`, or `null` when there is no marker or
+ * its payload is not valid JSON / fails the schema (caller degrades to plain
+ * text — the prose fallback is never made worse).
+ */
+export function parseAskMarker(turnText: string): AskRequest | null {
+  const match = ASK_MARKER_RE.exec(turnText.trimEnd());
+  if (!match || match[1] === undefined) return null;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(match[1]);
+  } catch {
+    return null;
+  }
+  return parseAskRequest(raw);
+}
+
+/**
+ * Strip a trailing `CEZ:ASK <json>` marker from one text event so transcripts
+ * stay free of protocol noise. Delta backends may split the marker across events
+ * — then it stays visible; detection on the assembled turn text is unaffected
+ * (same best-effort caveat as the `CEZ:DONE` / `CEZ:MONITORING` strippers).
+ */
+export function stripAskMarker(text: string): string {
+  return text.replace(/\s*CEZ:ASK[ \t]+\{[\s\S]*\}\s*$/, '');
+}

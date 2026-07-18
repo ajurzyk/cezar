@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { parseAskMarker, stripAskMarker, type AskRequest } from '../core/ask.js';
 import { type AgentSession } from '../core/claude-cli-runner.js';
 import { onUsage, registerRunProcess, unregisterRunProcess, type ProcessUsage } from '../core/process-usage.js';
 import { createRunner } from '../core/runner-factory.js';
@@ -62,6 +63,13 @@ function stripDoneMarker(text: string): string {
  *  `stripDoneMarker`; same delta-backend caveat). */
 function stripMonitoringMarker(text: string): string {
   return text.replace(/\s*CEZ:MONITORING\s*$/, '');
+}
+/** Emit the v2 `ask.requested` event for a parsed marker (the cockpit renders
+ *  it as an ask card, #473). Returns the minted request id. */
+function emitAskRequested(sink: UiEventSink, ask: AskRequest): string {
+  const requestId = randomUUID();
+  sink.handle({ type: 'ask.requested', requestId, questions: ask.questions });
+  return requestId;
 }
 /** Periodic "cezar autosave" commit in the task worktree (spec 006). */
 export const AUTOSAVE_INTERVAL_MS = 90_000;
@@ -764,7 +772,7 @@ export class RunManager {
       }
       if (event.type === 'text') {
         turnText += event.text;
-        const text = stripMonitoringMarker(stripDoneMarker(event.text));
+        const text = stripAskMarker(stripMonitoringMarker(stripDoneMarker(event.text)));
         if (text) this.store.appendEvent(runId, { type: 'text', text, stepId });
         return;
       }
@@ -787,7 +795,11 @@ export class RunManager {
         void this.recordTurnEnd(runId, turnText); // titleSummary + diffStat (#389)
         const sessionOpen = !state.cancelled && state.session?.open;
         const done = sessionOpen && DONE_MARKER_RE.test(turnText.trimEnd());
-        const monitoring = sessionOpen && !done && MONITORING_MARKER_RE.test(turnText.trimEnd());
+        // `CEZ:ASK` → the user is genuinely blocked; wins over `CEZ:MONITORING`
+        // (a pending question is always attention), loses to `CEZ:DONE` (#473).
+        const ask = sessionOpen && !done ? parseAskMarker(turnText) : null;
+        const monitoring =
+          sessionOpen && !done && !ask && MONITORING_MARKER_RE.test(turnText.trimEnd());
         turnText = '';
         if (done) {
           // Goal achieved (agent contract, #347) — same as in runAgentStep.
@@ -814,10 +826,12 @@ export class RunManager {
               return true;
             })();
           if (!autoContinued) {
-            // `CEZ:MONITORING` → non-attention `running`/`activity:'monitoring'`
-            // instead of `waiting` (spec 2026-07-18-subagent-monitoring-status,
-            // #490). Same lifecycle as waiting (frees the slot, keeps the idle
-            // timer). The autonomous nudge above still wins over monitoring.
+            // `CEZ:ASK` → park `waiting` (attention) AND surface the structured
+            // question as an ask card (#473). `CEZ:MONITORING` → non-attention
+            // `running`/`activity:'monitoring'` (#490). Both share the waiting
+            // lifecycle (free the slot, keep the idle timer); the autonomous
+            // nudge above still wins over either.
+            if (ask) emitAskRequested(sink, ask);
             if (monitoring) {
               this.store.updateRun(runId, { status: 'running', activity: 'monitoring' });
               this.store.updateStep(runId, stepId, { status: 'running' });
@@ -1213,7 +1227,7 @@ export class RunManager {
       }
       if (event.type === 'text') {
         turnText += event.text;
-        const text = stripMonitoringMarker(stripDoneMarker(event.text));
+        const text = stripAskMarker(stripMonitoringMarker(stripDoneMarker(event.text)));
         if (text) emit({ type: 'text', text, stepId: step.id });
         return;
       }
@@ -1236,8 +1250,15 @@ export class RunManager {
         void this.recordTurnEnd(runId, turnText); // titleSummary + diffStat (#389)
         const sessionOpen = !state.cancelled && state.session?.open;
         const done = interactive && sessionOpen && DONE_MARKER_RE.test(turnText.trimEnd());
+        // `CEZ:ASK` → the user is blocked; wins over `CEZ:MONITORING`, loses to
+        // `CEZ:DONE` (#473).
+        const ask = interactive && sessionOpen && !done ? parseAskMarker(turnText) : null;
         const monitoring =
-          interactive && sessionOpen && !done && MONITORING_MARKER_RE.test(turnText.trimEnd());
+          interactive &&
+          sessionOpen &&
+          !done &&
+          !ask &&
+          MONITORING_MARKER_RE.test(turnText.trimEnd());
         turnText = '';
         if (done) {
           // Goal achieved (agent contract, #347): close the session instead
@@ -1250,12 +1271,13 @@ export class RunManager {
         const waiting = interactive && sessionOpen;
         if (waiting) {
           // Turn over, session open. Either the ball is in the user's court
-          // (`waiting`), or the agent declared it is still working on its own
-          // downstream work with `CEZ:MONITORING` — then park as
-          // `running`/`activity:'monitoring'`, a non-attention state, instead of
-          // raising "needs you" (spec 2026-07-18-subagent-monitoring-status, #490).
-          // Lifecycle is identical either way: the run frees its slot and keeps
-          // the idle timer, so even a stalled monitoring run is reclaimed.
+          // (`waiting`) — optionally with a structured `CEZ:ASK` question the
+          // cockpit renders as an ask card (#473) — or the agent declared it is
+          // still working on its own downstream work with `CEZ:MONITORING`, which
+          // parks as `running`/`activity:'monitoring'`, a non-attention state,
+          // instead of raising "needs you" (#490). Lifecycle is identical: the
+          // run frees its slot and keeps the idle timer.
+          if (ask) emitAskRequested(sink, ask);
           if (monitoring) {
             this.store.updateRun(runId, { status: 'running', activity: 'monitoring' });
             this.store.updateStep(runId, step.id, { status: 'running' });
