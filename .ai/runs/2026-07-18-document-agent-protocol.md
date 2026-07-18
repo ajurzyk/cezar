@@ -74,4 +74,4 @@ PR: #491
 ### Phase 3: Validate, self-review, PR
 
 - [x] 3.1 Docs-only validation + self-review (diff re-read; referenced paths + technical claims verified against code) — 02f90a7
-- [ ] 3.2 Open PR, normalize labels, run `om-auto-review-pr`, post summary comment
+- [x] 3.2 Open PR #491, normalize labels, run `om-auto-review-pr` (APPROVED, 0 findings), post summary comment
