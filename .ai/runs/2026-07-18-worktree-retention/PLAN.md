@@ -20,7 +20,7 @@ Tracking PR: #486
 | 1 | 1.4 | `reclaimWorktrees(repoRoot, store, keep)` I/O enforcer + real-git tests | done | 6a535f2 |
 | 1 | 1.5 | Wire enforcer: startup (index.ts) + terminal transitions (run.ts) | done | bca6926 |
 | 1 | 1.5a | Clear `worktreeReclaimedAt` + re-materialize dir on resume/continue | done | 24ada5b |
-| 1 | 1.6 | Settings → Resources "Keep last N worktrees" input + types + test | done | pending |
+| 1 | 1.6 | Settings → Resources "Keep last N worktrees" input + types + test | done | da9186f |
 | 2 | 2.1 | `GET /api/worktrees` (list + du sizes, degrade to null) + tests | todo | — |
 | 2 | 2.2 | `POST /api/worktrees/reclaim` (force enforce) + tests | todo | — |
 | 2 | 2.3 | Worktrees management table in Settings → Resources + component test | todo | — |
