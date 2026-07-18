@@ -1,8 +1,10 @@
+import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   keyboardAwareCollisionPadding,
   keyboardInset,
+  useViewportInsets,
   viewportInsets,
   watchKeyboardInset,
   watchViewportInsets,
@@ -123,6 +125,40 @@ describe('watchViewportInsets — the stubbed adapter', () => {
     const stop = watchViewportInsets(win(null), (insets) => applied.push(insets))
     expect(applied).toEqual([{ top: 0, bottom: 0 }])
     stop() // must not throw
+  })
+})
+
+describe('useViewportInsets — the React binding', () => {
+  const setViewport = (viewport: KeyboardViewport | null) =>
+    Object.defineProperty(window, 'visualViewport', { value: viewport, configurable: true })
+
+  afterEach(() => setViewport(null))
+
+  it('tracks the real window.visualViewport while mounted', () => {
+    Object.defineProperty(window, 'innerHeight', { value: 800, configurable: true })
+    const viewport = new StubViewport(800)
+    setViewport(viewport)
+    const { result, unmount } = renderHook(() => useViewportInsets())
+    expect(result.current).toEqual({ top: 0, bottom: 0 })
+
+    act(() => {
+      viewport.height = 460
+      viewport.offsetTop = 100
+      viewport.fire('resize')
+    })
+    expect(result.current).toEqual({ top: 100, bottom: 240 })
+
+    unmount()
+    act(() => {
+      viewport.height = 800
+      viewport.fire('resize')
+    })
+    expect(viewport.listeners.get('resize')?.size ?? 0).toBe(0) // unsubscribed
+  })
+
+  it('stays {0,0} without a visualViewport (jsdom, desktop engines)', () => {
+    const { result } = renderHook(() => useViewportInsets())
+    expect(result.current).toEqual({ top: 0, bottom: 0 })
   })
 })
 

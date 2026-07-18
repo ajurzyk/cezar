@@ -705,7 +705,13 @@ function SourcePill({
               onValueChange={setSearch}
               onInput={() => listRef.current?.scrollTo(0, 0)}
             />
-            <CommandList ref={listRef} data-slot="source-menu" className="max-h-72">
+            {/* The 3rem headroom is the CommandInput row: the popper's available-height var
+                covers the whole popover, and the list must leave the search box visible. */}
+            <CommandList
+              ref={listRef}
+              data-slot="source-menu"
+              className="max-h-[min(18rem,calc(var(--radix-popover-content-available-height)-3rem))]"
+            >
               {nothingMatches ? <CommandEmpty>Nothing matches.</CommandEmpty> : null}
               {/* Project skills lead, Global trails everything — the closer a skill lives
                   to the repo, the more likely it's the one being picked. */}

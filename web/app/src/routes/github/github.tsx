@@ -431,7 +431,7 @@ function LabelFilter({
       <PopoverContent align="end" sideOffset={6} className="w-60 p-0">
         <Command>
           <CommandInput placeholder="Filter labels…" />
-          <CommandList className="max-h-64">
+          <CommandList className="max-h-[min(16rem,calc(var(--radix-popover-content-available-height)-3rem))]">
             <CommandEmpty>No labels.</CommandEmpty>
             {selected.length > 0 ? (
               <CommandItem value="__clear__" onSelect={() => onChange([])} className="text-soft-foreground">
