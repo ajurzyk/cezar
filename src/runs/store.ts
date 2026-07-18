@@ -60,6 +60,12 @@ const runRecordSchema = z.object({
   /** Per-task follow-up inbox contract (spec 007, #444). Missing on old runs
    *  means enabled — the historical behavior. */
   generateFollowups: z.boolean().optional(),
+  /** Autonomous mode (#489): the run was started with the "autonomous" checkbox,
+   *  so it never parks at `waiting` (auto-nudge) and — once persisted here —
+   *  never parks at the terminal `review` gate either (`settleSuccess` + the
+   *  group-pick winner-park read it). Additive-safe: absent = falsy = not
+   *  autonomous. Set at creation from `WorkflowInput.autonomous`. */
+  autonomous: z.boolean().optional(),
   status: z.enum(['queued', 'running', 'waiting', 'review', 'done', 'failed', 'cancelled']),
   createdAt: z.string(),
   startedAt: z.string().optional(),
@@ -266,6 +272,7 @@ export class RunStore extends EventEmitter {
     model?: string;
     runner?: 'claude' | 'codex' | 'opencode';
     generateFollowups?: boolean;
+    autonomous?: boolean;
     groupId?: string;
     variant?: string;
     steps: Array<Pick<StepState, 'id' | 'name' | 'kind'>>;
@@ -278,6 +285,7 @@ export class RunStore extends EventEmitter {
       model: input.model,
       runner: input.runner,
       generateFollowups: input.generateFollowups,
+      autonomous: input.autonomous,
       groupId: input.groupId,
       variant: input.variant,
       status: 'queued',
