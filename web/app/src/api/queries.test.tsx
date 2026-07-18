@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ApiError } from './client'
 import { createQueryClient } from './query-client'
-import { queryKeys, useHealth, usePatchRun, useRun, useRuns } from './queries'
+import { queryKeys, useHealth, usePatchRun, useRun, useRunChanges, useRuns } from './queries'
 
 const fetchMock = vi.fn<typeof fetch>()
 
@@ -184,6 +184,30 @@ describe('usePatchRun', () => {
     await waitFor(() => expect(result.current.isError).toBe(true))
     expect(result.current.error).toBeInstanceOf(ApiError)
     expect(invalidate).not.toHaveBeenCalled()
+  })
+})
+
+describe('useRunChanges', () => {
+  it('opts out of the no-poll defaults so a finished run’s tab refetches on focus (#488)', async () => {
+    fetchMock.mockResolvedValue(json({ files: [], stat: { adds: 0, dels: 0, files: 0 } }))
+    const client = createQueryClient()
+    // live=false: the run is not active, so polling is off — exactly when the global defaults would
+    // otherwise leave a stale, possibly-empty snapshot on screen until the 5-min staleTime lapses.
+    const { result } = renderHook(() => useRunChanges('run-1', false), {
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      ),
+    })
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    // Read the resolved options off the live observer: this query overrides the client-wide
+    // refetchOnWindowFocus:false / long staleTime (asserted in 'query defaults'), scoped to itself.
+    const options = client.getQueryCache().find({ queryKey: queryKeys.runs.changes('run-1') })?.observers[0]
+      ?.options
+    expect(options?.refetchOnWindowFocus).toBe(true)
+    expect(options?.staleTime).toBe(0)
+    // …but an inactive run still must not poll.
+    expect(options?.refetchInterval).toBe(false)
   })
 })
 

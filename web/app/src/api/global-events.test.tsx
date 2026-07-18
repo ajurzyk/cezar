@@ -252,6 +252,29 @@ describe('useGlobalEvents — run events', () => {
     expect(client.getQueryData(queryKeys.runs.detail('r2'))).toBeUndefined()
   })
 
+  it('invalidates the changes cache on a run event so an ended run’s final writes appear (#488)', () => {
+    // The Changes tab stops polling the moment a run leaves the active set, so without this the
+    // last diff would wait for the next SSE reconnect. A cache the user opened must refresh.
+    client.setQueryData(queryKeys.runs.changes('r1'), { files: [], stat: { adds: 0, dels: 0, files: 0 } })
+    const invalidate = vi.spyOn(client, 'invalidateQueries')
+    const { source } = mount()
+
+    source.emit('run', JSON.stringify(runRecord('r1', { status: 'done' })))
+
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.runs.changes('r1') })
+  })
+
+  it('does not invalidate a changes cache nobody opened — no background diff fetch', () => {
+    // Mirror of the detail-cache guard: a run event for a task whose Changes tab was never viewed
+    // must not spawn a fetch for a diff no one is looking at.
+    const invalidate = vi.spyOn(client, 'invalidateQueries')
+    const { source } = mount()
+
+    source.emit('run', JSON.stringify(runRecord('r2', { status: 'done' })))
+
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: queryKeys.runs.changes('r2') })
+  })
+
   it('ignores a malformed frame and keeps serving the next one', () => {
     client.setQueryData<ApiRun[]>(queryKeys.runs.list(), [])
     const { source } = mount()
