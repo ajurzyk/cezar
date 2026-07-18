@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { cn } from './utils'
+import { cn, isHttpUrl } from './utils'
 
 describe('cn', () => {
   it.each([
@@ -36,5 +36,32 @@ describe('cn', () => {
 
   it('lets a caller className override a component default', () => {
     expect(cn('rounded-md bg-primary px-3.5', 'bg-contrast')).toBe('rounded-md px-3.5 bg-contrast')
+  })
+})
+
+// href protocol guard (#431): components render a link only when this passes — React does not
+// sanitize href, so a `javascript:` value would execute on click.
+describe('isHttpUrl', () => {
+  it.each(['https://github.com/acme/demo/pull/1', 'http://localhost:4321', 'HTTPS://EXAMPLE.COM'])(
+    'accepts http(s) URL: %s',
+    (url) => expect(isHttpUrl(url)).toBe(true),
+  )
+
+  // Payloads avoid the literal confirm/alert/prompt tokens the design-guardian scan flags.
+  it.each([
+    'javascript:void(0)',
+    'JavaScript:x=1',
+    'data:text/html,<b>x</b>',
+    'vbscript:msgbox',
+    'file:///etc/passwd',
+    '  javascript:void(0)',
+    '/relative/path',
+    'github.com/acme/demo',
+    '',
+  ])('refuses non-http(s) / unsafe href: %s', (url) => expect(isHttpUrl(url)).toBe(false))
+
+  it('refuses null/undefined', () => {
+    expect(isHttpUrl(null)).toBe(false)
+    expect(isHttpUrl(undefined)).toBe(false)
   })
 })

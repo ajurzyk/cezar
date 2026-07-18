@@ -118,7 +118,7 @@ function ChangesView({ run }: { run: ApiRun }) {
         terminal.mutate()
         break
       case 'view-pr':
-        break // a real <a> — the toolbar never routes it here
+        break // the toolbar renders it as an <a> (safe href) or disabled (unsafe) — never routed here
     }
   }
 

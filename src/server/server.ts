@@ -372,17 +372,26 @@ export function createApp(deps: ServerDeps): Hono {
     // Additive fields only below — the pre-forge shape is the most
     // externally-depended-on JSON in the app (BACKWARD_COMPATIBILITY.md §2).
     const forge = resolveForge(repo);
+    const caps = capabilities();
     return c.json({
       version,
       latestVersion: update?.latest,
-      repoRoot,
+      // Health is CORS-open and, in hosted mode, reachable off the loopback —
+      // so any site/host that reads it would learn the developer's absolute
+      // checkout path and username (#431). Local mode keeps the full path (the
+      // protected bookmarklet shape); hosted/remote mode trims it to a basename.
+      // NB this narrows the VALUE of a field named in BACKWARD_COMPATIBILITY.md
+      // §2: the field is always present and a string, but under CEZ_REMOTE it is
+      // no longer an absolute path. Deliberate — a hosted cockpit's paths are on
+      // a machine the reader does not have anyway. See §2's `repoRoot` note.
+      repoRoot: caps.localHandoff ? repoRoot : basename(repoRoot),
       repo,
       checks,
       defaultRunner: config.defaultRunner,
       // Non-blocking: cached availability or null-until-warm — health must never pay a `gh`
       // shell-out (the bookmarklet aborts its port probe at 800 ms). See detectGithubCached.
       forge: forge ? { kind: forge.kind, ...(forge.detectCached() ?? {}) } : null,
-      capabilities: capabilities(),
+      capabilities: caps,
     });
   });
 
@@ -780,6 +789,8 @@ export function createApp(deps: ServerDeps): Hono {
     if (!sessionId) return c.json({ error: 'no agent session to resume' }, 409);
     const cwd = run.worktreePath && existsSync(run.worktreePath) ? run.worktreePath : repoRoot;
     const command = resumeCommand(run.runner, sessionId);
+    // Fails closed on an id we do not recognise — see resumeCommand (#431).
+    if (!command) return c.json({ error: 'the recorded session id has an unexpected shape' }, 409);
     const opened = await openInTerminal(cwd, command);
     if (!opened) {
       return c.json({ error: 'no terminal emulator found', command: `cd '${cwd}' && ${command}` }, 409);
@@ -828,8 +839,11 @@ export function createApp(deps: ServerDeps): Hono {
       const sessionId = engineOwnsSession
         ? undefined
         : [...run.steps].reverse().find((s) => s.sessionId)?.sessionId;
-      const command =
-        sessionId && cliRunner === (run.runner ?? 'claude') ? resumeCommand(cliRunner, sessionId) : cliRunner;
+      // An id resumeCommand refuses (#431) degrades to a fresh CLI in the worktree,
+      // exactly like a run that never recorded a session.
+      const resume =
+        sessionId && cliRunner === (run.runner ?? 'claude') ? resumeCommand(cliRunner, sessionId) : null;
+      const command = resume ?? cliRunner;
       const opened = await openInTerminal(dir, command);
       if (!opened) {
         return c.json({ error: 'no terminal emulator found', command: `cd '${dir}' && ${command}` }, 409);
@@ -1491,9 +1505,38 @@ function resolveWebDir(): string {
   return join(here, '..', '..', 'web');
 }
 
-/** The CLI command that reopens a run's session for interactive take-over,
- *  per backend. Legacy/undefined records default to Claude. */
-function resumeCommand(runner: string | undefined, sessionId: string): string {
+/**
+ * The session id shape every backend actually mints: UUIDs (claude/codex) and
+ * the CLIs' own slug-ish ids. No character here is special to bash, AppleScript
+ * OR cmd.exe, and a leading `-` is refused so the id can never be read as an
+ * option by the CLI it is passed to (same dash-guard as `isSafeGitRef`, #431).
+ * Bounded, like every other input that reaches a spawned process.
+ */
+const SAFE_SESSION_ID = /^[A-Za-z0-9._][A-Za-z0-9._-]{0,199}$/;
+
+/** True for session ids safe to splice into the take-over command (see above). */
+export function isSafeSessionId(sessionId: string): boolean {
+  return SAFE_SESSION_ID.test(sessionId);
+}
+
+/**
+ * The CLI command that reopens a run's session for interactive take-over, per
+ * backend. Legacy/undefined records default to Claude. Returns null when the id
+ * is not a shape we recognise — callers degrade (no take-over) rather than
+ * splice it into a shell.
+ *
+ * Validate, don't quote (#431): the session id is the only variable spliced
+ * into the command string, and `openInTerminal` runs that string through bash
+ * on darwin/linux but through `cmd /K` on win32. cmd.exe does not treat `'` as
+ * a quote character, so POSIX-quoting the id handed Windows users a literal
+ * `claude --resume '9f8e…'` and Claude answered "no conversation found".
+ * Constraining the charset to one with no metacharacter in ANY of those shells
+ * needs no quoting at all and fails closed on an unexpected id — a stronger
+ * guarantee than escaping, and platform-independent. Ids are UUID/CLI-minted
+ * today; this keeps a future source safe.
+ */
+export function resumeCommand(runner: string | undefined, sessionId: string): string | null {
+  if (!isSafeSessionId(sessionId)) return null;
   switch (runner) {
     case 'codex':
       return `codex resume ${sessionId}`;

@@ -15,6 +15,7 @@ import { toast } from '@/components/ui/toaster'
 import { deriveAttention } from '@/lib/attention'
 import { shortAge } from '@/lib/format'
 import { insertTemplate, normalizePromptTemplates } from '@/lib/prompt-templates'
+import { isHttpUrl } from '@/lib/utils'
 
 /**
  * `/inbox` — the follow-up inbox rebuilt in React (R6 Step 1.2, spec §"Skills, Workflows,
@@ -235,7 +236,8 @@ function TodoCard({
                 <span data-slot="todo-source-gone">source task deleted</span>
               )
             ) : null}
-            {todo.prUrl ? (
+            {/* href protocol guard (#431): link only for http(s) URLs. */}
+            {isHttpUrl(todo.prUrl) ? (
               <a
                 href={todo.prUrl}
                 target="_blank"

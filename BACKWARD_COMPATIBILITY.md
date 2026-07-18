@@ -20,6 +20,7 @@ Consumed by the bundled React cockpit (`web/dist`, shipped in lockstep — low r
 
 - Static/GUI: `GET /` and every SPA shell route, `/new` (bookmarklet deep-link, query `?skill=&ref=&auto=&key=`), `/assets/:file`, `/open-mercato.svg`
 - Meta: `GET /api/health` (the **only** CORS-open route — bookmarklets probe it cross-origin; its shape `{version, latestVersion, repoRoot, repo, checks, defaultRunner}` is the most externally-depended-on JSON in the app), `GET /api/launch-key`
+  - `repoRoot` is the absolute checkout path in local mode (the shape the saved bookmarklets read) but only the checkout's **basename** in hosted mode (`CEZ_REMOTE`), where health is CORS-open off the loopback and the absolute path would leak the developer's username (#431). Always present, always a string — but a hosted consumer must not treat it as a filesystem path.
 - Skills: `GET /api/skills`, `POST /api/skills/refresh`
 - Workflows: `GET/POST /api/workflows`, `DELETE /api/workflows/:name`, `POST /api/workflows/parse`, `POST /api/plan`
 - Runs: `GET/POST /api/runs`, `GET /api/runs/:id`, `PATCH /api/runs/:id`, `POST /api/runs/:id/{cancel,messages,finish,continue,open-in-cli,open-in,pr,archive,remove-worktree,git/commit,git/push}`, `POST /api/runs/archive-finished`, `DELETE /api/runs/:id`, `GET /api/runs/:id/{handoff,diff,changes,files,commits,events}`, `GET /api/runs/:id/commit/:sha`, `GET /api/runs/:id/images/:file`

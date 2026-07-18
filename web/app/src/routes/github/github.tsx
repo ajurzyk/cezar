@@ -27,7 +27,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { toast } from '@/components/ui/toaster'
 import { shortAge } from '@/lib/format'
 import { githubTaskPrompt } from '@/lib/github-task'
-import { cn } from '@/lib/utils'
+import { cn, isHttpUrl } from '@/lib/utils'
 
 import { Markdown } from '../task-thread/markdown'
 import { allLabels, filterGithubItems, labelChipStyle } from './github-filter'
@@ -518,16 +518,23 @@ function GithubDetail({
           </>
         ) : null}
         ·
-        <a
-          href={item.url}
-          target="_blank"
-          rel="noopener noreferrer"
-          data-slot="gh-open-link"
-          className="inline-flex items-center gap-0.5 text-muted-foreground hover:text-foreground hover:underline"
-        >
-          open on GitHub
-          <ExternalLinkIcon aria-hidden="true" className="size-2.5" />
-        </a>
+        {/* href protocol guard (#431): link only for http(s) URLs. */}
+        {isHttpUrl(item.url) ? (
+          <a
+            href={item.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            data-slot="gh-open-link"
+            className="inline-flex items-center gap-0.5 text-muted-foreground hover:text-foreground hover:underline"
+          >
+            open on GitHub
+            <ExternalLinkIcon aria-hidden="true" className="size-2.5" />
+          </a>
+        ) : (
+          <span data-slot="gh-open-link" className="text-muted-foreground">
+            open on GitHub
+          </span>
+        )}
       </p>
 
       <h2 className="mt-2 text-xl leading-snug font-semibold">{item.title}</h2>

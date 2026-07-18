@@ -14,7 +14,7 @@ import { Button } from '@/components/ui/button'
 import { toast } from '@/components/ui/toaster'
 import { useKeyboardInsetVar } from '@/lib/keyboard-inset'
 import { taskPrUrl } from '@/lib/tasks-table'
-import { cn } from '@/lib/utils'
+import { cn, isHttpUrl } from '@/lib/utils'
 
 import {
   AssistantMessage,
@@ -174,7 +174,8 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
             )}
           >
             {footer.label}
-            {taskPrUrl(run) ? (
+            {/* href protocol guard (#431): link only for http(s) URLs. */}
+            {isHttpUrl(taskPrUrl(run)) ? (
               // The run shipped as a PR (review-gate Draft PR, or agent-opened), or worked on
               // one (#407) — the link stays reachable after the panel is gone.
               <a

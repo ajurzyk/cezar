@@ -12,7 +12,7 @@ import { compactTokens, shortAge } from '@/lib/format'
 import { groupRuns, listCounts, runTitle, type ListView, type QuickListRow } from '@/lib/task-groups'
 import { taskPrUrl } from '@/lib/tasks-table'
 import { useNow } from '@/lib/use-now'
-import { cn } from '@/lib/utils'
+import { cn, isHttpUrl } from '@/lib/utils'
 
 /**
  * The sidebar's task quick-list (spec, "App shell & navigation"): Active/Archived tabs, then the
@@ -257,7 +257,8 @@ function RunRow({
           <span className="shrink-0 text-[11px] text-soft-foreground tabular-nums">{age}</span>
         )}
       </Link>
-      {prUrl ? (
+      {/* href protocol guard (#431): link only for http(s) URLs. */}
+      {prUrl && isHttpUrl(prUrl) ? (
         <a
           data-slot="pr-chip"
           href={prUrl}

@@ -12,6 +12,7 @@ import {
   collectChanges,
   collectRunCommits,
   commitAll,
+  createOrSwitchBranch,
   imageMimeType,
   patchByPath,
   pushCurrentBranch,
@@ -727,6 +728,40 @@ describe('repo git API routes (R5 Step 1.3 — main working tree)', () => {
     const invalid = await app.request('/api/repo/commit/not-a-sha?structured=1');
     expect(invalid.status).toBe(409);
     expect(((await invalid.json()) as { error: string }).error).toContain('not a commit hash');
+  });
+});
+
+describe('createOrSwitchBranch — dash-guard on both operands (#431)', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'cez-dashguard-'));
+    initRepo(dir);
+    writeFileSync(join(dir, 'a.txt'), 'a\n');
+    g(dir, 'add', '-A');
+    g(dir, 'commit', '-m', 'base');
+  });
+
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it('rejects an option-like branch name — it reaches `checkout [-b] <name>` positionally', async () => {
+    for (const name of ['-x', '--force', '-']) {
+      const res = await createOrSwitchBranch(dir, name);
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(res.error).toContain('invalid branch name');
+    }
+    expect(g(dir, 'rev-parse', '--abbrev-ref', 'HEAD').trim()).toBe('main');
+  });
+
+  it('rejects an option-like start point', async () => {
+    const res = await createOrSwitchBranch(dir, 'ok-name', '--upload-pack=touch /tmp/pwn');
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error).toContain('invalid start point');
+  });
+
+  it('still creates an ordinary branch', async () => {
+    const res = await createOrSwitchBranch(dir, 'feature', 'main');
+    expect(res).toEqual({ ok: true, branch: 'feature', created: true });
   });
 });
 
