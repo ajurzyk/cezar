@@ -169,6 +169,23 @@ CLIs you are already logged into, `claude` by default.
 > instead of the real CLI — the whole cockpit works with no `claude` login, so
 > you can explore runs, diffs, variants and the review gate offline.
 
+### Preview builds
+
+Every green CI run publishes an installable npm snapshot
+([how it works](docs/publishing.md)), so you can try unreleased code without
+cloning anything:
+
+```bash
+npx cezar-cli@develop      # current develop head
+npx cezar-cli@main         # current main head (ahead of the latest stable release)
+```
+
+Every pull request gets its own preview too — the CI bot posts a sticky comment
+on the PR with the exact pinned version to copy-paste
+(`npx cezar-cli@<version>-pr<N>.<run>`). Previews are prerelease versions under
+their own dist-tags; a plain `npx cezar-cli` always resolves to the latest
+stable release.
+
 ---
 
 ## How it works
