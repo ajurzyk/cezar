@@ -137,6 +137,11 @@ describe('request-origin guard (#426)', () => {
     expect(store.listRuns()).toHaveLength(1);
   });
 
+  // Guard-layer behavior only: over a real socket `@hono/node-server` rejects an
+  // expanded IPv6 Host with its own 400 "Invalid host header" (it compares the
+  // header against `new URL().hostname`, which compresses) before our middleware
+  // runs. That fails closed, so this asserts the guard does not add a *second*
+  // reason to refuse a spelling of loopback.
   it('allows the expanded IPv6 loopback Host (0:0:0:0:0:0:0:1) → 201', async () => {
     const res = await postRuns({
       host: '[0:0:0:0:0:0:0:1]:4321',
@@ -169,9 +174,69 @@ describe('request-origin guard (#426)', () => {
   it('allows the dev-proxy write where a loopback Origin differs from a loopback Host → 201', async () => {
     // `npm run dev`: Vite (localhost:5173) proxies to the cockpit with
     // changeOrigin, so Host becomes 127.0.0.1 while the Origin stays localhost.
-    const res = await postRuns({ host: '127.0.0.1:4321', origin: 'http://localhost:5173' });
+    // Verified against the real proxy: it rewrites Host but forwards both the
+    // browser's Origin and its `Sec-Fetch-Site: same-origin`.
+    const res = await postRuns({
+      host: '127.0.0.1:4321',
+      origin: 'http://localhost:5173',
+      'sec-fetch-site': 'same-origin',
+    });
     expect(res.status).toBe(201);
     expect(store.listRuns()).toHaveLength(1);
+  });
+
+  // ---- a different port is a different origin -----------------------------
+
+  it('rejects a write from another loopback PORT (local dev server / local XSS) → 403', async () => {
+    // A page on http://localhost:3000 is as foreign as evil.tld: matching on
+    // hostname alone would hand every local dev server a shell here. Real
+    // browsers label this `same-site`, NOT `same-origin`, so the dev-proxy
+    // exemption does not cover it.
+    const res = await postRuns({
+      host: 'localhost:4321',
+      origin: 'http://localhost:3000',
+      'sec-fetch-site': 'same-site',
+    });
+    expect(res.status).toBe(403);
+    expect(store.listRuns()).toHaveLength(0);
+  });
+
+  it('rejects a cross-port loopback write that sends no Sec-Fetch-Site → 403', async () => {
+    const res = await postRuns({ host: '127.0.0.1:4321', origin: 'http://127.0.0.1:9999' });
+    expect(res.status).toBe(403);
+    expect(store.listRuns()).toHaveLength(0);
+  });
+
+  it('rejects a cross-scheme write on the matching port → 403', async () => {
+    // https://127.0.0.1:4321 is a different origin from the http cockpit; the
+    // authority comparison catches it because URL.port keeps the explicit 4321.
+    const res = await postRuns({ host: '127.0.0.1:443', origin: 'https://127.0.0.1' });
+    expect(res.status).toBe(403);
+    expect(store.listRuns()).toHaveLength(0);
+  });
+
+  it('does not let a forged Sec-Fetch-Site readmit a NON-loopback cross-origin write → 403', async () => {
+    const res = await postRuns({
+      host: '127.0.0.1:4321',
+      origin: 'https://evil.tld',
+      'sec-fetch-site': 'same-origin',
+    });
+    expect(res.status).toBe(403);
+    expect(store.listRuns()).toHaveLength(0);
+  });
+
+  // ---- malformed authorities must not normalize down to a loopback name ----
+
+  it.each([
+    '[::1]@evil.com',
+    '[::1]evil.com',
+    '127.0.0.1%2eevil.com',
+    'localhost%.evil.com',
+    '127.0.0.1:evil.com',
+    'evil.com:80:127.0.0.1',
+  ])('rejects the malformed/spoofing Host %s → 403', async (host) => {
+    const res = await app.request('/api/runs', { headers: { host } });
+    expect(res.status).toBe(403);
   });
 
   it('allows an IPv6 loopback same-origin write ([::1]) → 201', async () => {

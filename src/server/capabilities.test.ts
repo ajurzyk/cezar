@@ -37,6 +37,15 @@ const NOT_LOOPBACK = [
   '127.0.0.256',
   '127.0.0',
   'localhost.evil.com',
+  // Malformed authorities: a lax parser normalizes each of these down to a
+  // loopback name. They must fail closed instead.
+  '[::1]@evil.com',
+  '[::1]evil.com',
+  '[::1]x',
+  '127.0.0.1%2eevil.com',
+  'localhost%.evil.com',
+  '127.0.0.1:evil.com',
+  'evil.com:80:127.0.0.1',
   '0.0.0.0',
   '192.168.1.10',
   'example.com',
@@ -47,13 +56,32 @@ const NOT_LOOPBACK = [
 describe('normalizeHostname', () => {
   it.each([
     ['127.0.0.1:4321', '127.0.0.1'],
-    ['[::1]:4321', '::1'],
+    // IPv6 is canonicalized to all 8 groups, so every spelling of ::1 — and the
+    // compressed form `new URL().hostname` emits — compares equal.
+    ['[::1]:4321', '0:0:0:0:0:0:0:1'],
     ['[0:0:0:0:0:0:0:1]:4321', '0:0:0:0:0:0:0:1'],
-    ['::1', '::1'], // bare IPv6 literal: >1 colon, so never `name:port`
+    ['[0000:0000:0000:0000:0000:0000:0000:0001]', '0:0:0:0:0:0:0:1'],
+    ['::1', '0:0:0:0:0:0:0:1'], // bare IPv6 literal: >1 colon, so never `name:port`
     ['LocalHost.:4321', 'localhost'], // lowercased, trailing FQDN dot dropped
-    ['fe80::1%eth0', 'fe80::1'], // IPv6 zone id stripped
+    ['fe80::1%eth0', 'fe80:0:0:0:0:0:0:1'], // IPv6 zone id stripped
+    ['[::1%25eth0]:4321', '0:0:0:0:0:0:0:1'], // bracketed, zone id + port
   ])('normalizes %s → %s', (input, expected) => {
     expect(normalizeHostname(input)).toBe(expected);
+  });
+
+  it.each([
+    '[::1]@evil.com', // trailing junk after the bracket
+    '[::1]evil.com',
+    '127.0.0.1:evil.com', // port that is not digits
+    'evil.com:80:127.0.0.1',
+  ])('returns "" for the unparseable authority %s', (input) => {
+    expect(normalizeHostname(input)).toBe('');
+  });
+
+  it('only strips a % zone id at the end, never mid-hostname', () => {
+    // `.replace(/%.*$/, '')` would truncate these to a loopback name.
+    expect(normalizeHostname('127.0.0.1%2eevil.com')).toBe('127.0.0.1%2eevil.com');
+    expect(normalizeHostname('localhost%.evil.com')).toBe('localhost%.evil.com');
   });
 });
 

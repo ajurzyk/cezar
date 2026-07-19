@@ -29,38 +29,67 @@ export interface Capabilities {
  *  about — see `isLoopbackHostHeader`. */
 const LOOPBACK_V4 = /^127(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
 
-/** Strip the port, IPv6 brackets, the FQDN trailing dot and the IPv6 zone id,
- *  then lowercase. `[::1]:4321` → `::1`, `localhost.:4321` → `localhost`. */
-export function normalizeHostname(host: string): string {
-  const bracketed = host.match(/^\[([^\]]+)\]/);
-  // A bare IPv6 literal has >1 colon and cannot carry a port without brackets,
-  // so only a single-colon host is `name:port`.
-  const bare = bracketed?.[1] ?? (host.split(':').length > 2 ? host : (host.split(':')[0] ?? ''));
-  return bare.toLowerCase().replace(/%.*$/, '').replace(/\.$/, '');
-}
+/** The IPv6 loopback in the canonical form `expandIpv6` emits. */
+const LOOPBACK_V6 = '0:0:0:0:0:0:0:1';
 
-/** True for every textual form of the IPv6 loopback `::1` — `::1`, `0:0:0:0:0:0:0:1`,
- *  `0000:...:0001`. Anything unparseable is false (fail closed). */
-function isIpv6Loopback(h: string): boolean {
-  if (!h.includes(':')) return false;
+/** Expand an IPv6 literal to all 8 groups, lowercase and without leading zeros
+ *  (`::1` → `0:0:0:0:0:0:0:1`), or `null` when it is not a valid literal.
+ *
+ *  Canonicalizing rather than merely *recognizing* matters: `Host` carries
+ *  whatever spelling the client sent, but `new URL().hostname` compresses
+ *  (`[0:0:0:0:0:0:0:1]` → `[::1]`), so the two only compare equal on a common
+ *  form. */
+function expandIpv6(h: string): string | null {
   const halves = h.split('::');
-  if (halves.length > 2) return false;
+  if (halves.length > 2) return null;
   let groups: string[];
   if (halves.length === 2) {
     const head = halves[0] ? halves[0].split(':') : [];
     const tail = halves[1] ? halves[1].split(':') : [];
-    if (head.length + tail.length > 7) return false;
+    if (head.length + tail.length > 7) return null;
     groups = [...head, ...Array(8 - head.length - tail.length).fill('0'), ...tail];
   } else {
     groups = h.split(':');
   }
-  if (groups.length !== 8 || !groups.every((g) => /^[0-9a-f]{1,4}$/.test(g))) return false;
-  return groups.slice(0, 7).every((g) => parseInt(g, 16) === 0) && parseInt(groups[7]!, 16) === 1;
+  if (groups.length !== 8 || !groups.every((g) => /^[0-9a-f]{1,4}$/.test(g))) return null;
+  return groups.map((g) => parseInt(g, 16).toString(16)).join(':');
 }
 
-/** True when the hostname names this machine and nothing else. */
+/** Canonical hostname of an authority: port and IPv6 brackets removed, IPv6
+ *  expanded, zone id and FQDN trailing dot dropped, lowercased.
+ *  `[::1]:4321` → `0:0:0:0:0:0:0:1`, `localhost.:4321` → `localhost`.
+ *
+ *  Strict by construction: an authority that does not parse as one of the three
+ *  legal shapes returns `''`, which no allowlist matches. Being lax here is a
+ *  security bug, not a convenience — a parser that merely *finds* a loopback
+ *  name inside the header would accept `[::1]@evil.com` or `127.0.0.1:evil.com`. */
+export function normalizeHostname(host: string): string {
+  // 1. Bracketed IPv6, optionally with a port: `[::1]`, `[::1%25eth0]:4321`.
+  //    The end anchor is load-bearing — without it `[::1]@evil.com` → `::1`.
+  const bracketed = host.match(/^\[([^\]]+)\](?::\d+)?$/);
+  if (bracketed) return expandIpv6(stripZone(bracketed[1]!.toLowerCase())) ?? '';
+
+  // 2. A bare IPv6 literal cannot carry a port (no brackets ⇒ every colon
+  //    belongs to the address), so anything with >1 colon is taken whole.
+  if (host.split(':').length > 2) return expandIpv6(stripZone(host.toLowerCase())) ?? '';
+
+  // 3. `name` or `name:port`, where the port must actually be digits.
+  const plain = host.match(/^([^:[\]]*)(?::(\d+))?$/);
+  if (plain) return plain[1]!.toLowerCase().replace(/\.$/, '');
+
+  return ''; // unparseable ⇒ matches no allowlist
+}
+
+/** Drop an IPv6 zone id (`fe80::1%eth0`), anchored to the end so a `%` inside a
+ *  registrable hostname can never truncate it down to a loopback name. */
+function stripZone(h: string): string {
+  return h.replace(/%[a-z0-9._~-]+$/, '');
+}
+
+/** True when the hostname names this machine and nothing else. Expects the
+ *  canonical output of `normalizeHostname`. */
 function isLoopbackName(hostname: string): boolean {
-  return hostname === 'localhost' || LOOPBACK_V4.test(hostname) || isIpv6Loopback(hostname);
+  return hostname === 'localhost' || LOOPBACK_V4.test(hostname) || hostname === LOOPBACK_V6;
 }
 
 /** True for bind hosts that only the local machine can reach. Undefined = the
@@ -76,7 +105,7 @@ export function isLoopbackHost(host: string | undefined): boolean {
  *  The untrusted-input twin of `isLoopbackHost`: a missing or unparseable host
  *  is **untrusted** (false), because absent is not the same as "we defaulted to
  *  loopback" once the value arrives over the wire (#426). */
-export function isLoopbackHostHeader(host: string | undefined): boolean {
+export function isLoopbackHostHeader(host: string | null | undefined): boolean {
   if (!host) return false;
   return isLoopbackName(normalizeHostname(host));
 }

@@ -528,7 +528,7 @@ describe('session git API routes', () => {
   });
 
   it('GET /files?raw=1 still rejects traversal with a 409', async () => {
-    const res = await apiRequest(app, 
+    const res = await apiRequest(app,
       `/api/runs/${run.id}/files?path=${encodeURIComponent('../../etc/passwd')}&raw=1`,
     );
     expect(res.status).toBe(409);

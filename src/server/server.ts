@@ -396,11 +396,18 @@ export function createApp(deps: ServerDeps): Hono {
   //      attacker-registrable `127.0.0.1.evil.com`, and such a page is really
   //      same-origin with us, so checks 2 and 3 would wave it through too.
   //   2. Same-origin write guard — a cross-origin write always carries an
-  //      `Origin` header (browsers attach it to every non-GET), so its host
-  //      must match the served Host. A blind CSRF POST from evil.tld is
-  //      rejected; the cockpit's own same-origin fetch (Origin === Host, or no
-  //      Origin at all for non-browser callers) passes untouched. Works in both
-  //      local and hosted mode because it compares Origin to the actual Host.
+  //      `Origin` header (browsers attach it to every non-GET), so its full
+  //      authority (host AND port) must match the served Host. A blind CSRF
+  //      POST from evil.tld is rejected; the cockpit's own same-origin fetch
+  //      (Origin === Host, or no Origin at all for non-browser callers) passes
+  //      untouched. Works in both local and hosted mode because it compares
+  //      Origin to the actual Host.
+  // Scope note: check 2 covers writes only. A cross-origin GET from any site
+  // still reaches the read routes — but its Host is ours, so it is a *forced
+  // request*, not a read: the same-origin policy stops the attacker seeing any
+  // response body (we send CORS headers on /api/health alone), and no GET
+  // handler mutates state. Rebinding, which WOULD make those reads legible, is
+  // what check 1 stops.
   const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
   const isHostedMode = () => !resolveCapabilities(process.env, bindHost).localHandoff;
   app.use('/api/*', async (c, next) => {
@@ -423,14 +430,29 @@ export function createApp(deps: ServerDeps): Hono {
       const origin = c.req.header('origin');
       if (origin !== undefined) {
         const originHost = hostnameOfOrigin(origin);
-        // Same-origin when the Origin host matches the served Host, or when both
-        // are loopback — the `npm run dev` cockpit reaches us through Vite's
-        // `changeOrigin` proxy, so its Origin is `localhost:5173` while our Host
-        // is `127.0.0.1:<port>`; both name this one machine, never a remote site.
+        // Compare the whole authority, not just the hostname: a different PORT
+        // is a different web origin, and on a dev machine `http://localhost:3000`
+        // is every bit as foreign as `https://evil.tld`. Matching on hostname
+        // alone would let any page served from another loopback port (a local
+        // dev server rendering attacker content, an XSS in a local app) start a
+        // shell-capable agent here.
         const sameOrigin =
-          !!originHost &&
-          (originHost === hostName || (isLoopbackHostHeader(originHost) && isLoopbackHostHeader(hostName)));
-        if (!sameOrigin) {
+          !!originHost && authorityOfOrigin(origin) === authorityOfHost(c.req.header('host'));
+        // The one legitimate cross-port case is the `npm run dev` Vite proxy:
+        // the browser fetches same-origin from `localhost:5173`, Vite's
+        // `changeOrigin` rewrites Host to `127.0.0.1:<api port>` but forwards
+        // the original Origin, so the authorities no longer line up. The browser
+        // already told us what it thinks: `Sec-Fetch-Site: same-origin` is a
+        // forbidden header name that page JS cannot set, and a cross-port
+        // attacker page gets `same-site`, never `same-origin`. Requiring it
+        // (plus loopback on both ends) readmits the proxy without readmitting
+        // the attack. Browsers too old to send Sec-Fetch metadata simply fail
+        // closed here — they still work against a non-proxied cockpit.
+        const isDevProxy =
+          c.req.header('sec-fetch-site') === 'same-origin' &&
+          isLoopbackHostHeader(originHost) &&
+          isLoopbackHostHeader(hostName);
+        if (!sameOrigin && !isDevProxy) {
           return c.json({ error: 'forbidden: cross-origin request rejected (same-origin only)' }, 403);
         }
       }
@@ -1727,11 +1749,36 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
   return serve({ fetch: app.fetch, port, hostname: deps.bindHost ?? '127.0.0.1' });
 }
 
-/** The bare hostname of a `Host` header — port stripped, IPv6 brackets and the
- *  FQDN trailing dot removed, lowercased. `[::1]:4321` → `::1`,
- *  `127.0.0.1:4321` → `127.0.0.1`, `localhost.:4321` → `localhost`. */
+/** The bare hostname of a `Host` header — see `normalizeHostname`. `''` when the
+ *  header is absent, which no allowlist matches. */
 function hostnameOfHost(host: string | undefined): string {
   return host ? normalizeHostname(host) : '';
+}
+
+/** The `hostname:port` authority of a `Host` header, e.g. `127.0.0.1:4321`.
+ *
+ *  The port is kept verbatim and is `''` when the header omits it — which is
+ *  exactly when a browser also omits it from `Origin` (both drop the scheme's
+ *  default port). That symmetry is what lets us compare the two without knowing
+ *  our own scheme, which we cannot know behind a TLS-terminating proxy. */
+function authorityOfHost(host: string | undefined): string {
+  if (!host) return '';
+  const port = host.match(/^\[[^\]]*\]:(\d+)$/)?.[1] ?? host.match(/^[^:]*:(\d+)$/)?.[1] ?? '';
+  return `${normalizeHostname(host)}:${port}`;
+}
+
+/** The `hostname:port` authority of an `Origin` header, or `null` when it is not
+ *  a parseable http(s) URL (the opaque `"null"` origin of a sandboxed iframe, a
+ *  `file://` page). `URL.port` is `''` for a scheme's default port, matching
+ *  `authorityOfHost`. */
+function authorityOfOrigin(origin: string): string | null {
+  try {
+    const u = new URL(origin);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    return `${normalizeHostname(u.hostname)}:${u.port}`;
+  } catch {
+    return null;
+  }
 }
 
 /** The hostname of an `Origin` header, or `null` when it is not a parseable URL
