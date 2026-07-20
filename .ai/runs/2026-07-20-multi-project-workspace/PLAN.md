@@ -19,11 +19,11 @@
 | 1 | 1.5 | Boot wiring in `src/index.ts` (serve+run, worktree/$HOME guards) + pin `CEZ_HOME` in e2e/test:package harnesses | done | 757b66e |
 | 1 | 1.6 | `GET /api/projects` + additive `/api/health` fields (`projects`, `bootProject`) | done | 941e7a7 |
 | 1 | 1.7 | BACKWARD_COMPATIBILITY.md: `~/.cezar/{config,ui-state}.json`, `/api/projects`, health additions | done | 8d881f3 |
-| 2 | 2.1 | `src/server/project-context.ts` lazy context map + `RunManager.dispose()` | done | 98d916f |
-| 2 | 2.2 | `server.ts` context-resolver refactor: `/api/p/:projectId/*` + legacy aliases + parity tests | done | 01f379b |
-| 2 | 2.3 | `src/todos.ts` per-dataDir watcher/emitter map | done | 18220ff |
-| 2 | 2.4 | Usage fan-out scoping (`run.ts` + SSE relay per-project `usage` filtering) | done | 1152337 |
-| 2 | 2.5 | Workspace semaphore for global `maxParallel` (cached config, #347 exemption preserved) | done | 8683cee |
+| 2 | 2.1 | `src/server/project-context.ts` lazy context map + `RunManager.dispose()` | done | 29bab9f |
+| 2 | 2.2 | `server.ts` context-resolver refactor: `/api/p/:projectId/*` + legacy aliases + parity tests | done | 078ea79 |
+| 2 | 2.3 | `src/todos.ts` per-dataDir watcher/emitter map | done | 479eacd |
+| 2 | 2.4 | Usage fan-out scoping (`run.ts` + SSE relay per-project `usage` filtering) | done | 9f0eae0 |
+| 2 | 2.5 | Workspace semaphore for global `maxParallel` (cached config, #347 exemption preserved) | done | 9abbf6e |
 | 2 | 2.6 | Per-project cache keying: GitHub list + comments caches, team-skills cache (+ isolation regression tests) | todo | |
 | 2 | 2.7 | `GET/PUT /api/workspace/config` (projectsDir writability probe) + `/api/workspace/ui-state` | todo | |
 | 2 | 2.8 | `GET /api/workspace/events` all-project SSE; legacy `/api/events` stays boot-filtered | todo | |

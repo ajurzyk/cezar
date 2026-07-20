@@ -18,3 +18,8 @@
 - GET /api/projects + additive health fields (never projects[].root, #431) + BC docs §2/§9.
 - Validation green: typecheck; scoped vitest 48/48; FULL suite 2843/2843 (env -u CEZ_REMOTE — shell ambient CEZ_REMOTE=1 breaks one pre-existing test on base too).
 - Phase 1 complete; upgraded users see no behavior change.
+
+## 2026-07-20T17:03:13Z — checkpoint 3 (steps 2.1..2.5)
+- Project contexts, 53-route context-resolver refactor with manifest-driven parity suite, per-dataDir todos watchers, per-project usage filtering, workspace maxParallel semaphore (#347 exemption tested cross-project).
+- Validation green: typecheck; FULL suite 2873/2873; build; test:package 8/8.
+- Incident: step-2.2 executor cut by session limit mid-run; resumed from transcript; tree verified clean before resume — no partial state landed.

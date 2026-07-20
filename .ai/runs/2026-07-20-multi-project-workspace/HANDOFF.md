@@ -1,17 +1,17 @@
 # Handoff — 2026-07-20-multi-project-workspace
 
-**Last updated:** 2026-07-20T13:12:00Z
+**Last updated:** 2026-07-20T17:03:13Z
 **Branch:** feat/multi-project-workspace
 **PR:** https://github.com/open-mercato/cezar/pull/521 (draft, opened early for live progress; three-signal lock held by pkarw)
-**Current phase/step:** Phase 2 Step 2.1
-**Last commit:** 8d881f3 — docs(bc): Phase-1 workspace surfaces
+**Current phase/step:** Phase 2 Step 2.6
+**Last commit:** 9abbf6e — feat(workspace): workspace semaphore
 
 ## What just happened
-- Phase 1 complete (1.1–1.7): workspace modules, boot wiring, GET /api/projects, additive health fields, BC docs §2+§9.
-- Checkpoint 2 green: typecheck, scoped 48/48, full suite 2843/2843 (env -u CEZ_REMOTE — shell exports CEZ_REMOTE=1, must strip for full runs).
+- Steps 2.1–2.5 done: ProjectContexts + RunManager.dispose, server.ts context-resolver refactor (53 routes mirrored, parity suite), per-dataDir todos watchers, usage fan-out scoping, workspace semaphore (#347 exemption preserved cross-project).
+- Checkpoint 3 green: typecheck, FULL suite 2873/2873, build, test:package 8/8.
 
 ## Next concrete action
-- Dispatch Step 2.1: `src/server/project-context.ts` lazy context map + `RunManager.dispose()`.
+- Dispatch Step 2.6: per-project cache keying (GitHub list/comments caches, team-skills cache) + isolation regression tests.
 
 ## Blockers / open questions
 - none
