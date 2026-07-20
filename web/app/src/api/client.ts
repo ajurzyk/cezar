@@ -46,6 +46,7 @@ import type {
   UiState,
   WorkflowsResponse,
 } from './types'
+import { scopeApiPath } from './project-scope'
 
 /**
  * The typed client for the cockpit's own HTTP API.
@@ -53,6 +54,12 @@ import type {
  * Same-origin by construction: the Hono server serves this bundle and owns `/api/*`, and the
  * Vite dev server proxies `/api` to it. So every path here is root-relative — there is no base
  * URL to configure and no cross-origin case to get wrong.
+ *
+ * Multi-project (spec, step 3.1): every path below is spelled in the legacy unscoped form and
+ * prefixed to `/api/p/<id>` at request time by `send()` (via `scopeApiPath`) when a project
+ * scope is active. Unscoped, `scopeApiPath` is the identity — the request paths stay
+ * byte-identical to the single-project cockpit. `runFileRawUrl` is the one URL this module
+ * hands out instead of fetching itself, so it applies the scope at build time.
  *
  * This module is the boundary. It parses responses, turns every non-2xx into an `ApiError`
  * carrying the server's own words, and does nothing else: no caching, no retries, no
@@ -130,7 +137,7 @@ function errorFor(status: number, statusText: string, body: string): ApiError {
 
 async function send(path: string, init: RequestInit): Promise<Response> {
   try {
-    return await fetch(path, init)
+    return await fetch(scopeApiPath(path), init)
   } catch (cause) {
     // The request never got an answer. Not an HTTP failure — hence status 0 — but callers get
     // one error type either way instead of two.
@@ -296,9 +303,10 @@ export function getRunFile(id: string, path: string, opts?: ReadOptions): Promis
 }
 
 /** The same-origin URL an `<img>` can load an image file's bytes from (R5 Files tab). The
- *  server serves raw ONLY for image extensions within the size cap — everything else 409s. */
+ *  server serves raw ONLY for image extensions within the size cap — everything else 409s.
+ *  Scoped here rather than in send() — this URL is handed to an `<img>`, never fetched. */
 export function runFileRawUrl(id: string, path: string): string {
-  return runPath(id, `/files?path=${encodeURIComponent(path)}&raw=1`)
+  return scopeApiPath(runPath(id, `/files?path=${encodeURIComponent(path)}&raw=1`))
 }
 
 /** The variant-compare data (spec 010): one entry per variant of the group, with the legacy

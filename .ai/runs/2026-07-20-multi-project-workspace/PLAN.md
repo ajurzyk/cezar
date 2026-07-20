@@ -28,7 +28,7 @@
 | 2 | 2.7 | `GET/PUT /api/workspace/config` (projectsDir writability probe) + `/api/workspace/ui-state` | done | 4c45fc6 |
 | 2 | 2.8 | `GET /api/workspace/events` all-project SSE; legacy `/api/events` stays boot-filtered | done | f90707c |
 | 2 | 2.9 | BACKWARD_COMPATIBILITY.md: `/api/p/*`, workspace SSE stream, `project` SSE field | done | 1f00530 |
-| 3 | 3.1 | Cockpit API-client scope seam (`send()` prefix, 4 non-send sites, workspace EventSource, query keys) | todo | |
+| 3 | 3.1 | Cockpit API-client scope seam (`send()` prefix, 4 non-send sites, workspace EventSource, query keys) | done | e275ef8 |
 | 3 | 3.2 | `/p/:projectId/*` routes + legacy redirects (params preserved) + `default` alias normalization | todo | |
 | 3 | 3.3 | Multi-project sidebar: groups, collapse persistence, 10-recent + More…, missing state, add-project button | todo | |
 | 3 | 3.4 | New-task project pill: scope swap, per-project draft keys, scoped submit | todo | |

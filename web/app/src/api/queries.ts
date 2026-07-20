@@ -27,6 +27,7 @@ import {
   patchRun,
   sendMessage,
 } from './client'
+import { queryScope } from './project-scope'
 import type { MessageInput, PatchRunInput } from './types'
 
 /**
@@ -37,41 +38,73 @@ import type { MessageInput, PatchRunInput } from './types'
  *
  * Hierarchical on purpose — `queryKeys.runs.all` invalidates the list and every single-run
  * query under it in one call.
+ *
+ * Every key leads with the ACTIVE project scope (multi-project spec, step 3.1): the registered
+ * project id, or the stable `'default'` sentinel when unscoped — read at access time via
+ * `queryScope()`, which is why the constant keys are getters. One cache, never bleeding across
+ * projects: project A's `['a','runs','list']` and project B's `['b','runs','list']` are simply
+ * different entries, and a scoped invalidation (`queryKeys.runs.all` under scope A) can only
+ * ever reach A's data. Call sites are unchanged — they keep writing `queryKeys.runs.list()`.
  */
 export const queryKeys = {
-  health: ['health'] as const,
+  get health() {
+    return [queryScope(), 'health'] as const
+  },
   runs: {
-    all: ['runs'] as const,
-    list: () => ['runs', 'list'] as const,
-    detail: (id: string) => ['runs', 'detail', id] as const,
-    diff: (id: string) => ['runs', 'diff', id] as const,
-    changes: (id: string) => ['runs', 'changes', id] as const,
-    file: (id: string, path: string) => ['runs', 'files', id, path] as const,
-    handoff: (id: string) => ['runs', 'handoff', id] as const,
-    commits: (id: string) => ['runs', 'commits', id] as const,
-    commit: (id: string, sha: string) => ['runs', 'commit', id, sha] as const,
+    get all() {
+      return [queryScope(), 'runs'] as const
+    },
+    list: () => [queryScope(), 'runs', 'list'] as const,
+    detail: (id: string) => [queryScope(), 'runs', 'detail', id] as const,
+    diff: (id: string) => [queryScope(), 'runs', 'diff', id] as const,
+    changes: (id: string) => [queryScope(), 'runs', 'changes', id] as const,
+    file: (id: string, path: string) => [queryScope(), 'runs', 'files', id, path] as const,
+    handoff: (id: string) => [queryScope(), 'runs', 'handoff', id] as const,
+    commits: (id: string) => [queryScope(), 'runs', 'commits', id] as const,
+    commit: (id: string, sha: string) => [queryScope(), 'runs', 'commit', id, sha] as const,
   },
   groups: {
-    detail: (groupId: string) => ['groups', groupId] as const,
+    detail: (groupId: string) => [queryScope(), 'groups', groupId] as const,
   },
-  todos: ['todos'] as const,
-  workflows: ['workflows'] as const,
-  skills: ['skills'] as const,
-  launchKey: ['launch-key'] as const,
-  repo: ['repo'] as const,
+  get todos() {
+    return [queryScope(), 'todos'] as const
+  },
+  get workflows() {
+    return [queryScope(), 'workflows'] as const
+  },
+  get skills() {
+    return [queryScope(), 'skills'] as const
+  },
+  get launchKey() {
+    return [queryScope(), 'launch-key'] as const
+  },
+  get repo() {
+    return [queryScope(), 'repo'] as const
+  },
   /** Children of `repo` on purpose: invalidating `queryKeys.repo` (a branch switch, a new
    *  commit) prefix-matches the working-tree diff and every cached commit diff too. */
-  repoChanges: ['repo', 'changes'] as const,
-  repoCommit: (sha: string) => ['repo', 'commit', sha] as const,
-  uiState: ['ui-state'] as const,
+  get repoChanges() {
+    return [queryScope(), 'repo', 'changes'] as const
+  },
+  repoCommit: (sha: string) => [queryScope(), 'repo', 'commit', sha] as const,
+  get uiState() {
+    return [queryScope(), 'ui-state'] as const
+  },
   /** The Settings → Agents knobs (`GET /api/config`, R6 1.5). */
-  config: ['config'] as const,
+  get config() {
+    return [queryScope(), 'config'] as const
+  },
   /** The worktree management panel (`GET /api/worktrees`, #483). */
-  worktrees: ['worktrees'] as const,
-  github: (params: { limit?: number } = {}) => ['github', params.limit ?? null] as const,
-  githubComments: (kind: 'issue' | 'pr', number: number) => ['github', 'comments', kind, number] as const,
-  openTargets: ['open-targets'] as const,
-} as const
+  get worktrees() {
+    return [queryScope(), 'worktrees'] as const
+  },
+  github: (params: { limit?: number } = {}) => [queryScope(), 'github', params.limit ?? null] as const,
+  githubComments: (kind: 'issue' | 'pr', number: number) =>
+    [queryScope(), 'github', 'comments', kind, number] as const,
+  get openTargets() {
+    return [queryScope(), 'open-targets'] as const
+  },
+}
 
 /** Version + update check + repo/branch + tool probes. Feeds the sidebar's repo and version
  *  chips and (Step 4.2) the Tools menu.

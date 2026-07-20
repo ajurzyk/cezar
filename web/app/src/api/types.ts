@@ -229,6 +229,11 @@ export interface HealthResponse {
   /** R5 additive fields (BACKWARD_COMPATIBILITY.md §2 keeps the pre-forge shape intact). */
   forge: ForgeInfo | null
   capabilities: Capabilities
+  /** Multi-project additive fields (step 1.6): the registered projects — id + name ONLY, never
+   *  roots (health is the one CORS-open route) — and the id of the project cezar booted in.
+   *  `bootProject` is what the workspace-events filter compares stamps against when unscoped. */
+  projects?: { id: string; name: string }[]
+  bootProject?: string
 }
 
 /** `GET /api/launch-key` — the bookmarklet auto-start secret (spec 011). Fetched to COMPARE
