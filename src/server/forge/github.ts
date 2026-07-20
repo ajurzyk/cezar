@@ -190,16 +190,21 @@ export function parseOwnerName(nameWithOwner: string): { owner: string; name: st
 /* Reads degrade to `available: false` with a hint — never an error (plan rule
    7): no `gh`, no remote, offline all land on the same quiet path. A short
    cache keeps tab switches from hammering the GitHub API; a cached fetch with
-   a bigger limit than asked serves fine (it's a superset). */
-let cache: { at: number; limit: number; data: GithubData } | null = null;
+   a bigger limit than asked serves fine (it's a superset). Keyed by `repoRoot`
+   (multi-project workspace, step 2.6): one project's — possibly private —
+   issues/PRs must never be served under another project's scope. Bounded like
+   `commentsCache` so an unbounded workspace can't grow it without limit. */
+const listCache = new Map<string, { at: number; limit: number; data: GithubData }>();
+const LIST_CACHE_MAX = 50;
 const CACHE_MS = 60_000;
 export const GH_MAX_LIMIT = 1000;
 
 export async function fetchGithub(repoRoot: string, refresh = false, limit = 30): Promise<GithubData> {
   if (process.env.CEZ_DRY_RUN === '1') return mockGithub();
   const capped = Math.min(Math.max(limit, 1), GH_MAX_LIMIT);
-  if (!refresh && cache && Date.now() - cache.at < CACHE_MS && cache.limit >= capped) {
-    return cache.data;
+  const hit = listCache.get(repoRoot);
+  if (!refresh && hit && Date.now() - hit.at < CACHE_MS && hit.limit >= capped) {
+    return hit.data;
   }
   try {
     // No `comments` field — `gh … --json comments` ships full comment bodies.
@@ -279,7 +284,13 @@ export async function fetchGithub(repoRoot: string, refresh = false, limit = 30)
       prs,
       labelColors,
     };
-    cache = { at: Date.now(), limit: capped, data };
+    listCache.delete(repoRoot); // re-insert so this key becomes the newest
+    listCache.set(repoRoot, { at: Date.now(), limit: capped, data });
+    while (listCache.size > LIST_CACHE_MAX) {
+      const oldest = listCache.keys().next().value;
+      if (oldest === undefined) break;
+      listCache.delete(oldest);
+    }
     return data;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -415,8 +426,10 @@ export function mergeThread(
   return { comments: truncated ? all.slice(0, cap) : all, truncated };
 }
 
-// Per-thread cache: keyed `kind#number`, same 60 s TTL as the list cache but BOUNDED — a long
-// browsing session can't grow it without limit (Map preserves insertion order → oldest first).
+// Per-thread cache: keyed `repoRoot␀kind#number` (the root scopes the key — two projects each
+// having a PR #42 must not collide; step 2.6), same 60 s TTL as the list cache but BOUNDED — a
+// long browsing session can't grow it without limit (Map preserves insertion order → oldest
+// first).
 const commentsCache = new Map<string, { at: number; data: ForgeCommentsData }>();
 const COMMENTS_CACHE_MAX = 50;
 
@@ -447,7 +460,8 @@ export async function fetchGithubComments(
   refresh = false,
 ): Promise<ForgeCommentsData> {
   if (process.env.CEZ_DRY_RUN === '1') return mockGithubComments(kind);
-  const key = `${kind}#${number}`;
+  // NUL separator: cannot appear in a filesystem path, so roots can never alias.
+  const key = `${repoRoot}\0${kind}#${number}`;
   const hit = commentsCache.get(key);
   if (!refresh && hit && Date.now() - hit.at < CACHE_MS) return hit.data;
   try {

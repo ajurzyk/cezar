@@ -14,8 +14,11 @@ vi.mock('node:child_process', async (importOriginal) => {
 });
 
 import {
+  __clearCommentsCacheForTests,
   detectGithubCached,
   fetchCommentCounts,
+  fetchGithub,
+  fetchGithubComments,
   ghCheckRunSchema,
   mergeThread,
   normalizeComments,
@@ -315,6 +318,110 @@ describe('mergeThread', () => {
     const { comments, truncated } = mergeThread([many], THREAD_ENTRY_CAP);
     expect(comments).toHaveLength(THREAD_ENTRY_CAP);
     expect(truncated).toBe(true);
+  });
+});
+
+/** Per-project cache isolation (multi-project workspace, step 2.6). Both in-process caches in
+ *  this module — the 60 s list cache behind `fetchGithub` and the per-thread comments cache
+ *  behind `fetchGithubComments` — used to be keyed process-globally, so within one TTL window
+ *  project B was served project A's (possibly private) GitHub data. These regression tests drive
+ *  `gh` entirely through `execFileMock`, answering by the subprocess `cwd` (= `repoRoot`), and
+ *  assert one project's payload is NEVER served under another project's scope. */
+
+/** Route every mocked `gh` invocation by argv + cwd. */
+const ghByCwd = () =>
+  execFileMock.mockImplementation((...args: unknown[]) => {
+    const argv = args[1] as string[];
+    const opts = args[2] as { cwd?: string } | undefined;
+    const cb = args[args.length - 1] as (e: unknown, r: unknown) => void;
+    const who = opts?.cwd?.includes('proj-b') ? 'b' : 'a';
+    let stdout = '';
+    if (argv[0] === 'repo') stdout = `owner/${who}\n`;
+    else if (argv[0] === 'issue')
+      stdout = JSON.stringify([
+        {
+          number: 1,
+          title: `${who}-issue`,
+          author: { login: who },
+          createdAt: '2026-07-01T00:00:00Z',
+          labels: [],
+          body: `${who} body`,
+          url: `https://github.com/owner/${who}/issues/1`,
+        },
+      ]);
+    else if (argv[0] === 'pr') stdout = '[]';
+    else if (argv[1]?.includes('/comments'))
+      stdout = JSON.stringify([
+        {
+          id: 1,
+          user: { login: `${who}-commenter` },
+          created_at: '2026-07-01T00:00:00Z',
+          body: `${who} says hi`,
+          html_url: `https://github.com/owner/${who}/pull/42#c1`,
+        },
+      ]);
+    else if (argv[1]?.includes('/reviews')) stdout = '[]';
+    else stdout = '{}'; // graphql counts — malformed page degrades to empty maps
+    cb(null, { stdout, stderr: '' });
+  });
+
+describe('fetchGithub per-project list-cache isolation (step 2.6)', () => {
+  beforeEach(() => {
+    vi.stubEnv('CEZ_DRY_RUN', ''); // dry-run would short-circuit the cache path we're testing
+    execFileMock.mockReset();
+    ghByCwd();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('never serves project A\'s issues/PRs to project B inside the TTL window', async () => {
+    const a = await fetchGithub('/repo/list-iso/proj-a');
+    expect(a.repo).toBe('owner/a');
+    expect(a.issues[0]?.title).toBe('a-issue');
+
+    // Within A's 60 s TTL: B must trigger its own fetch, not read A's entry.
+    const b = await fetchGithub('/repo/list-iso/proj-b');
+    expect(b.repo).toBe('owner/b');
+    expect(b.issues[0]?.title).toBe('b-issue');
+
+    // Per-key TTL semantics survive the scoping: A is still served from cache…
+    const calls = execFileMock.mock.calls.length;
+    const a2 = await fetchGithub('/repo/list-iso/proj-a');
+    expect(a2).toBe(a); // same cached object, no new gh calls
+    expect(execFileMock.mock.calls.length).toBe(calls);
+    // …and it is A's data, not B's (B's fetch didn't overwrite A's key).
+    expect(a2.issues[0]?.title).toBe('a-issue');
+  });
+});
+
+describe('fetchGithubComments per-project cache isolation (step 2.6)', () => {
+  beforeEach(() => {
+    vi.stubEnv('CEZ_DRY_RUN', '');
+    execFileMock.mockReset();
+    ghByCwd();
+    __clearCommentsCacheForTests();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('does not collide two projects that both have a PR #42', async () => {
+    const a = await fetchGithubComments('/repo/thread-iso/proj-a', 'pr', 42);
+    expect(a.comments[0]?.author).toBe('a-commenter');
+
+    // Old key was `pr#42` — B would have been served A's thread from cache.
+    const b = await fetchGithubComments('/repo/thread-iso/proj-b', 'pr', 42);
+    expect(b.comments[0]?.author).toBe('b-commenter');
+    expect(b.comments[0]?.body).toBe('b says hi');
+
+    // A's entry survives B's write and still serves from cache (no new gh calls).
+    const calls = execFileMock.mock.calls.length;
+    const a2 = await fetchGithubComments('/repo/thread-iso/proj-a', 'pr', 42);
+    expect(a2).toBe(a);
+    expect(execFileMock.mock.calls.length).toBe(calls);
   });
 });
 
