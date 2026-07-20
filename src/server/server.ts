@@ -3,6 +3,7 @@ import { mkdir, readFile, realpath, unlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Hono, type Context } from 'hono';
+import type { Next } from 'hono';
 import { serve, type ServerType } from '@hono/node-server';
 import { bodyLimit } from 'hono/body-limit';
 import { streamSSE } from 'hono/streaming';
@@ -45,8 +46,9 @@ import {
   readWorktreePath,
 } from './git-changes.js';
 import { loadConfig, type CezConfig } from '../config.js';
-import { defaultWorkspaceConfig, loadWorkspaceConfig, type WorkspaceProject } from '../workspace/config.js';
+import { PROJECT_ID_RE, defaultWorkspaceConfig, loadWorkspaceConfig, type WorkspaceProject } from '../workspace/config.js';
 import { allocateProjectSlug, listProjects, type ProjectListEntry } from '../workspace/projects.js';
+import { ProjectContextError, ProjectContexts, type ProjectContext } from './project-context.js';
 import { reviewGateEnabled } from '../runs/review-gate.js';
 import { readUiState, uiStatePath } from '../ui-state.js';
 import { resolveCapabilities } from './capabilities.js';
@@ -73,6 +75,57 @@ export interface ServerDeps {
    *  from `initWorkspace` in src/index.ts. Optional: legacy callers/tests get
    *  a lazy registry lookup by `repoRoot`, falling back to the repo's slug. */
   bootProjectId?: string;
+  /** Per-project context map (multi-project spec, step 2.2). Non-boot
+   *  `/api/p/:projectId/*` requests resolve their `{store, manager, …}` here,
+   *  built lazily on first touch. Optional so legacy callers change nothing —
+   *  the default is a registry-backed map; tests inject their own so they can
+   *  `disposeAll()` after. The BOOT project never lives in this map: its
+   *  context is seeded from `deps.{store,manager}` (which src/index.ts already
+   *  recovered/pruned at startup) and the resolver short-circuits to it. */
+  contexts?: ProjectContexts;
+}
+
+// ---- project-scoped routing (multi-project spec, step 2.2) -----------------
+
+/** Hono env for the mirrored project-route table: the scope resolver puts the
+ *  request's `ProjectContext` on the context, handlers read `c.get('project')`. */
+type ProjectApiEnv = { Variables: { project: ProjectContext } };
+
+/** `projectId` gate at the route boundary (spec "Project identity"): the slug
+ *  shape or the reserved `default` alias — validated BEFORE touching any map
+ *  or path. (`default` matches the slug regex too; the literal keeps the
+ *  contract explicit.) */
+const projectIdSchema = z.union([z.literal('default'), z.string().regex(PROJECT_ID_RE)]);
+
+/** One row of the mirrored project-route table. */
+export interface ProjectRouteInfo {
+  method: string;
+  /** Path relative to the mount — `/runs/:id`, not `/api/runs/:id`. */
+  path: string;
+}
+
+const SCOPED_PREFIX = '/api/p/:projectId';
+
+/**
+ * The project-scoped route table of a `createApp()` app, derived from its
+ * actual registrations (so it can never drift from the code): every
+ * method+path mounted under `/api/p/:projectId/…`, minus the scope-resolver
+ * middleware (method ALL), deduped. The alias-parity suite iterates this to
+ * assert unprefixed `/api/<path>` ≡ `/api/p/<boot>/<path>` ≡
+ * `/api/p/default/<path>`.
+ */
+export function projectRouteManifest(app: Hono): ProjectRouteInfo[] {
+  const seen = new Set<string>();
+  const manifest: ProjectRouteInfo[] = [];
+  for (const route of app.routes) {
+    if (route.method === 'ALL' || !route.path.startsWith(`${SCOPED_PREFIX}/`)) continue;
+    const path = route.path.slice(SCOPED_PREFIX.length);
+    const key = `${route.method} ${path}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    manifest.push({ method: route.method, path });
+  }
+  return manifest;
 }
 
 /** 409 body for the inbox mutators while the follow-up inbox is off (#471). */
@@ -377,8 +430,14 @@ const UI_STATE_BODY_LIMIT = 128 * 1024; // 128 KiB
 const UI_STATE_MAX_KEYS = 200;
 
 export function createApp(deps: ServerDeps): Hono {
-  const { repoRoot, store, manager, version, update, bindHost, bootProjectId } = deps;
-  const dataDir = join(repoRoot, '.ai/cezar');
+  const { version, update, bindHost, bootProjectId } = deps;
+  // Boot singletons keep DELIBERATELY distinct names (`boot*`): every
+  // project-scoped handler must resolve its `{store, manager, root, dataDir,
+  // launchKey}` from `c.get('project')` — a bare `store`/`repoRoot` in a
+  // handler body would silently pin it to the boot project, which the rename
+  // turns into a compile error instead.
+  const bootRoot = deps.repoRoot;
+  const bootDataDir = join(bootRoot, '.ai/cezar');
 
   // ---- workspace boot-project identity (multi-project spec) ----------------
   // The boot flow (`initWorkspace` in src/index.ts) registers the boot repo
@@ -394,13 +453,13 @@ export function createApp(deps: ServerDeps): Hono {
     if (bootProjectCache) return bootProjectCache;
     try {
       const registry = projects ?? (await loadWorkspaceConfig()).projects;
-      const real = await realpath(repoRoot).catch(() => repoRoot);
-      const match = registry.find((p) => p.root === real || p.root === repoRoot);
+      const real = await realpath(bootRoot).catch(() => bootRoot);
+      const match = registry.find((p) => p.root === real || p.root === bootRoot);
       if (match) bootProjectCache = match.id;
     } catch {
       // unreadable workspace — fall through to the slug fallback below
     }
-    return bootProjectCache ?? allocateProjectSlug(repoRoot, []);
+    return bootProjectCache ?? allocateProjectSlug(bootRoot, []);
   };
   // Health's workspace garnish: id+name ONLY — never `root` (#431, see the
   // health route). Reads only the registry file; no per-root status probes,
@@ -426,13 +485,68 @@ export function createApp(deps: ServerDeps): Hono {
   const capabilities = () => resolveCapabilities(process.env, bindHost);
   // Inbox live updates (spec 007). Opt-in (#471): no capability, no watcher —
   // nothing can write todos.json anyway, so a watch would only burn an fd.
-  if (capabilities().followups) startTodosWatch(dataDir);
-  const launchKey = ensureLaunchKey(dataDir); // bookmarklet auto-start secret (spec 011)
+  // Boot project only until step 2.3 de-singletonizes the watcher.
+  if (capabilities().followups) startTodosWatch(bootDataDir);
+
+  // ---- project contexts (multi-project spec, step 2.2) ---------------------
+  // The boot project's context is SEEDED from the deps the caller already
+  // built (src/index.ts `serveCommand` did the recover/prune/launch-key work
+  // at startup — observable boot behavior unchanged); it never enters the
+  // lazy map, so its `.ai/cezar` state is never double-opened. `id` starts as
+  // the reserved alias when registration was suppressed — handlers never read
+  // it; API payloads name the boot project via `resolveBootProject` instead.
+  const bootContext: ProjectContext = {
+    id: bootProjectId ?? 'default',
+    root: bootRoot,
+    dataDir: bootDataDir,
+    store: deps.store,
+    manager: deps.manager,
+    launchKey: ensureLaunchKey(bootDataDir), // bookmarklet auto-start secret (spec 011)
+  };
+  // Non-boot projects build lazily on first scoped request.
+  const contexts = deps.contexts ?? new ProjectContexts({ listProjects });
+
   const app = new Hono();
 
   // Reject oversized request bodies before they reach any handler (#429). GETs
   // and SSE carry no body, so this only ever gates the mutating routes.
   app.use('*', bodyLimit({ maxSize: GLOBAL_BODY_LIMIT }));
+
+  // The mirrored project-route table (spec "API Contracts → Project-scoped").
+  // Every route below registers ONCE on this sub-app; `createApp` mounts it
+  // twice — under `/api/p/:projectId` (scoped) and under `/api` (the legacy
+  // aliases, protected surfaces) — so both spellings share one handler and
+  // can never drift. The resolver middleware binds `c.get('project')`:
+  // no `projectId` param (legacy mount) → the boot context, byte-identical to
+  // the pre-workspace closures; `default` or the boot project's own id → the
+  // boot context too; anything else → the lazy context map, with
+  // `ProjectContextError` mapped to 404 (unknown) / 409 (missing root).
+  const api = new Hono<ProjectApiEnv>();
+  api.use('*', async (c, next: Next) => {
+    const raw = c.req.param('projectId');
+    if (raw === undefined) {
+      c.set('project', bootContext);
+      return next();
+    }
+    if (!projectIdSchema.safeParse(raw).success) {
+      return c.json({ error: `unknown project: ${raw}` }, 404);
+    }
+    if (raw === 'default' || raw === (await resolveBootProject())) {
+      c.set('project', bootContext);
+      return next();
+    }
+    try {
+      c.set('project', await contexts.context(raw));
+    } catch (err) {
+      if (err instanceof ProjectContextError) {
+        return err.reason === 'missing-root'
+          ? c.json({ error: `project folder not found: ${err.projectId}` }, 409)
+          : c.json({ error: err.message }, 404);
+      }
+      throw err;
+    }
+    return next();
+  });
 
   // ---- static GUI ----------------------------------------------------------
   const webDir = resolveWebDir();
@@ -499,8 +613,8 @@ export function createApp(deps: ServerDeps): Hono {
   app.get('/api/health', async (c) => {
     const [checks, repo, config, workspace] = await Promise.all([
       detectEnvironment(),
-      getRepoInfo(repoRoot),
-      loadConfig(repoRoot),
+      getRepoInfo(bootRoot),
+      loadConfig(bootRoot),
       workspaceSummary(),
     ]);
     // Additive fields only below — the pre-forge shape is the most
@@ -518,7 +632,7 @@ export function createApp(deps: ServerDeps): Hono {
       // §2: the field is always present and a string, but under CEZ_REMOTE it is
       // no longer an absolute path. Deliberate — a hosted cockpit's paths are on
       // a machine the reader does not have anyway. See §2's `repoRoot` note.
-      repoRoot: caps.localHandoff ? repoRoot : basename(repoRoot),
+      repoRoot: caps.localHandoff ? bootRoot : basename(bootRoot),
       repo,
       checks,
       defaultRunner: config.defaultRunner,
@@ -562,15 +676,16 @@ export function createApp(deps: ServerDeps): Hono {
 
   // The bookmarklet generator bakes this key into the `javascript:` URLs —
   // `/new?auto=1` is honored only with it (spec 011). Same-origin only.
-  app.get('/api/launch-key', (c) => c.json({ key: launchKey }));
+  api.get('/launch-key', (c) => c.json({ key: c.get('project').launchKey }));
 
-  app.get('/api/skills', async (c) => c.json(await discoverSkills(repoRoot)));
+  api.get('/skills', async (c) => c.json(await discoverSkills(c.get('project').root)));
 
   // ---- GUI prefs (ui-state.json) --------------------------------------------
   // The read path is shared with the CLI (`src/ui-state.ts`) so `cezar serve` can honour a
   // preference set here — #391's dismissed skills banner — from one notion of the file.
-  app.get('/api/ui-state', async (c) => c.json(await readUiState(repoRoot)));
-  app.put('/api/ui-state', bodyLimit({ maxSize: UI_STATE_BODY_LIMIT }), async (c) => {
+  api.get('/ui-state', async (c) => c.json(await readUiState(c.get('project').root)));
+  api.put('/ui-state', bodyLimit({ maxSize: UI_STATE_BODY_LIMIT }), async (c) => {
+    const { root: repoRoot, dataDir } = c.get('project');
     const parsed = uiStateSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
       return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
@@ -593,17 +708,19 @@ export function createApp(deps: ServerDeps): Hono {
   // Refresh team skills (spec 005): clone/fetch the configured skills repos,
   // then return the merged catalog. Degrades quietly — offline just means the
   // team entries stay as they were (or absent).
-  app.post('/api/skills/refresh', async (c) => {
+  api.post('/skills/refresh', async (c) => {
+    const { root: repoRoot } = c.get('project');
     await refreshTeamSkills(repoRoot);
     return c.json(await discoverSkills(repoRoot));
   });
 
-  app.get('/api/workflows', async (c) => c.json(await loadWorkflows(repoRoot)));
+  api.get('/workflows', async (c) => c.json(await loadWorkflows(c.get('project').root)));
 
   // Save an approved plan as a reusable chain (spec 008): YAML in
   // `.ai/cezar/workflows/<slug>.yaml` — from then on it's in the dropdown
   // like any other workflow.
-  app.post('/api/workflows', async (c) => {
+  api.post('/workflows', async (c) => {
+    const { root: repoRoot } = c.get('project');
     const parsed = saveWorkflowSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
       return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
@@ -641,7 +758,8 @@ export function createApp(deps: ServerDeps): Hono {
 
   // Delete a saved workflow (spec 012 follow-up): file workflows only —
   // built-ins have no file and always come back.
-  app.delete('/api/workflows/:name', async (c) => {
+  api.delete('/workflows/:name', async (c) => {
+    const { root: repoRoot } = c.get('project');
     const name = c.req.param('name');
     const { workflows } = await loadWorkflows(repoRoot);
     const wf = workflows.find((w) => w.name === name);
@@ -665,7 +783,7 @@ export function createApp(deps: ServerDeps): Hono {
   // Import support for the builder (spec 012): parse + validate a pasted
   // workflow YAML (either form) and hand back the normalized definition. The
   // server owns YAML parsing — the GUI stays dependency-free.
-  app.post('/api/workflows/parse', async (c) => {
+  api.post('/workflows/parse', async (c) => {
     const parsed = parseWorkflowSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
       return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
@@ -690,7 +808,8 @@ export function createApp(deps: ServerDeps): Hono {
   // Chain-from-prompt (spec 008): one cheap claude call proposes a chain of
   // steps for the task. Never blocks — degraded answers come back as a
   // one-step quick-task plan with `fallback: true`.
-  app.post('/api/plan', async (c) => {
+  api.post('/plan', async (c) => {
+    const { root: repoRoot } = c.get('project');
     const parsed = planSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
       return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
@@ -718,7 +837,7 @@ export function createApp(deps: ServerDeps): Hono {
   // Deliberately best-effort: bookkeeping must never cost the user their task,
   // so an unknown, stale or already-started id (markStarted → false) and any I/O
   // failure only log. The run has already been created by the time we get here.
-  const noteTodoStarted = async (todoId: string, taskId: string): Promise<void> => {
+  const noteTodoStarted = async (dataDir: string, todoId: string, taskId: string): Promise<void> => {
     try {
       if (!(await markStarted(dataDir, todoId, taskId))) {
         console.warn(`[cezar] inbox entry ${todoId} not marked started (unknown or already started)`);
@@ -728,13 +847,16 @@ export function createApp(deps: ServerDeps): Hono {
     }
   };
 
-  app.get('/api/runs', (c) => c.json(store.listRuns().map(withUsage)));
+  api.get('/runs', (c) => c.json(c.get('project').store.listRuns().map(withUsage)));
 
   // Registered before the `/:id/...` routes so "archive-finished" never
   // matches as a run id.
-  app.post('/api/runs/archive-finished', (c) => c.json({ archived: store.archiveFinished() }));
+  api.post('/runs/archive-finished', (c) =>
+    c.json({ archived: c.get('project').store.archiveFinished() }),
+  );
 
-  app.post('/api/runs/:id/archive', async (c) => {
+  api.post('/runs/:id/archive', async (c) => {
+    const { store } = c.get('project');
     const id = c.req.param('id');
     // An empty/absent body archives (the common case); a malformed body degrades
     // to `{}` just as before, but a wrong-typed `archived` is now a 400 (#429).
@@ -746,7 +868,8 @@ export function createApp(deps: ServerDeps): Hono {
     return run ? c.json(run) : c.json({ error: 'not found' }, 404);
   });
 
-  app.post('/api/runs', async (c) => {
+  api.post('/runs', async (c) => {
+    const { root: repoRoot, dataDir, manager } = c.get('project');
     const parsed = startRunSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
       return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
@@ -798,17 +921,17 @@ export function createApp(deps: ServerDeps): Hono {
       const runs = manager.startVariants(workflow, input, variants);
       // The entry points at the first variant — the thread the composer navigates to.
       const first = runs[0];
-      if (parsed.data.todoId && first) await noteTodoStarted(parsed.data.todoId, first.id);
+      if (parsed.data.todoId && first) await noteTodoStarted(dataDir, parsed.data.todoId, first.id);
       return c.json({ runs }, 201);
     }
     const run = manager.startRun(workflow, input);
-    if (parsed.data.todoId) await noteTodoStarted(parsed.data.todoId, run.id);
+    if (parsed.data.todoId) await noteTodoStarted(dataDir, parsed.data.todoId, run.id);
     return c.json(run, 201);
   });
 
   // ---- parallel variants (spec 010) -----------------------------------------
 
-  const groupRuns = (groupId: string): RunRecord[] =>
+  const groupRuns = (store: RunStore, groupId: string): RunRecord[] =>
     store
       .listRuns()
       .filter((r) => r.groupId === groupId)
@@ -817,8 +940,9 @@ export function createApp(deps: ServerDeps): Hono {
   // Comparison data: per variant the status, cost, `git diff --stat` and the
   // first Progress-log lines from the handoff. The full diff is fetched per
   // variant via the existing GET /api/runs/:id/diff.
-  app.get('/api/groups/:groupId', async (c) => {
-    const runs = groupRuns(c.req.param('groupId'));
+  api.get('/groups/:groupId', async (c) => {
+    const { dataDir, store } = c.get('project');
+    const runs = groupRuns(store, c.req.param('groupId'));
     if (runs.length === 0) return c.json({ error: 'not found' }, 404);
     const detailed = await Promise.all(
       runs.map(
@@ -844,8 +968,9 @@ export function createApp(deps: ServerDeps): Hono {
   // "Pick this one": the winner rests at `review` (spec 009 takes it from
   // there — send back / draft PR / finish); the losers are cancelled if
   // alive, archived, and their worktrees + branches removed.
-  app.post('/api/groups/:groupId/pick', async (c) => {
-    const runs = groupRuns(c.req.param('groupId'));
+  api.post('/groups/:groupId/pick', async (c) => {
+    const { root: repoRoot, dataDir, store, manager } = c.get('project');
+    const runs = groupRuns(store, c.req.param('groupId'));
     if (runs.length === 0) return c.json({ error: 'not found' }, 404);
     const parsed = pickSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
@@ -894,7 +1019,8 @@ export function createApp(deps: ServerDeps): Hono {
     return c.json({ winner: store.getRun(winner.id) } satisfies PickVariantResponse);
   });
 
-  app.get('/api/runs/:id', (c) => {
+  api.get('/runs/:id', (c) => {
+    const { store } = c.get('project');
     const run = store.getRun(c.req.param('id'));
     return run ? c.json(withUsage(run)) : c.json({ error: 'not found' }, 404);
   });
@@ -905,7 +1031,8 @@ export function createApp(deps: ServerDeps): Hono {
   // actually displays). The auto-summarizer only ever fills an *unset*
   // titleSummary (RunManager.recordTurnEnd), so an edit wins over any past or
   // future auto-summary. Answers the updated record.
-  app.patch('/api/runs/:id', async (c) => {
+  api.patch('/runs/:id', async (c) => {
+    const { store } = c.get('project');
     const id = c.req.param('id');
     if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
     const parsed = patchRunSchema.safeParse(await c.req.json().catch(() => null));
@@ -920,7 +1047,8 @@ export function createApp(deps: ServerDeps): Hono {
     return c.json(store.getRun(id));
   });
 
-  app.post('/api/runs/:id/cancel', (c) => {
+  api.post('/runs/:id/cancel', (c) => {
+    const { store, manager } = c.get('project');
     const id = c.req.param('id');
     if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
     const cancelled = manager.cancel(id);
@@ -929,7 +1057,8 @@ export function createApp(deps: ServerDeps): Hono {
 
   // Live-session participation (spec 002): deliver a user message (text +
   // pasted screenshots) into the run's open claude session.
-  app.post('/api/runs/:id/messages', async (c) => {
+  api.post('/runs/:id/messages', async (c) => {
+    const { store, manager } = c.get('project');
     const id = c.req.param('id');
     if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
     const parsed = messageSchema.safeParse(await c.req.json().catch(() => null));
@@ -953,7 +1082,8 @@ export function createApp(deps: ServerDeps): Hono {
   });
 
   // "Finish": gracefully close a waiting session — the run completes as done.
-  app.post('/api/runs/:id/finish', (c) => {
+  api.post('/runs/:id/finish', (c) => {
+    const { store, manager } = c.get('project');
     const id = c.req.param('id');
     if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
     const finished = manager.finish(id);
@@ -962,7 +1092,8 @@ export function createApp(deps: ServerDeps): Hono {
   });
 
   // "Continue" (spec 003): reopen a finished run's session in-process.
-  app.post('/api/runs/:id/continue', async (c) => {
+  api.post('/runs/:id/continue', async (c) => {
+    const { store, manager } = c.get('project');
     const id = c.req.param('id');
     if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
     // Bounded resume text (#429); an empty/absent body still just re-runs.
@@ -977,7 +1108,8 @@ export function createApp(deps: ServerDeps): Hono {
 
   // "Open in terminal" (spec 003): hand the session off to a real terminal —
   // in the task's worktree when it still exists (spec 006).
-  app.post('/api/runs/:id/open-in-cli', async (c) => {
+  api.post('/runs/:id/open-in-cli', async (c) => {
+    const { root: repoRoot, store } = c.get('project');
     const id = c.req.param('id');
     const run = store.getRun(id);
     if (!run) return c.json({ error: 'not found' }, 404);
@@ -1004,12 +1136,13 @@ export function createApp(deps: ServerDeps): Hono {
 
   // "Open in…" session takeover (#open-in): the editors/file-manager/terminal
   // detected on THIS machine. Empty in hosted mode (no local desktop to open).
-  app.get('/api/open-targets', (c) =>
+  api.get('/open-targets', (c) =>
     c.json({ targets: capabilities().localHandoff ? detectOpenTargets() : [] }),
   );
 
   // Open a run's worktree (or the repo root) in the chosen local app.
-  app.post('/api/runs/:id/open-in', async (c) => {
+  api.post('/runs/:id/open-in', async (c) => {
+    const { root: repoRoot, store } = c.get('project');
     const id = c.req.param('id');
     const run = store.getRun(id);
     if (!run) return c.json({ error: 'not found' }, 404);
@@ -1110,7 +1243,8 @@ export function createApp(deps: ServerDeps): Hono {
 
   // Handoff journal (spec 007): the per-task handoff.md as markdown. 404 only
   // when the task is unknown; a task without a (yet) seeded file returns ''.
-  app.get('/api/runs/:id/handoff', (c) => {
+  api.get('/runs/:id/handoff', (c) => {
+    const { dataDir, store } = c.get('project');
     const run = store.getRun(c.req.param('id'));
     if (!run) return c.json({ error: 'not found' }, 404);
     return c.text(readHandoff(dataDir, run.id), 200, {
@@ -1126,7 +1260,8 @@ export function createApp(deps: ServerDeps): Hono {
     webp: 'image/webp',
     gif: 'image/gif',
   };
-  app.get('/api/runs/:id/images/:file', (c) => {
+  api.get('/runs/:id/images/:file', (c) => {
+    const { dataDir, store } = c.get('project');
     const run = store.getRun(c.req.param('id'));
     if (!run) return c.json({ error: 'not found' }, 404);
     const file = basename(c.req.param('file'));
@@ -1139,7 +1274,8 @@ export function createApp(deps: ServerDeps): Hono {
   });
 
   // Task diff (spec 006): what this run changed — its worktree vs its base.
-  app.get('/api/runs/:id/diff', async (c) => {
+  api.get('/runs/:id/diff', async (c) => {
+    const { store } = c.get('project');
     const run = store.getRun(c.req.param('id'));
     if (!run) return c.json({ error: 'not found' }, 404);
     if (!run.worktreePath || !existsSync(run.worktreePath)) {
@@ -1156,7 +1292,8 @@ export function createApp(deps: ServerDeps): Hono {
     run.worktreePath && existsSync(run.worktreePath) ? run.worktreePath : null;
   const NO_WORKTREE = 'no worktree — this task ran directly in the repo working tree';
 
-  app.get('/api/runs/:id/changes', async (c) => {
+  api.get('/runs/:id/changes', async (c) => {
+    const { store } = c.get('project');
     const run = store.getRun(c.req.param('id'));
     if (!run) return c.json({ error: 'not found' }, 404);
     const worktree = worktreeOf(run);
@@ -1167,7 +1304,8 @@ export function createApp(deps: ServerDeps): Hono {
   });
 
   // The run's own commits (<base>..HEAD on the worktree branch) — the Commits tab.
-  app.get('/api/runs/:id/commits', async (c) => {
+  api.get('/runs/:id/commits', async (c) => {
+    const { store } = c.get('project');
     const run = store.getRun(c.req.param('id'));
     if (!run) return c.json({ error: 'not found' }, 404);
     const worktree = worktreeOf(run);
@@ -1178,7 +1316,8 @@ export function createApp(deps: ServerDeps): Hono {
   });
 
   // One of the run's commits, structured like the Changes tab (reuses collectCommitChanges).
-  app.get('/api/runs/:id/commit/:sha', async (c) => {
+  api.get('/runs/:id/commit/:sha', async (c) => {
+    const { store } = c.get('project');
     const run = store.getRun(c.req.param('id'));
     if (!run) return c.json({ error: 'not found' }, 404);
     const worktree = worktreeOf(run);
@@ -1194,7 +1333,8 @@ export function createApp(deps: ServerDeps): Hono {
   // image files only, for the preview's inline <img> — never HTML/JS/etc., so
   // no worktree file can become a same-origin document, and never past the
   // size cap. The no-script CSP neutralizes SVG opened as a top-level URL.
-  app.get('/api/runs/:id/files', async (c) => {
+  api.get('/runs/:id/files', async (c) => {
+    const { store } = c.get('project');
     const run = store.getRun(c.req.param('id'));
     if (!run) return c.json({ error: 'not found' }, 404);
     const worktree = worktreeOf(run);
@@ -1229,7 +1369,8 @@ export function createApp(deps: ServerDeps): Hono {
     });
   });
 
-  app.post('/api/runs/:id/git/commit', async (c) => {
+  api.post('/runs/:id/git/commit', async (c) => {
+    const { store } = c.get('project');
     const run = store.getRun(c.req.param('id'));
     if (!run) return c.json({ error: 'not found' }, 404);
     const worktree = worktreeOf(run);
@@ -1243,7 +1384,8 @@ export function createApp(deps: ServerDeps): Hono {
     return c.json({ committed: true, sha: result.sha });
   });
 
-  app.post('/api/runs/:id/git/push', async (c) => {
+  api.post('/runs/:id/git/push', async (c) => {
+    const { store } = c.get('project');
     const run = store.getRun(c.req.param('id'));
     if (!run) return c.json({ error: 'not found' }, 404);
     const worktree = worktreeOf(run);
@@ -1257,7 +1399,8 @@ export function createApp(deps: ServerDeps): Hono {
   // `gh pr create --draft`; on success the run completes as done with the PR
   // badge. Failures come back as 409 with a `manual` merge command the GUI
   // shows next to the toast. CEZ_DRY_RUN=1 fakes the URL (no push, no gh).
-  app.post('/api/runs/:id/pr', async (c) => {
+  api.post('/runs/:id/pr', async (c) => {
+    const { root: repoRoot, dataDir, store, manager } = c.get('project');
     const id = c.req.param('id');
     const run = store.getRun(id);
     if (!run) return c.json({ error: 'not found' }, 404);
@@ -1283,7 +1426,8 @@ export function createApp(deps: ServerDeps): Hono {
 
   // Archived tasks keep their worktree for inspection; this is the explicit
   // "🧹 Remove worktree" cleanup (spec 006).
-  app.post('/api/runs/:id/remove-worktree', async (c) => {
+  api.post('/runs/:id/remove-worktree', async (c) => {
+    const { root: repoRoot, store, manager } = c.get('project');
     const id = c.req.param('id');
     const run = store.getRun(id);
     if (!run) return c.json({ error: 'not found' }, 404);
@@ -1293,7 +1437,8 @@ export function createApp(deps: ServerDeps): Hono {
     return c.json({ removed: true });
   });
 
-  app.delete('/api/runs/:id', async (c) => {
+  api.delete('/runs/:id', async (c) => {
+    const { root: repoRoot, store, manager } = c.get('project');
     const id = c.req.param('id');
     if (manager.isActive(id)) return c.json({ error: 'run is active — cancel it first' }, 409);
     const run = store.getRun(id);
@@ -1307,7 +1452,8 @@ export function createApp(deps: ServerDeps): Hono {
   // List materialized task worktrees with disk usage + retention state, and a
   // "Reclaim now" action. Both additive; the per-row delete reuses the existing
   // /api/runs/:id/remove-worktree route above.
-  app.get('/api/worktrees', async (c) => {
+  api.get('/worktrees', async (c) => {
+    const { root: repoRoot, store } = c.get('project');
     const config = await loadConfig(repoRoot);
     const runs = store.listRuns().filter((r) => r.worktreePath && existsSync(r.worktreePath));
     const worktrees = await Promise.all(
@@ -1330,7 +1476,8 @@ export function createApp(deps: ServerDeps): Hono {
   });
 
   const reclaimBodySchema = z.object({}).passthrough();
-  app.post('/api/worktrees/reclaim', async (c) => {
+  api.post('/worktrees/reclaim', async (c) => {
+    const { root: repoRoot, store } = c.get('project');
     // Accept an empty or `{}` body; retention is best-effort, so 200 always.
     const parsed = reclaimBodySchema.safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) return c.json({ error: 'invalid body' }, 400);
@@ -1345,10 +1492,13 @@ export function createApp(deps: ServerDeps): Hono {
   // merely switched off) and the mutators 409 as defense in depth — the shape
   // the hosted-mode open-in-* handlers already use. Existing todos.json entries
   // are never touched, so flipping the env back on restores them.
-  app.get('/api/todos', async (c) => c.json(capabilities().followups ? await readTodos(dataDir) : []));
+  api.get('/todos', async (c) =>
+    c.json(capabilities().followups ? await readTodos(c.get('project').dataDir) : []),
+  );
 
   // Check off = delete the entry.
-  app.delete('/api/todos/:id', async (c) => {
+  api.delete('/todos/:id', async (c) => {
+    const { dataDir } = c.get('project');
     if (!capabilities().followups) return c.json({ error: FOLLOWUPS_OFF }, 409);
     const removed = await removeTodo(dataDir, c.req.param('id'));
     return removed ? c.json({ removed: true }) : c.json({ error: 'not found' }, 404);
@@ -1356,7 +1506,8 @@ export function createApp(deps: ServerDeps): Hono {
 
   // "▶ Run": turn an inbox entry into a task — a one-off single-step workflow
   // around the suggested skill when it exists, plain quick-task otherwise.
-  app.post('/api/todos/:id/start', async (c) => {
+  api.post('/todos/:id/start', async (c) => {
+    const { root: repoRoot, dataDir, manager } = c.get('project');
     if (!capabilities().followups) return c.json({ error: FOLLOWUPS_OFF }, 409);
     const id = c.req.param('id');
     const todo = (await readTodos(dataDir)).find((t) => t.id === id);
@@ -1410,7 +1561,8 @@ export function createApp(deps: ServerDeps): Hono {
   // Per-run SSE: full replay from the NDJSON file, then live events. The
   // listener attaches before the replay and buffers, so nothing emitted
   // during the replay is lost or duplicated (dedup by seq).
-  app.get('/api/runs/:id/events', (c) => {
+  api.get('/runs/:id/events', (c) => {
+    const { store } = c.get('project');
     const id = c.req.param('id');
     if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
     return streamSSENoBuffer(c, async (stream) => {
@@ -1464,8 +1616,13 @@ export function createApp(deps: ServerDeps): Hono {
   });
 
   // Global SSE: run-summary updates for the list view + inbox changes.
-  app.get('/api/events', (c) =>
-    streamSSENoBuffer(c, async (stream) => {
+  // Scoped `/p/:projectId/events` carries that project's stream in today's
+  // shape; the legacy unprefixed alias stays bound to the boot project ONLY
+  // (spec "Legacy aliases" — widening it would be a silent behavioral break;
+  // the all-project stream arrives as `/api/workspace/events` in step 2.8).
+  api.get('/events', (c) => {
+    const { dataDir, store } = c.get('project');
+    return streamSSENoBuffer(c, async (stream) => {
       const onRun = (run: RunRecord) =>
         void stream.writeSSE({ event: 'run', data: JSON.stringify(run) });
       const onDeleted = (id: string) =>
@@ -1499,14 +1656,15 @@ export function createApp(deps: ServerDeps): Hono {
         await stream.writeSSE({ event: 'ping', data: '' });
         await stream.sleep(15_000);
       }
-    }),
-  );
+    });
+  });
 
   // ---- GitHub tab ------------------------------------------------------------
   // Issues + PRs of the repo's origin, read through the logged-in `gh` CLI.
   // Degrades to `{available:false, reason}` — no gh / no remote / offline all
   // just render as a hint in the tab, never an error.
-  app.get('/api/github', async (c) => {
+  api.get('/github', async (c) => {
+    const { root: repoRoot } = c.get('project');
     const limit = Number.parseInt(c.req.query('limit') ?? '', 10);
     return c.json(
       await fetchGithub(repoRoot, c.req.query('refresh') === '1', Number.isFinite(limit) ? limit : 30),
@@ -1520,7 +1678,8 @@ export function createApp(deps: ServerDeps): Hono {
     kind: z.enum(['issue', 'pr']),
     number: z.coerce.number().int().positive(),
   });
-  app.get('/api/github/comments/:kind/:number', async (c) => {
+  api.get('/github/comments/:kind/:number', async (c) => {
+    const { root: repoRoot } = c.get('project');
     const parsed = commentsParams.safeParse({ kind: c.req.param('kind'), number: c.req.param('number') });
     if (!parsed.success) return c.json({ error: 'invalid kind or number' }, 400);
     return c.json(
@@ -1529,7 +1688,8 @@ export function createApp(deps: ServerDeps): Hono {
   });
 
   // ---- repo view -----------------------------------------------------------
-  app.get('/api/repo', async (c) => {
+  api.get('/repo', async (c) => {
+    const { root: repoRoot } = c.get('project');
     const info = await getRepoInfo(repoRoot);
     if (!info) return c.json({ info: null, status: [], log: [], branches: [], baseBranch: null });
     const [status, log, branches, config] = await Promise.all([
@@ -1560,7 +1720,7 @@ export function createApp(deps: ServerDeps): Hono {
     // CEZ_REVIEW_GATE env default (OFF) decides".
     reviewGate: config.reviewGate ?? null,
   });
-  app.get('/api/config', async (c) => c.json(configAnswer(await loadConfig(repoRoot))));
+  api.get('/config', async (c) => c.json(configAnswer(await loadConfig(c.get('project').root))));
 
   // Set/clear the agents' config knobs (Settings → Agents; the Repo tab's
   // base-branch picker). Merges into the RAW config.json so user keys
@@ -1595,7 +1755,8 @@ export function createApp(deps: ServerDeps): Hono {
     // back to the env-default behavior (OFF).
     reviewGate: z.boolean().nullable().optional(),
   });
-  app.put('/api/config', async (c) => {
+  api.put('/config', async (c) => {
+    const { root: repoRoot, dataDir } = c.get('project');
     const parsed = setConfigSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
       return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
@@ -1668,7 +1829,8 @@ export function createApp(deps: ServerDeps): Hono {
     return c.json(configAnswer(await loadConfig(repoRoot)));
   });
 
-  app.get('/api/repo/diff', async (c) => {
+  api.get('/repo/diff', async (c) => {
+    const { root: repoRoot } = c.get('project');
     const info = await getRepoInfo(repoRoot);
     if (!info) return c.text('not a git repository');
     return c.text(await getDiff(info.root));
@@ -1679,7 +1841,8 @@ export function createApp(deps: ServerDeps): Hono {
   // shape `{sha, subject, author, when, files, stat}` with 409 + reason on failure. The
   // legacy text answer below is a protected surface (BACKWARD_COMPATIBILITY.md §2) — its
   // shape, including the in-band failure sentences, stays exactly as it was.
-  app.get('/api/repo/commit/:sha', async (c) => {
+  api.get('/repo/commit/:sha', async (c) => {
+    const { root: repoRoot } = c.get('project');
     const info = await getRepoInfo(repoRoot);
     if (c.req.query('structured') === '1') {
       if (!info) return c.json({ error: 'not a git repository' }, 409);
@@ -1699,7 +1862,8 @@ export function createApp(deps: ServerDeps): Hono {
   // surface, untouched): the same {files, stat} shape the session /changes
   // route serves, here for the MAIN working tree's uncommitted changes vs
   // HEAD (redesign R5 Step 1.3 — §"Git/session API additions").
-  app.get('/api/repo/changes', async (c) => {
+  api.get('/repo/changes', async (c) => {
+    const { root: repoRoot } = c.get('project');
     const info = await getRepoInfo(repoRoot);
     if (!info) return c.json({ error: 'not a git repository' }, 409);
     // The user's REAL working tree — never stage into their index (a GET must not write).
@@ -1715,7 +1879,8 @@ export function createApp(deps: ServerDeps): Hono {
     name: z.string().trim().min(1).max(200),
     from: z.string().trim().min(1).max(200).optional(),
   });
-  app.post('/api/repo/branch', async (c) => {
+  api.post('/repo/branch', async (c) => {
+    const { root: repoRoot } = c.get('project');
     const info = await getRepoInfo(repoRoot);
     if (!info) return c.json({ error: 'not a git repository' }, 409);
     const parsed = repoBranchSchema.safeParse(await c.req.json().catch(() => null));
@@ -1726,6 +1891,15 @@ export function createApp(deps: ServerDeps): Hono {
     if (!result.ok) return c.json({ error: result.error }, 409);
     return c.json({ branch: result.branch, created: result.created });
   });
+
+  // ---- mount the mirrored table (multi-project spec, step 2.2) -------------
+  // Scoped first, then the legacy aliases. The paths are disjoint (no legacy
+  // route starts with `/p/`), so order between the two mounts never decides a
+  // match — but the catch-all below must still come last. `route()` re-registers
+  // the sub-app's routes under each prefix, handlers shared, internal order
+  // (e.g. `/runs/archive-finished` before `/runs/:id/archive`) preserved.
+  app.route(SCOPED_PREFIX, api);
+  app.route('/api', api);
 
   // ---- SPA catch-all -------------------------------------------------------
   // Last, so every route above still wins. Any other GET gets the cockpit shell:

@@ -20,7 +20,7 @@
 | 1 | 1.6 | `GET /api/projects` + additive `/api/health` fields (`projects`, `bootProject`) | done | 941e7a7 |
 | 1 | 1.7 | BACKWARD_COMPATIBILITY.md: `~/.cezar/{config,ui-state}.json`, `/api/projects`, health additions | done | 8d881f3 |
 | 2 | 2.1 | `src/server/project-context.ts` lazy context map + `RunManager.dispose()` | done | 98d916f |
-| 2 | 2.2 | `server.ts` context-resolver refactor: `/api/p/:projectId/*` + legacy aliases + parity tests | todo | |
+| 2 | 2.2 | `server.ts` context-resolver refactor: `/api/p/:projectId/*` + legacy aliases + parity tests | done | 01f379b |
 | 2 | 2.3 | `src/todos.ts` per-dataDir watcher/emitter map | todo | |
 | 2 | 2.4 | Usage fan-out scoping (`run.ts` + SSE relay per-project `usage` filtering) | todo | |
 | 2 | 2.5 | Workspace semaphore for global `maxParallel` (cached config, #347 exemption preserved) | todo | |
