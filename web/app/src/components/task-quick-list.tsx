@@ -1,8 +1,7 @@
 import { ArrowUpRightIcon, ChevronDownIcon, ScaleIcon } from 'lucide-react'
 import * as React from 'react'
-import { Link, useMatch } from 'react-router'
-
 import { useRuns } from '@/api/queries'
+import { Link, useProjectMatch } from '@/lib/project-router'
 import type { RunRecord } from '@/api/types'
 import { DiffStatLabel } from '@/components/diff-stat'
 import { useListView } from '@/components/list-view'
@@ -292,8 +291,9 @@ function variantLabel(run: RunRecord): string {
 export function TaskQuickListContainer() {
   const runs = useRuns()
   const [view, setView] = useListView()
-  const match = useMatch('/tasks/:id/*')
-  const exact = useMatch('/tasks/:id')
+  // Project-prefix-agnostic matches (step 3.2): `/p/<id>/tasks/:id` must light its row too.
+  const match = useProjectMatch('/tasks/:id/*')
+  const exact = useProjectMatch('/tasks/:id')
   const now = useNow(30_000)
 
   // Nothing at all until the list has answered: a skeleton here would be inventing rows, and an

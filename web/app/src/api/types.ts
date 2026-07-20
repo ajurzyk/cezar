@@ -236,6 +236,28 @@ export interface HealthResponse {
   bootProject?: string
 }
 
+/** One `GET /api/projects` registry entry (multi-project spec, step 1.6). Unlike health's
+ *  id+name pairs this carries absolute `root`s — same-origin only, never the CORS-open route. */
+export interface ProjectListEntry {
+  id: string
+  name: string
+  root: string
+  addedAt: string
+  lastOpenedAt: string
+  source: 'local' | 'checkout'
+  /** `not-git` is fully usable (degraded single-queue mode); only `missing` blocks. */
+  status: 'ok' | 'missing' | 'not-git'
+  /** Current branch when cheaply available (omitted e.g. on an unborn HEAD). */
+  branch?: string
+}
+
+/** `GET /api/projects` — the workspace registry. Workspace-level: never 404s, never scoped. */
+export interface ProjectsResponse {
+  projects: ProjectListEntry[]
+  bootProject: string
+  projectsDir: string
+}
+
 /** `GET /api/launch-key` — the bookmarklet auto-start secret (spec 011). Fetched to COMPARE
  *  against the `?key=` query param (/new deep link) and to bake into the `javascript:` links
  *  the Settings → Skills bookmarklet panel generates (the legacy generator's exact use). The

@@ -8,6 +8,7 @@ import {
   getHealth,
   getLaunchKey,
   getOpenTargets,
+  getProjects,
   getRepo,
   getRunCommit,
   getRunCommits,
@@ -104,6 +105,26 @@ export const queryKeys = {
   get openTargets() {
     return [queryScope(), 'open-targets'] as const
   },
+}
+
+/**
+ * Workspace-level keys — deliberately NOT scope-led: there is one project registry no matter
+ * which project is active, and the `/p/:projectId` route gate reads it while the scope is
+ * still being decided, so a scope-dependent key would chase its own tail (mount provider →
+ * scope changes → key changes → data gone → provider unmounts).
+ */
+export const workspaceQueryKeys = {
+  projects: ['workspace', 'projects'] as const,
+}
+
+/** The workspace project registry (`GET /api/projects`): the `/p/:projectId` route gate's
+ *  known/unknown answer, the boot slug behind the `/p/default` alias, and the list the
+ *  unknown-project screen offers. Step 3.3's sidebar reads it too. */
+export function useProjects() {
+  return useQuery({
+    queryKey: workspaceQueryKeys.projects,
+    queryFn: ({ signal }) => getProjects({ signal }),
+  })
 }
 
 /** Version + update check + repo/branch + tool probes. Feeds the sidebar's repo and version

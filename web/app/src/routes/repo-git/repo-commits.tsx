@@ -1,6 +1,8 @@
 import { ArrowLeftIcon, GitCommitHorizontalIcon, SearchXIcon, TriangleAlertIcon } from 'lucide-react'
 import { useState } from 'react'
-import { Link, useParams } from 'react-router'
+import { useParams } from 'react-router'
+
+import { Link } from '@/lib/project-router'
 
 import { ApiError } from '@/api/client'
 import { useRepoCommit } from '@/api/queries'

@@ -34,7 +34,7 @@ import {
   ZapIcon,
 } from 'lucide-react'
 import { Fragment, useState, type ReactNode } from 'react'
-import { useNavigate } from 'react-router'
+import { useNavigate } from '@/lib/project-router'
 
 import { ApiError, archiveRun, cancelRun, continueRun, deleteRun, openRunIn, openRunInCli } from '@/api/client'
 import { queryKeys, useHealth, useOpenTargets, usePatchRun, useRunHandoff, useRuns } from '@/api/queries'

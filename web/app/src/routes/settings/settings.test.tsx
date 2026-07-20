@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { queryKeys, workspaceQueryKeys } from '@/api/queries'
 import { createQueryClient } from '@/api/query-client'
 import { AppearanceProvider } from '@/components/appearance-provider'
 import { ThemeProvider } from '@/components/theme-provider'
@@ -38,9 +39,23 @@ function serve(uiState: Record<string, unknown> = {}) {
   )
 }
 
+/** Seeds the step-3.2 route gates — boot id (legacy redirect) + registry (known-check) — so a
+ *  flat entry URL lands scoped immediately. The boot project mounts UNSCOPED, so the exact
+ *  `/api/*` paths this file's fetch stub matches stay byte-identical. */
+function gateSeededClient() {
+  const client = createQueryClient()
+  client.setQueryData(queryKeys.health, { bootProject: 'boot' })
+  client.setQueryData(workspaceQueryKeys.projects, {
+    projects: [],
+    bootProject: 'boot',
+    projectsDir: '~/cezar/projects',
+  })
+  return client
+}
+
 function renderAt(entry: string) {
   render(
-    <QueryClientProvider client={createQueryClient()}>
+    <QueryClientProvider client={gateSeededClient()}>
       <ThemeProvider>
         <AppearanceProvider>
           <MemoryRouter initialEntries={[entry]}>
@@ -116,11 +131,12 @@ describe('the settings shell', () => {
       'notifications',
       'prompt-templates',
     ])
+    // Scope-aware links (step 3.2): the flat `to` picks up the active project's prefix.
     expect(index.querySelector('[data-section="bookmarklets"]')?.getAttribute('href')).toBe(
-      '/settings/bookmarklets',
+      '/p/boot/settings/bookmarklets',
     )
     expect(index.querySelector('[data-section="appearance"]')?.getAttribute('href')).toBe(
-      '/settings/appearance',
+      '/p/boot/settings/appearance',
     )
   })
 

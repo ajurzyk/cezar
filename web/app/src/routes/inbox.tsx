@@ -1,7 +1,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { CheckIcon, InboxIcon, PlayIcon, TriangleAlertIcon } from 'lucide-react'
 import { useRef, useState } from 'react'
-import { Link, useNavigate } from 'react-router'
+import { Link, useNavigate } from '@/lib/project-router'
 
 import { removeTodo, startTodo } from '@/api/client'
 import { queryKeys, useHealth, useRuns, useTodos, useUiState } from '@/api/queries'

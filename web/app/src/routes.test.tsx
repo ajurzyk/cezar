@@ -1,9 +1,11 @@
 import { QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, render, screen } from '@testing-library/react'
-import { MemoryRouter } from 'react-router'
+import { MemoryRouter, useLocation } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from './api/query-client'
+import { queryKeys, workspaceQueryKeys } from './api/queries'
+import type { ProjectsResponse } from './api/types'
 import { AppearanceProvider } from './components/appearance-provider'
 import { ListViewProvider } from './components/list-view'
 import { ThemeProvider } from './components/theme-provider'
@@ -24,73 +26,148 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+/** The boot project (multi-project spec, step 3.2) — what `/api/health.bootProject` and
+ *  `/api/projects.bootProject` name, and where every legacy flat URL redirects. */
+const BOOT = 'boot'
+
+/** A full-enough `/api/health` answer: the redirect gate reads `bootProject`, and the routes
+ *  behind it (inbox, /new) read `capabilities` — a partial seed would crash what a real health
+ *  payload never crashes. `followups: true` keeps the Inbox route's real heading. */
+const HEALTH = {
+  version: '0.0.0-test',
+  repoRoot: '/home/u/cezar',
+  repo: null,
+  checks: [],
+  defaultRunner: 'claude',
+  forge: null,
+  capabilities: { localHandoff: true, followups: true },
+  projects: [{ id: BOOT, name: 'cezar' }],
+  bootProject: BOOT,
+}
+
+const REGISTRY: ProjectsResponse = {
+  projects: [
+    {
+      id: BOOT,
+      name: 'cezar',
+      root: '/home/u/cezar',
+      addedAt: '',
+      lastOpenedAt: '',
+      source: 'local',
+      status: 'ok',
+    },
+    {
+      id: 'other',
+      name: 'other-repo',
+      root: '/home/u/other',
+      addedAt: '',
+      lastOpenedAt: '',
+      source: 'local',
+      status: 'ok',
+    },
+  ],
+  bootProject: BOOT,
+  projectsDir: '~/cezar/projects',
+}
+
+/** The address bar, readable from assertions: MemoryRouter keeps its location internal, so the
+ *  probe publishes it — that is how the tests prove params and query survive the redirects. */
+function LocationProbe() {
+  const location = useLocation()
+  return (
+    <div
+      data-testid="location"
+      data-pathname={location.pathname}
+      data-search={location.search}
+    />
+  )
+}
+
 /** Cold-load the router at a URL, exactly as a pasted deep link would — under the same providers
- *  the app shell supplies (the overview at `/` needs the query cache and the shared list view;
- *  the Settings appearance section reads the theme and appearance contexts). */
-function renderAt(entry: string) {
+ *  the app shell supplies. With `seed` (the default) the health + registry answers the redirect
+ *  gates need are already cached, the way a warm app has them; `seed: false` is the cold state
+ *  where the boot id is still unknown. */
+function renderAt(entry: string, { seed = true }: { seed?: boolean } = {}) {
+  const client = createQueryClient()
+  if (seed) {
+    // Scope is unset while seeding, so `queryKeys.health` is the unscoped `['default','health']`
+    // key the legacy-redirect gate reads.
+    client.setQueryData(queryKeys.health, HEALTH)
+    client.setQueryData(workspaceQueryKeys.projects, REGISTRY)
+  }
   render(
-    <QueryClientProvider client={createQueryClient()}>
+    <QueryClientProvider client={client}>
       <ThemeProvider>
         <AppearanceProvider>
           <MemoryRouter initialEntries={[entry]}>
             <ListViewProvider>
               <AppRoutes />
+              <LocationProbe />
             </ListViewProvider>
           </MemoryRouter>
         </AppearanceProvider>
       </ThemeProvider>
     </QueryClientProvider>,
   )
+  return client
 }
 
 function routeName(): string | null {
   return document.querySelector('[data-route]')?.getAttribute('data-route') ?? null
 }
 
-/** The URL contract from the spec's "Routing — every surface is a URL" section.
- *  These paths are pasteable links; changing one breaks a teammate's bookmark,
- *  so the map is asserted URL-by-URL rather than through the (future) nav. */
-describe('route map', () => {
-  const cases: Array<[url: string, route: string, title: string]> = [
-    ['/', 'tasks', 'Tasks'],
-    // The real full-screen composer (R4 Step 1.1): the hero title is the page heading.
-    ['/new', 'new', 'What should the agent work on?'],
-    // The real thread view (Step R3.1): with fetch never answering it is honestly loading.
-    ['/tasks/abc123', 'task-thread', 'Loading task…'],
-    // The real R5 tab routes: with fetch never answering they are honestly loading.
-    ['/tasks/abc123/changes', 'task-changes', 'Loading changes…'],
-    ['/tasks/abc123/files', 'task-files', 'Loading files…'],
-    // The real compare view (Step R3 2.3): with fetch never answering it is honestly loading.
-    ['/compare/grp-1', 'compare', 'Loading variants…'],
-    // The real repo view (R5 Step 1.7): with fetch never answering it is honestly loading —
-    // and every segment is its own URL, commit deep links included.
-    ['/git', 'repo-git', 'Loading repository…'],
-    ['/git/commits', 'repo-git', 'Loading repository…'],
-    ['/git/commits/abc1234', 'repo-git', 'Loading repository…'],
-    ['/git/branches', 'repo-git', 'Loading repository…'],
-    // The real GitHub tab (R6 Step 1.1): with fetch never answering every github URL is
-    // honestly loading — lists and item deep links included.
-    ['/github', 'github', 'Loading GitHub…'],
-    ['/github/prs', 'github', 'Loading GitHub…'],
-    ['/github/issues/42', 'github', 'Loading GitHub…'],
-    ['/github/prs/7', 'github', 'Loading GitHub…'],
-    ['/inbox', 'inbox', 'Inbox'],
-    // The real workflow builder (R6 Step 1.6): with fetch never answering both the list URL
-    // and a named deep link are honestly loading.
-    ['/workflows', 'workflows', 'Loading workflows…'],
-    ['/workflows/ship-it', 'workflows', 'Loading workflows…'],
-    ['/skills', 'skills', 'Skills'],
-    ['/settings', 'settings', 'Settings'],
-    ['/settings/bookmarklets', 'settings-bookmarklets', 'Bookmarklets'],
-    ['/settings/appearance', 'settings-appearance', 'Appearance'],
-    ['/settings/agents', 'settings-agents', 'Agents'],
-    ['/settings/notifications', 'settings-notifications', 'Notifications'],
-    ['/settings/prompt-templates', 'settings-prompt-templates', 'Prompt templates'],
-  ]
+function currentPathname(): string | null {
+  return screen.getByTestId('location').getAttribute('data-pathname')
+}
 
-  for (const [url, route, title] of cases) {
-    it(`${url} → ${route}`, () => {
-      renderAt(url)
+function currentSearch(): string | null {
+  return screen.getByTestId('location').getAttribute('data-search')
+}
+
+/** The URL contract from the spec's "Routing — every surface is a URL" section, now under the
+ *  `/p/:projectId` prefix (multi-project spec, step 3.2). These paths are pasteable links;
+ *  changing one breaks a teammate's bookmark, so the map is asserted URL-by-URL. */
+const ROUTE_CASES: Array<[url: string, route: string, title: string]> = [
+  ['/', 'tasks', 'Tasks'],
+  // The real full-screen composer (R4 Step 1.1): the hero title is the page heading.
+  ['/new', 'new', 'What should the agent work on?'],
+  // The real thread view (Step R3.1): with fetch never answering it is honestly loading.
+  ['/tasks/abc123', 'task-thread', 'Loading task…'],
+  // The real R5 tab routes: with fetch never answering they are honestly loading.
+  ['/tasks/abc123/changes', 'task-changes', 'Loading changes…'],
+  ['/tasks/abc123/files', 'task-files', 'Loading files…'],
+  // The real compare view (Step R3 2.3): with fetch never answering it is honestly loading.
+  ['/compare/grp-1', 'compare', 'Loading variants…'],
+  // The real repo view (R5 Step 1.7): with fetch never answering it is honestly loading —
+  // and every segment is its own URL, commit deep links included.
+  ['/git', 'repo-git', 'Loading repository…'],
+  ['/git/commits', 'repo-git', 'Loading repository…'],
+  ['/git/commits/abc1234', 'repo-git', 'Loading repository…'],
+  ['/git/branches', 'repo-git', 'Loading repository…'],
+  // The real GitHub tab (R6 Step 1.1): with fetch never answering every github URL is
+  // honestly loading — lists and item deep links included.
+  ['/github', 'github', 'Loading GitHub…'],
+  ['/github/prs', 'github', 'Loading GitHub…'],
+  ['/github/issues/42', 'github', 'Loading GitHub…'],
+  ['/github/prs/7', 'github', 'Loading GitHub…'],
+  ['/inbox', 'inbox', 'Inbox'],
+  // The real workflow builder (R6 Step 1.6): with fetch never answering both the list URL
+  // and a named deep link are honestly loading.
+  ['/workflows', 'workflows', 'Loading workflows…'],
+  ['/workflows/ship-it', 'workflows', 'Loading workflows…'],
+  ['/skills', 'skills', 'Skills'],
+  ['/settings', 'settings', 'Settings'],
+  ['/settings/bookmarklets', 'settings-bookmarklets', 'Bookmarklets'],
+  ['/settings/appearance', 'settings-appearance', 'Appearance'],
+  ['/settings/agents', 'settings-agents', 'Agents'],
+  ['/settings/notifications', 'settings-notifications', 'Notifications'],
+  ['/settings/prompt-templates', 'settings-prompt-templates', 'Prompt templates'],
+]
+
+describe('scoped route map (/p/:projectId)', () => {
+  for (const [url, route, title] of ROUTE_CASES) {
+    it(`/p/${BOOT}${url} → ${route}`, () => {
+      renderAt(`/p/${BOOT}${url}`)
       expect(routeName()).toBe(route)
       expect(screen.getByRole('heading', { level: 1 }).textContent).toBe(title)
     })
@@ -98,7 +175,7 @@ describe('route map', () => {
 
   // The tab lives in the path, so /tasks/:id/changes must not fall back to the thread.
   it('a task tab deep link renders the tab, not the thread', () => {
-    renderAt('/tasks/abc123/changes')
+    renderAt(`/p/${BOOT}/tasks/abc123/changes`)
     expect(document.querySelector('[data-route="task-thread"]')).toBeNull()
     expect(screen.queryByRole('heading', { name: 'Loading task…' })).toBeNull()
   })
@@ -115,26 +192,125 @@ describe('route map', () => {
     '/compare',
   ]
   for (const url of unknown) {
-    it(`${url} → the 404 route`, () => {
-      renderAt(url)
+    it(`/p/${BOOT}${url} → the 404 route`, () => {
+      renderAt(`/p/${BOOT}${url}`)
       expect(routeName()).toBe('not-found')
     })
   }
 
-  // Step 4.1: the 404 is a CenteredState with a way home, not a bare stub.
-  it('the 404 renders a CenteredState with a back-to-tasks action', () => {
-    renderAt('/definitely-not-a-route')
+  // Step 4.1: the 404 is a CenteredState with a way home, not a bare stub — and its way home
+  // stays inside the active project (the scope-aware Link).
+  it('the 404 renders a CenteredState with a back-to-tasks action scoped to the project', () => {
+    renderAt(`/p/${BOOT}/definitely-not-a-route`)
     expect(routeName()).toBe('not-found')
     expect(document.querySelector('[data-route="not-found"] [data-slot="centered-state"]')).not.toBeNull()
     expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Page not found')
-    expect(screen.getByRole('link', { name: 'Back to tasks' }).getAttribute('href')).toBe('/')
+    expect(screen.getByRole('link', { name: 'Back to tasks' }).getAttribute('href')).toBe(`/p/${BOOT}/`)
   })
 
+  // The area rule (nav links, tab links…) — spot-checked through the Settings shell, whose
+  // section links are plain flat `to`s routed through the scope-aware Link.
+  it('navigation links generated inside a project carry its prefix', () => {
+    renderAt(`/p/${BOOT}/settings`)
+    const link = document.querySelector('[data-slot="settings-index"] a[data-section="appearance"]')
+    expect(link?.getAttribute('href')).toBe(`/p/${BOOT}/settings/appearance`)
+  })
+})
+
+/** Legacy flat URLs (BACKWARD_COMPATIBILITY.md): every pre-multi-project path redirects to the
+ *  boot project's scoped twin with params intact — old bookmarks keep landing. */
+describe('legacy flat URLs redirect to the boot project', () => {
+  for (const [url, route] of ROUTE_CASES) {
+    it(`${url} → /p/${BOOT}${url}`, () => {
+      renderAt(url)
+      expect(routeName()).toBe(route)
+      expect(currentPathname()).toBe(`/p/${BOOT}${url === '/' ? '/' : url}`)
+    })
+  }
+
+  it('preserves a query byte-for-byte across the redirect', () => {
+    // /skills keeps its `?skill=` selection in the URL, so the address bar itself proves the
+    // redirect carried the query untouched (the /new composer consumes-then-clears its own).
+    const search = '?skill=om-code-review&x=a%2Fb&auto=1'
+    renderAt(`/skills${search}`)
+    expect(currentPathname()).toBe(`/p/${BOOT}/skills`)
+    expect(currentSearch()).toBe(search)
+    expect(routeName()).toBe('skills')
+  })
+
+  it('delivers the full bookmarklet grammar into the composer (spec 011 contract)', () => {
+    renderAt('/new?skill=om-code-review&ref=https%3A%2F%2Fgithub.com%2Fo%2Fr%2Fpull%2F1&auto=1&key=s3cret')
+    expect(currentPathname()).toBe(`/p/${BOOT}/new`)
+    expect(routeName()).toBe('new')
+    // auto=1 + key armed the unattended start — only possible if every param survived.
+    expect(document.querySelector('[data-slot="auto-starting"]')).not.toBeNull()
+    expect(document.body.textContent).not.toContain('s3cret')
+  })
+
+  it('renders the quiet resolving state while the boot id is unknown — never a wrong screen', () => {
+    renderAt('/tasks/abc123', { seed: false })
+    expect(routeName()).toBe('scope-resolving')
+    expect(currentPathname()).toBe('/tasks/abc123')
+  })
+
+  it('an unknown legacy path still ends at the scoped 404', () => {
+    renderAt('/definitely-not-a-route')
+    expect(routeName()).toBe('not-found')
+    expect(currentPathname()).toBe(`/p/${BOOT}/definitely-not-a-route`)
+  })
+
+  it('a bare /p names no project and lands on the boot project home', () => {
+    renderAt('/p')
+    expect(routeName()).toBe('tasks')
+    expect(currentPathname()).toBe(`/p/${BOOT}/`)
+  })
+})
+
+/** `/p/default/…` is the reserved boot alias (never an allocated slug): it resolves to the boot
+ *  project and normalizes to the real slug in the address bar. */
+describe('the /p/default alias', () => {
+  it('normalizes /p/default/tasks/x to /p/<boot>/tasks/x', () => {
+    renderAt('/p/default/tasks/x')
+    expect(routeName()).toBe('task-thread')
+    expect(currentPathname()).toBe(`/p/${BOOT}/tasks/x`)
+  })
+
+  it('keeps the query while normalizing', () => {
+    renderAt('/p/default/skills?skill=om-code-review')
+    expect(currentPathname()).toBe(`/p/${BOOT}/skills`)
+    expect(currentSearch()).toBe('?skill=om-code-review')
+  })
+
+  it('normalizes the bare /p/default to the boot project home', () => {
+    renderAt('/p/default')
+    expect(routeName()).toBe('tasks')
+    expect(currentPathname()).toBe(`/p/${BOOT}/`)
+  })
+})
+
+/** A deep link to a project this server never registered: the cockpit twin of the API's 404 —
+ *  name the problem, list what IS registered, link out. */
+describe('unknown project ids', () => {
+  it('renders the not-registered screen with the registry list', () => {
+    renderAt('/p/nope/tasks/x')
+    expect(routeName()).toBe('unknown-project')
+    expect(screen.getByRole('heading', { level: 1 }).textContent).toContain('nope')
+    const links = Array.from(
+      document.querySelectorAll('[data-slot="registered-projects"] a'),
+    ).map((a) => a.getAttribute('href'))
+    expect(links).toEqual([`/p/${BOOT}/`, '/p/other/'])
+  })
+
+  it('stays honestly resolving while the registry is still loading', () => {
+    renderAt('/p/nope/tasks/x', { seed: false })
+    expect(routeName()).toBe('scope-resolving')
+  })
 })
 
 /** The bookmarklet contract (spec 011), protected by BACKWARD_COMPATIBILITY.md:
  *  `/new?skill=&ref=&auto=1&key=`. Since R4 Step 1.3 `auto=1` arms the real unattended start
- *  (the full matrix lives in routes/new-task.test.tsx); this file keeps the URL contract. */
+ *  (the full matrix lives in routes/new-task.test.tsx); this file keeps the URL contract —
+ *  through the legacy redirect, exactly as a saved bookmarklet arrives. */
 describe('/new query params', () => {
   const textarea = () =>
     screen.getByLabelText('Describe a task for the agent') as HTMLTextAreaElement

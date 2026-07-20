@@ -1,9 +1,10 @@
 import { MenuIcon, PlusIcon, SearchIcon, XIcon } from 'lucide-react'
 import * as React from 'react'
 import type { ReactNode } from 'react'
-import { Link, useLocation } from 'react-router'
+import { useLocation } from 'react-router'
 
 import { openCommandPalette } from '@/components/command-palette'
+import { Link, stripProjectPrefix } from '@/lib/project-router'
 import { StatusDot } from '@/components/status-dot'
 import { ThemeToggle } from '@/components/theme-toggle'
 import { Button } from '@/components/ui/button'
@@ -87,8 +88,11 @@ export function AppShell({
   banner,
 }: AppShellProps) {
   const { pathname } = useLocation()
-  const activeTo = activeNavPath(pathname)
-  const current = activeNavItem(pathname)
+  // The nav's area rules reason about the flat route map — strip any `/p/:projectId` prefix
+  // (multi-project spec, step 3.2) so `/p/cezar/git/commits` still lights Git.
+  const areaPathname = stripProjectPrefix(pathname)
+  const activeTo = activeNavPath(areaPathname)
+  const current = activeNavItem(areaPathname)
   const [menuOpen, setMenuOpen] = React.useState(false)
   const mainRef = React.useRef<HTMLElement>(null)
 

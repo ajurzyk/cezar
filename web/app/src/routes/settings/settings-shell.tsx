@@ -1,6 +1,5 @@
 import { ChevronRightIcon } from 'lucide-react'
-import { Link, NavLink } from 'react-router'
-
+import { Link, NavLink } from '@/lib/project-router'
 import { cn } from '@/lib/utils'
 import { visibleSettingsSections, type SettingsSection } from './registry'
 

@@ -29,6 +29,7 @@ import type {
   PatchRunInput,
   PickVariantResponse,
   PlanResponse,
+  ProjectsResponse,
   RemoveTodoResponse,
   RepoBranchResponse,
   RepoCommitPayload,
@@ -191,6 +192,12 @@ export function getHealth(opts?: ReadOptions): Promise<HealthResponse> {
  *  never rendered, never logged, never put back into a URL. */
 export function getLaunchKey(opts?: ReadOptions): Promise<LaunchKeyResponse> {
   return get<LaunchKeyResponse>('/api/launch-key', opts)
+}
+
+/** The workspace project registry (multi-project spec). Workspace-level, so `scopeApiPath`
+ *  never prefixes it — one registry no matter which project is active. */
+export function getProjects(opts?: ReadOptions): Promise<ProjectsResponse> {
+  return get<ProjectsResponse>('/api/projects', opts)
 }
 
 /** The authoritative run list — sorted newest-first by the server. */

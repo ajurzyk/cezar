@@ -1,7 +1,9 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { MessageSquareTextIcon, PlayIcon, SearchXIcon } from 'lucide-react'
 import { useMemo } from 'react'
-import { Link, useLocation, useParams } from 'react-router'
+import { useLocation, useParams } from 'react-router'
+
+import { Link } from '@/lib/project-router'
 
 import { ApiError, continueRun } from '@/api/client'
 import { queryKeys, useRun, useRuns, useSendMessage } from '@/api/queries'

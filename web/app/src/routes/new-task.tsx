@@ -8,7 +8,9 @@ import {
   WorkflowIcon,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { useNavigate, useSearchParams } from 'react-router'
+import { useSearchParams } from 'react-router'
+
+import { useNavigate } from '@/lib/project-router'
 
 import { createRun, getLaunchKey, postPlan, putConfig, putUiState } from '@/api/client'
 import { queryKeys, useConfig, useHealth, useRepo, useSkills, useUiState, useWorkflows } from '@/api/queries'
