@@ -12,11 +12,11 @@
 
 | Phase | Step | Title | Status | Commit |
 |-------|------|-------|--------|--------|
-| 1 | 1.1 | `src/paths.ts` workspace path helpers + fix stale `instances/` docstring | done | db16e2e |
-| 1 | 1.2 | `src/workspace/config.ts` — zod schema, load, merge-write (atomic, 0600) | done | 7ca678a |
-| 1 | 1.3 | `src/workspace/projects.ts` — register/list/remove, slug alloc, realpath dedupe | done | a7c8656 |
-| 1 | 1.4 | `src/workspace/migrations.ts` framework + migration 001 | done | 618f997 |
-| 1 | 1.5 | Boot wiring in `src/index.ts` (serve+run, worktree/$HOME guards) + pin `CEZ_HOME` in e2e/test:package harnesses | done | 3b4be8a |
+| 1 | 1.1 | `src/paths.ts` workspace path helpers + fix stale `instances/` docstring | done | edf42f6 |
+| 1 | 1.2 | `src/workspace/config.ts` — zod schema, load, merge-write (atomic, 0600) | done | ca64ed5 |
+| 1 | 1.3 | `src/workspace/projects.ts` — register/list/remove, slug alloc, realpath dedupe | done | c8de088 |
+| 1 | 1.4 | `src/workspace/migrations.ts` framework + migration 001 | done | 8d27de2 |
+| 1 | 1.5 | Boot wiring in `src/index.ts` (serve+run, worktree/$HOME guards) + pin `CEZ_HOME` in e2e/test:package harnesses | done | 757b66e |
 | 1 | 1.6 | `GET /api/projects` + additive `/api/health` fields (`projects`, `bootProject`) | todo | |
 | 1 | 1.7 | BACKWARD_COMPATIBILITY.md: `~/.cezar/{config,ui-state}.json`, `/api/projects`, health additions | todo | |
 | 2 | 2.1 | `src/server/project-context.ts` lazy context map + `RunManager.dispose()` | todo | |
