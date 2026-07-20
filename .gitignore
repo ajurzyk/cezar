@@ -17,6 +17,7 @@ skills-lock.json
 .ai/qa/test-env.lock/
 .ai/qa/test-env-*.log
 .ai/qa/.build-cache
+.ai/qa/cez-home/
 
 # local symlink into .agents/skills
 .claude/skills

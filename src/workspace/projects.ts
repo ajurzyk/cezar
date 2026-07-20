@@ -1,5 +1,6 @@
 import { realpath, stat } from 'node:fs/promises';
-import { basename, join, resolve } from 'node:path';
+import { homedir } from 'node:os';
+import { basename, join, resolve, sep } from 'node:path';
 import { getRepoInfo } from '../server/git.js';
 import {
   mergeWriteWorkspaceConfig,
@@ -86,6 +87,33 @@ async function normalizeRoot(root: string): Promise<string> {
   } catch {
     return resolve(root);
   }
+}
+
+/** True when `path` sits inside a cezar task worktree (`…/.ai/cezar/worktrees/…`). */
+function isInsideTaskWorktree(path: string): boolean {
+  const marker = `${sep}.ai${sep}cezar${sep}worktrees${sep}`;
+  return `${path}${sep}`.includes(marker);
+}
+
+/**
+ * Registration guard (spec 2026-07-20-multi-project-workspace, "Boot flow"):
+ * auto-registration is suppressed — the process still serves the folder
+ * normally, it just doesn't pollute the registry — when the resolved
+ * `repoRoot` is:
+ *
+ * - inside any `…/.ai/cezar/worktrees/…` path (task worktrees and nested
+ *   `cez` invocations — the same nesting reality the `CEZ_TODOS_FILE=''`
+ *   guard in `workflows/run.ts` acknowledges), checked on both the raw and
+ *   realpath'd spelling so neither a symlinked prefix nor a literal one
+ *   slips through; or
+ * - the user's home directory itself (realpath-compared, so a symlinked
+ *   `$HOME` still matches).
+ */
+export async function shouldRegisterProject(repoRoot: string): Promise<boolean> {
+  const real = await normalizeRoot(repoRoot);
+  if (isInsideTaskWorktree(real) || isInsideTaskWorktree(resolve(repoRoot))) return false;
+  const home = await normalizeRoot(homedir());
+  return real !== home;
 }
 
 /**

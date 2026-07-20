@@ -16,6 +16,8 @@ import { loadWorkflows } from './workflows/load.js';
 import { startServer } from './server/server.js';
 import { checkForUpdate } from './update-check.js';
 import { printSkillsBanner } from './skills-banner.js';
+import { runMigrations } from './workspace/migrations.js';
+import { registerProject, shouldRegisterProject } from './workspace/projects.js';
 
 const HELP = `cezar — local cockpit for AI agent tasks in your repo
 
@@ -122,9 +124,31 @@ async function main(): Promise<void> {
   }
 }
 
+// ---- workspace boot ----------------------------------------------------------
+
+/**
+ * Boot-time workspace bookkeeping (spec 2026-07-20-multi-project-workspace,
+ * "Boot flow"): run pending `~/.cezar` migrations first, then register the
+ * boot repo in the per-user project registry. Registration is suppressed for
+ * task worktrees and `$HOME` itself (`shouldRegisterProject`) — the process
+ * still serves those folders normally. Strictly non-fatal: the zero-config
+ * law says a broken or read-only home degrades to a smaller cockpit, never a
+ * failed boot, so any workspace error logs one warning and boot continues.
+ */
+async function initWorkspace(repoRoot: string): Promise<void> {
+  try {
+    await runMigrations({ bootRepoRoot: repoRoot });
+    if (await shouldRegisterProject(repoRoot)) await registerProject(repoRoot);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`[cez] workspace registry unavailable (${message}) — continuing without it`);
+  }
+}
+
 // ---- serve -----------------------------------------------------------------
 
 async function serveCommand(repoRoot: string, preferredPort: number, openBrowser: boolean): Promise<void> {
+  await initWorkspace(repoRoot);
   // keepLive + recover() (#367): runs that were queued/running/waiting when
   // the previous process exited are re-queued or resumed instead of failed.
   const store = openStore(repoRoot, { keepLive: true });
@@ -243,6 +267,7 @@ async function runCommand(
     process.exitCode = 1;
     return;
   }
+  await initWorkspace(repoRoot);
   const { workflows, issues } = await loadWorkflows(repoRoot);
   for (const issue of issues) console.error(`! skipped ${issue.path}: ${issue.message}`);
   const name = workflowName ?? 'quick-task';

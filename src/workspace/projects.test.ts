@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { loadWorkspaceConfig } from './config.js';
@@ -10,6 +10,7 @@ import {
   listProjects,
   registerProject,
   removeProject,
+  shouldRegisterProject,
 } from './projects.js';
 
 /**
@@ -185,6 +186,33 @@ describe('workspace projects', () => {
       const entry = await registerProject(makeDir('survivor'));
       expect(await removeProject('no-such-project')).toBe(false);
       expect((await loadWorkspaceConfig()).projects.map((p) => p.id)).toEqual([entry.id]);
+    });
+  });
+
+  describe('shouldRegisterProject (boot registration guards)', () => {
+    it('allows a normal repo root', async () => {
+      expect(await shouldRegisterProject(makeRepo('normal-repo'))).toBe(true);
+    });
+
+    it('suppresses a cezar task worktree root', async () => {
+      const worktree = makeDir('host-repo', '.ai', 'cezar', 'worktrees', 'abc12345');
+      expect(await shouldRegisterProject(worktree)).toBe(false);
+    });
+
+    it('suppresses a repo nested deeper inside a task worktree', async () => {
+      const nested = join(repos, 'host', '.ai', 'cezar', 'worktrees', 'run-1', 'sub', 'repo');
+      // Path need not exist — normalizeRoot degrades to resolve(); the guard
+      // must still recognize the worktree marker on the raw spelling.
+      expect(await shouldRegisterProject(nested)).toBe(false);
+    });
+
+    it('does not suppress a repo merely named like the marker pieces', async () => {
+      expect(await shouldRegisterProject(makeDir('cezar-worktrees'))).toBe(true);
+    });
+
+    it('suppresses the home directory itself, in any spelling', async () => {
+      expect(await shouldRegisterProject(homedir())).toBe(false);
+      expect(await shouldRegisterProject(`${homedir()}/`)).toBe(false);
     });
   });
 });
