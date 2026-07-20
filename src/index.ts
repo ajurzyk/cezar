@@ -134,21 +134,28 @@ async function main(): Promise<void> {
  * still serves those folders normally. Strictly non-fatal: the zero-config
  * law says a broken or read-only home degrades to a smaller cockpit, never a
  * failed boot, so any workspace error logs one warning and boot continues.
+ *
+ * Returns the boot project's registry id when registration happened —
+ * `serveCommand` plumbs it into the server (`ServerDeps.bootProjectId`) so
+ * `/api/projects` and `/api/health` can name the boot project without a
+ * lookup. Undefined when registration was suppressed or the workspace is
+ * unavailable; the server then derives a fallback on its own.
  */
-async function initWorkspace(repoRoot: string): Promise<void> {
+async function initWorkspace(repoRoot: string): Promise<string | undefined> {
   try {
     await runMigrations({ bootRepoRoot: repoRoot });
-    if (await shouldRegisterProject(repoRoot)) await registerProject(repoRoot);
+    if (await shouldRegisterProject(repoRoot)) return (await registerProject(repoRoot)).id;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.warn(`[cez] workspace registry unavailable (${message}) — continuing without it`);
   }
+  return undefined;
 }
 
 // ---- serve -----------------------------------------------------------------
 
 async function serveCommand(repoRoot: string, preferredPort: number, openBrowser: boolean): Promise<void> {
-  await initWorkspace(repoRoot);
+  const bootProjectId = await initWorkspace(repoRoot);
   // keepLive + recover() (#367): runs that were queued/running/waiting when
   // the previous process exited are re-queued or resumed instead of failed.
   const store = openStore(repoRoot, { keepLive: true });
@@ -193,7 +200,7 @@ async function serveCommand(repoRoot: string, preferredPort: number, openBrowser
   });
 
   const port = await pickPort(preferredPort);
-  startServer({ repoRoot, store, manager, version, update }, port);
+  startServer({ repoRoot, store, manager, version, update, bootProjectId }, port);
   const url = `http://localhost:${port}`;
 
   console.log(`\n  cezar v${version} — ${repoRoot}`);

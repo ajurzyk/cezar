@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath, unlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Hono, type Context } from 'hono';
@@ -45,6 +45,8 @@ import {
   readWorktreePath,
 } from './git-changes.js';
 import { loadConfig, type CezConfig } from '../config.js';
+import { defaultWorkspaceConfig, loadWorkspaceConfig, type WorkspaceProject } from '../workspace/config.js';
+import { allocateProjectSlug, listProjects, type ProjectListEntry } from '../workspace/projects.js';
 import { reviewGateEnabled } from '../runs/review-gate.js';
 import { readUiState, uiStatePath } from '../ui-state.js';
 import { resolveCapabilities } from './capabilities.js';
@@ -67,6 +69,10 @@ export interface ServerDeps {
   /** Host the HTTP server binds (default 127.0.0.1). A non-loopback host
    *  implies hosted mode — `capabilities.localHandoff:false`. */
   bindHost?: string;
+  /** Workspace-registry id of the boot project (multi-project spec) — plumbed
+   *  from `initWorkspace` in src/index.ts. Optional: legacy callers/tests get
+   *  a lazy registry lookup by `repoRoot`, falling back to the repo's slug. */
+  bootProjectId?: string;
 }
 
 /** 409 body for the inbox mutators while the follow-up inbox is off (#471). */
@@ -99,6 +105,16 @@ export interface GroupResponse {
 /** `POST /api/groups/:groupId/pick` — the winner, parked at `review` when it has a diff. */
 export interface PickVariantResponse {
   winner?: RunRecord;
+}
+
+/** `GET /api/projects` (multi-project spec) — the workspace registry with
+ *  per-root status probes. Absolute `root`s belong HERE (same-origin, behind
+ *  the cockpit) and are deliberately never mirrored into the CORS-open
+ *  `/api/health` payload (#431 — see the health route). Never 404s. */
+export interface ProjectsResponse {
+  projects: ProjectListEntry[];
+  bootProject: string;
+  projectsDir: string;
 }
 
 /** streamSSE with the anti-buffering contract (#424): hono's own header is a
@@ -361,8 +377,50 @@ const UI_STATE_BODY_LIMIT = 128 * 1024; // 128 KiB
 const UI_STATE_MAX_KEYS = 200;
 
 export function createApp(deps: ServerDeps): Hono {
-  const { repoRoot, store, manager, version, update, bindHost } = deps;
+  const { repoRoot, store, manager, version, update, bindHost, bootProjectId } = deps;
   const dataDir = join(repoRoot, '.ai/cezar');
+
+  // ---- workspace boot-project identity (multi-project spec) ----------------
+  // The boot flow (`initWorkspace` in src/index.ts) registers the boot repo
+  // and plumbs its registry id in via `deps.bootProjectId`. Legacy callers and
+  // tests construct the app without one — then it is derived lazily from the
+  // registry by realpath and cached on a hit. A boot repo that is legitimately
+  // unregistered (task worktree, `$HOME` itself, unreadable workspace) falls
+  // back to its would-be slug, so `bootProject` always names the repo this
+  // server was started in. Strictly non-fatal, zero-config: every failure path
+  // degrades to the slug fallback, never an error.
+  let bootProjectCache = bootProjectId;
+  const resolveBootProject = async (projects?: readonly WorkspaceProject[]): Promise<string> => {
+    if (bootProjectCache) return bootProjectCache;
+    try {
+      const registry = projects ?? (await loadWorkspaceConfig()).projects;
+      const real = await realpath(repoRoot).catch(() => repoRoot);
+      const match = registry.find((p) => p.root === real || p.root === repoRoot);
+      if (match) bootProjectCache = match.id;
+    } catch {
+      // unreadable workspace — fall through to the slug fallback below
+    }
+    return bootProjectCache ?? allocateProjectSlug(repoRoot, []);
+  };
+  // Health's workspace garnish: id+name ONLY — never `root` (#431, see the
+  // health route). Reads only the registry file; no per-root status probes,
+  // so health stays cheap enough for the bookmarklet's 800 ms port sweep.
+  const workspaceSummary = async (): Promise<{
+    projects: { id: string; name: string }[];
+    bootProject: string;
+  }> => {
+    try {
+      const registry = (await loadWorkspaceConfig()).projects;
+      return {
+        // Explicit picks, not a spread: the registry schema passes unknown
+        // keys through, and `root` must never ride along onto health.
+        projects: registry.map((p) => ({ id: p.id, name: p.name || basename(p.root) })),
+        bootProject: await resolveBootProject(registry),
+      };
+    } catch {
+      return { projects: [], bootProject: await resolveBootProject([]) };
+    }
+  };
   // Hosted-mode gate (spec §"Deployment modes") — read per request so
   // CEZ_REMOTE flips take effect live (and tests can toggle it).
   const capabilities = () => resolveCapabilities(process.env, bindHost);
@@ -439,10 +497,11 @@ export function createApp(deps: ServerDeps): Hono {
     await next();
   });
   app.get('/api/health', async (c) => {
-    const [checks, repo, config] = await Promise.all([
+    const [checks, repo, config, workspace] = await Promise.all([
       detectEnvironment(),
       getRepoInfo(repoRoot),
       loadConfig(repoRoot),
+      workspaceSummary(),
     ]);
     // Additive fields only below — the pre-forge shape is the most
     // externally-depended-on JSON in the app (BACKWARD_COMPATIBILITY.md §2).
@@ -467,7 +526,38 @@ export function createApp(deps: ServerDeps): Hono {
       // shell-out (the bookmarklet aborts its port probe at 800 ms). See detectGithubCached.
       forge: forge ? { kind: forge.kind, ...(forge.detectCached() ?? {}) } : null,
       capabilities: caps,
+      // Workspace enumeration (multi-project spec) — additive, id+name ONLY.
+      // NEVER `projects[].root` here: health is the one CORS-open route, and
+      // the repoRoot trim above exists precisely to keep absolute paths and
+      // usernames away from cross-origin readers (#431) — per-project roots
+      // would reintroduce that leak once per registered project. Absolute
+      // roots live on the same-origin GET /api/projects instead. An
+      // unreadable workspace degrades to `projects: []`.
+      projects: workspace.projects,
+      bootProject: workspace.bootProject,
     });
+  });
+
+  // ---- workspace projects (multi-project spec) -----------------------------
+  // The registered-project list for the cockpit sidebar. Same-origin (unlike
+  // health), so absolute `root`s are fine here. `listProjects()` TTL-caches
+  // its per-root status/branch probes, so a burst of renders never shells git
+  // N times. Never 404s: empty or unreadable registry → `projects: []`.
+  app.get('/api/projects', async (c) => {
+    let projects: ProjectListEntry[] = [];
+    let projectsDir = defaultWorkspaceConfig().projectsDir;
+    try {
+      projectsDir = (await loadWorkspaceConfig()).projectsDir;
+      projects = await listProjects();
+    } catch {
+      // unreadable workspace — degrade to the empty registry + defaults
+    }
+    const body: ProjectsResponse = {
+      projects,
+      bootProject: await resolveBootProject(projects),
+      projectsDir,
+    };
+    return c.json(body);
   });
 
   // The bookmarklet generator bakes this key into the `javascript:` URLs —
