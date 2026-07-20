@@ -7,7 +7,6 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
   branchFor,
   createWorktree,
-  diffBaseRef,
   parseShortstat,
   resolveBaseRef,
   worktreeShortstat,
@@ -104,10 +103,6 @@ describe('createWorktree recovery (real git)', () => {
     const second = await createWorktree(repo, runId, 'main');
 
     expect(second).toEqual(first);
-    // The base is pinned to main's immutable commit, not the branch name (the
-    // 142k-line phantom diff) — so later diffs anchor to a fixed fork point.
-    const mainSha = (await run('git', ['rev-parse', 'main'], { cwd: repo })).stdout.trim();
-    expect(first.baseCommit).toBe(mainSha);
     expect(first.baseBranch).toBe('main');
     const listed = await run('git', ['worktree', 'list', '--porcelain'], { cwd: repo });
     expect(listed.stdout.match(new RegExp(`branch refs/heads/${branchFor(runId)}`, 'g'))).toHaveLength(1);
@@ -186,13 +181,33 @@ describe('worktreeShortstat (real git)', () => {
       rmSync(plain, { recursive: true, force: true });
     }
   });
-});
 
-describe('diffBaseRef', () => {
-  it('prefers the pinned commit, falls back to the branch name, then HEAD', () => {
-    expect(diffBaseRef({ baseCommit: 'abc123', baseBranch: 'develop' })).toBe('abc123');
-    expect(diffBaseRef({ baseBranch: 'develop' })).toBe('develop');
-    expect(diffBaseRef({})).toBe('HEAD');
+  it('counts only the task\'s own changes after the base is merged back in', async () => {
+    // Regression: anchoring to a moving base *name* (via merge-base) must stay
+    // correct when the task syncs with its base — the routine merge that a
+    // pinned fork commit would have inflated by swallowing every upstream commit.
+    const r = mkdtempSync(join(tmpdir(), 'cez-mergeback-'));
+    worktreeRoots.push(r);
+    await run('git', ['init', '-q', '-b', 'main'], { cwd: r });
+    writeFileSync(join(r, 'f.txt'), 'base\n');
+    await run('git', ['add', '-A'], { cwd: r });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'c0'], { cwd: r });
+    await run('git', ['checkout', '-q', '-b', 'task'], { cwd: r });
+    writeFileSync(join(r, 'task.txt'), 'task-change\n'); // the one real change
+    await run('git', ['add', '-A'], { cwd: r });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'task work'], { cwd: r });
+    // Base moves far ahead, then the task merges it back in (conflict-free).
+    await run('git', ['checkout', '-q', 'main'], { cwd: r });
+    for (let i = 0; i < 5; i += 1) {
+      writeFileSync(join(r, 'big.txt'), `${'upstream\n'.repeat(i + 1)}`);
+      await run('git', ['add', '-A'], { cwd: r });
+      await run('git', [...GIT_ID, 'commit', '-q', '-m', `upstream ${i}`], { cwd: r });
+    }
+    await run('git', ['checkout', '-q', 'task'], { cwd: r });
+    await run('git', [...GIT_ID, 'merge', '-q', '--no-edit', 'main'], { cwd: r });
+
+    // Only task.txt (1 add) — NOT the merged-in upstream lines.
+    expect(await worktreeShortstat(r, 'main')).toEqual({ adds: 1, dels: 0, files: 1 });
   });
 });
 

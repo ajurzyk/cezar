@@ -116,14 +116,8 @@ const runRecordSchema = z.object({
   worktreePath: z.string().optional(),
   /** The task's own branch (`cez/<id8>`), created off `baseBranch`. */
   branch: z.string().optional(),
-  /** Branch (or commit, when HEAD was detached) the worktree was forked from.
-   *  The *name* — drives PR targeting; may move. */
+  /** Branch (or commit, when HEAD was detached) the worktree was forked from. */
   baseBranch: z.string().optional(),
-  /** Immutable commit the base branch pointed at when the worktree was created.
-   *  Diffs/shortstats anchor here (via `diffBaseRef`) so "what this task changed"
-   *  can't drift as the base moves. Absent on runs created before this existed —
-   *  those fall back to `baseBranch`. */
-  baseCommit: z.string().optional(),
   /** Set when count-based retention (#483) reclaimed this run's worktree
    *  *directory* (the `cez/<id8>` branch is kept). Presence means "materialized
    *  dir gone, recoverable via `git worktree add`"; it excludes the run from the
