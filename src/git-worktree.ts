@@ -47,15 +47,30 @@ export function branchFor(runId: string): string {
 
 /**
  * Resolve the configured base branch to something `git worktree add` can
- * fork from: the branch itself, else its remote-tracking ref (base exists
- * only on origin), else null — the caller falls back to the current branch
- * with a note. Never throws.
+ * fork from: the local branch, its remote-tracking ref, or null — the caller
+ * falls back to the current branch with a note. Never throws.
+ *
+ * When BOTH the local branch and `origin/<base>` exist, prefer whichever is up
+ * to date. A stale LOCAL base (behind origin, because nothing fetched it into
+ * this worktree's repo) is the classic inflated-diff trap: the merge-base every
+ * diff is measured from collapses onto the stale tip, so all of the history
+ * merged into origin since then counts as the task's own changes — the phantom
+ * 142k-line diff. `origin/<base>` is the source of truth for a review base, so
+ * only keep the local ref when it is equal to or ahead of origin (unpushed base
+ * commits); otherwise use origin.
  */
 export async function resolveBaseRef(repoRoot: string, base: string): Promise<string | null> {
-  for (const ref of [base, `origin/${base}`]) {
-    const res = await git(repoRoot, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
-    if (res.ok) return ref;
+  if (!isSafeGitRef(base)) return null;
+  const verify = (ref: string) =>
+    git(repoRoot, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]).then((r) => r.ok);
+  const [hasLocal, hasRemote] = await Promise.all([verify(base), verify(`origin/${base}`)]);
+  if (hasLocal && hasRemote) {
+    // `--is-ancestor origin/<base> <base>` succeeds iff local is equal-or-ahead.
+    const localCurrent = await git(repoRoot, ['merge-base', '--is-ancestor', `origin/${base}`, base]);
+    return localCurrent.ok ? base : `origin/${base}`;
   }
+  if (hasLocal) return base;
+  if (hasRemote) return `origin/${base}`;
   return null;
 }
 
