@@ -24,10 +24,10 @@
 | 2 | 2.3 | `src/todos.ts` per-dataDir watcher/emitter map | done | 479eacd |
 | 2 | 2.4 | Usage fan-out scoping (`run.ts` + SSE relay per-project `usage` filtering) | done | 9f0eae0 |
 | 2 | 2.5 | Workspace semaphore for global `maxParallel` (cached config, #347 exemption preserved) | done | 9abbf6e |
-| 2 | 2.6 | Per-project cache keying: GitHub list + comments caches, team-skills cache (+ isolation regression tests) | done | c8aa560 |
-| 2 | 2.7 | `GET/PUT /api/workspace/config` (projectsDir writability probe) + `/api/workspace/ui-state` | done | bd74203 |
-| 2 | 2.8 | `GET /api/workspace/events` all-project SSE; legacy `/api/events` stays boot-filtered | done | 03177af |
-| 2 | 2.9 | BACKWARD_COMPATIBILITY.md: `/api/p/*`, workspace SSE stream, `project` SSE field | done | d07b079 |
+| 2 | 2.6 | Per-project cache keying: GitHub list + comments caches, team-skills cache (+ isolation regression tests) | done | d93de6e |
+| 2 | 2.7 | `GET/PUT /api/workspace/config` (projectsDir writability probe) + `/api/workspace/ui-state` | done | 4c45fc6 |
+| 2 | 2.8 | `GET /api/workspace/events` all-project SSE; legacy `/api/events` stays boot-filtered | done | f90707c |
+| 2 | 2.9 | BACKWARD_COMPATIBILITY.md: `/api/p/*`, workspace SSE stream, `project` SSE field | done | 1f00530 |
 | 3 | 3.1 | Cockpit API-client scope seam (`send()` prefix, 4 non-send sites, workspace EventSource, query keys) | todo | |
 | 3 | 3.2 | `/p/:projectId/*` routes + legacy redirects (params preserved) + `default` alias normalization | todo | |
 | 3 | 3.3 | Multi-project sidebar: groups, collapse persistence, 10-recent + More…, missing state, add-project button | todo | |

@@ -23,3 +23,8 @@
 - Project contexts, 53-route context-resolver refactor with manifest-driven parity suite, per-dataDir todos watchers, per-project usage filtering, workspace maxParallel semaphore (#347 exemption tested cross-project).
 - Validation green: typecheck; FULL suite 2873/2873; build; test:package 8/8.
 - Incident: step-2.2 executor cut by session limit mid-run; resumed from transcript; tree verified clean before resume — no partial state landed.
+
+## 2026-07-20T17:31:20Z — checkpoint 4 (steps 2.6..2.9, Phase 2 close)
+- Cache isolation fixes (github list/comments, team-skills) + regressions; workspace config/ui-state routes (projectsDir probe, semaphore refresh); GET /api/workspace/events (stamped, usage split, legacy stream protected); BC docs.
+- Validation green: typecheck; FULL suite 2895/2895; test:unit 31/31; build; test:package 8/8.
+- Phase 2 complete — server fully project-scoped behind byte-identical aliases.
