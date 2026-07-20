@@ -43,6 +43,7 @@ import {
   bumpSkillUsage,
   isProjectSkill,
   orderSkillsByUsage,
+  partitionSkillsForDisplay,
   searchSkills,
   searchWorkflows,
   skillKeywords,
@@ -429,6 +430,7 @@ export function NewTaskRoute() {
                 source={source}
                 ready={sourcesReady}
                 skills={skillList}
+                skillUsage={skillUsage}
                 workflows={workflowList}
                 onPick={(next) => update({ source: next })}
               />
@@ -620,20 +622,22 @@ const chipClass =
 const chevron = <ChevronDownIcon aria-hidden="true" className="size-2.5 shrink-0 text-soft-foreground" />
 
 /**
- * The workflow/skill picker (#385's searchable cmdk dropdown, #377's project-first ordering):
- * ONE pill for both kinds of source. Groups follow the mockup — Project skills (bold), Global,
- * then Workflows.
+ * The workflow/skill picker (#385's searchable cmdk dropdown, #519's tier ordering): ONE pill
+ * for both kinds of source. Groups render Most used (skills picked before, frequency
+ * descending), Project skills (bold), Workflows, then Global.
  */
 function SourcePill({
   source,
   ready,
   skills,
+  skillUsage,
   workflows,
   onPick,
 }: {
   source: TaskSource
   ready: boolean
   skills: readonly Skill[]
+  skillUsage: Readonly<Record<string, number>> | undefined
   workflows: readonly WorkflowDef[]
   onPick: (source: TaskSource) => void
 }) {
@@ -642,12 +646,12 @@ function SourcePill({
   const [preview, setPreview] = useState<Skill | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
   // #484: rank in JS (cmdk's own score-sort does not re-order reliably here), then split the
-  // ranked matches into the Project/Global groups so each group stays match-ordered.
-  const matched = searchSkills(skills, search)
-  const project = matched.filter(isProjectSkill)
-  const global = matched.filter((skill) => !isProjectSkill(skill))
+  // ranked matches into the #519 display tiers so each group stays match-ordered.
+  const matched = searchSkills(skills, search, skillUsage)
+  const { mostUsed, project, global } = partitionSkillsForDisplay(matched, skillUsage)
   const matchedWorkflows = searchWorkflows(workflows, search)
-  const nothingMatches = project.length === 0 && global.length === 0 && matchedWorkflows.length === 0
+  const nothingMatches =
+    mostUsed.length === 0 && project.length === 0 && global.length === 0 && matchedWorkflows.length === 0
   const pick = (next: TaskSource) => {
     onPick(next)
     setOpen(false)
@@ -742,8 +746,13 @@ function SourcePill({
               className="max-h-[min(18rem,calc(var(--radix-popover-content-available-height)-3rem))]"
             >
               {nothingMatches ? <CommandEmpty>Nothing matches.</CommandEmpty> : null}
-              {/* Project skills lead, Global trails everything — the closer a skill lives
-                  to the repo, the more likely it's the one being picked. */}
+              {/* Most used leads (#519), then Project skills before Global — the closer a
+                  skill lives to the repo, the more likely it's the one being picked. */}
+              {mostUsed.length > 0 ? (
+                <CommandGroup heading="Most used">
+                  {mostUsed.map((skill) => skillItem(skill, isProjectSkill(skill)))}
+                </CommandGroup>
+              ) : null}
               {project.length > 0 ? (
                 <CommandGroup heading="Project skills">
                   {project.map((skill) => skillItem(skill, true))}
