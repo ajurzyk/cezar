@@ -495,3 +495,101 @@ describe('CEZ:MONITORING parks as running/monitoring, not waiting (#490)', () =>
     expect(store.getRun(record.id)?.activity).toBeUndefined();
   }, 30_000);
 });
+
+/**
+ * #473 — the `CEZ:ASK` marker parks a turn-end as `waiting` (attention, NOT
+ * monitoring) AND emits an `ask.requested` v2 event so the cockpit renders a
+ * structured question as clickable chips. The marker is stripped from the v1
+ * text; a markerless turn raises no ask. Driven dry through the mock
+ * (`mock:ask`).
+ */
+describe('CEZ:ASK parks as waiting and emits ask.requested (#473)', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  let manager: RunManager;
+  let currentId: string | undefined;
+  const savedEnv: Record<string, string | undefined> = {};
+  const SINGLE_STEP: WorkflowDef = {
+    name: 'quick-task',
+    source: 'built-in',
+    steps: [{ id: 'task', name: 'Task', prompt: '{{task}}' }],
+  };
+
+  beforeEach(async () => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-473-'));
+    savedEnv.CEZ_DRY_RUN = process.env.CEZ_DRY_RUN;
+    process.env.CEZ_DRY_RUN = '1';
+    await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
+    writeFileSync(join(repoRoot, 'a.txt'), 'one\n');
+    await run('git', ['add', '-A'], { cwd: repoRoot });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repoRoot });
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot);
+    currentId = undefined;
+  });
+
+  afterEach(() => {
+    if (currentId) manager.cancel(currentId);
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  const waitFor = async (id: string, pred: (r: RunRecord | undefined) => boolean, ms = 15_000) => {
+    const deadline = Date.now() + ms;
+    while (!pred(store.getRun(id))) {
+      if (Date.now() > deadline) throw new Error('condition not met in time');
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  };
+
+  const readEvents = (id: string): Array<Record<string, unknown>> =>
+    readFileSync(join(repoRoot, '.ai/cezar/runs', `${id}.ndjson`), 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l));
+
+  it('a CEZ:ASK turn-end parks the run as waiting (attention) and emits ask.requested', async () => {
+    const record = manager.startRun(SINGLE_STEP, { task: 'mock:ask which library?', worktree: false });
+    currentId = record.id;
+    await waitFor(record.id, (r) => r?.status === 'waiting');
+    const parked = store.getRun(record.id);
+    expect(parked?.status).toBe('waiting'); // attention — NOT running/monitoring
+    expect(parked?.activity).toBeUndefined();
+    const asks = readEvents(record.id).filter((e) => e.type === 'ask.requested');
+    expect(asks).toHaveLength(1);
+    expect(typeof asks[0]!.requestId).toBe('string');
+    const questions = asks[0]!.questions as Array<{ header: string; options: unknown[] }>;
+    expect(questions[0]!.header).toBe('Library');
+    expect(questions[0]!.options).toHaveLength(2);
+  }, 30_000);
+
+  it('strips the CEZ:ASK marker from server-emitted v1 text events', async () => {
+    const record = manager.startRun(SINGLE_STEP, { task: 'mock:ask pick one', worktree: false });
+    currentId = record.id;
+    await waitFor(record.id, (r) => r?.status === 'waiting');
+    const v1Text = readEvents(record.id).filter((e) => e.type === 'text');
+    expect(v1Text.length).toBeGreaterThan(0);
+    expect(v1Text.some((e) => String(e.text).includes('CEZ:ASK'))).toBe(false);
+  }, 30_000);
+
+  it('a markerless turn-end raises no ask.requested', async () => {
+    const record = manager.startRun(SINGLE_STEP, { task: 'just do the thing', worktree: false });
+    currentId = record.id;
+    await waitFor(record.id, (r) => r?.status === 'waiting');
+    expect(readEvents(record.id).some((e) => e.type === 'ask.requested')).toBe(false);
+  }, 30_000);
+
+  it('a malformed CEZ:ASK degrades gracefully: parks waiting, no ask card', async () => {
+    const record = manager.startRun(SINGLE_STEP, { task: 'mock:ask-bad choose', worktree: false });
+    currentId = record.id;
+    await waitFor(record.id, (r) => r?.status === 'waiting');
+    const parked = store.getRun(record.id);
+    expect(parked?.status).toBe('waiting'); // still parks — never worse than the prose fallback
+    expect(parked?.activity).toBeUndefined();
+    expect(readEvents(record.id).some((e) => e.type === 'ask.requested')).toBe(false);
+  }, 30_000);
+});
