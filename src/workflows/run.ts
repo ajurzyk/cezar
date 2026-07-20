@@ -242,6 +242,10 @@ export class RunManager {
    *  triggers one pause, not a burst. Cleared in dropActive when the run leaves the registry. */
   private readonly memoryPausing = new Set<string>();
 
+  /** Unsubscribe handle for the constructor's `onUsage` subscription — released
+   *  by dispose() so a torn-down manager stops receiving sampler ticks. */
+  private readonly offUsage: () => void;
+
   constructor(
     private readonly store: RunStore,
     private readonly repoRoot: string,
@@ -249,7 +253,34 @@ export class RunManager {
     this.dataDir = join(repoRoot, '.ai/cezar');
     // Memory guard (#memory-guard): the shared process-tree sampler already ticks ~every 2 s for
     // the runs table; piggyback on it to enforce the per-task memory ceiling.
-    onUsage((snapshot) => void this.enforceMemoryLimit(snapshot));
+    this.offUsage = onUsage((snapshot) => void this.enforceMemoryLimit(snapshot));
+  }
+
+  /**
+   * Release everything this manager owns without touching run records
+   * (multi-project workspace, spec 2026-07-20: a removed project's context is
+   * torn down while the process lives on). Unsubscribes the shared usage
+   * sampler — before dispose() existed that subscription lived for the whole
+   * process — clears every per-run idle/autosave timer, releases any held
+   * repo-root locks, and empties the queued state so nothing fires later.
+   * Live sessions are NOT ended here: run lifecycle stays the caller's policy;
+   * dispose only guarantees the manager makes no further moves on its own.
+   */
+  dispose(): void {
+    this.offUsage();
+    for (const state of this.active.values()) {
+      this.clearIdleTimer(state);
+      this.clearAutosaveTimer(state);
+      state.releaseRepoRoot?.();
+      state.releaseRepoRoot = undefined;
+    }
+    this.active.clear();
+    this.waiting.clear();
+    this.starting.clear();
+    this.queue.length = 0;
+    this.pendingJobs.clear();
+    this.memoryPausing.clear();
+    this.lastNamerKey.clear();
   }
 
   /**
