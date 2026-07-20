@@ -23,7 +23,7 @@
 | 2 | 2.2 | `server.ts` context-resolver refactor: `/api/p/:projectId/*` + legacy aliases + parity tests | done | 01f379b |
 | 2 | 2.3 | `src/todos.ts` per-dataDir watcher/emitter map | done | 18220ff |
 | 2 | 2.4 | Usage fan-out scoping (`run.ts` + SSE relay per-project `usage` filtering) | done | 1152337 |
-| 2 | 2.5 | Workspace semaphore for global `maxParallel` (cached config, #347 exemption preserved) | todo | |
+| 2 | 2.5 | Workspace semaphore for global `maxParallel` (cached config, #347 exemption preserved) | done | 8683cee |
 | 2 | 2.6 | Per-project cache keying: GitHub list + comments caches, team-skills cache (+ isolation regression tests) | todo | |
 | 2 | 2.7 | `GET/PUT /api/workspace/config` (projectsDir writability probe) + `/api/workspace/ui-state` | todo | |
 | 2 | 2.8 | `GET /api/workspace/events` all-project SSE; legacy `/api/events` stays boot-filtered | todo | |

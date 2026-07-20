@@ -48,6 +48,7 @@ import {
 import { loadConfig, type CezConfig } from '../config.js';
 import { PROJECT_ID_RE, defaultWorkspaceConfig, loadWorkspaceConfig, type WorkspaceProject } from '../workspace/config.js';
 import { allocateProjectSlug, listProjects, type ProjectListEntry } from '../workspace/projects.js';
+import { WorkspaceSemaphore } from '../workspace/semaphore.js';
 import { ProjectContextError, ProjectContexts, type ProjectContext } from './project-context.js';
 import { reviewGateEnabled } from '../runs/review-gate.js';
 import { readUiState, uiStatePath } from '../ui-state.js';
@@ -83,6 +84,13 @@ export interface ServerDeps {
    *  context is seeded from `deps.{store,manager}` (which src/index.ts already
    *  recovered/pruned at startup) and the resolver short-circuits to it. */
   contexts?: ProjectContexts;
+  /** Workspace-wide parallel-cap semaphore + cached resource config (spec
+   *  2026-07-20, step 2.5): the ONE instance boot created, refreshed, and gave
+   *  the boot manager — threaded into the default `ProjectContexts` so every
+   *  project's RunManager shares it. Step 2.7's `PUT /api/workspace/config`
+   *  calls `semaphore.refresh()` after a write. Optional so legacy
+   *  callers/tests change nothing. */
+  semaphore?: WorkspaceSemaphore;
 }
 
 // ---- project-scoped routing (multi-project spec, step 2.2) -----------------
@@ -502,8 +510,9 @@ export function createApp(deps: ServerDeps): Hono {
     manager: deps.manager,
     launchKey: ensureLaunchKey(bootDataDir), // bookmarklet auto-start secret (spec 011)
   };
-  // Non-boot projects build lazily on first scoped request.
-  const contexts = deps.contexts ?? new ProjectContexts({ listProjects });
+  // Non-boot projects build lazily on first scoped request; their managers
+  // count against the same workspace semaphore as the boot manager (step 2.5).
+  const contexts = deps.contexts ?? new ProjectContexts({ listProjects, semaphore: deps.semaphore });
 
   const app = new Hono();
 

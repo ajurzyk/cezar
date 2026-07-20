@@ -3,6 +3,7 @@ import { loadConfig } from '../config.js';
 import { pruneOrphans } from '../git-worktree.js';
 import { reclaimWorktrees } from '../runs/retention.js';
 import { RunStore } from '../runs/store.js';
+import { WorkspaceSemaphore } from '../workspace/semaphore.js';
 import { RunManager } from '../workflows/run.js';
 import { ensureLaunchKey } from './launch-key.js';
 import { getRepoInfo } from './git.js';
@@ -49,6 +50,12 @@ export interface ProjectContextSource {
 export interface ProjectContextDeps {
   /** Registry lookup — the workspace `listProjects()` in production. */
   listProjects: () => Promise<readonly ProjectContextSource[]>;
+  /** Workspace-wide parallel-cap semaphore (spec 2026-07-20, step 2.5). Boot
+   *  passes the ONE instance it already gave the boot manager, so every
+   *  project's RunManager counts against the same `resources.maxParallel`.
+   *  When omitted, the map still shares one private instance across the
+   *  managers it builds (workspace defaults, never refreshed). */
+  semaphore?: WorkspaceSemaphore;
 }
 
 export type ProjectContextFailure = 'unknown-project' | 'missing-root';
@@ -79,8 +86,13 @@ export class ProjectContextError extends Error {
 export class ProjectContexts {
   private readonly contexts = new Map<string, ProjectContext>();
   private readonly building = new Map<string, Promise<ProjectContext>>();
+  /** One semaphore for every manager this map builds — injected by boot,
+   *  private-but-shared otherwise. */
+  private readonly semaphore: WorkspaceSemaphore;
 
-  constructor(private readonly deps: ProjectContextDeps) {}
+  constructor(private readonly deps: ProjectContextDeps) {
+    this.semaphore = deps.semaphore ?? new WorkspaceSemaphore();
+  }
 
   /** The built context for `projectId`, building it on first access.
    *  Throws `ProjectContextError` for unknown ids and missing roots. */
@@ -140,7 +152,7 @@ export class ProjectContexts {
     // keepLive + recover() (#367), same as serveCommand: runs that were live
     // when this project's context last existed are re-queued or resumed.
     const store = RunStore.open(dataDir, { keepLive: true });
-    const manager = new RunManager(store, project.root);
+    const manager = new RunManager(store, project.root, { semaphore: this.semaphore });
     try {
       const launchKey = ensureLaunchKey(dataDir);
       // Startup reconcile (spec 006) + count-based retention (#483) — the same

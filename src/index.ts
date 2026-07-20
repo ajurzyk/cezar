@@ -18,6 +18,7 @@ import { checkForUpdate } from './update-check.js';
 import { printSkillsBanner } from './skills-banner.js';
 import { runMigrations } from './workspace/migrations.js';
 import { registerProject, shouldRegisterProject } from './workspace/projects.js';
+import { WorkspaceSemaphore } from './workspace/semaphore.js';
 
 const HELP = `cezar — local cockpit for AI agent tasks in your repo
 
@@ -156,10 +157,16 @@ async function initWorkspace(repoRoot: string): Promise<string | undefined> {
 
 async function serveCommand(repoRoot: string, preferredPort: number, openBrowser: boolean): Promise<void> {
   const bootProjectId = await initWorkspace(repoRoot);
+  // ONE workspace semaphore for the whole process (spec 2026-07-20, step 2.5):
+  // the boot manager and every lazily-built project context count their runs
+  // against the same `resources.maxParallel`. The boot refresh() below is the
+  // cache hook's first call; PUT /api/workspace/config (step 2.7) re-fires it.
+  const semaphore = new WorkspaceSemaphore();
+  await semaphore.refresh();
   // keepLive + recover() (#367): runs that were queued/running/waiting when
   // the previous process exited are re-queued or resumed instead of failed.
   const store = openStore(repoRoot, { keepLive: true });
-  const manager = new RunManager(store, repoRoot);
+  const manager = new RunManager(store, repoRoot, { semaphore });
   const version = readOwnVersion();
 
   const checks = await detectEnvironment();
@@ -200,7 +207,7 @@ async function serveCommand(repoRoot: string, preferredPort: number, openBrowser
   });
 
   const port = await pickPort(preferredPort);
-  startServer({ repoRoot, store, manager, version, update, bootProjectId }, port);
+  startServer({ repoRoot, store, manager, version, update, bootProjectId, semaphore }, port);
   const url = `http://localhost:${port}`;
 
   console.log(`\n  cezar v${version} — ${repoRoot}`);
@@ -286,7 +293,11 @@ async function runCommand(
   }
 
   const store = openStore(repoRoot);
-  const manager = new RunManager(store, repoRoot);
+  // Headless runs enforce the same workspace-level cap/memory limit (step
+  // 2.5) — one refreshed semaphore, even with just one manager in play.
+  const semaphore = new WorkspaceSemaphore();
+  await semaphore.refresh();
+  const manager = new RunManager(store, repoRoot, { semaphore });
 
   store.on('event', ({ event }) => {
     switch (event.type) {
