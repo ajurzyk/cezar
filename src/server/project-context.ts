@@ -86,6 +86,8 @@ export class ProjectContextError extends Error {
 export class ProjectContexts {
   private readonly contexts = new Map<string, ProjectContext>();
   private readonly building = new Map<string, Promise<ProjectContext>>();
+  /** Live `onContextBuilt` subscribers (workspace SSE, step 2.8). */
+  private readonly builtListeners = new Set<(ctx: ProjectContext) => void>();
   /** One semaphore for every manager this map builds — injected by boot,
    *  private-but-shared otherwise. */
   private readonly semaphore: WorkspaceSemaphore;
@@ -106,9 +108,33 @@ export class ProjectContexts {
     try {
       const ctx = await build;
       this.contexts.set(projectId, ctx);
+      this.notifyBuilt(ctx);
       return ctx;
     } finally {
       this.building.delete(projectId);
+    }
+  }
+
+  /**
+   * Subscribe to future context builds (multi-project spec, step 2.8): the
+   * workspace SSE stream attaches to every already-built context at connect
+   * and uses this hook to pick up contexts built LATER — so subscribing never
+   * force-instantiates a project, yet a project's first API touch makes its
+   * events flow to already-open workspace streams. Returns an unsubscribe.
+   */
+  onContextBuilt(listener: (ctx: ProjectContext) => void): () => void {
+    this.builtListeners.add(listener);
+    return () => this.builtListeners.delete(listener);
+  }
+
+  /** A listener throwing must never fail the build (its context is fine). */
+  private notifyBuilt(ctx: ProjectContext): void {
+    for (const listener of [...this.builtListeners]) {
+      try {
+        listener(ctx);
+      } catch {
+        // subscriber's problem — the build succeeded
+      }
     }
   }
 

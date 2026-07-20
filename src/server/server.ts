@@ -100,6 +100,11 @@ export interface ServerDeps {
    *  calls `semaphore.refresh()` after a write. Optional so legacy
    *  callers/tests change nothing. */
   semaphore?: WorkspaceSemaphore;
+  /** Workspace-level SSE bus (spec, step 2.8): `project-added` /
+   *  `project-removed` / `checkout-progress` reach the `/api/workspace/events`
+   *  streams through this. Optional — createApp builds a private one; inject
+   *  to emit from outside the app (tests, future CLI hooks). */
+  workspaceEvents?: WorkspaceEventBus;
 }
 
 // ---- project-scoped routing (multi-project spec, step 2.2) -----------------
@@ -198,6 +203,35 @@ export interface WorkspaceConfigResponse {
     memoryLimitMb: number | null;
     worktreeRetentionDefault: number;
   };
+}
+
+// ---- workspace SSE (multi-project spec, step 2.8) --------------------------
+
+/** Workspace-level event names carried ONLY on `GET /api/workspace/events`
+ *  (never on the per-project streams): registry mutations plus the GUI-clone
+ *  progress feed (step 4.3). */
+export type WorkspaceEventName = 'project-added' | 'project-removed' | 'checkout-progress';
+
+/**
+ * The in-process bus for workspace-level SSE events. The registry-mutating
+ * routes (`POST /api/projects`, `DELETE /api/projects/:projectId` — Phase 4;
+ * today only GET exists, so nothing emits yet) and the checkout flow (step
+ * 4.3) call `emit()`; every open `/api/workspace/events` stream relays the
+ * event verbatim under its name. Injectable via `ServerDeps.workspaceEvents`
+ * so tests (and any out-of-createApp emitter) can drive the stream.
+ */
+export class WorkspaceEventBus {
+  private readonly listeners = new Set<(event: WorkspaceEventName, data: unknown) => void>();
+
+  emit(event: WorkspaceEventName, data: unknown): void {
+    for (const listener of [...this.listeners]) listener(event, data);
+  }
+
+  /** Subscribe; returns an unsubscribe. */
+  on(listener: (event: WorkspaceEventName, data: unknown) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
 }
 
 /** streamSSE with the anti-buffering contract (#424): hono's own header is a
@@ -611,6 +645,9 @@ export function createApp(deps: ServerDeps): Hono {
   // Non-boot projects build lazily on first scoped request; their managers
   // count against the same workspace semaphore as the boot manager (step 2.5).
   const contexts = deps.contexts ?? new ProjectContexts({ listProjects, semaphore: deps.semaphore });
+  // Workspace-level SSE bus (step 2.8) — the registry mutators and the
+  // checkout flow (Phase 4) emit here; /api/workspace/events relays.
+  const workspaceEvents = deps.workspaceEvents ?? new WorkspaceEventBus();
 
   const app = new Hono();
 
@@ -1846,6 +1883,105 @@ export function createApp(deps: ServerDeps): Hono {
         offTodos();
         offUsage();
       });
+      while (!stream.aborted) {
+        await stream.writeSSE({ event: 'ping', data: '' });
+        await stream.sleep(15_000);
+      }
+    });
+  });
+
+  // ---- workspace SSE (multi-project spec, step 2.8) ------------------------
+  // The cockpit's future single EventSource: one stream, every project.
+  // WORKSPACE-level (single-mount on `app`, never mirrored under /api/p/).
+  // Same event names as the per-project stream, but every payload is stamped
+  // with the owning `project` id — additively where the legacy payload is an
+  // object (`run` grows a `project` key, `run-deleted` becomes
+  // `{id, project}`), wrapped where it is not (`todos` → `{project, items}`,
+  // `usage` → `{project, usage}` — a bare array/record has nowhere to carry a
+  // stamp). The legacy `/api/events` alias above keeps its UN-stamped,
+  // boot-filtered shape — that stream is a protected surface.
+  //
+  // Subscribing NEVER force-instantiates a project: only the boot context
+  // (always live) and already-built lazy contexts are attached at connect;
+  // contexts built later join via the `onContextBuilt` hook, so a project's
+  // first API touch makes its events flow to streams already open.
+  app.get('/api/workspace/events', (c) => {
+    return streamSSENoBuffer(c, async (stream) => {
+      // One detach bundle per attached project — the id guard makes a double
+      // attach (connect-time snapshot vs. the built hook) impossible.
+      const attached = new Map<string, { store: RunStore; detach: () => void }>();
+      const attach = (project: string, ctx: Pick<ProjectContext, 'store' | 'dataDir'>): void => {
+        if (attached.has(project)) return;
+        const { store, dataDir } = ctx;
+        const onRun = (run: RunRecord) =>
+          void stream.writeSSE({ event: 'run', data: JSON.stringify({ ...run, project }) });
+        const onDeleted = (id: string) =>
+          void stream.writeSSE({ event: 'run-deleted', data: JSON.stringify({ id, project }) });
+        const sendTodos = async () => {
+          const items: TodoItem[] = await readTodos(dataDir).catch(() => []);
+          await stream.writeSSE({ event: 'todos', data: JSON.stringify({ project, items }) });
+        };
+        // Same opt-in gate as the per-project stream (#471): no capability, no
+        // watcher — and each subscription is scoped to its own dataDir (2.3).
+        const offTodos = capabilities().followups
+          ? onTodosChanged(dataDir, () => void sendTodos())
+          : () => undefined;
+        store.on('run', onRun);
+        store.on('deleted', onDeleted);
+        attached.set(project, {
+          store,
+          detach: () => {
+            store.off('run', onRun);
+            store.off('deleted', onDeleted);
+            offTodos();
+          },
+        });
+      };
+
+      // The boot context never lives in the lazy map — seed it under its
+      // registry id (`resolveBootProject`, NOT `bootContext.id`, which may be
+      // the reserved alias when registration was suppressed).
+      attach(await resolveBootProject(), bootContext);
+      // NB: snapshot + hook subscription happen in one sync block, so no
+      // context can slip between them.
+      for (const id of contexts.ids()) {
+        const ctx = contexts.peek(id);
+        if (ctx) attach(ctx.id, ctx);
+      }
+      const offBuilt = contexts.onContextBuilt((ctx) => attach(ctx.id, ctx));
+
+      // `usage` is FILTERED per project, never a stamped whole (spec "SSE
+      // streams"): the module-global sampler's snapshot is split by each
+      // attached project's owned runIds, one event per project that has live
+      // rows. No event for a row-less project — the workspace stream carries
+      // no empty-record clears (that is the per-project streams' contract).
+      const offUsage = onUsage((usage) => {
+        const rows = Object.entries(usage);
+        for (const [project, { store }] of attached) {
+          const owned: typeof usage = {};
+          for (const [runId, sample] of rows) {
+            if (store.getRun(runId)) owned[runId] = sample;
+          }
+          if (Object.keys(owned).length > 0) {
+            void stream.writeSSE({ event: 'usage', data: JSON.stringify({ project, usage: owned }) });
+          }
+        }
+      });
+
+      // Workspace-level events (project-added / project-removed /
+      // checkout-progress) — relayed verbatim under their own names.
+      const offWorkspace = workspaceEvents.on(
+        (event, data) => void stream.writeSSE({ event, data: JSON.stringify(data) }),
+      );
+
+      stream.onAbort(() => {
+        offBuilt();
+        offUsage();
+        offWorkspace();
+        for (const { detach } of attached.values()) detach();
+        attached.clear();
+      });
+
       while (!stream.aborted) {
         await stream.writeSSE({ event: 'ping', data: '' });
         await stream.sleep(15_000);

@@ -116,6 +116,29 @@ describe('ProjectContexts', () => {
     contexts.dispose('a');
   });
 
+  it('onContextBuilt: fires once per build (not cached hits), unsubscribes cleanly, and a throwing listener never fails the build', async () => {
+    const contexts = makeContexts([
+      { id: 'a', root: rootA, status: 'not-git' },
+      { id: 'b', root: rootB, status: 'not-git' },
+    ]);
+    const built: string[] = [];
+    const off = contexts.onContextBuilt((ctx) => built.push(ctx.id));
+    contexts.onContextBuilt(() => {
+      throw new Error('subscriber boom');
+    });
+
+    await contexts.context('a');
+    expect(built).toEqual(['a']); // the throwing listener didn't fail the build
+    await contexts.context('a');
+    expect(built).toEqual(['a']); // cached hit — no re-notify
+
+    off();
+    const b = await contexts.context('b');
+    expect(b.id).toBe('b'); // built fine with only the throwing listener left
+    expect(built).toEqual(['a']); // unsubscribed — not notified for b
+    contexts.disposeAll();
+  });
+
   it('dispose() of a never-built project is a no-op returning false', () => {
     const contexts = makeContexts([{ id: 'a', root: rootA, status: 'not-git' }]);
     expect(contexts.dispose('a')).toBe(false);
