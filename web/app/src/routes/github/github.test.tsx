@@ -1244,7 +1244,6 @@ describe('the follow-up prompt template menu (#413)', () => {
     const before = textarea().value
     fireEvent.click(document.querySelector('[data-slot="prompt-template-trigger"]')!)
     await waitFor(() => {
-      if (textarea().value !== before) return // the click already landed
       if (!option(id)) throw new Error(`template option "${id}" not mounted yet`)
     })
     await selectOption(id)

@@ -745,11 +745,23 @@ export class RunManager {
       if (opts.model && modelConflictsWithRunner(opts.model, targetRunner)) {
         return { ok: false, error: `model '${opts.model}' is not a ${targetRunner} model` };
       }
+      // A runner switch that carries NO explicit model must not leave the previous backend's pin
+      // on the record: the guard above only sees `opts.model`, so without this an inherited
+      // `opus` would survive a switch to codex and `runContinuation` would hand it to the codex
+      // runner. Clearing (not rejecting) is right — the pin belonged to the old backend and is
+      // meaningless for the new one, which is exactly what the composer already displays (auto).
+      // Only a recognizably foreign preset is cleared; a free-form/custom id is left alone.
+      const inheritedPinIsForeign =
+        opts.model === undefined &&
+        run.model !== undefined &&
+        modelConflictsWithRunner(run.model, targetRunner);
       this.store.updateRun(runId, {
         ...(opts.runner !== undefined ? { runner: opts.runner } : {}),
         ...(opts.model !== undefined
           ? { model: opts.model === '' ? undefined : opts.model }
-          : {}),
+          : inheritedPinIsForeign
+            ? { model: undefined }
+            : {}),
       });
     }
 

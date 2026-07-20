@@ -217,6 +217,38 @@ describe('RunManager.continueRun override', () => {
     expect(store.getRun(id)?.runner).toBe('claude');
   });
 
+  it('a runner-only switch clears the previous backend model pin instead of carrying it over', () => {
+    const id = resumableRun(); // claude/sonnet
+    // The composer sends only `runner` when the user switches backend without touching the
+    // model pill (it displays `auto` at that point). The inherited `sonnet` pin belongs to
+    // claude and must not reach the codex runner via `runContinuation`'s `model: record.model`.
+    expect(manager.continueRun(id, { runner: 'codex' })).toEqual({ ok: true });
+    const after = store.getRun(id);
+    expect(after?.runner).toBe('codex');
+    expect(after?.model).toBeUndefined();
+  });
+
+  it('a runner-only switch keeps a free-form model id — only known foreign presets are cleared', () => {
+    const record = store.createRun({
+      title: 't',
+      workflow: 'quick-task',
+      task: 't',
+      runner: 'claude',
+      model: 'my-org/custom-tune',
+      steps: [{ id: 's1', name: 'Work', kind: 'agent' }],
+    });
+    store.updateRun(record.id, { status: 'done', finishedAt: new Date().toISOString() });
+    store.updateStep(record.id, 's1', { sessionId: 'sess-1' });
+    expect(manager.continueRun(record.id, { runner: 'codex' })).toEqual({ ok: true });
+    expect(store.getRun(record.id)?.model).toBe('my-org/custom-tune');
+  });
+
+  it('a runner-only continue on the SAME backend keeps the pin (no spurious clear)', () => {
+    const id = resumableRun(); // claude/sonnet
+    expect(manager.continueRun(id, { runner: 'claude' })).toEqual({ ok: true });
+    expect(store.getRun(id)?.model).toBe('sonnet');
+  });
+
   it('guards legacy records too — no persisted runner resolves to claude, like runContinuation', () => {
     const record = store.createRun({ title: 't', workflow: 'quick-task', task: 't', steps: [{ id: 's1', name: 'Work', kind: 'agent' }] });
     store.updateRun(record.id, { status: 'done', finishedAt: new Date().toISOString() });

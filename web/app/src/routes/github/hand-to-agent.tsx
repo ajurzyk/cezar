@@ -146,9 +146,9 @@ export function HandToAgent({
   useEffect(() => {
     // Reads/writes go through refs, never a setState updater: StrictMode double-invokes those in
     // dev, which would double-apply the ref bookkeeping (the composer's #double-paste hazard).
-    const resolved = resolveAutoApply(promptRefValue.current, autoAppliedRef.current, autoText)
-    autoAppliedRef.current = resolved.applied
-    if (resolved.text !== promptRefValue.current) setPrompt(resolved.text)
+    const autoApplied = resolveAutoApply(promptRefValue.current, autoAppliedRef.current, autoText)
+    autoAppliedRef.current = autoApplied.applied
+    if (autoApplied.text !== promptRefValue.current) setPrompt(autoApplied.text)
     // `autoText` is a derived STRING, so this fires only when the assigned set really changes —
     // not on every render that rebuilds the skills array.
   }, [autoText])
@@ -297,7 +297,6 @@ export function HandToAgent({
     </section>
   )
 }
-
 
 /**
  * The workflow dropdown: single-select, and — legacy parity — selecting the chosen workflow
