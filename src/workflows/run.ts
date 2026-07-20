@@ -290,7 +290,11 @@ export class RunManager {
    * no limit is set or the sampler has no data (e.g. `ps`/PowerShell unavailable).
    */
   private async enforceMemoryLimit(snapshot: Record<string, ProcessUsage>): Promise<void> {
-    const runIds = Object.keys(snapshot);
+    // The sampler is module-global (one `ps` for the whole process), so with
+    // multiple projects a snapshot carries EVERY project's runs. Act only on
+    // rows this manager owns (multi-project spec, step 2.4) — and skip the
+    // config read entirely when a tick concerns other managers' runs only.
+    const runIds = Object.keys(snapshot).filter((runId) => this.active.has(runId));
     if (runIds.length === 0) return;
     const limitMb = (await loadConfig(this.repoRoot)).memoryLimitMb;
     if (!limitMb || limitMb <= 0) return;

@@ -1640,10 +1640,17 @@ export function createApp(deps: ServerDeps): Hono {
       // Live resource telemetry (#348): the sampler ticks ~every 2 s only
       // while some run has a registered process; each tick is relayed as one
       // `usage` message (runId → {cpuPct, rssBytes, procCount}). Never
-      // persisted — the NDJSON transcripts stay usage-free.
-      const offUsage = onUsage(
-        (usage) => void stream.writeSSE({ event: 'usage', data: JSON.stringify(usage) }),
-      );
+      // persisted — the NDJSON transcripts stay usage-free. The sampler is
+      // module-global, so a snapshot carries EVERY project's runs — split it
+      // by ownership and relay only this project's rows, never a stamped
+      // whole (multi-project spec, step 2.4: filtered, not stamped).
+      const offUsage = onUsage((usage) => {
+        const owned: typeof usage = {};
+        for (const [runId, sample] of Object.entries(usage)) {
+          if (store.getRun(runId)) owned[runId] = sample;
+        }
+        void stream.writeSSE({ event: 'usage', data: JSON.stringify(owned) });
+      });
       store.on('run', onRun);
       store.on('deleted', onDeleted);
       stream.onAbort(() => {
