@@ -13,7 +13,7 @@
 | Phase | Step | Title | Status | Commit |
 |-------|------|-------|--------|--------|
 | 1 | 1.1 | `src/paths.ts` workspace path helpers + fix stale `instances/` docstring | done | db16e2e |
-| 1 | 1.2 | `src/workspace/config.ts` — zod schema, load, merge-write (atomic, 0600) | todo | |
+| 1 | 1.2 | `src/workspace/config.ts` — zod schema, load, merge-write (atomic, 0600) | done | 7ca678a |
 | 1 | 1.3 | `src/workspace/projects.ts` — register/list/remove, slug alloc, realpath dedupe | todo | |
 | 1 | 1.4 | `src/workspace/migrations.ts` framework + migration 001 | todo | |
 | 1 | 1.5 | Boot wiring in `src/index.ts` (serve+run, worktree/$HOME guards) + pin `CEZ_HOME` in e2e/test:package harnesses | todo | |
