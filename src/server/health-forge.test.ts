@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join, sep } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { RunStore } from '../runs/store.js';
 import type { RunManager } from '../workflows/run.js';
@@ -115,6 +115,21 @@ describe('GET /api/health — forge + capabilities', () => {
     process.env.CEZ_REMOTE = '1';
     const body = await health();
     expect(body.capabilities).toEqual({ localHandoff: false, followups: false });
+  });
+
+  it('hosted mode trims repoRoot to a basename — no absolute path/username leak (#431)', async () => {
+    process.env.CEZ_REMOTE = '1';
+    const body = await health();
+    // The absolute checkout path (with the developer's username) must not be exposed to a
+    // site/host that reads the CORS-open health endpoint in hosted mode.
+    expect(body.repoRoot).toBe(basename(repoRoot));
+    expect(body.repoRoot).not.toContain(sep);
+    expect(body.repoRoot).not.toBe(repoRoot);
+  });
+
+  it('hosted mode via a non-loopback bind host also trims repoRoot (#431)', async () => {
+    const body = await health({ bindHost: '0.0.0.0' });
+    expect(body.repoRoot).toBe(basename(repoRoot));
   });
 
   it('hosted mode via a non-loopback bind host: localHandoff:false', async () => {

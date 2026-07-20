@@ -95,8 +95,12 @@ export interface RunRecord {
   /** The PR/issue number this task is ABOUT (task auto-naming spec) — display tier only. */
   prNumber?: number
   issueNumber?: number
-  /** 'user' = renamed via PATCH, never auto-overwritten; 'auto' = namer-owned. */
-  titleOrigin?: 'user' | 'auto'
+  /** 'user' = renamed via PATCH, never auto-overwritten; 'marker' = agent-declared
+   *  via CEZ:TITLE (spec 2026-07-18-task-ref-markers); 'auto' = namer-owned. */
+  titleOrigin?: 'user' | 'auto' | 'marker'
+  /** References the agent declared via CEZ:PR/CEZ:ISSUE markers — authoritative
+   *  over the namer for the matching kind. */
+  markerRefs?: { pr?: number; issue?: number }
   /** The referenced tier's working set (distinct PR URLs spotted, capped server-side). */
   referencedPrCandidates?: string[]
   /** Absent when the run executed in the repo working tree rather than its own worktree. */
@@ -248,6 +252,9 @@ export interface ChangedFile {
   dels: number
   /** Binary per numstat — there is no text patch to render. */
   binary: boolean
+  /** True when the path is one the raw-bytes route serves as an `<img>` (#365) — present only
+   *  when true, so old clients that never read it stay correct. */
+  image?: boolean
   /** This file's unified-diff section; possibly `… (patch truncated)`, possibly empty. */
   patch: string
 }
@@ -378,6 +385,10 @@ export interface WorkflowsResponse {
  *  a missing CLI, a timeout or an unparseable answer degrade to the one-step quick-task plan
  *  with `fallback: true`, which the UI surfaces as a dim note. */
 export interface PlanResponse {
+  /** A short kebab-case workflow title the planner proposed (spec 008 follow-up / #414). The
+   *  workflow builder's auto chain creator pre-fills its name field with it. Absent on the
+   *  degraded fallback, and on older servers that never sent one. */
+  name?: string
   steps: WorkflowStepDef[]
   rationale: string
   fallback: boolean
@@ -446,7 +457,11 @@ export interface TodoItem {
   suggestedPrompt?: string
   /** Explicit intent; missing infers from suggestedSkill/suggestedPrompt for old files. */
   runnable?: boolean
-  /** Set by the server when "▶ Run" turned this entry into a task. */
+  /** Set by the server when a task was started from this entry — by `startTodo` below, or by
+   *  the cockpit's "▶ Run": since #374 that prefills the composer instead of calling that
+   *  route, and the entry's id travels along (`/new?…&todo=`, then `CreateRunInput.todoId`) so
+   *  the launched run is recorded here all the same. Set → the entry leaves the inbox and stays
+   *  in todos.json as the audit trail; a later launch never overwrites the first. */
   startedTaskId?: string
 }
 
@@ -455,7 +470,10 @@ export interface RemoveTodoResponse {
   removed: boolean
 }
 
-/** `POST /api/todos/:id/start` — Run turns the entry into a task (201 with the new run). */
+/** `POST /api/todos/:id/start` — turns the entry into a task in one step (201 with the new
+ *  run). Still a documented public route (BACKWARD_COMPATIBILITY.md) for anyone scripting the
+ *  cockpit directly, but (#374) the Inbox's own "▶ Run" no longer calls it — it navigates to
+ *  a prefilled `/new` instead so the user can review the suggestion before starting it. */
 export interface StartTodoResponse {
   run: RunRecord
 }
@@ -492,6 +510,27 @@ export interface GithubData {
   labelColors?: Record<string, string>
 }
 
+/** One comment or PR review summary in an issue/PR thread (`GET /api/github/comments/…`, #499). */
+export interface GithubComment {
+  id: number
+  author: string
+  avatarUrl?: string
+  createdAt: string
+  body: string
+  kind: 'comment' | 'review'
+  reviewState?: 'approved' | 'changes_requested' | 'commented' | 'dismissed'
+  url: string
+}
+
+/** `GET /api/github/comments/:kind/:number` — degrades to `{ available: false, reason }` like the
+ *  list fetch, never an error. */
+export interface GithubCommentsData {
+  available: boolean
+  reason?: string
+  comments: GithubComment[]
+  truncated?: boolean
+}
+
 // ---- GUI prefs (`PUT /api/ui-state`) -----------------------------------------------------------
 
 /** The keys the server's schema names. It is a passthrough schema, so unknown keys round-trip
@@ -508,6 +547,10 @@ export interface UiState {
   lastAutonomous?: boolean
   /** Whether new runs should ask agents to append follow-up work. Absent → on. */
   lastGenerateFollowups?: boolean
+  /** Skill selection frequency (#408): name → times chosen, across BOTH composers (`/new` and
+   *  the GitHub tab's follow-up picker). Feeds `orderSkillsByUsage` (lib/skills.ts) — the
+   *  most-selected skills float to the top of their project/global locality group. */
+  skillUsage?: Record<string, number>
   runsView?: 'list' | 'table'
   /** The GitHub tab's last-selected sub-tab (#417) — issues or PRs. Absent → issues. */
   githubView?: 'issues' | 'prs'
@@ -555,6 +598,13 @@ export interface CreateRunInput {
   /** false → keep the handoff journal but do not expose or request a follow-up todos file.
    *  Omit for the default (enabled). */
   generateFollowups?: boolean
+  /** The inbox entry this task came from (#374), when the composer was prefilled from one
+   *  (`/new?…&todo=`). The server records the new run on that entry's `startedTaskId` so it
+   *  leaves the inbox. Best-effort: an unknown or already-started id never fails the run.
+   *  For ×2/×3 the FIRST variant is recorded — the thread the composer navigates to.
+   *  Orthogonal to `generateFollowups` (#444): that governs whether THIS task may append new
+   *  follow-ups, not whether the entry it was launched from gets marked started. */
+  todoId?: string
 }
 
 export interface MessageInput {

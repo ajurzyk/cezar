@@ -14,7 +14,7 @@ export interface TaskRefs {
   ambiguousNumber?: number;
 }
 
-const MAX_REF = 10_000_000; // sanity bound — GitHub numbers are far below this
+export const MAX_REF = 10_000_000; // sanity bound — GitHub numbers are far below this
 
 function num(raw: string | undefined): number | undefined {
   if (!raw) return undefined;

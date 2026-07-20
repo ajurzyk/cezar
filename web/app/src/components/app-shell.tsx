@@ -90,6 +90,17 @@ export function AppShell({
   const activeTo = activeNavPath(pathname)
   const current = activeNavItem(pathname)
   const [menuOpen, setMenuOpen] = React.useState(false)
+  const mainRef = React.useRef<HTMLElement>(null)
+
+  // The scroller PERSISTS across routes (it is the shell's, not the view's), so without this
+  // a deep scroll on one page carries into the next — most visibly on mobile, where Tasks or
+  // GitHub opened mid-list. Layout effect: the reset lands before the new view paints. Routes
+  // that own their arrival position (the task thread's cached-restore / stick-to-bottom) set
+  // it later, in their own effects once their content ref lands, so they still win.
+  React.useLayoutEffect(() => {
+    const main = mainRef.current
+    if (main) main.scrollTop = 0
+  }, [pathname])
 
   // Close on route change. Without this the drawer survives the navigation it triggered and sits
   // on top of the view the user just asked for — and back/forward and the ⌘K palette (Step 4.3)
@@ -143,7 +154,11 @@ export function AppShell({
             </div>
           ) : null}
 
-          <main data-slot="main" className="row-start-3 min-h-0 overflow-y-auto overscroll-contain">
+          <main
+            ref={mainRef}
+            data-slot="main"
+            className="row-start-3 min-h-0 overflow-y-auto overscroll-contain"
+          >
             {children}
           </main>
 

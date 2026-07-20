@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { existsSync, realpathSync, type Dirent } from 'node:fs';
 import { readdir, rm } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
+import { isSafeGitRef } from './git-refs.js';
 
 /**
  * Git worktree per task (spec 006). Each run gets its own branch
@@ -46,15 +47,30 @@ export function branchFor(runId: string): string {
 
 /**
  * Resolve the configured base branch to something `git worktree add` can
- * fork from: the branch itself, else its remote-tracking ref (base exists
- * only on origin), else null — the caller falls back to the current branch
- * with a note. Never throws.
+ * fork from: the local branch, its remote-tracking ref, or null — the caller
+ * falls back to the current branch with a note. Never throws.
+ *
+ * When BOTH the local branch and `origin/<base>` exist, prefer whichever is up
+ * to date. A stale LOCAL base (behind origin, because nothing fetched it into
+ * this worktree's repo) is the classic inflated-diff trap: the merge-base every
+ * diff is measured from collapses onto the stale tip, so all of the history
+ * merged into origin since then counts as the task's own changes — the phantom
+ * 142k-line diff. `origin/<base>` is the source of truth for a review base, so
+ * only keep the local ref when it is equal to or ahead of origin (unpushed base
+ * commits); otherwise use origin.
  */
 export async function resolveBaseRef(repoRoot: string, base: string): Promise<string | null> {
-  for (const ref of [base, `origin/${base}`]) {
-    const res = await git(repoRoot, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
-    if (res.ok) return ref;
+  if (!isSafeGitRef(base)) return null;
+  const verify = (ref: string) =>
+    git(repoRoot, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]).then((r) => r.ok);
+  const [hasLocal, hasRemote] = await Promise.all([verify(base), verify(`origin/${base}`)]);
+  if (hasLocal && hasRemote) {
+    // `--is-ancestor origin/<base> <base>` succeeds iff local is equal-or-ahead.
+    const localCurrent = await git(repoRoot, ['merge-base', '--is-ancestor', `origin/${base}`, base]);
+    return localCurrent.ok ? base : `origin/${base}`;
   }
+  if (hasLocal) return base;
+  if (hasRemote) return `origin/${base}`;
   return null;
 }
 
@@ -124,6 +140,9 @@ export async function createWorktree(
     if (!head.ok) throw new Error(`git rev-parse HEAD failed: ${head.stderr.trim()}`);
     base = head.stdout.trim();
   }
+  // Dash-guard (#431): `base` is spliced in as a positional git operand; an
+  // option-like value would be argument injection.
+  if (!isSafeGitRef(base)) throw new Error(`refusing option-like base ref: ${base}`);
   const branch = branchFor(runId);
   const absolutePath = join(canonicalPath(repoRoot), WORKTREES_DIR, runId);
   const branchRef = `refs/heads/${branch}`;
@@ -269,6 +288,7 @@ export async function worktreeDiff(
   baseBranch: string,
   cap = DIFF_CAP,
 ): Promise<string> {
+  if (!isSafeGitRef(baseBranch)) return '(diff failed: refusing option-like base ref)';
   await git(worktreePath, ['add', '-N', '.']); // intent-to-add: untracked files show up
   const mergeBase = await git(worktreePath, ['merge-base', baseBranch, 'HEAD']);
   const base = mergeBase.ok && mergeBase.stdout.trim() ? mergeBase.stdout.trim() : baseBranch;
@@ -286,6 +306,7 @@ export async function worktreeDiffStat(
   worktreePath: string,
   baseBranch: string,
 ): Promise<string> {
+  if (!isSafeGitRef(baseBranch)) return '';
   await git(worktreePath, ['add', '-N', '.']); // intent-to-add: untracked files show up
   const mergeBase = await git(worktreePath, ['merge-base', baseBranch, 'HEAD']);
   const base = mergeBase.ok && mergeBase.stdout.trim() ? mergeBase.stdout.trim() : baseBranch;
@@ -328,6 +349,7 @@ export async function worktreeShortstat(
   worktreePath: string,
   baseBranch: string,
 ): Promise<DiffStat | null> {
+  if (!isSafeGitRef(baseBranch)) return null;
   await git(worktreePath, ['add', '-N', '.']); // intent-to-add: untracked files show up
   const mergeBase = await git(worktreePath, ['merge-base', baseBranch, 'HEAD']);
   const base = mergeBase.ok && mergeBase.stdout.trim() ? mergeBase.stdout.trim() : baseBranch;

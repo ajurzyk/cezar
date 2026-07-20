@@ -2,7 +2,16 @@ import { describe, expect, it } from 'vitest'
 
 import type { RunRecord, RunStatus, StepState } from '@/api/types'
 
-import { finishTitle, isRunActive, lastSessionId, queuePosition, resumeCommand, resumeHint, runActionFlags } from './run-actions'
+import {
+  cliTargetResumes,
+  finishTitle,
+  isRunActive,
+  lastSessionId,
+  queuePosition,
+  resumeCommand,
+  resumeHint,
+  runActionFlags,
+} from './run-actions'
 
 const step = (extra: Partial<StepState> = {}): StepState => ({
   id: 'task',
@@ -103,6 +112,33 @@ describe('resumeCommand — per backend, mirroring the server', () => {
   ] as Array<[RunRecord['runner'], string]>)('%s → %s', (runner, expected) => {
     expect(resumeCommand(runner, 's1')).toBe(expected)
   })
+
+  // #431: the hint is a one-click copy for pasting into a shell, so the id gets the server's
+  // validation rather than being trusted — the server refuses these ids too (server.ts).
+  it('refuses a hostile-shaped id instead of building a pasteable command', () => {
+    expect(resumeCommand('claude', '$(touch /tmp/pwn); rm -rf ~ #')).toBeUndefined()
+    expect(resumeCommand('claude', "a'b")).toBeUndefined()
+    expect(resumeCommand('codex', 'a && calc.exe')).toBeUndefined()
+    expect(resumeCommand('opencode', 'a`id`')).toBeUndefined()
+    expect(resumeCommand('claude', 'a b')).toBeUndefined()
+    expect(resumeCommand('claude', '')).toBeUndefined()
+  })
+
+  it('refuses an option-like id — `--resume -x` would be read as a flag', () => {
+    expect(resumeCommand('claude', '-x')).toBeUndefined()
+    expect(resumeCommand('claude', '--help')).toBeUndefined()
+  })
+
+  it('accepts the shapes the backends actually mint', () => {
+    for (const id of ['9f8e7d6c-1234-4abc-9def-0123456789ab', 'ses_01JABCDEF', 'session.2026-07-17']) {
+      expect(resumeCommand('claude', id)).toBe(`claude --resume ${id}`)
+    }
+  })
+
+  it('bounds the id length, like the server', () => {
+    expect(resumeCommand('claude', 'a'.repeat(200))).toBe(`claude --resume ${'a'.repeat(200)}`)
+    expect(resumeCommand('claude', 'a'.repeat(201))).toBeUndefined()
+  })
 })
 
 describe('resumeHint', () => {
@@ -120,6 +156,59 @@ describe('resumeHint', () => {
     expect(resumeHint(run('waiting'))).toBeUndefined()
     expect(resumeHint(run('done', { steps: [step()] }))).toBeUndefined()
   })
+
+  // #431: no copyable line at all beats one that runs an injected command on paste.
+  it('is absent for a session id the server would refuse, worktree or not', () => {
+    const hostile = { steps: [step({ sessionId: 'x; rm -rf ~ #' })] }
+    expect(resumeHint(run('done', hostile))).toBeUndefined()
+    expect(resumeHint(run('failed', { ...hostile, worktreePath: '/tmp/wt' }))).toBeUndefined()
+  })
+})
+
+describe('cliTargetResumes — Open in… menu labeling (#402)', () => {
+  it.each([
+    ['claude', 'cli:claude'],
+    ['codex', 'cli:codex'],
+    ['opencode', 'cli:opencode'],
+  ] as Array<[RunRecord['runner'], string]>)('%s CLI resumes a %s run with a session', (runner, target) => {
+    expect(cliTargetResumes(run('done', { runner }), target)).toBe(true)
+  })
+
+  it('a legacy run with no runner recorded resumes as Claude (pre-runner-choice default)', () => {
+    expect(cliTargetResumes(run('done', { runner: undefined }), 'cli:claude')).toBe(true)
+  })
+
+  it('cross-runner: a CLI that is not the run\'s own never claims to resume', () => {
+    expect(cliTargetResumes(run('done', { runner: 'claude' }), 'cli:codex')).toBe(false)
+    expect(cliTargetResumes(run('done', { runner: 'opencode' }), 'cli:claude')).toBe(false)
+  })
+
+  it('no session yet: even the matching CLI does not claim to resume', () => {
+    expect(cliTargetResumes(run('done', { runner: 'codex', steps: [step()] }), 'cli:codex')).toBe(false)
+  })
+
+  it('non-CLI targets (editors, Finder, terminal) never resume', () => {
+    expect(cliTargetResumes(run('done', { runner: 'claude' }), 'vscode')).toBe(false)
+    expect(cliTargetResumes(run('done', { runner: 'claude' }), 'finder')).toBe(false)
+    expect(cliTargetResumes(run('done', { runner: 'claude' }), 'terminal')).toBe(false)
+  })
+
+  // The engine seeds `sessionId` the moment an agent step starts, so an ACTIVE run carries both
+  // a runner and a session — the match check alone would offer to resume the live transcript and
+  // attach a second CLI to it.
+  it.each(['running', 'queued', 'waiting'] as RunStatus[])(
+    'a %s run never resumes — the engine still owns the session',
+    (status) => {
+      expect(cliTargetResumes(run(status, { runner: 'claude' }), 'cli:claude')).toBe(false)
+    },
+  )
+
+  it.each(['done', 'failed', 'cancelled', 'review'] as RunStatus[])(
+    'a %s run resumes again once the engine has let go',
+    (status) => {
+      expect(cliTargetResumes(run(status, { runner: 'claude' }), 'cli:claude')).toBe(true)
+    },
+  )
 })
 
 describe('finishTitle', () => {

@@ -127,6 +127,13 @@ Asking the main agent to emit a `CEZ_TITLE:` line contaminates every skill's pro
 unreliable across backends, arrives a full turn late — and no surveyed tool does it. Revisit
 only if cezar adopts ACP `session_info_update` natively.
 
+> **Superseded in part (owner decision 2026-07-18):** spec
+> `2026-07-18-task-ref-markers.md` introduces in-band `CEZ:PR` / `CEZ:ISSUE` /
+> `CEZ:TITLE` markers after conversation-borne references kept defeating both
+> the janitor and this namer. The namer stays the default title mechanism; a
+> marker title takes precedence and silences the live refresh (`titleOrigin:
+> 'marker'`), and marker-declared numbers block the namer's `pr`/`issue`.
+
 ## Phasing
 
 1. Land #442 (rebase first — 2 test hunks).

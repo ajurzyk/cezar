@@ -83,6 +83,32 @@ async function respond(userText, imageCount) {
   // `mock:monitoring` → the reply ends with CEZ:MONITORING, the "still working
   // on downstream work" marker (#490), so the monitoring-status path is testable dry.
   const monitoringMarker = userText.includes('mock:monitoring') ? '\n\nCEZ:MONITORING' : '';
+  // `mock:ask` → the reply ends with a valid CEZ:ASK marker (#473), so the
+  // AskUser card path (park `waiting` + emit `ask.requested`) is testable dry.
+  // `mock:ask-bad` → a MALFORMED marker (invalid JSON), to prove graceful
+  // degradation: the run still parks `waiting`, no ask card, prose preserved.
+  const askMarker = userText.includes('mock:ask-bad')
+    ? '\n\nCEZ:ASK {not valid json'
+    : userText.includes('mock:ask')
+      ? '\n\nCEZ:ASK ' +
+        JSON.stringify({
+          questions: [
+            {
+              header: 'Library',
+              question: 'Which date library should I standardize on?',
+              options: [
+                { label: 'date-fns', description: 'Tree-shakeable, functional' },
+                { label: 'Luxon', description: 'Immutable, tz-aware' },
+              ],
+            },
+          ],
+        })
+      : '';
+  // `mock:refs` → the reply carries the in-band task-reference markers
+  // (spec 2026-07-18-task-ref-markers), so the declaration path is testable dry.
+  const refsMarkers = userText.includes('mock:refs')
+    ? '\nCEZ:PR=4242\nCEZ:ISSUE=17\nCEZ:TITLE=implementing marker refs'
+    : '';
 
   // `mock:slow` → hold the turn for ~25 s so queue states are observable.
   if (userText.includes('mock:slow')) await sleep(25_000);
@@ -156,6 +182,7 @@ async function respond(userText, imageCount) {
   // its prompt — which is exactly the path worth exercising in dry runs.
   if (userText.includes('[cez-planner]')) {
     const plan = JSON.stringify({
+      title: 'implement-verify-review',
       steps: [
         { name: 'Implement', prompt: '{{task}}' },
         { name: 'Verify', command: 'npm test' },
@@ -253,7 +280,7 @@ async function respond(userText, imageCount) {
       type: 'assistant',
       message: {
         role: 'assistant',
-        content: [{ type: 'text', text: `Done with the first pass — opened a draft PR: https://github.com/open-mercato/demo/pull/123. Anything to adjust? (dry-run mock)${doneMarker}${monitoringMarker}` }],
+        content: [{ type: 'text', text: `Done with the first pass — opened a draft PR: https://github.com/open-mercato/demo/pull/123. Anything to adjust? (dry-run mock)${refsMarkers}${doneMarker}${monitoringMarker}${askMarker}` }],
         usage: { input_tokens: 300, output_tokens: 90 },
       },
     });
@@ -273,7 +300,7 @@ async function respond(userText, imageCount) {
     type: 'assistant',
     message: {
       role: 'assistant',
-      content: [{ type: 'text', text: `Follow-up #${turn - 1} received: "${userText.slice(0, 100)}".${imgNote} Applied (dry run).${doneMarker}${monitoringMarker}` }],
+      content: [{ type: 'text', text: `Follow-up #${turn - 1} received: "${userText.slice(0, 100)}".${imgNote} Applied (dry run).${refsMarkers}${doneMarker}${monitoringMarker}${askMarker}` }],
       usage: { input_tokens: 200, output_tokens: 60 },
     },
   });
@@ -301,6 +328,18 @@ rl.on('line', (line) => {
     imageCount = blocks.filter((b) => b.type === 'image').length;
   } catch {
     // keep placeholders
+  }
+  // Testability hook: CEZ_MOCK_STDIN_FILE=<path> appends the FULL inbound
+  // text + image count (one JSON object per line) — the scripted replies
+  // below only echo a truncated slice, so tests asserting exact wiring (e.g.
+  // #357's pasted-attachment path note in the prompt) need the untruncated
+  // text this hook captures.
+  if (process.env.CEZ_MOCK_STDIN_FILE) {
+    try {
+      appendFileSync(process.env.CEZ_MOCK_STDIN_FILE, `${JSON.stringify({ userText, imageCount })}\n`);
+    } catch {
+      // best effort — never break the mock over the hook
+    }
   }
   queue = queue.then(() => respond(userText, imageCount));
 });

@@ -111,6 +111,57 @@ The installer is also **idempotent** if you need to change the setup itself:
 
 ---
 
+## Hosting several cockpits on one box (multiple domains)
+
+One VPS can run **several independent cezar cockpits**, one per domain. Each
+instance gets its **own** loopback port, nginx site, htpasswd, systemd service,
+and state file — they share only nginx and certbot, which route by `Host`
+header. Pass `--domain` to select or create an instance:
+
+```bash
+# first cockpit — the default instance (loopback :4321, ~/.cezar/server.json)
+npx cezar-cli server-install --platform ubuntu-vps
+
+# a SECOND, fully independent cockpit for another domain
+npx cezar-cli server-install --platform ubuntu-vps --domain shop.example.com
+```
+
+Because instances are **keyed by domain**, running `server-install` again with a
+**new** `--domain` never resumes or overwrites an existing install — it stands
+up a fresh instance. Run it again with the **same** `--domain` to resume or
+reconfigure that instance.
+
+What differs per instance:
+
+| Instance | State file | nginx site | htpasswd | systemd unit | Loopback port |
+|----------|-----------|-----------|----------|--------------|---------------|
+| default (no `--domain`) | `~/.cezar/server.json` | `…/sites-available/cezar` | `/etc/cezar/htpasswd` | `cezar.service` | `4321` |
+| `--domain shop.example.com` | `~/.cezar/server-instances/shop-example-com.json` | `…/cezar-shop-example-com` | `/etc/cezar/htpasswd-shop-example-com` | `cezar-shop-example-com.service` | auto (next free, e.g. `4322`) |
+
+- **Port** — a new instance auto-picks the next free loopback port (`4321`,
+  `4322`, …). Override with `--port <n>`. Each cockpit still serves loopback-only;
+  nginx is the single public surface for all of them.
+- **Login** — each instance has its own htpasswd, so every cockpit can have a
+  different username/password.
+- **Deploy / uninstall** — pass the same `--domain` to target that instance:
+
+  ```bash
+  npx cezar-cli server-deploy    --platform ubuntu-vps --domain shop.example.com
+  npx cezar-cli server-uninstall --platform ubuntu-vps --domain shop.example.com
+  ```
+
+  A named-instance uninstall removes only that instance's owned artifacts and
+  deletes its state file; the other cockpits and the shared nginx/certbot are
+  left running. (Uninstalling the **default** instance does not remove a shared
+  nginx that a named instance still needs — it lists it for manual removal.)
+
+> Interactive installs help here too: if a cockpit already exists and you run
+> `server-install` with no `--domain`, the wizard asks whether you want to set up
+> a **second instance for a new domain** or manage the existing one — so the
+> common "it just asks me to reinstall" case now has an obvious path forward.
+
+---
+
 ## Uninstall
 
 ```bash

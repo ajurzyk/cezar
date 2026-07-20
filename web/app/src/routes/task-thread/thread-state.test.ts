@@ -243,6 +243,22 @@ describe('reduceThread — live-stream mechanics', () => {
     expect((turns[0]!.items[0] as UiMessageItem).text).toBe('Spawned the reviewer, waiting on it.')
   })
 
+  it('strips CEZ:PR/CEZ:ISSUE/CEZ:TITLE marker lines but keeps prose mentions (spec 2026-07-18-task-ref-markers)', () => {
+    const events: RunEvent[] = [
+      line(1, 'turn.started', { turnId: 'turn_1' }),
+      line(2, 'item.completed', {
+        item: {
+          kind: 'message',
+          id: 'm1',
+          role: 'assistant',
+          text: 'Opened the PR.\nCEZ:PR=442\nCEZ:ISSUE=433\nCEZ:TITLE=implementing marker refs\nI will keep CEZ:PR=442 updated.',
+        },
+      }),
+    ]
+    const { turns } = reduceThread(events)
+    expect((turns[0]!.items[0] as UiMessageItem).text).toBe('Opened the PR.\nI will keep CEZ:PR=442 updated.')
+  })
+
   it('a malformed line costs itself, not the fold', () => {
     const events: RunEvent[] = [
       line(1, 'item.delta', { itemId: 'ghost', field: 'text', delta: 'x' }), // delta before any item
@@ -518,5 +534,51 @@ describe('the v1 vocabulary sweep (cezar-code-map §3.2) — every persisted typ
 
   it('unknown future types → nothing, never a guessed rendering (divergence from the legacy raw-JSON note, on purpose)', () => {
     expect(allItems([line(1, 'telemetry.fancy', { whatever: true })])).toEqual([])
+  })
+})
+
+describe('reduceThread — AskUser cards (#473)', () => {
+  const allItems = (events: RunEvent[]): ThreadEntry[] =>
+    reduceThread(events).turns.flatMap((turn) => turn.items)
+
+  const ASK = {
+    requestId: 'ask_1',
+    questions: [
+      { header: 'Library', question: 'Which?', options: [{ label: 'date-fns' }, { label: 'Luxon' }] },
+    ],
+  }
+
+  it('ask.requested → an unresolved ask entry in the current turn', () => {
+    const ask = allItems([
+      line(1, 'text', { text: 'Here are the options.' }),
+      line(2, 'ask.requested', ASK),
+    ]).find((i) => i.kind === 'ask')
+    expect(ask).toMatchObject({ kind: 'ask', id: 'ask_1', resolved: false })
+  })
+
+  it('the next user-message resolves the ask and records the answer', () => {
+    const ask = allItems([
+      line(1, 'text', { text: 'options' }),
+      line(2, 'ask.requested', ASK),
+      line(3, 'user-message', { text: 'Library: date-fns', imageCount: 0 }),
+    ]).find((i) => i.kind === 'ask')
+    expect(ask).toMatchObject({ resolved: true, answer: 'Library: date-fns' })
+  })
+
+  it('drops an ask.requested with no valid questions', () => {
+    expect(
+      allItems([line(1, 'ask.requested', { requestId: 'x', questions: [] })]).some(
+        (i) => i.kind === 'ask',
+      ),
+    ).toBe(false)
+  })
+
+  it('strips a CEZ:ASK marker from a v2 assistant message on display', () => {
+    const msg = allItems([
+      line(1, 'item.completed', {
+        item: { kind: 'message', id: 'm1', role: 'assistant', text: 'Pick one.\n\nCEZ:ASK {"questions":[]}' },
+      }),
+    ]).find((i) => i.kind === 'message') as { text: string } | undefined
+    expect(msg?.text).toBe('Pick one.')
   })
 })

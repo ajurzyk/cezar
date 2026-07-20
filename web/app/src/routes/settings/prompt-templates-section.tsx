@@ -25,7 +25,7 @@ import {
   normalizePromptTemplates,
   type PromptTemplate,
 } from '@/lib/prompt-templates'
-import { isProjectSkill, multiWordFilter, skillKeywords } from '@/lib/skills'
+import { isProjectSkill, multiWordFilter, partitionSkillsForDisplay, skillKeywords } from '@/lib/skills'
 import { cn } from '@/lib/utils'
 
 /**
@@ -69,6 +69,8 @@ export function PromptTemplatesSection() {
 function PromptTemplatesForm({ initial }: { initial: PromptTemplate[] }) {
   const queryClient = useQueryClient()
   const skills = useSkills()
+  // Already cached by the section gate above; read again here for the picker's #519 tiers.
+  const uiState = useUiState()
   const [templates, setTemplates] = useState<PromptTemplate[]>(initial)
   const [newLabel, setNewLabel] = useState('')
   const [newText, setNewText] = useState('')
@@ -172,6 +174,7 @@ function PromptTemplatesForm({ initial }: { initial: PromptTemplate[] }) {
                   <TemplateSkillsPicker
                     label={template.label}
                     skills={skills.data ?? []}
+                    skillUsage={uiState.data?.skillUsage}
                     selected={template.skills ?? []}
                     onToggle={(name) => toggleTemplateSkill(template.id, name)}
                   />
@@ -276,18 +279,20 @@ function PromptTemplatesForm({ initial }: { initial: PromptTemplate[] }) {
 function TemplateSkillsPicker({
   label,
   skills,
+  skillUsage,
   selected,
   onToggle,
 }: {
   label: string
   skills: readonly Skill[]
+  skillUsage: Readonly<Record<string, number>> | undefined
   selected: readonly string[]
   onToggle: (name: string) => void
 }) {
   const [open, setOpen] = useState(false)
   const listRef = useRef<HTMLDivElement>(null)
-  const project = skills.filter(isProjectSkill)
-  const global = skills.filter((skill) => !isProjectSkill(skill))
+  // The #519 display tiers — the same most-used → project → global order every picker renders.
+  const { mostUsed, project, global } = partitionSkillsForDisplay(skills, skillUsage)
 
   const skillItem = (skill: Skill, emphasized: boolean) => {
     const isSelected = selected.includes(skill.name)
@@ -339,8 +344,17 @@ function TemplateSkillsPicker({
       <PopoverContent align="start" sideOffset={8} className="w-[336px] max-w-[calc(100vw-2rem)] p-0">
         <Command filter={multiWordFilter}>
           <CommandInput placeholder="search skills…" onInput={() => listRef.current?.scrollTo(0, 0)} />
-          <CommandList ref={listRef} data-slot="prompt-template-skill-menu" className="max-h-64">
+          <CommandList
+            ref={listRef}
+            data-slot="prompt-template-skill-menu"
+            className="max-h-[min(16rem,calc(var(--radix-popover-content-available-height)-3rem))]"
+          >
             <CommandEmpty>Nothing matches.</CommandEmpty>
+            {mostUsed.length > 0 ? (
+              <CommandGroup heading="Most used">
+                {mostUsed.map((skill) => skillItem(skill, isProjectSkill(skill)))}
+              </CommandGroup>
+            ) : null}
             {project.length > 0 ? (
               <CommandGroup heading="Project skills">
                 {project.map((skill) => skillItem(skill, true))}

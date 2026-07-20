@@ -12,7 +12,7 @@ import { StatusDot } from '@/components/status-dot'
 import { Button } from '@/components/ui/button'
 import { useKeyboardInsetVar } from '@/lib/keyboard-inset'
 import { taskPrUrl } from '@/lib/tasks-table'
-import { cn } from '@/lib/utils'
+import { cn, isHttpUrl } from '@/lib/utils'
 
 import {
   AssistantMessage,
@@ -29,6 +29,7 @@ import { PlanDock, planCounts } from './plan-dock'
 import { AcceptCelebration, ReviewPanel } from './review-panel'
 import { queuePosition } from './run-actions'
 import { RunHeader } from './run-header'
+import { AskCard } from './ask-card'
 import { groupThreadItems, type ThreadBlock } from './thread-groups'
 import { ThreadLoading } from './thread-loading'
 import { ThreadCardCache } from './thread-open-cards'
@@ -113,7 +114,10 @@ export function buildThreadRows(run: ApiRun, thread: ThreadState): ThreadRow[] {
       })
     }
     for (const block of groupThreadItems(turn.items)) {
-      rows.push({ key: `${turn.id}:${block.id}`, node: <ThreadBlockView block={block} scope={turn.id} /> })
+      rows.push({
+        key: `${turn.id}:${block.id}`,
+        node: <ThreadBlockView block={block} scope={turn.id} runId={run.id} />,
+      })
     }
   }
   return rows
@@ -173,7 +177,8 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
             )}
           >
             {footer.label}
-            {taskPrUrl(run) ? (
+            {/* href protocol guard (#431): link only for http(s) URLs. */}
+            {isHttpUrl(taskPrUrl(run)) ? (
               // The run shipped as a PR (review-gate Draft PR, or agent-opened), or worked on
               // one (#407) — the link stays reachable after the panel is gone.
               <a
@@ -267,10 +272,10 @@ function QueuedPlaceholder({ run }: { run: ApiRun }) {
 /** One grouped block → its surface. Grouping (context groups, streaks, sub-agent nesting) is
  *  `groupThreadItems`'s — this only maps block kinds to components. `scope` (the turn's render
  *  key) namespaces the open-card cache keys, because item ids repeat across sessions. */
-function ThreadBlockView({ block, scope }: { block: ThreadBlock; scope: string }) {
+function ThreadBlockView({ block, scope, runId }: { block: ThreadBlock; scope: string; runId: string }) {
   switch (block.kind) {
     case 'entry':
-      return <ThreadEntryView entry={block.entry} scope={scope} />
+      return <ThreadEntryView entry={block.entry} scope={scope} runId={runId} />
     case 'tool-card':
       return <ToolCard item={block.item} nested={block.children} cacheKey={`${scope}:${block.id}`} />
     case 'context-group':
@@ -279,7 +284,7 @@ function ThreadBlockView({ block, scope }: { block: ThreadBlock; scope: string }
       return (
         <ToolStreak count={block.count}>
           {block.blocks.map((inner) => (
-            <ThreadBlockView key={inner.id} block={inner} scope={scope} />
+            <ThreadBlockView key={inner.id} block={inner} scope={scope} runId={runId} />
           ))}
         </ToolStreak>
       )
@@ -287,7 +292,7 @@ function ThreadBlockView({ block, scope }: { block: ThreadBlock; scope: string }
 }
 
 /** One reducer entry → its block (non-tool entries; tools always arrive as tool-card blocks). */
-function ThreadEntryView({ entry, scope }: { entry: ThreadEntry; scope: string }) {
+function ThreadEntryView({ entry, scope, runId }: { entry: ThreadEntry; scope: string; runId: string }) {
   switch (entry.kind) {
     case 'message':
       // Agent-side user echoes (some backends emit them) read as user bubbles too.
@@ -304,5 +309,7 @@ function ThreadEntryView({ entry, scope }: { entry: ThreadEntry; scope: string }
       return <NoteLine note={entry} />
     case 'image':
       return <ImageItem image={entry} />
+    case 'ask':
+      return <AskCard ask={entry} runId={runId} />
   }
 }

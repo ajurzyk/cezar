@@ -38,6 +38,38 @@ export interface ForgeItem {
   checks?: 'passing' | 'failing' | 'pending' | null;
 }
 
+/** One comment (or PR review summary) in an issue/PR conversation thread (#499). Served by the
+ *  new `GET /api/github/comments/:kind/:number` endpoint; additive, no impact on `ForgeItem`. */
+export interface ForgeComment {
+  id: number;
+  /** Author login, `'?'` fallback when gh omits the user. */
+  author: string;
+  /** https://avatars.githubusercontent.com/…, when known. */
+  avatarUrl?: string;
+  /** ISO timestamp. */
+  createdAt: string;
+  /** Markdown body, sliced to the same 8 000-char cap as item bodies. */
+  body: string;
+  /** `review` = a submitted PR review summary; `comment` = a conversation comment. */
+  kind: 'comment' | 'review';
+  /** For reviews only — drives the state chip. */
+  reviewState?: 'approved' | 'changes_requested' | 'commented' | 'dismissed';
+  /** html_url deep link back to the comment/review on GitHub. */
+  url: string;
+}
+
+/** The `GET /api/github/comments/:kind/:number` payload — mirrors the tab's quiet-degrade
+ *  contract (`available: false` + a hint, never a 5xx). */
+export interface ForgeCommentsData {
+  available: boolean;
+  /** Human-readable hint when unavailable. */
+  reason?: string;
+  /** Chronological, oldest first. */
+  comments: ForgeComment[];
+  /** True when the thread exceeded the fetch cap and was trimmed. */
+  truncated?: boolean;
+}
+
 export interface ForgeListOptions {
   /** Bypass the driver's short cache. */
   refresh?: boolean;

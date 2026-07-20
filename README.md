@@ -146,7 +146,7 @@ the [`codex` CLI](https://github.com/openai/codex), or
 ```bash
 cd your-repo
 npx cezar-cli              # start the cockpit for the current repo
-#   or: npx @pat-lewczuk/cezar
+#   or: npx @open-mercato/cezar
 ```
 
 The cockpit opens at `http://localhost:4321` (auto-picks the next free port if
@@ -161,9 +161,30 @@ Both the `cezar` and `cez` commands are installed, so once it's on your PATH you
 can run either. No API key is ever used — cezar shells out to whichever agent
 CLIs you are already logged into, `claude` by default.
 
+> **Contributing?** [Local development](#local-development) shows how to get a
+> global `cezar` command straight off your checkout (`npm run install-as-command`)
+> — no publish needed.
+
 > **Just kicking the tires?** Set `CEZ_DRY_RUN=1` to run against a bundled mock
 > instead of the real CLI — the whole cockpit works with no `claude` login, so
 > you can explore runs, diffs, variants and the review gate offline.
+
+### Preview builds
+
+Every green CI run publishes an installable npm snapshot
+([how it works](docs/publishing.md)), so you can try unreleased code without
+cloning anything:
+
+```bash
+npx cezar-cli@develop      # current develop head
+npx cezar-cli@main         # current main head (ahead of the latest stable release)
+```
+
+Every pull request gets its own preview too — the CI bot posts a sticky comment
+on the PR with the exact pinned version to copy-paste
+(`npx cezar-cli@<version>-pr<N>.<run>`). Previews are prerelease versions under
+their own dist-tags; a plain `npx cezar-cli` always resolves to the latest
+stable release.
 
 ---
 
@@ -346,6 +367,9 @@ Useful environment variables:
 | `CEZ_CODEX_BIN=/path/to/codex` | Override which `codex` binary is used. |
 | `CEZ_OPENCODE_BIN=/path/to/opencode` | Override which `opencode` binary is used. |
 | `GITHUB_TOKEN` | Fallback for GitHub reads/PRs when `gh` isn't authenticated. |
+| `CEZ_ENV_PASSTHROUGH=A,B` | Forward these extra host env vars to spawned agents. By default agents get a least-privilege env (safe shell/toolchain vars + the backend's own auth + `GITHUB_TOKEN` + `CEZ_*`), not your full environment — use this to add a var an agent needs. |
+| `CEZ_AGENT_ENV_FULL=1` | Escape hatch: give spawned agents the full host environment (pre-hardening behavior). Off by default; only set it if you understand that this hands every host secret to the agent process. |
+| `CEZ_REDACT_SECRETS=0` | Disable scrubbing of credential values/token shapes from the on-disk state (the NDJSON transcript and the free-text fields of `runs.json`). On by default; leave it on. Best-effort defense-in-depth, not a guarantee: it catches known token shapes and the values of your own secret-named env vars, so a credential in neither category can still get through. |
 | `CEZ_TITLE_UPDATES=0` | Turn off the live task-title refresh (namer re-runs on each turn end). The Settings → Agents toggle overrides this default. |
 | `CEZ_AUTONAME=0` | Disable ALL LLM task naming (creation + live) — titles stay heuristic (`437: /om-auto-review-pr`). Under `CEZ_DRY_RUN=1` naming is already off unless forced with `CEZ_AUTONAME=1`. |
 | `CEZ_REVIEW_GATE=1` | Turn ON the optional diff-first review gate (#489): a successful, non-autonomous run with changes parks at `review` (Accept / Send back / Draft PR) instead of finishing. Off by default — changed runs settle to `done` with the diff left in the worktree. Only `1` enables. The Settings → Agents toggle overrides this; autonomous runs always skip it. |
@@ -415,7 +439,14 @@ and verified, and it ends with a real authenticated end-to-end check.
 npx cezar-cli server-install   --platform ubuntu-vps   # stand it up
 npx cezar-cli server-deploy    --platform ubuntu-vps   # roll out a new version (reload the service)
 npx cezar-cli server-uninstall --platform ubuntu-vps   # reverse it
+
+# host a SECOND cockpit for another domain on the same box (ubuntu-vps):
+npx cezar-cli server-install   --platform ubuntu-vps --domain shop.example.com
 ```
+
+On `ubuntu-vps` a single host can run several independent cockpits — add
+`--domain <host>` and each gets its own port, nginx site, login and service; a
+new domain never resumes or clobbers the first install.
 
 | Provider | `--platform` | Public front | Guide |
 |----------|--------------|--------------|-------|
@@ -436,6 +467,12 @@ never blocks startup):
 ```jsonc
 {
   "skillsRepos": [{ "repo": "open-mercato/skills", "ref": "main" }], // team skills; [] disables
+  // Team-skill repos are code-trusted: a skill body becomes an agent system prompt.
+  // Only owner/name, https/ssh URLs, or local paths (`/abs`, `./rel`, `~/dir`,
+  // `C:\dir`) are accepted — no ext::/fd:: transport helpers. Write a relative
+  // path as `./name`, not a bare `name`. Pin `ref` to a full commit SHA to freeze
+  // the source against a moving branch head — cezar verifies it resolves to
+  // exactly that commit, and reports it as `team.commit`.
   "maxParallel": 2,          // how many tasks may run at once (non-git dirs always run 1)
   "worktreeRetention": 10,   // keep the last N finished worktrees on disk; 0 = unlimited (branch always kept)
   "defaultRunner": "claude", // agent backend: "claude" (default) · "codex" · "opencode"
@@ -449,10 +486,74 @@ git-ignored automatically; your workflows and skills stay committable.
 
 ---
 
-## Development
+## Local development
+
+End-to-end, from a fresh clone to a global `cezar` command you can run in **any**
+repo on your machine — no npm publish required.
+
+**1. Prerequisites** — Node 20+ and `git` (plus at least one logged-in agent CLI,
+as in [Quick start](#quick-start)).
+
+**2. Clone & install**
 
 ```bash
+git clone https://github.com/open-mercato/cezar.git
+cd cezar
 npm install
+```
+
+**3. Build** — compiles the server (`tsc → dist/`) and the cockpit
+(`vite build → web/dist/`), then runs the pack gate:
+
+```bash
+npm run build
+```
+
+**4. Install as a global command** — build + put `cezar` / `cez` / `cezar-cli` on
+your PATH pointing at *this checkout*:
+
+```bash
+npm run install-as-command            # live link (default) — see the change loop below
+#   or: npm run install-as-command:global   # self-contained snapshot copy
+```
+
+Now `cd` into any other repo and run it:
+
+```bash
+cd ~/some-other-project
+cezar            # cockpit for that repo, straight off your checkout
+cezar-cli --help # same binary; the name matches `npx cezar-cli`
+```
+
+**5. The change loop**
+
+- **Link mode** (default): edit source → `npm run build` → the global command
+  reflects it immediately. No relink needed. (It is a live symlink into this
+  checkout — don't move or delete the checkout while it's linked.)
+- **Snapshot mode** (`:global`): re-run `npm run install-as-command:global` to
+  refresh the installed copy. It survives moving/deleting the checkout.
+
+**6. Uninstall**
+
+```bash
+npm run uninstall-as-command    # removes cezar / cez / cezar-cli (either flavor)
+```
+
+**7. Troubleshooting**
+
+- **`cezar: command not found`** after install → your npm global bin dir isn't on
+  PATH. The script prints the exact dir; add it to your shell profile
+  (`export PATH="$(npm prefix -g)/bin:$PATH"`).
+- **`EACCES` / permission denied** → your global prefix is root-owned. Point npm
+  at a user-writable one and retry — **never** sudo:
+  `npm config set prefix ~/.npm-global`.
+- **Already installed the published `@open-mercato/cezar` globally?** The
+  link/snapshot install replaces it; `uninstall-as-command` removes ours, and
+  `npm i -g @open-mercato/cezar` brings the published one back.
+
+### In-checkout scripts
+
+```bash
 npm run dev          # server (API :4321) + Vite dev server, opens the cockpit in the browser
 npm run dev:server   # tsx src/index.ts — the API server alone
 npm run dev:web      # Vite dev server alone (proxies /api to :4321)

@@ -5,6 +5,7 @@ import type { WorkflowStepDef } from '@/api/types'
 
 import {
   WB_MAX_STEPS,
+  draftFromPlan,
   insertStep,
   moveStep,
   removeStep,
@@ -191,5 +192,46 @@ describe('stepCountLabel / workflowSlug', () => {
   it('slugs the export file name the way the server slugs the saved path', () => {
     expect(workflowSlug('My Great Flow!')).toBe('my-great-flow')
     expect(workflowSlug('  ---  ')).toBe('workflow')
+  })
+})
+
+describe('draftFromPlan (auto chain creator, #414)', () => {
+  it('adopts the planner’s proposed name and steps', () => {
+    const plan = {
+      name: 'fix-and-review',
+      steps: [
+        { id: 'implement', name: 'Implement', prompt: '{{task}}' },
+        { id: 'verify', name: 'Verify', command: 'npm test' },
+      ] satisfies WorkflowStepDef[],
+      rationale: 'do it',
+      fallback: false,
+    }
+    expect(draftFromPlan(plan, 'my-workflow')).toEqual({
+      name: 'fix-and-review',
+      steps: plan.steps,
+    })
+  })
+
+  it('keeps the current name when the plan proposed none (never blanks it)', () => {
+    const plan = { steps: [{ id: 'task', name: 'Do it', prompt: '{{task}}' }] }
+    expect(draftFromPlan(plan, 'my-workflow').name).toBe('my-workflow')
+    expect(draftFromPlan({ ...plan, name: '   ' }, 'my-workflow').name).toBe('my-workflow')
+  })
+
+  it('caps the chain at the server’s step limit', () => {
+    const steps = Array.from({ length: WB_MAX_STEPS + 3 }, (_, i) => ({
+      id: `s${i}`,
+      name: `Step ${i}`,
+      prompt: '{{task}}',
+    }))
+    expect(draftFromPlan({ steps }, 'x').steps).toHaveLength(WB_MAX_STEPS)
+  })
+
+  it('re-dedupes ids so a repaired plan can’t seed a duplicate-id canvas', () => {
+    const steps = [
+      { id: 'review', name: 'Review', prompt: '{{task}}' },
+      { id: 'review', name: 'Review again', prompt: '{{task}}' },
+    ]
+    expect(draftFromPlan({ steps }, 'x').steps.map((s) => s.id)).toEqual(['review', 'review-2'])
   })
 })

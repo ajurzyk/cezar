@@ -27,6 +27,12 @@ npx cezar-cli server-uninstall --platform <id>   # reverse it
 Same engine, different steps — each strategy is a small registry entry, so new
 platforms slot in without touching the engine.
 
+> **Several domains on one box?** `ubuntu-vps` can host multiple independent
+> cockpits — add `--domain <host>` to install/deploy/uninstall a separate
+> instance (its own port, nginx site, login and service). A new `--domain` never
+> resumes the first install. See
+> [Hosting several cockpits on one box](./ubuntu-vps.md#hosting-several-cockpits-on-one-box-multiple-domains).
+
 ## How it works (all providers)
 
 1. **Dependencies** — detect the agent CLIs (`claude`/`codex`/`opencode`),
@@ -46,6 +52,11 @@ platforms slot in without touching the engine.
 `npx cezar-cli server-deploy --platform <id>` is the standardized, per-strategy way to
 roll out a new cezar: it restarts the service and re-verifies. See each guide's
 **Updating / redeploying** section for the checkout-vs-npx details.
+
+To test an unreleased build on a server, pin a preview version
+(see [Preview builds](../publishing.md)) — for example roll a box to a PR's
+exact snapshot with `npx cezar-cli@<version> server-deploy --platform <id>`,
+or track a branch with `npx cezar-cli@develop server-deploy --platform <id>`.
 
 ---
 

@@ -69,7 +69,7 @@ import { queuePositions, runTitle } from '@/lib/task-groups'
 import { formatCost, workflowLabel } from '@/lib/tasks-table'
 
 import { Markdown } from './markdown'
-import { finishTitle, resumeHint, runActionFlags } from './run-actions'
+import { cliTargetResumes, finishTitle, resumeHint, runActionFlags } from './run-actions'
 import { StepRail } from './step-rail'
 import { useFinishRun } from './use-finish-run'
 
@@ -297,15 +297,22 @@ function OpenInMenu({
         ) : null}
         {canResume && worktreeTargets.length > 0 ? <DropdownMenuSeparator /> : null}
         {worktreeTargets.map((target) => {
+          // Agent-CLI targets (#402): the one matching this run's own runner resumes THIS run's
+          // session when one exists — label that explicitly so it reads as different from just
+          // opening the editor/file-manager entries above. Every other CLI (wrong backend, or no
+          // session yet) still opens, just starts clean — no silent cross-backend resume attempt.
+          const resumes = cliTargetResumes(run, target.id)
           const Icon = openInIcon(target)
           return (
             <DropdownMenuItem
               key={target.id}
               data-target={target.id}
+              title={resumes ? "Resume this run's session" : undefined}
               onSelect={() => open.mutate(target.id)}
             >
               <Icon aria-hidden="true" />
               {target.label}
+              {resumes ? ' (resume)' : ''}
             </DropdownMenuItem>
           )
         })}

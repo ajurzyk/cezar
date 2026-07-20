@@ -2,13 +2,19 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname } from 'node:path';
-import { cezarHomeDir, serverLockPath, serverStatePath } from '../paths.js';
+import { basename, dirname } from 'node:path';
+import {
+  DEFAULT_SERVER_INSTANCE,
+  serverInstancesDir,
+  serverLockPath,
+  serverStatePath,
+} from '../paths.js';
 import { freshServerState, serverStateSchema, type ServerState, type StepOutcome } from './types.js';
 
 /**
@@ -18,9 +24,9 @@ import { freshServerState, serverStateSchema, type ServerState, type StepOutcome
  * uninstall's "reverse exactly what was created" logic.
  */
 
-/** Load the host-level state, degrading to a fresh record on any error. */
-export function loadServerState(): ServerState {
-  const path = serverStatePath();
+/** Load a host-level instance record, degrading to a fresh record on any error. */
+export function loadServerState(instance: string = DEFAULT_SERVER_INSTANCE): ServerState {
+  const path = serverStatePath(instance);
   let raw: string;
   try {
     raw = readFileSync(path, 'utf8');
@@ -36,9 +42,48 @@ export function loadServerState(): ServerState {
   return freshServerState();
 }
 
-/** Atomically persist state as `0600`, creating `~/.cezar` (`0700`) if needed. */
-export function saveServerState(state: ServerState): void {
-  const path = serverStatePath();
+/**
+ * Every instance recorded on this host, newest schema first: the `default`
+ * record (`server.json`) plus each named record under `server-instances/`.
+ * Used to auto-pick a free loopback port for a new instance and to let
+ * uninstall/deploy resolve which instance to act on. Never throws — an
+ * unreadable dir or a corrupt file is simply skipped.
+ */
+export function listServerInstances(): Array<{ instance: string; state: ServerState }> {
+  const out: Array<{ instance: string; state: ServerState }> = [];
+  if (existsSync(serverStatePath(DEFAULT_SERVER_INSTANCE))) {
+    out.push({ instance: DEFAULT_SERVER_INSTANCE, state: loadServerState(DEFAULT_SERVER_INSTANCE) });
+  }
+  let entries: string[] = [];
+  try {
+    entries = readdirSync(serverInstancesDir());
+  } catch {
+    entries = [];
+  }
+  for (const file of entries) {
+    if (!file.endsWith('.json')) continue;
+    const instance = basename(file, '.json');
+    out.push({ instance, state: loadServerState(instance) });
+  }
+  return out;
+}
+
+/**
+ * The next free loopback port for a NEW instance, scanning from `startAt`
+ * (4321, the default cockpit port) upward past every port already recorded by
+ * another instance. Deterministic (recorded-state only, no network probe) so it
+ * stays unit-testable; the operator can always override it with `--port`.
+ */
+export function nextFreeInstancePort(startAt = 4321): number {
+  const used = new Set(listServerInstances().map((i) => i.state.primaryPort));
+  let port = startAt;
+  while (used.has(port)) port++;
+  return port;
+}
+
+/** Atomically persist state as `0600`, creating its dir (`0700`) if needed. */
+export function saveServerState(state: ServerState, instance: string = DEFAULT_SERVER_INSTANCE): void {
+  const path = serverStatePath(instance);
   const dir = dirname(path);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const tmp = `${path}.tmp`;
@@ -48,6 +93,22 @@ export function saveServerState(state: ServerState): void {
     chmodSync(path, 0o600); // best-effort — ignored on some filesystems
   } catch {
     // non-fatal
+  }
+}
+
+/**
+ * Delete a named instance's state file (used after a complete uninstall so it
+ * stops reserving its port and drops out of `listServerInstances`). The
+ * `default` record is left in place — that is the legacy single-host file, and
+ * its absence vs. an empty-but-present record has historically meant the same
+ * thing, so we don't change that behavior. Best-effort; never throws.
+ */
+export function deleteServerState(instance: string): void {
+  if (instance === DEFAULT_SERVER_INSTANCE) return;
+  try {
+    rmSync(serverStatePath(instance), { force: true });
+  } catch {
+    // non-fatal — an empty record left behind is harmless
   }
 }
 
@@ -71,9 +132,9 @@ export class LockHeldError extends Error {}
  * process already holds it; a stale lock (dead pid) is reclaimed. Returns a
  * release function.
  */
-export function acquireLock(): () => void {
-  const path = serverLockPath();
-  mkdirSync(cezarHomeDir(), { recursive: true, mode: 0o700 });
+export function acquireLock(instance: string = DEFAULT_SERVER_INSTANCE): () => void {
+  const path = serverLockPath(instance);
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
 
   // `wx` makes creation atomic — a plain exists-then-write check would let two
   // concurrent wizards both "acquire". One reclaim retry handles a stale lock;

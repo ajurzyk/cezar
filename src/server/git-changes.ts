@@ -3,6 +3,7 @@ import { rmSync } from 'node:fs';
 import { lstat, open, readFile, readdir, realpath, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
+import { isSafeGitRef } from '../git-refs.js';
 
 /**
  * Session git plumbing for the cockpit's Changes & Files tabs (redesign spec
@@ -61,6 +62,10 @@ export interface ChangedFile {
   adds: number;
   dels: number;
   binary: boolean;
+  /** True when `path`'s extension is one the raw-bytes route (`/files?raw=1`) will serve as an
+   *  `<img>` (#365) — lets the diff pane preview it inline instead of the "Binary file" note,
+   *  even for extensions (SVG) git itself doesn't flag `binary`. Present only when true. */
+  image?: boolean;
   patch: string;
 }
 
@@ -243,6 +248,7 @@ export async function collectChanges(
   baseBranch: string,
   opts: { patchCap?: number; intentToAdd?: boolean } = {},
 ): Promise<ChangesResult> {
+  if (!isSafeGitRef(baseBranch)) return { ok: false, error: 'refusing option-like base ref' };
   const patchCap = opts.patchCap ?? PATCH_CAP;
   // `git add -N .` (intent-to-add) makes untracked files appear in the diff, but it MUTATES the
   // index — fine in a task worktree cezar owns, but forbidden on the user's real main tree (a
@@ -311,6 +317,7 @@ export function assemblePayload(
       adds: count?.adds ?? 0,
       dels: count?.dels ?? 0,
       binary: count?.binary ?? false,
+      ...(imageMimeType(entry.path) ? { image: true } : {}),
       patch,
     };
   });
@@ -343,6 +350,7 @@ export type RunCommitsResult = { ok: true; commits: RunCommit[] } | { ok: false;
  * what "this task's work" means. Empty (not an error) when the branch has no commits past base.
  */
 export async function collectRunCommits(dir: string, baseBranch: string): Promise<RunCommitsResult> {
+  if (!isSafeGitRef(baseBranch)) return { ok: false, error: 'refusing option-like base ref' };
   const mergeBase = await git(dir, ['merge-base', baseBranch, 'HEAD']);
   const base = mergeBase.ok && mergeBase.stdout.trim() ? mergeBase.stdout.trim() : baseBranch;
   const log = await git(dir, ['log', '--pretty=format:%H%x1f%s%x1f%an%x1f%cr', `${base}..HEAD`]);
@@ -449,6 +457,30 @@ export function imageMimeType(path: string): string | null {
   return IMAGE_MIME[name.slice(dot + 1).toLowerCase()] ?? null;
 }
 
+/**
+ * Extensions the "open in the OS default app" route (#365) will hand to the OS launcher —
+ * deliberately NOT `imageMimeType`'s list, even though it is otherwise the same set minus one.
+ *
+ * `IMAGE_MIME` earns its SVG entry from two mitigations that belong to the HTTP response:
+ * the bytes land inside an `<img>` (inert), and the raw route attaches a no-script CSP. The OS
+ * launcher has neither — it just asks the OS to open the file, and the default handler for
+ * `.svg` is usually a browser, which runs `<script>` inside it from a `file://` origin. A repo
+ * can force an SVG down the preview branch on demand (`*.svg binary` in its own `.gitattributes`
+ * makes numstat report it binary ⇒ `shouldPreviewImage`), so this is reachable, not theoretical.
+ *
+ * Raster only: pixels, no document. Sharing the list with the raw route would silently inherit
+ * a decision that was justified by a CSP this path never applies.
+ */
+const OS_OPENABLE_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico', 'avif']);
+
+/** True when `path` is an image safe to hand to the OS's default handler — see OS_OPENABLE_EXT. */
+export function isOsOpenableImage(path: string): boolean {
+  const name = path.slice(path.lastIndexOf('/') + 1);
+  const dot = name.lastIndexOf('.');
+  if (dot <= 0) return false;
+  return OS_OPENABLE_EXT.has(name.slice(dot + 1).toLowerCase());
+}
+
 /** True when the first 8 KB contain a NUL byte — good enough for a viewer flag. */
 async function sniffBinary(path: string, size: number): Promise<boolean> {
   const handle = await open(path, 'r');
@@ -551,14 +583,19 @@ export type BranchResult =
  * Repo-view branch action (`POST /api/repo/branch`): switch to `name` when it
  * already exists locally, otherwise create it from `from` (or HEAD) and switch.
  * Name validation is delegated to `git check-ref-format --branch` — git's own
- * rules, not a reimplementation. Predictable failures (invalid name, unknown
- * `from`, dirty-tree checkout conflict) come back as `{ ok:false, error }`.
+ * rules, not a reimplementation — behind an explicit dash-guard (#431).
+ * Predictable failures (invalid name, unknown `from`, dirty-tree checkout
+ * conflict) come back as `{ ok:false, error }`.
  */
 export async function createOrSwitchBranch(
   dir: string,
   name: string,
   from?: string,
 ): Promise<BranchResult> {
+  // Dash-guard (#431): `name` reaches `git checkout <name>` / `git checkout -b <name>` as a
+  // positional operand, so it gets the same explicit guard as `from` below — check-ref-format
+  // already rejects option-like names, and the point is not to rely on that alone.
+  if (!isSafeGitRef(name)) return { ok: false, error: `invalid branch name: ${name}` };
   const check = await git(dir, ['check-ref-format', '--branch', name]);
   if (!check.ok) return { ok: false, error: `invalid branch name: ${name}` };
 
@@ -570,6 +607,8 @@ export async function createOrSwitchBranch(
   }
 
   if (from) {
+    // Dash-guard (#431): `from` becomes a positional operand of `checkout -b`.
+    if (!isSafeGitRef(from)) return { ok: false, error: `invalid start point: ${from}` };
     // `--quiet` keeps git silent on failure, so supply our own reason.
     const start = await git(dir, ['rev-parse', '--verify', '--quiet', `${from}^{commit}`]);
     if (!start.ok) return { ok: false, error: `unknown start point: ${from}` };

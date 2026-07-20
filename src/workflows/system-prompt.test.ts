@@ -47,6 +47,16 @@ describe('composeSystemPrompt', () => {
   });
 });
 
+describe('handoff contract markers', () => {
+  it('teaches the CEZ:ASK structured-question marker with its schema (#473)', () => {
+    expect(HANDOFF_ONLY_INSTRUCTIONS).toContain('CEZ:ASK');
+    expect(HANDOFF_ONLY_INSTRUCTIONS).toContain('"questions"');
+    expect(HANDOFF_ONLY_INSTRUCTIONS).toContain('"multiSelect"');
+    // It rides in the combined contract every agent step receives.
+    expect(HANDOFF_INSTRUCTIONS).toContain('CEZ:ASK');
+  });
+});
+
 describe('skill-aware task naming (#432)', () => {
   const skillWorkflow: WorkflowDef = {
     name: '(planned)',
@@ -272,6 +282,48 @@ describe('systemPrompt end-to-end (dry run)', () => {
     }
   }, 30_000);
 
+  it('marker declarations outrank the namer (spec 2026-07-18-task-ref-markers)', async () => {
+    const record = manager.startRun(skillWorkflow, { task: '437' });
+    await manager.recordTurnEnd(record.id, 'Working on it.\nCEZ:PR=500\nCEZ:TITLE=implementing marker refs');
+    let after = store.getRun(record.id);
+    expect(after?.prNumber).toBe(500);
+    expect(after?.titleSummary).toBe('500: implementing marker refs');
+    expect(after?.titleOrigin).toBe('marker');
+    // A namer answer landing later (mock: "implementing cr fixes" + pr 437)
+    // must not displace the agent's own declaration.
+    type NamerSeam = { autoNameRun(id: string, skill: string | undefined, task: string, live?: object): Promise<void> };
+    await (manager as unknown as NamerSeam).autoNameRun(record.id, 'om-auto-review-pr', '437', {
+      turnText: 'fixed the watchdog race',
+      diffStat: '2 files, +10 -3',
+    });
+    after = store.getRun(record.id);
+    expect(after?.titleSummary).toBe('500: implementing marker refs');
+    expect(after?.titleOrigin).toBe('marker');
+    expect(after?.prNumber).toBe(500);
+  }, 30_000);
+
+  it('mock:refs end to end: markers set the record, silence the wrong chip, and stay out of the transcript', async () => {
+    const id = await runToEnd({ task: 'do the thing mock:refs mock:done' });
+    // Settle window for the fire-and-forget turn-end bookkeeping.
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    const after = store.getRun(id);
+    expect(after?.prNumber).toBe(4242);
+    expect(after?.issueNumber).toBe(17);
+    expect(after?.titleSummary).toBe('4242: implementing marker refs');
+    expect(after?.titleOrigin).toBe('marker');
+    // The mock's transcript references pull/123, but the agent declared PR
+    // 4242 — a contradicting candidate must NOT become the chip (the #777
+    // failure class), and the created tier stays empty (nothing was created).
+    expect(after?.referencedPullRequestUrl).toBeUndefined();
+    expect(after?.pullRequestUrl).toBeUndefined();
+    // Marker lines are protocol noise — stripped from persisted v1 text.
+    const textEvents = store.readEvents(id).filter((e) => e.type === 'text');
+    expect(textEvents.length).toBeGreaterThan(0);
+    for (const event of textEvents) {
+      expect(String(event.text)).not.toMatch(/^CEZ:(?:PR|ISSUE|TITLE)=/m);
+    }
+  }, 30_000);
+
   it('a user rename made before the namer answers is never overwritten', async () => {
     writeFileSync(argsFile, '', 'utf8');
     const record = manager.startRun(skillWorkflow, { task: '437' });
@@ -482,6 +534,10 @@ describe('the global follow-up gate (dry run)', () => {
     expect(capturedSystemPrompt()).toContain('CEZ:DONE');
     // The still-working marker rides in the same handoff contract (#490).
     expect(capturedSystemPrompt()).toContain('CEZ:MONITORING');
+    // The task-reference markers too (spec 2026-07-18-task-ref-markers).
+    expect(capturedSystemPrompt()).toContain('CEZ:PR=<number>');
+    expect(capturedSystemPrompt()).toContain('CEZ:ISSUE=<number>');
+    expect(capturedSystemPrompt()).toContain('CEZ:TITLE=');
     expect(readFileSync(join(repoRoot, '.ai/cezar/runs', `${id}.handoff.md`), 'utf8')).toContain(
       'mock: implemented the change',
     );
