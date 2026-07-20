@@ -25,7 +25,7 @@
 | 2 | 2.4 | Usage fan-out scoping (`run.ts` + SSE relay per-project `usage` filtering) | done | 9f0eae0 |
 | 2 | 2.5 | Workspace semaphore for global `maxParallel` (cached config, #347 exemption preserved) | done | 9abbf6e |
 | 2 | 2.6 | Per-project cache keying: GitHub list + comments caches, team-skills cache (+ isolation regression tests) | done | c8aa560 |
-| 2 | 2.7 | `GET/PUT /api/workspace/config` (projectsDir writability probe) + `/api/workspace/ui-state` | todo | |
+| 2 | 2.7 | `GET/PUT /api/workspace/config` (projectsDir writability probe) + `/api/workspace/ui-state` | done | bd74203 |
 | 2 | 2.8 | `GET /api/workspace/events` all-project SSE; legacy `/api/events` stays boot-filtered | todo | |
 | 2 | 2.9 | BACKWARD_COMPATIBILITY.md: `/api/p/*`, workspace SSE stream, `project` SSE field | todo | |
 | 3 | 3.1 | Cockpit API-client scope seam (`send()` prefix, 4 non-send sites, workspace EventSource, query keys) | todo | |

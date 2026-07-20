@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { mkdir, readFile, realpath, unlink, writeFile } from 'node:fs/promises';
+import { access, constants as fsConstants, mkdir, readFile, realpath, unlink, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Hono, type Context } from 'hono';
@@ -46,9 +47,17 @@ import {
   readWorktreePath,
 } from './git-changes.js';
 import { loadConfig, type CezConfig } from '../config.js';
-import { PROJECT_ID_RE, defaultWorkspaceConfig, loadWorkspaceConfig, type WorkspaceProject } from '../workspace/config.js';
+import {
+  PROJECT_ID_RE,
+  defaultWorkspaceConfig,
+  loadWorkspaceConfig,
+  mergeWriteWorkspaceConfig,
+  type WorkspaceConfig,
+  type WorkspaceProject,
+} from '../workspace/config.js';
 import { allocateProjectSlug, listProjects, type ProjectListEntry } from '../workspace/projects.js';
 import { WorkspaceSemaphore } from '../workspace/semaphore.js';
+import { mergeWriteWorkspaceUiState, readWorkspaceUiState } from '../workspace/ui-state.js';
 import { ProjectContextError, ProjectContexts, type ProjectContext } from './project-context.js';
 import { reviewGateEnabled } from '../runs/review-gate.js';
 import { readUiState, uiStatePath } from '../ui-state.js';
@@ -178,6 +187,19 @@ export interface ProjectsResponse {
   projectsDir: string;
 }
 
+/** `GET/PUT /api/workspace/config` (multi-project spec, step 2.7) — the
+ *  settings slice of `~/.cezar/config.json`: global knobs ONLY, never the
+ *  project registry (that is `GET /api/projects`' job). */
+export interface WorkspaceConfigResponse {
+  /** Checkout root for GUI-cloned projects — stored as written (`~` kept). */
+  projectsDir: string;
+  resources: {
+    maxParallel: number;
+    memoryLimitMb: number | null;
+    worktreeRetentionDefault: number;
+  };
+}
+
 /** streamSSE with the anti-buffering contract (#424): hono's own header is a
  *  bare `no-cache`, which lets an intermediary (reverse proxy, compression
  *  middleware, corporate MITM) transform-buffer the stream — the client then
@@ -291,6 +313,47 @@ const parseWorkflowSchema = z.object({
  *  bounds the ui-state.json write without ever rejecting a legitimate one. */
 const SKILL_USAGE_MAX_ENTRIES = 200;
 
+// Belt-and-braces cap on the number of top-level ui-state keys so a
+// `.passthrough()` schema can't accumulate an unbounded key set (#429). Very
+// generous for GUI prefs; over-limit is a 400, never a silent strip. Shared by
+// BOTH ui-state routes (per-repo and workspace) via `parseUiStateBody`.
+const UI_STATE_MAX_KEYS = 200;
+
+/** Settings → Appearance (redesign R6): accent + density. ONE schema for both
+ *  ui-state files — per-repo (the legacy home, kept so an older cezar in the
+ *  same repo still honours it) and workspace (`~/.cezar/ui-state.json`, its
+ *  post-migration home — multi-project spec, Data Model). */
+const appearanceSchema = z.object({
+  accent: z.enum(['lime', 'violet']).optional(),
+  density: z.enum(['comfortable', 'compact', 'ultra']).optional(),
+});
+
+/** Global GUI state (`~/.cezar/ui-state.json`, step 2.7) — the workspace twin
+ *  of `uiStateSchema` below, sharing its `.passthrough()` + key-cap + shallow
+ *  merge-on-write semantics via `parseUiStateBody`. Known keys are the
+ *  cross-project prefs from the spec's Data Model; everything project-scoped
+ *  (githubView, prompt templates, dismissed banners…) stays per-repo. */
+const workspaceUiStateSchema = z
+  .object({
+    appearance: appearanceSchema.optional(),
+    notifications: z.object({ enabled: z.boolean().optional() }).passthrough().optional(),
+    // Sidebar per-project collapse map, keyed by project id (slug ≤ 64 chars).
+    // Entry-capped like `skillUsage`: the map is written straight to a file the
+    // cockpit GETs on every load, so it must stay bounded on every axis.
+    sidebar: z
+      .object({
+        collapsed: z
+          .record(z.string().min(1).max(64), z.boolean())
+          .refine((map) => Object.keys(map).length <= UI_STATE_MAX_KEYS, {
+            message: `sidebar.collapsed must have at most ${UI_STATE_MAX_KEYS} entries`,
+          })
+          .optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
 const uiStateSchema = z
   .object({
     lastTask: z
@@ -332,12 +395,7 @@ const uiStateSchema = z
     // Settings → Appearance (redesign R6): accent + density. ADDITIVE — the theme itself
     // stays in the browser (`cez-theme` localStorage, pre-paint). The cockpit always PUTs
     // the whole object because the top-level merge below is shallow.
-    appearance: z
-      .object({
-        accent: z.enum(['lime', 'violet']).optional(),
-        density: z.enum(['comfortable', 'compact', 'ultra']).optional(),
-      })
-      .optional(),
+    appearance: appearanceSchema.optional(),
     // Follow-up prompt templates (#413): reusable snippets insertable into the GitHub hand-over
     // and Inbox follow-up composers. Absent → the client's built-in defaults; present (even `[]`)
     // is the user's own edited list, from Settings → Prompt templates. Additive, like the rest of
@@ -432,10 +490,50 @@ const archiveSchema = z.object({
 // it only ever carries small GUI prefs.
 const GLOBAL_BODY_LIMIT = 32 * 1024 * 1024; // 32 MiB
 const UI_STATE_BODY_LIMIT = 128 * 1024; // 128 KiB
-// Belt-and-braces cap on the number of top-level ui-state keys so the
-// `.passthrough()` schema can't accumulate an unbounded key set (#429). Very
-// generous for GUI prefs; over-limit is a 400, never a silent strip.
-const UI_STATE_MAX_KEYS = 200;
+
+/** The shared write-side half of BOTH ui-state routes (per-repo `/api/ui-state`
+ *  and workspace `/api/workspace/ui-state`) — the factored split the
+ *  multi-project spec calls for instead of a copy: parse with the route's own
+ *  schema, then cap the top-level key count so a `.passthrough()` schema can't
+ *  accumulate an unbounded key set (#429). The merge-on-write stays with each
+ *  route (they write different files) but is shallow in both. */
+function parseUiStateBody<S extends z.ZodTypeAny>(
+  schema: S,
+  body: unknown,
+): { data: z.infer<S> } | { error: string } {
+  const parsed = schema.safeParse(body);
+  if (!parsed.success) return { error: parsed.error.issues.map((i) => i.message).join('; ') };
+  if (Object.keys(parsed.data as Record<string, unknown>).length > UI_STATE_MAX_KEYS) {
+    return { error: `ui-state has too many keys (max ${UI_STATE_MAX_KEYS})` };
+  }
+  return { data: parsed.data as z.infer<S> };
+}
+
+/** Expand a leading `~` to the user's home — the `projectsDir` probe validates
+ *  the REAL directory while the config keeps the literal `~` form the user
+ *  wrote (see the `projectsDir` note in src/workspace/config.ts). */
+function expandTilde(path: string): string {
+  if (path === '~') return homedir();
+  return path.startsWith('~/') ? join(homedir(), path.slice(2)) : path;
+}
+
+/** The `projectsDir` writability probe (multi-project spec, "API Contracts"):
+ *  `mkdir -p`, `access W_OK`, then a real create/delete round-trip — W_OK alone
+ *  can lie (e.g. a read-only mount still reports writable permission bits).
+ *  Returns the failure message, or null when the directory is usable. */
+async function probeWritableDir(dir: string): Promise<string | null> {
+  const probe = join(dir, `.cez-write-probe-${process.pid}-${Date.now().toString(36)}`);
+  try {
+    await mkdir(dir, { recursive: true });
+    await access(dir, fsConstants.W_OK);
+    await writeFile(probe, '', 'utf8');
+    await unlink(probe);
+    return null;
+  } catch (err) {
+    await unlink(probe).catch(() => {}); // best-effort if the round-trip half-succeeded
+    return err instanceof Error ? err.message : String(err);
+  }
+}
 
 export function createApp(deps: ServerDeps): Hono {
   const { version, update, bindHost, bootProjectId } = deps;
@@ -682,6 +780,90 @@ export function createApp(deps: ServerDeps): Hono {
     return c.json(body);
   });
 
+  // ---- workspace settings (multi-project spec, step 2.7) -------------------
+  // WORKSPACE-level routes: single-mount (never mirrored under /api/p/),
+  // same-origin. The config routes carry the settings UI's slice of
+  // `~/.cezar/config.json` — global knobs only; the registry stays on
+  // /api/projects above, and schemaVersion (a migration cursor, not a
+  // setting) is deliberately omitted.
+  const workspaceConfigBody = (config: WorkspaceConfig): WorkspaceConfigResponse => ({
+    projectsDir: config.projectsDir,
+    resources: {
+      maxParallel: config.resources.maxParallel,
+      memoryLimitMb: config.resources.memoryLimitMb,
+      worktreeRetentionDefault: config.resources.worktreeRetentionDefault,
+    },
+  });
+  app.get('/api/workspace/config', async (c) =>
+    c.json(workspaceConfigBody(await loadWorkspaceConfig())),
+  );
+
+  // Partial updates only — absent keys stay untouched. Bounds mirror the
+  // workspace schema (src/workspace/config.ts, step 1.2) exactly, so a value
+  // this route accepts can never be degraded away by the next load's `.catch`.
+  const workspaceConfigUpdateSchema = z.object({
+    projectsDir: z.string().trim().min(1).max(4096).optional(),
+    resources: z
+      .object({
+        maxParallel: z.number().int().min(1).max(16).optional(),
+        memoryLimitMb: z.number().int().min(0).max(1_048_576).nullable().optional(),
+        worktreeRetentionDefault: z.number().int().min(0).max(1000).optional(),
+      })
+      .optional(),
+  });
+  app.put('/api/workspace/config', async (c) => {
+    const parsed = workspaceConfigUpdateSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
+    }
+    const { projectsDir, resources } = parsed.data;
+    if (projectsDir !== undefined) {
+      // Validated ON CHANGE, never at load (spec): expand `~`, `mkdir -p`,
+      // probe real writability. Any failure → 400 and NO change persisted.
+      const expanded = expandTilde(projectsDir);
+      if (!expanded.startsWith('/')) {
+        return c.json({ error: `not writable: ${projectsDir} is not an absolute path` }, 400);
+      }
+      const probeError = await probeWritableDir(expanded);
+      if (probeError !== null) return c.json({ error: `not writable: ${probeError}` }, 400);
+    }
+    let written: WorkspaceConfig;
+    try {
+      written = await mergeWriteWorkspaceConfig((config) => {
+        // `projectsDir` is stored as written (`~` kept — see the schema note);
+        // only the probe above sees the expanded form.
+        if (projectsDir !== undefined) config.projectsDir = projectsDir;
+        if (resources?.maxParallel !== undefined) config.resources.maxParallel = resources.maxParallel;
+        if (resources?.memoryLimitMb !== undefined) config.resources.memoryLimitMb = resources.memoryLimitMb;
+        if (resources?.worktreeRetentionDefault !== undefined) {
+          config.resources.worktreeRetentionDefault = resources.worktreeRetentionDefault;
+        }
+      });
+    } catch (err) {
+      // e.g. a read-only home — nothing was persisted (atomic tmp+rename).
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+    // A resource change takes effect WITHOUT a restart: refresh the shared
+    // semaphore's in-memory snapshot and pump every manager (step 2.5's hook).
+    if (resources !== undefined) await deps.semaphore?.refresh();
+    return c.json(workspaceConfigBody(written));
+  });
+
+  // Global GUI state (`~/.cezar/ui-state.json`) — same parse/key-cap/shallow-
+  // merge semantics as the per-repo /api/ui-state route below (the shared half
+  // is `parseUiStateBody`), but backed by the workspace file.
+  app.get('/api/workspace/ui-state', async (c) => c.json(await readWorkspaceUiState()));
+  app.put('/api/workspace/ui-state', bodyLimit({ maxSize: UI_STATE_BODY_LIMIT }), async (c) => {
+    const parsed = parseUiStateBody(workspaceUiStateSchema, await c.req.json().catch(() => null));
+    if ('error' in parsed) return c.json({ error: parsed.error }, 400);
+    try {
+      return c.json(await mergeWriteWorkspaceUiState((state) => ({ ...state, ...parsed.data })));
+    } catch (err) {
+      // A read-only home degrades to an unsaved pref, never a crash.
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
   // The bookmarklet generator bakes this key into the `javascript:` URLs —
   // `/new?auto=1` is honored only with it (spec 011). Same-origin only.
   api.get('/launch-key', (c) => c.json({ key: c.get('project').launchKey }));
@@ -694,15 +876,11 @@ export function createApp(deps: ServerDeps): Hono {
   api.get('/ui-state', async (c) => c.json(await readUiState(c.get('project').root)));
   api.put('/ui-state', bodyLimit({ maxSize: UI_STATE_BODY_LIMIT }), async (c) => {
     const { root: repoRoot, dataDir } = c.get('project');
-    const parsed = uiStateSchema.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
-    }
     // `.passthrough()` keeps unknown prefs (BACKWARD_COMPATIBILITY §3), but a
-    // single request may not stuff an unbounded key set (#429).
-    if (Object.keys(parsed.data).length > UI_STATE_MAX_KEYS) {
-      return c.json({ error: `ui-state has too many keys (max ${UI_STATE_MAX_KEYS})` }, 400);
-    }
+    // single request may not stuff an unbounded key set (#429) — the shared
+    // parse+cap half of both ui-state routes lives in parseUiStateBody.
+    const parsed = parseUiStateBody(uiStateSchema, await c.req.json().catch(() => null));
+    if ('error' in parsed) return c.json({ error: parsed.error }, 400);
     const merged = { ...(await readUiState(repoRoot)), ...parsed.data };
     try {
       await mkdir(dataDir, { recursive: true });

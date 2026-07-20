@@ -1,9 +1,14 @@
-import { chmodSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
-import { cezarHomeDir, workspaceConfigPath, workspaceUiStatePath } from '../paths.js';
+import { join } from 'node:path';
+import { cezarHomeDir, workspaceConfigPath } from '../paths.js';
 import { readUiState } from '../ui-state.js';
 import { loadWorkspaceConfig, mergeWriteWorkspaceConfig } from './config.js';
+import { mergeWriteWorkspaceUiState } from './ui-state.js';
+
+// Step 1.4 exported the global ui-state merge-write from here; step 2.7 moved
+// it to its cleaner home (src/workspace/ui-state.ts, next to the read path the
+// workspace routes share). Re-exported so existing importers keep working.
+export { mergeWriteWorkspaceUiState } from './ui-state.js';
 
 /**
  * Workspace config migrations (spec 2026-07-20-multi-project-workspace,
@@ -43,32 +48,6 @@ function asObject(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
-}
-
-/**
- * Read-modify-write for `~/.cezar/ui-state.json` — the global twin of the
- * per-repo ui-state, written with the same atomic tmp+rename `0600` pattern
- * as `mergeWriteWorkspaceConfig`. The state is an opaque `.passthrough()`-
- * style bag (schema/caps live at the route boundary, step 2.7); a missing or
- * corrupt file merges from `{}`. Throws on write failure — degrading is the
- * caller's policy, per house rules.
- */
-export async function mergeWriteWorkspaceUiState(
-  mutator: (state: Record<string, unknown>) => Record<string, unknown> | void,
-): Promise<Record<string, unknown>> {
-  const path = workspaceUiStatePath();
-  const current = (await readRawObject(path)) ?? {};
-  const next = mutator(current) ?? current;
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const tmp = `${path}.tmp`;
-  writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
-  renameSync(tmp, path);
-  try {
-    chmodSync(path, 0o600); // best-effort — ignored on some filesystems
-  } catch {
-    // non-fatal
-  }
-  return next;
 }
 
 /**
