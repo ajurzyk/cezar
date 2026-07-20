@@ -27,7 +27,7 @@ import { planChain, slugify } from '../planner.js';
 import { discoverSkills } from '../skills.js';
 import { refreshTeamSkills } from '../skills-remote.js';
 import { appendHandoffHeartbeat, handoffProgressExcerpt, readHandoff } from '../handoff.js';
-import { markStarted, onTodosChanged, readTodos, removeTodo, startTodosWatch, todoTaskText, type TodoItem } from '../todos.js';
+import { markStarted, onTodosChanged, readTodos, removeTodo, todoTaskText, type TodoItem } from '../todos.js';
 import type { RunEvent, RunRecord, RunStatus, RunStore } from '../runs/store.js';
 import { isV2WireEventType } from '../runs/ui-event-sink.js';
 import type { RunManager } from '../workflows/run.js';
@@ -484,9 +484,8 @@ export function createApp(deps: ServerDeps): Hono {
   // CEZ_REMOTE flips take effect live (and tests can toggle it).
   const capabilities = () => resolveCapabilities(process.env, bindHost);
   // Inbox live updates (spec 007). Opt-in (#471): no capability, no watcher —
-  // nothing can write todos.json anyway, so a watch would only burn an fd.
-  // Boot project only until step 2.3 de-singletonizes the watcher.
-  if (capabilities().followups) startTodosWatch(bootDataDir);
+  // and since step 2.3 the per-dataDir watch is created lazily by the first
+  // SSE subscription (and torn down with the last), nothing to start here.
 
   // ---- project contexts (multi-project spec, step 2.2) ---------------------
   // The boot project's context is SEEDED from the deps the caller already
@@ -1631,11 +1630,12 @@ export function createApp(deps: ServerDeps): Hono {
         const items: TodoItem[] = await readTodos(dataDir).catch(() => []);
         await stream.writeSSE({ event: 'todos', data: JSON.stringify(items) });
       };
-      // Opt-in inbox (#471): with the capability off the watcher never starts,
-      // so this would never fire anyway — but the emitter is module-global, so
-      // subscribe only when the inbox actually exists rather than lean on that.
+      // Opt-in inbox (#471): subscribing is what creates this project's
+      // watcher (step 2.3), so with the capability off we never subscribe —
+      // no watcher, no fd. Scoped to this stream's dataDir: another
+      // project's todos.json writes never reach this connection.
       const offTodos = capabilities().followups
-        ? onTodosChanged(() => void sendTodos())
+        ? onTodosChanged(dataDir, () => void sendTodos())
         : () => undefined;
       // Live resource telemetry (#348): the sampler ticks ~every 2 s only
       // while some run has a registered process; each tick is relayed as one
