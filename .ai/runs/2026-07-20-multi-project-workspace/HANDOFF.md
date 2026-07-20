@@ -1,17 +1,17 @@
 # Handoff — 2026-07-20-multi-project-workspace
 
-**Last updated:** 2026-07-20T12:47:00Z
+**Last updated:** 2026-07-20T13:12:00Z
 **Branch:** feat/multi-project-workspace
 **PR:** https://github.com/open-mercato/cezar/pull/521 (draft, opened early for live progress; three-signal lock held by pkarw)
-**Current phase/step:** Phase 1 Step 1.6
-**Last commit:** 757b66e — feat(workspace): boot wiring + harness CEZ_HOME pinning
+**Current phase/step:** Phase 2 Step 2.1
+**Last commit:** 8d881f3 — docs(bc): Phase-1 workspace surfaces
 
 ## What just happened
-- Steps 1.1–1.5 done via sequential executor subagents: paths helpers, workspace config module, project registry ops, migrations framework + migration 001, boot wiring with worktree/$HOME guards + harness CEZ_HOME pinning.
-- Checkpoint 1 green: typecheck, 48/48 scoped unit tests, build, test:package 8/8.
+- Phase 1 complete (1.1–1.7): workspace modules, boot wiring, GET /api/projects, additive health fields, BC docs §2+§9.
+- Checkpoint 2 green: typecheck, scoped 48/48, full suite 2843/2843 (env -u CEZ_REMOTE — shell exports CEZ_REMOTE=1, must strip for full runs).
 
 ## Next concrete action
-- Dispatch Step 1.6: `GET /api/projects` + additive `/api/health` fields (`projects`, `bootProject`; never `projects[].root`).
+- Dispatch Step 2.1: `src/server/project-context.ts` lazy context map + `RunManager.dispose()`.
 
 ## Blockers / open questions
 - none

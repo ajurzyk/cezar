@@ -13,3 +13,8 @@
 - Decision: PLAN.md Commit cells reconcile to pushed SHAs at checkpoints (per-step amend flow records lag-by-one SHA — SHA-in-tree cannot converge).
 - Delegations: steps 1.1–1.5 each implemented by one sequential executor subagent (executor-dispatch pattern).
 - PR #521 opened early (draft) at the user's request for live progress; lock claimed.
+
+## 2026-07-20T13:12:00Z — checkpoint 2 (steps 1.6..1.7, Phase 1 close)
+- GET /api/projects + additive health fields (never projects[].root, #431) + BC docs §2/§9.
+- Validation green: typecheck; scoped vitest 48/48; FULL suite 2843/2843 (env -u CEZ_REMOTE — shell ambient CEZ_REMOTE=1 breaks one pre-existing test on base too).
+- Phase 1 complete; upgraded users see no behavior change.

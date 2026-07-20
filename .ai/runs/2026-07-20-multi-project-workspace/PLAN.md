@@ -17,8 +17,8 @@
 | 1 | 1.3 | `src/workspace/projects.ts` — register/list/remove, slug alloc, realpath dedupe | done | c8de088 |
 | 1 | 1.4 | `src/workspace/migrations.ts` framework + migration 001 | done | 8d27de2 |
 | 1 | 1.5 | Boot wiring in `src/index.ts` (serve+run, worktree/$HOME guards) + pin `CEZ_HOME` in e2e/test:package harnesses | done | 757b66e |
-| 1 | 1.6 | `GET /api/projects` + additive `/api/health` fields (`projects`, `bootProject`) | done | 0050994 |
-| 1 | 1.7 | BACKWARD_COMPATIBILITY.md: `~/.cezar/{config,ui-state}.json`, `/api/projects`, health additions | done | 9b140f0 |
+| 1 | 1.6 | `GET /api/projects` + additive `/api/health` fields (`projects`, `bootProject`) | done | 941e7a7 |
+| 1 | 1.7 | BACKWARD_COMPATIBILITY.md: `~/.cezar/{config,ui-state}.json`, `/api/projects`, health additions | done | 8d881f3 |
 | 2 | 2.1 | `src/server/project-context.ts` lazy context map + `RunManager.dispose()` | todo | |
 | 2 | 2.2 | `server.ts` context-resolver refactor: `/api/p/:projectId/*` + legacy aliases + parity tests | todo | |
 | 2 | 2.3 | `src/todos.ts` per-dataDir watcher/emitter map | todo | |
