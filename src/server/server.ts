@@ -30,7 +30,7 @@ import { markStarted, onTodosChanged, readTodos, removeTodo, startTodosWatch, to
 import type { RunEvent, RunRecord, RunStatus, RunStore } from '../runs/store.js';
 import { isV2WireEventType } from '../runs/ui-event-sink.js';
 import type { RunManager } from '../workflows/run.js';
-import { removeWorktree, worktreeDiff, worktreeDiffStat, worktreeSizeBytes } from '../git-worktree.js';
+import { diffBaseRef, removeWorktree, worktreeDiff, worktreeDiffStat, worktreeSizeBytes } from '../git-worktree.js';
 import { isReclaimable, reclaimWorktrees } from '../runs/retention.js';
 import { getBranches, getCommit, getDiff, getLog, getRepoInfo, getStatus } from './git.js';
 import {
@@ -742,7 +742,7 @@ export function createApp(deps: ServerDeps): Hono {
           costUsd: r.costUsd,
           diffStat:
             r.worktreePath && existsSync(r.worktreePath)
-              ? await worktreeDiffStat(r.worktreePath, r.baseBranch ?? 'HEAD')
+              ? await worktreeDiffStat(r.worktreePath, diffBaseRef(r))
               : '',
           handoffExcerpt: handoffProgressExcerpt(readHandoff(dataDir, r.id)),
         }),
@@ -779,7 +779,7 @@ export function createApp(deps: ServerDeps): Hono {
       winner.autonomous !== true &&
       reviewGateEnabled(await loadConfig(repoRoot))
     ) {
-      const diff = await worktreeDiff(winner.worktreePath, winner.baseBranch ?? 'HEAD');
+      const diff = await worktreeDiff(winner.worktreePath, diffBaseRef(winner));
       if (diff.trim().length > 0 && !diff.startsWith('(diff failed')) {
         store.updateRun(winner.id, { status: 'review' });
       }
@@ -1055,7 +1055,7 @@ export function createApp(deps: ServerDeps): Hono {
     if (!run.worktreePath || !existsSync(run.worktreePath)) {
       return c.text('(no worktree — this task ran directly in the repo working tree)');
     }
-    return c.text(await worktreeDiff(run.worktreePath, run.baseBranch ?? 'HEAD'));
+    return c.text(await worktreeDiff(run.worktreePath, diffBaseRef(run)));
   });
 
   // ---- session git view (redesign R5 Step 1.2 — §"Git/session API additions").
@@ -1071,7 +1071,7 @@ export function createApp(deps: ServerDeps): Hono {
     if (!run) return c.json({ error: 'not found' }, 404);
     const worktree = worktreeOf(run);
     if (!worktree) return c.json({ error: NO_WORKTREE }, 409);
-    const result = await collectChanges(worktree, run.baseBranch ?? 'HEAD');
+    const result = await collectChanges(worktree, diffBaseRef(run));
     if (!result.ok) return c.json({ error: result.error }, 409);
     return c.json(result.changes);
   });
@@ -1082,7 +1082,7 @@ export function createApp(deps: ServerDeps): Hono {
     if (!run) return c.json({ error: 'not found' }, 404);
     const worktree = worktreeOf(run);
     if (!worktree) return c.json({ error: NO_WORKTREE }, 409);
-    const result = await collectRunCommits(worktree, run.baseBranch ?? 'HEAD');
+    const result = await collectRunCommits(worktree, diffBaseRef(run));
     if (!result.ok) return c.json({ error: result.error }, 409);
     return c.json({ commits: result.commits });
   });

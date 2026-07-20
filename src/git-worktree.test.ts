@@ -4,7 +4,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { branchFor, createWorktree, parseShortstat, worktreeShortstat, worktreeSizeBytes } from './git-worktree.js';
+import {
+  branchFor,
+  createWorktree,
+  diffBaseRef,
+  parseShortstat,
+  resolveBaseRef,
+  worktreeShortstat,
+  worktreeSizeBytes,
+} from './git-worktree.js';
 
 const run = promisify(execFile);
 
@@ -96,6 +104,11 @@ describe('createWorktree recovery (real git)', () => {
     const second = await createWorktree(repo, runId, 'main');
 
     expect(second).toEqual(first);
+    // The base is pinned to main's immutable commit, not the branch name (the
+    // 142k-line phantom diff) — so later diffs anchor to a fixed fork point.
+    const mainSha = (await run('git', ['rev-parse', 'main'], { cwd: repo })).stdout.trim();
+    expect(first.baseCommit).toBe(mainSha);
+    expect(first.baseBranch).toBe('main');
     const listed = await run('git', ['worktree', 'list', '--porcelain'], { cwd: repo });
     expect(listed.stdout.match(new RegExp(`branch refs/heads/${branchFor(runId)}`, 'g'))).toHaveLength(1);
   });
@@ -172,5 +185,84 @@ describe('worktreeShortstat (real git)', () => {
     } finally {
       rmSync(plain, { recursive: true, force: true });
     }
+  });
+});
+
+describe('diffBaseRef', () => {
+  it('prefers the pinned commit, falls back to the branch name, then HEAD', () => {
+    expect(diffBaseRef({ baseCommit: 'abc123', baseBranch: 'develop' })).toBe('abc123');
+    expect(diffBaseRef({ baseBranch: 'develop' })).toBe('develop');
+    expect(diffBaseRef({})).toBe('HEAD');
+  });
+});
+
+describe('resolveBaseRef (real git)', () => {
+  /** A work repo cloned from an `origin` that carries a `develop` branch, so
+   *  both a local `develop` and `origin/develop` remote-tracking ref exist. */
+  async function repoWithOrigin(): Promise<string> {
+    const origin = mkdtempSync(join(tmpdir(), 'cez-origin-'));
+    worktreeRoots.push(origin);
+    await run('git', ['init', '-q', '-b', 'main'], { cwd: origin });
+    writeFileSync(join(origin, 'a.txt'), '1\n');
+    await run('git', ['add', '-A'], { cwd: origin });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'c1'], { cwd: origin });
+    await run('git', ['checkout', '-q', '-b', 'develop'], { cwd: origin });
+    for (const n of ['2', '3']) {
+      writeFileSync(join(origin, 'a.txt'), `${n}\n`);
+      await run('git', [...GIT_ID, 'commit', '-q', '-am', `c${n}`], { cwd: origin });
+    }
+    const work = mkdtempSync(join(tmpdir(), 'cez-work-'));
+    worktreeRoots.push(work);
+    await run('git', ['clone', '-q', origin, work], { cwd: tmpdir() });
+    // Materialize a local `develop` tracking origin/develop.
+    await run('git', ['checkout', '-q', 'develop'], { cwd: work });
+    await run('git', ['checkout', '-q', 'main'], { cwd: work });
+    return work;
+  }
+
+  it('returns the local branch when it is up to date with origin', async () => {
+    const work = await repoWithOrigin();
+    expect(await resolveBaseRef(work, 'develop')).toBe('develop');
+  });
+
+  it('prefers origin/<base> when the local branch is STALE (behind origin)', async () => {
+    const work = await repoWithOrigin();
+    // Rewind local develop one commit behind origin/develop — the phantom-diff trap.
+    await run('git', ['branch', '-f', 'develop', 'develop~1'], { cwd: work });
+    expect(await resolveBaseRef(work, 'develop')).toBe('origin/develop');
+  });
+
+  it('keeps the local branch when it is AHEAD (unpushed base commits)', async () => {
+    const work = await repoWithOrigin();
+    await run('git', ['checkout', '-q', 'develop'], { cwd: work });
+    writeFileSync(join(work, 'a.txt'), 'local-ahead\n');
+    await run('git', [...GIT_ID, 'commit', '-q', '-am', 'local only'], { cwd: work });
+    await run('git', ['checkout', '-q', 'main'], { cwd: work });
+    expect(await resolveBaseRef(work, 'develop')).toBe('develop');
+  });
+
+  it('prefers origin/<base> when local and origin have DIVERGED', async () => {
+    const work = await repoWithOrigin();
+    // Rewrite local develop onto an unrelated commit → neither is an ancestor.
+    await run('git', ['branch', '-f', 'develop', 'main'], { cwd: work });
+    expect(await resolveBaseRef(work, 'develop')).toBe('origin/develop');
+  });
+
+  it('falls back to origin/<base> for a branch that exists only on origin', async () => {
+    const work = await repoWithOrigin();
+    // No local develop was materialized here; delete it to be sure.
+    await run('git', ['branch', '-D', 'develop'], { cwd: work }).catch(() => undefined);
+    expect(await resolveBaseRef(work, 'develop')).toBe('origin/develop');
+  });
+
+  it('returns the local name for a local-only branch, and null when neither exists', async () => {
+    const repo = await fixtureRepo('cez-resolve-localonly-');
+    expect(await resolveBaseRef(repo, 'main')).toBe('main');
+    expect(await resolveBaseRef(repo, 'nope-no-such-branch')).toBeNull();
+  });
+
+  it('refuses an option-like base ref', async () => {
+    const repo = await fixtureRepo('cez-resolve-dashguard-');
+    expect(await resolveBaseRef(repo, '--upload-pack=evil')).toBeNull();
   });
 });

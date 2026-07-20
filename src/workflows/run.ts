@@ -19,7 +19,7 @@ import type { AgentEvent, ContentBlock } from '../core/agent-runner.js';
 import { discoverSkills, type Skill } from '../skills.js';
 import { materializeSkillDir } from '../skills-remote.js';
 import { loadConfig } from '../config.js';
-import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff, worktreeShortstat } from '../git-worktree.js';
+import { autosaveCommit, createWorktree, diffBaseRef, resolveBaseRef, worktreeDiff, worktreeShortstat } from '../git-worktree.js';
 import { getRepoInfo } from '../server/git.js';
 import { loadWorkflows } from './load.js';
 import type { RunRecord, RunStore } from '../runs/store.js';
@@ -1015,6 +1015,9 @@ export class RunManager {
           worktreePath: wt.path,
           branch: wt.branch,
           baseBranch: wt.baseBranch,
+          // Keep the ORIGINAL fork commit across restarts — recomputing it would
+          // re-anchor the merge-base under an in-flight task if the base moved.
+          baseCommit: this.store.getRun(runId)?.baseCommit ?? wt.baseCommit,
         });
         emit({ type: 'note', message: `worktree ready — branch ${wt.branch} (base ${wt.baseBranch})` });
         this.armAutosave(state);
@@ -1477,7 +1480,7 @@ export class RunManager {
       // deliberately NEVER a title source; see maybeRefreshTitle below. The
       // one exception is an explicit CEZ:TITLE declaration (applied above).
       if (run.worktreePath && existsSync(run.worktreePath)) {
-        const stat = await worktreeShortstat(run.worktreePath, run.baseBranch ?? 'HEAD');
+        const stat = await worktreeShortstat(run.worktreePath, diffBaseRef(run));
         if (stat) this.store.updateRun(runId, { diffStat: stat });
         else this.store.appendEvent(runId, { type: 'note', message: 'diff stat unavailable — git diff --shortstat failed in the worktree' });
       }
@@ -1568,7 +1571,7 @@ export class RunManager {
     const run = this.store.getRun(runId);
     let review = false;
     if (run?.worktreePath && existsSync(run.worktreePath)) {
-      const diff = await worktreeDiff(run.worktreePath, run.baseBranch ?? 'HEAD');
+      const diff = await worktreeDiff(run.worktreePath, diffBaseRef(run));
       const hasDiff = diff.trim().length > 0 && !diff.startsWith('(diff failed');
       const config = await loadConfig(this.repoRoot);
       review = hasDiff && reviewGateEnabled(config) && run.autonomous !== true;

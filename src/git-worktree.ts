@@ -47,15 +47,30 @@ export function branchFor(runId: string): string {
 
 /**
  * Resolve the configured base branch to something `git worktree add` can
- * fork from: the branch itself, else its remote-tracking ref (base exists
- * only on origin), else null — the caller falls back to the current branch
- * with a note. Never throws.
+ * fork from: the local branch, its remote-tracking ref, or null — the caller
+ * falls back to the current branch with a note. Never throws.
+ *
+ * When BOTH the local branch and `origin/<base>` exist, prefer whichever is up
+ * to date. A stale LOCAL base (behind origin, because nothing fetched it into
+ * this worktree's repo) is the classic inflated-diff trap: the merge-base every
+ * diff is measured from collapses onto the stale tip, so all of the history
+ * merged into origin since then counts as the task's own changes — the phantom
+ * 142k-line diff. `origin/<base>` is the source of truth for a review base, so
+ * only keep the local ref when it is equal to or ahead of origin (unpushed base
+ * commits); otherwise use origin.
  */
 export async function resolveBaseRef(repoRoot: string, base: string): Promise<string | null> {
-  for (const ref of [base, `origin/${base}`]) {
-    const res = await git(repoRoot, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
-    if (res.ok) return ref;
+  if (!isSafeGitRef(base)) return null;
+  const verify = (ref: string) =>
+    git(repoRoot, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]).then((r) => r.ok);
+  const [hasLocal, hasRemote] = await Promise.all([verify(base), verify(`origin/${base}`)]);
+  if (hasLocal && hasRemote) {
+    // `--is-ancestor origin/<base> <base>` succeeds iff local is equal-or-ahead.
+    const localCurrent = await git(repoRoot, ['merge-base', '--is-ancestor', `origin/${base}`, base]);
+    return localCurrent.ok ? base : `origin/${base}`;
   }
+  if (hasLocal) return base;
+  if (hasRemote) return `origin/${base}`;
   return null;
 }
 
@@ -66,8 +81,14 @@ export function worktreePathFor(repoRoot: string, runId: string): string {
 export interface WorktreeInfo {
   path: string;
   branch: string;
-  /** Branch name the worktree was forked from (commit sha when HEAD was detached). */
+  /** Branch name the worktree was forked from (commit sha when HEAD was detached).
+   *  This is the *name* — it drives PR targeting and display, and may move. */
   baseBranch: string;
+  /** Immutable commit the base branch pointed at when the worktree was created.
+   *  Later diffs anchor here so "what this task changed" can't drift as the base
+   *  branch moves or a stale local ref is picked up (the 142k-line phantom
+   *  diff). Falls back to the base ref name only when it can't be resolved. */
+  baseCommit: string;
 }
 
 /** Parse `git worktree list --porcelain` without assuming paths contain no spaces. */
@@ -91,8 +112,18 @@ async function registeredWorktrees(repoRoot: string): Promise<RegisteredWorktree
   return worktrees;
 }
 
-function worktreeInfo(path: string, branch: string, baseBranch: string): WorktreeInfo {
-  return { path, branch, baseBranch };
+function worktreeInfo(path: string, branch: string, baseBranch: string, baseCommit: string): WorktreeInfo {
+  return { path, branch, baseBranch, baseCommit };
+}
+
+/**
+ * The ref later diffs/shortstats anchor to: the pinned fork commit when the run
+ * has one, else the (possibly moving) base branch name, else HEAD. Routing every
+ * diff surface through this keeps them measuring the same stable fork point —
+ * see the `baseCommit` pinning in `createWorktree`.
+ */
+export function diffBaseRef(run: { baseCommit?: string; baseBranch?: string }): string {
+  return run.baseCommit ?? run.baseBranch ?? 'HEAD';
 }
 
 /** Git canonicalizes symlinked path prefixes (macOS `/var` → `/private/var`). */
@@ -128,6 +159,13 @@ export async function createWorktree(
   // Dash-guard (#431): `base` is spliced in as a positional git operand; an
   // option-like value would be argument injection.
   if (!isSafeGitRef(base)) throw new Error(`refusing option-like base ref: ${base}`);
+  // Pin the base to the immutable commit it points at *now*, so later diffs
+  // measure against a fixed fork point instead of a branch name that can move
+  // (or resolve to a stale local ref). `base` itself stays the name — PR
+  // targeting and the worktree fork below need it. Fall back to the name if
+  // rev-parse can't resolve it (never blocks worktree creation).
+  const pinned = await git(repoRoot, ['rev-parse', '--verify', '--quiet', `${base}^{commit}`]);
+  const baseCommit = pinned.ok && pinned.stdout.trim() ? pinned.stdout.trim() : base;
   const branch = branchFor(runId);
   const absolutePath = join(canonicalPath(repoRoot), WORKTREES_DIR, runId);
   const branchRef = `refs/heads/${branch}`;
@@ -144,7 +182,7 @@ export async function createWorktree(
         `managed worktree path is registered to ${atPath.branch ?? 'a detached HEAD'}, expected ${branchRef}`,
       );
     }
-    return worktreeInfo(atPath.path, branch, base);
+    return worktreeInfo(atPath.path, branch, base, baseCommit);
   }
 
   // If the directory survived but its administrative entry did not, let Git
@@ -160,7 +198,7 @@ export async function createWorktree(
           `managed worktree path is registered to ${atPath.branch ?? 'a detached HEAD'}, expected ${branchRef}`,
         );
       }
-      return worktreeInfo(atPath.path, branch, base);
+      return worktreeInfo(atPath.path, branch, base, baseCommit);
     }
     const entries = await readdir(absolutePath).catch(() => ['unreadable']);
     if (entries.length > 0) {
@@ -178,20 +216,20 @@ export async function createWorktree(
       if (basename(byBranch.path) !== runId) {
         throw new Error(`task branch ${branch} is already checked out at ${byBranch.path}`);
       }
-      return worktreeInfo(byBranch.path, branch, base);
+      return worktreeInfo(byBranch.path, branch, base, baseCommit);
     }
     const attach = await git(repoRoot, ['worktree', 'add', absolutePath, branch]);
     if (!attach.ok) {
       throw new Error(`git worktree reattach failed: ${attach.stderr.trim() || attach.stdout.trim()}`);
     }
-    return worktreeInfo(absolutePath, branch, base);
+    return worktreeInfo(absolutePath, branch, base, baseCommit);
   }
 
   const create = await git(repoRoot, ['worktree', 'add', '-b', branch, absolutePath, base]);
   if (!create.ok) {
     throw new Error(`git worktree add failed: ${create.stderr.trim() || create.stdout.trim()}`);
   }
-  return worktreeInfo(absolutePath, branch, base);
+  return worktreeInfo(absolutePath, branch, base, baseCommit);
 }
 
 /**
