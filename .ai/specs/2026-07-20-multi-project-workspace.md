@@ -111,7 +111,7 @@ is never served under another's scope. Everything else is closure plumbing.
 
 ### What is reused (unchanged)
 
-- `RunStore.open(dataDir)` — one store per project, exactly as today
+- `RunStore.open(dataDir, opts?)` — one store per project, exactly as today
   (`store.ts:266`). Stores stay separate event buses; they are never merged.
 - `RunManager(store, repoRoot)` — one manager (queue, workers, worktrees) per
   project (`run.ts:245-249`). Worktrees stay at
@@ -119,9 +119,12 @@ is never served under another's scope. Everything else is closure plumbing.
 - `loadConfig(repoRoot)`, skills discovery, workflow loading, `getRepoInfo`,
   forge/PR code — already per-call on `repoRoot` *except their module-level
   caches* (singleton inventory items 4–6 above), which get keyed per project.
-- The static cockpit shell (`src/server/static-ui.ts`) — package-relative, one
-  bundle for all projects; any `/p/…` SPA route cold-loads it via the existing
-  catch-all.
+- The static cockpit shell — one bundle for all projects; any `/p/…` SPA route
+  cold-loads it via the existing catch-all. `src/server/static-ui.ts` owns the
+  routing decision only (`resolveGetRequest`, passthrough for `/api/*` and
+  assets, everything else → shell); the package-relative resolution is
+  `resolveWebDir()` (`server.ts:1663`, wired at `:380`). Neither needs a
+  change — the shell is project-agnostic.
 - `src/paths.ts` — `cezarHomeDir()` / `CEZ_HOME` is the single home resolver;
   this spec only adds path helpers to it.
 
@@ -210,9 +213,15 @@ every 2s tick) switches to the workspace config, **cached in memory** and
 refreshed on `PUT /api/workspace/config` — not N per-tick file reads across N
 projects. The semaphore contract: a slot is acquired before a manager starts
 an agent process and released when the run settles (finish/fail/cancel, or
-memory-pause frees its slot); crash-recovery resumes keep the existing #347
-exception (`run.ts:385`) and may momentarily exceed the cap; variants queue as
-today.
+memory-pause frees its slot); variants queue as today. **The #347 exception
+must be carried over exactly as it is today** (`run.ts:384-386`, inside
+`pump()`): a `waiting` run does *not* hold a slot, and a message into a
+waiting run resumes it immediately even when that momentarily exceeds
+`maxParallel`. This is queue-slot accounting, not crash recovery — making a
+resumed `waiting` run acquire a workspace slot would hang the resume whenever
+the workspace-wide cap is saturated by other projects, which is the exact
+failure #347 fixed. Crash recovery (`RunManager.recover`) is a separate path
+and acquires slots normally.
 
 ## Data Model
 
@@ -248,8 +257,13 @@ it is an inconvenience, not data loss).
 
 ### `~/.cezar/ui-state.json` (new — global GUI state)
 
-The workspace twin of the existing per-repo `ui-state.json` (same
-`.passthrough()` + merge-on-write + key-cap pattern from `src/ui-state.ts`):
+The workspace twin of the existing per-repo `ui-state.json`, reusing the same
+`.passthrough()` + merge-on-write + key-cap pattern. Note that pattern is
+currently **split**: `src/ui-state.ts` is only the read path
+(`uiStatePath`/`readUiState`, degrading to `{}`), while the schema
+(`server.ts:285`), the `UI_STATE_MAX_KEYS = 200` cap (`:361`) and the
+merge-on-write (`:493`) live in the route. Factor the shared half out rather
+than copying it:
 
 ```jsonc
 {
@@ -356,8 +370,15 @@ a §2 surface dressed up as additive, so the workspace gets its own stream
 instead (below). `/api/p/default/*` is the explicit spelling of the same
 thing (see Project identity). `GET /api/health` keeps its current fields
 (still describing the boot project) and additively gains
-`projects: [{id, name, root}]` and `bootProject: <id>` so bookmarklets and
+`projects: [{id, name}]` and `bootProject: <id>` so bookmarklets and
 external tooling can enumerate the workspace without a breaking change.
+**`root` is deliberately absent from the health payload.** Health is the one
+CORS-open route, and `server.ts:462` already trims `repoRoot` to a basename
+under `CEZ_REMOTE` precisely so a cross-origin reader cannot learn the
+developer's absolute path and username (#431). Shipping `projects[].root`
+there would reintroduce that leak once per registered project; `id` + `name`
+are all enumeration needs. Absolute roots stay on `GET /api/projects`, which
+is same-origin and behind the cockpit.
 
 ### SSE streams
 
@@ -403,8 +424,10 @@ known limit: a legacy `/tasks/:id` bookmark whose run belongs to a non-boot
 project 404s on the boot project — acceptable, since all pre-multi-project
 bookmarks point at what is now the boot project. React Router stays basename-less; the prefix is an ordinary param
 route, and the API client prefixes `/api/p/<id>` from the scope context
-(single seam: `send()` in `client.ts`, plus the four known non-`send()` URL
-sites incl. both EventSources and image URLs). TanStack Query keys gain a
+(single seam: the module-private `send()` in `web/app/src/api/client.ts:131`,
+which every `request`/`requestText`/`get`/`mutate` wrapper funnels through,
+plus the four known non-`send()` URL sites incl. both EventSources and image
+URLs). TanStack Query keys gain a
 leading `projectId` segment.
 
 ### Sidebar (mockup: `sidebar.html`)
@@ -522,7 +545,14 @@ bookmarklets keep working via the redirect (boot project).
   run-record schema (untouched). `BACKWARD_COMPATIBILITY.md` gains sections for
   `~/.cezar/config.json`, `~/.cezar/ui-state.json`, `/api/projects`,
   `/api/p/*`, `/p/*` URLs, the `project` SSE field, and the migration
-  framework **before** implementation (its §6 rule).
+  framework. Per the document's preamble ("additive changes are fine … a
+  breaking change requires a documented path") and its §2 route inventory,
+  **each section lands in the same PR as the code that creates the surface**,
+  not in Phase 5 — Phase 5 only carries the prose that has no earlier home
+  (README, `.env.example`). Phase 1 therefore documents `~/.cezar/*`,
+  `/api/projects` and the health additions; Phase 2 documents `/api/p/*`, the
+  workspace SSE stream and the `project` field; Phase 3 documents `/p/*` URLs
+  and the bookmarklet redirect.
 - **Rollback.** Config moves are additive and non-destructive: downgrading
   restores exactly today's behavior because per-repo files were never removed.
   The URL change ships with permanent legacy redirects. No flag: the feature
@@ -541,8 +571,10 @@ bookmarklets keep working via the redirect (boot project).
   disjoint project sets run with distinct `CEZ_HOME` (existing, documented
   mechanism — each home carries its own registry and global config). The
   `~/.cezar/instances/` live-instance dir from #406 is never created;
-  `liveInstancesExist()` (engine.ts:381) keeps working (always empty) and its
-  removal is noted as a follow-up cleanup, not part of this spec.
+  `liveInstancesExist()` (`server-install/engine.ts:380`, module-private, called
+  at `:271`) keeps working (always empty) and its removal is noted as a
+  follow-up cleanup, not part of this spec — being unexported, that cleanup is
+  purely internal and breaks no surface.
 - **Memory footprint.** N instantiated managers hold N recovered run indexes;
   mitigated by lazy contexts and the existing `MAX_RUNS_KEPT` caps. Usage
   sampler remains one timer.
@@ -632,8 +664,9 @@ Each phase ships independently and leaves the app fully working.
     frees the slot, #347 resume exception preserved); memory guard + cap read
     the **cached** workspace config (refreshed on PUT), not per-tick file
     reads; per-repo legacy keys ignored post-migration. *Test:* two projects,
-    cap 2 → third run queues; recovered run may exceed cap; config PUT takes
-    effect without restart.
+    cap 2 → third run queues; a message into a `waiting` run resumes it even at
+    cap (#347 exemption, asserted across projects); config PUT takes effect
+    without restart.
 2.6 Per-project cache keying: GitHub list cache, GitHub comments cache
     (`forge/github.ts:194`, `:420`), team-skills cache
     (`skills-remote.ts:403`) keyed by project. *Test:* regression per cache —
@@ -688,8 +721,7 @@ Each phase ships independently and leaves the app fully working.
 
 ### Phase 5 — Docs + alignment
 
-5.1 `BACKWARD_COMPATIBILITY.md` sections (before code merges that touch them),
-    `AGENTS.md` routing rows (`src/workspace/`, project-scoped routes),
+5.1 `AGENTS.md` routing rows (`src/workspace/`, project-scoped routes),
     README multi-project section, `.env.example` prose (`CEZ_HOME`, hosted
     exposure note).
 5.2 `cezar projects` CLI + server-install docs note (one unit serves the
