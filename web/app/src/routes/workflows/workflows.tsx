@@ -25,15 +25,17 @@ import {
   Trash2Icon,
   TriangleAlertIcon,
   UploadIcon,
+  WandSparklesIcon,
   XIcon,
 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router'
 
-import { ApiError, createWorkflow, deleteWorkflow, parseWorkflow } from '@/api/client'
-import { queryKeys, useSkills, useWorkflows } from '@/api/queries'
+import { ApiError, createWorkflow, deleteWorkflow, parseWorkflow, postPlan } from '@/api/client'
+import { queryKeys, useSkills, useUiState, useWorkflows } from '@/api/queries'
 import type { Skill, WorkflowDef, WorkflowStepDef } from '@/api/types'
 import { CenteredState } from '@/components/centered-state'
+import { SkillEmptyHintCompact } from '@/components/skill-empty-hint'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -48,10 +50,11 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { toast } from '@/components/ui/toaster'
-import { isProjectSkill, orderSkills } from '@/lib/skills'
+import { isProjectSkill, orderSkillsByUsage } from '@/lib/skills'
 import { cn } from '@/lib/utils'
 import {
   WB_MAX_STEPS,
+  draftFromPlan,
   insertStep,
   moveStep,
   removeStep,
@@ -120,6 +123,7 @@ export function WorkflowsRoute() {
 function WorkflowsBuilder({ routeName }: { routeName: string | undefined }) {
   const workflowsQuery = useWorkflows()
   const skillsQuery = useSkills()
+  const uiStateQuery = useUiState()
   const queryClient = useQueryClient()
 
   const [draft, setDraft] = useState<Draft | null>(null)
@@ -127,6 +131,8 @@ function WorkflowsBuilder({ routeName }: { routeName: string | undefined }) {
   const [importOpen, setImportOpen] = useState(false)
   const [importText, setImportText] = useState('')
   const [importError, setImportError] = useState('')
+  const [autoOpen, setAutoOpen] = useState(false)
+  const [autoText, setAutoText] = useState('')
   const [confirmOverwrite, setConfirmOverwrite] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [dragging, setDragging] = useState<DragItem | null>(null)
@@ -137,6 +143,9 @@ function WorkflowsBuilder({ routeName }: { routeName: string | undefined }) {
 
   const workflows = workflowsQuery.data?.workflows ?? []
   const skills = skillsQuery.data ?? []
+  // The palette lists skills the way every other picker does (#408/#414): project skills first,
+  // then most-used within each locality — so what you reach for floats to the top.
+  const paletteSkills = orderSkillsByUsage(skills, uiStateQuery.data?.skillUsage)
 
   // First visit seeds the canvas with the deep-linked workflow when the URL names one, else
   // the repo's first saved workflow — "open the tab, see your flow" (legacy rule). No files
@@ -163,6 +172,30 @@ function WorkflowsBuilder({ routeName }: { routeName: string | undefined }) {
       toast(`Imported "${parsed.name}" — review, then Save.`)
     },
     onError: (error) => setImportError(error.message),
+  })
+
+  // Auto chain creator (#414): the planner turns a plain-language brief into a proposed chain
+  // (title + steps) and drops it straight onto the canvas to review, tweak and Save. It never
+  // hard-fails — a degraded answer comes back as a one-step plan with `fallback: true`, which we
+  // surface as a dim note instead of an error.
+  const autoPlan = useMutation({
+    mutationFn: (task: string) => postPlan(task),
+    onSuccess: (plan) => {
+      setDraft((current) => {
+        const base = current ?? emptyDraft()
+        const { name, steps } = draftFromPlan(plan, base.name)
+        return { ...base, name, steps }
+      })
+      setAutoOpen(false)
+      setAutoText('')
+      toast(
+        plan.fallback
+          ? 'Planner unavailable — added a single step. Edit, then Save.'
+          : `Built "${plan.name ?? draft?.name ?? 'workflow'}" — review, tweak, then Save.`,
+        plan.fallback ? { tone: 'danger' } : undefined,
+      )
+    },
+    onError: (error) => toast(error instanceof Error ? error.message : String(error), { tone: 'danger' }),
   })
 
   const save = useMutation({
@@ -266,6 +299,12 @@ function WorkflowsBuilder({ routeName }: { routeName: string | undefined }) {
     importMutation.mutate(text)
   }
 
+  const runAuto = () => {
+    const text = autoText.trim()
+    if (text === '' || autoPlan.isPending) return
+    autoPlan.mutate(text)
+  }
+
   const runSave = () => {
     if (trimmedName === '') {
       nameInput.current?.focus()
@@ -347,9 +386,25 @@ function WorkflowsBuilder({ routeName }: { routeName: string | undefined }) {
                   type="button"
                   variant="ghost"
                   size="sm"
+                  data-slot="wb-auto"
+                  aria-expanded={autoOpen}
+                  title="Describe a chain — the agent builds it"
+                  onClick={() => {
+                    setImportOpen(false)
+                    setAutoOpen((open) => !open)
+                  }}
+                >
+                  <WandSparklesIcon aria-hidden="true" className="size-3" />
+                  Auto
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
                   data-slot="wb-import"
                   onClick={() => {
                     setImportError('')
+                    setAutoOpen(false)
                     setImportOpen((open) => !open)
                   }}
                 >
@@ -413,6 +468,59 @@ function WorkflowsBuilder({ routeName }: { routeName: string | undefined }) {
                 + new
               </button>
             </div>
+
+            {autoOpen ? (
+              <div data-slot="wb-auto-panel" className="mt-4 rounded-lg border border-border bg-card p-3 shadow-xs">
+                <div className="text-[11px] font-medium tracking-wide text-soft-foreground uppercase">
+                  Build a chain from a prompt
+                </div>
+                <p className="mt-1 text-xs leading-relaxed text-soft-foreground">
+                  Describe what the chain should do. An agent proposes a title and an ordered set of
+                  skill / check steps — land it on the canvas, then tweak and Save.
+                </p>
+                <Textarea
+                  data-slot="wb-auto-text"
+                  aria-label="Describe the chain to build"
+                  rows={3}
+                  autoFocus
+                  placeholder="e.g. Fix the bug, run the tests, then review the diff for regressions."
+                  value={autoText}
+                  onChange={(event) => setAutoText(event.target.value)}
+                  onKeyDown={(event) => {
+                    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+                      event.preventDefault()
+                      runAuto()
+                    }
+                  }}
+                  className="mt-2 min-h-20 text-[13px]"
+                />
+                <div className="mt-3 flex items-center gap-1.5">
+                  <Button
+                    type="button"
+                    variant="contrast"
+                    size="sm"
+                    data-slot="wb-auto-run"
+                    disabled={autoPlan.isPending || autoText.trim() === ''}
+                    onClick={runAuto}
+                  >
+                    <WandSparklesIcon aria-hidden="true" className="size-3" />
+                    {autoPlan.isPending ? 'Building…' : 'Build chain'}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    data-slot="wb-auto-cancel"
+                    onClick={() => {
+                      setAutoOpen(false)
+                      setAutoText('')
+                    }}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            ) : null}
 
             {importOpen ? (
               <div data-slot="wb-import-panel" className="mt-4 rounded-lg border border-border bg-card p-3 shadow-xs">
@@ -487,7 +595,7 @@ function WorkflowsBuilder({ routeName }: { routeName: string | undefined }) {
               className="mt-2.5 h-8 text-[13px]"
             />
             <Palette
-              skills={skills}
+              skills={paletteSkills}
               query={query}
               error={skillsQuery.isError ? skillsQuery.error.message : null}
               inFlow={new Set(steps.map((s) => s.skill).filter((s): s is string => Boolean(s)))}
@@ -819,8 +927,9 @@ function Palette({
     )
   }
   const needle = query.trim().toLowerCase()
-  // Project skills first (the #377 ordering rule) — same as every other skill list.
-  const shown = orderSkills(skills).filter(
+  // `skills` arrives already ordered (project-first, then recency — #408/#414); the filter
+  // preserves that order, it never re-sorts.
+  const shown = skills.filter(
     (skill) =>
       needle === '' ||
       skill.name.toLowerCase().includes(needle) ||
@@ -834,14 +943,7 @@ function Palette({
         ))
       ) : (
         <p className="py-1 text-xs leading-relaxed text-soft-foreground">
-          {skills.length > 0 ? (
-            'No skills match.'
-          ) : (
-            <>
-              No skills yet — drop Markdown files into <span className="font-mono">.ai/skills/</span> or{' '}
-              <span className="font-mono">.ai/cezar/skills/</span>.
-            </>
-          )}
+          {skills.length > 0 ? 'No skills match.' : <SkillEmptyHintCompact />}
         </p>
       )}
     </div>

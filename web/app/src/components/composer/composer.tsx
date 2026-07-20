@@ -532,7 +532,9 @@ export function Composer({
           <CommandList
             data-slot="composer-menu"
             data-trigger={trigger?.trigger}
-            className="max-h-64 p-1"
+            // Clamped to the popper's reported space so the open keyboard (collisionPadding
+            // via the shared PopoverContent) shrinks the menu instead of hiding its tail.
+            className="max-h-[min(16rem,var(--radix-popover-content-available-height))] p-1"
           >
             {candidates.length === 0 ? (
               <p className="px-3 py-4 text-center text-xs text-muted-foreground">

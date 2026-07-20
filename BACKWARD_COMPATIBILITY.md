@@ -1,6 +1,6 @@
 # Backward compatibility — protected surfaces
 
-cezar is a published npm CLI (`@pat-lewczuk/cezar`, currently 0.x) whose state lives as plain files inside users' repos. Users upgrade with `npx cezar@latest` against `.ai/cezar/` directories written by older versions, and they script the CLI and hand-edit the files — the README promises "plain JSON, NDJSON and Markdown you can `cat` and fix by hand." That promise is the compatibility contract.
+cezar is a published npm CLI (`@open-mercato/cezar`, currently 0.x — renamed from the now-deprecated `@pat-lewczuk/cezar` when the package moved to the open-mercato org; the unscoped `npx cezar-cli` alias is unchanged) whose state lives as plain files inside users' repos. Users upgrade with `npx cezar@latest` against `.ai/cezar/` directories written by older versions, and they script the CLI and hand-edit the files — the README promises "plain JSON, NDJSON and Markdown you can `cat` and fix by hand." That promise is the compatibility contract.
 
 **General rule for every surface below:** additive changes (new optional field, new flag, new route) are fine; anything that makes an existing input rejected, an existing output disappear, or an existing file unreadable is breaking. While the package is 0.x, a breaking change requires: a deprecation note in the README + CHANGELOG, a migration path (code that reads the old shape, or a documented manual fix), and a **minor** version bump called out as breaking. From 1.0 on, breaking = major bump.
 
@@ -20,6 +20,7 @@ Consumed by the bundled React cockpit (`web/dist`, shipped in lockstep — low r
 
 - Static/GUI: `GET /` and every SPA shell route, `/new` (bookmarklet deep-link, query `?skill=&ref=&auto=&key=`), `/assets/:file`, `/open-mercato.svg`
 - Meta: `GET /api/health` (the **only** CORS-open route — bookmarklets probe it cross-origin; its shape `{version, latestVersion, repoRoot, repo, checks, defaultRunner}` is the most externally-depended-on JSON in the app), `GET /api/launch-key`
+  - `repoRoot` is the absolute checkout path in local mode (the shape the saved bookmarklets read) but only the checkout's **basename** in hosted mode (`CEZ_REMOTE`), where health is CORS-open off the loopback and the absolute path would leak the developer's username (#431). Always present, always a string — but a hosted consumer must not treat it as a filesystem path.
 - Skills: `GET /api/skills`, `POST /api/skills/refresh`
 - Workflows: `GET/POST /api/workflows`, `DELETE /api/workflows/:name`, `POST /api/workflows/parse`, `POST /api/plan`
 - Runs: `GET/POST /api/runs`, `GET /api/runs/:id`, `PATCH /api/runs/:id`, `POST /api/runs/:id/{cancel,messages,finish,continue,open-in-cli,open-in,pr,archive,remove-worktree,git/commit,git/push}`, `POST /api/runs/archive-finished`, `DELETE /api/runs/:id`, `GET /api/runs/:id/{handoff,diff,changes,files,commits,events}`, `GET /api/runs/:id/commit/:sha`, `GET /api/runs/:id/images/:file`
@@ -60,7 +61,7 @@ Breaking: requiring frontmatter, dropping a discovery directory, or inverting pr
 
 ## 6. npm package surface (`package.json`)
 
-- Name `@pat-lewczuk/cezar` (plus the `cezar-cli` npx alias documented in the README); `bin` entries `cezar` + `cez`; published `files`: `dist`, `web/dist`, `web/open-mercato.svg`, `scripts`, `README.md`; `engines.node >= 20`; `"type": "module"`.
+- Name `@open-mercato/cezar` (plus the `cezar-cli` npx alias documented in the README); `bin` entries `cezar` + `cez`; published `files`: `dist`, `web/dist`, `web/open-mercato.svg`, `scripts`, `README.md`; `engines.node >= 20`; `"type": "module"`.
 - There is **no** `exports`/library API — the package is CLI-only. Keep it that way deliberately: adding one creates a new compatibility surface; if it happens, this document gains a section first.
 - `dist/index.js` must remain the bin entry, and `web/` must stay resolvable relative to `dist/server` (`resolveWebDir` walks `../../web`; the built cockpit lives at `web/dist`).
 - The tarball MUST contain the built UI (`web/dist/index.html` + hashed `web/dist/assets/*`) — `npm run check:pack` (`scripts/check-pack.mjs`, run as the last leg of `npm run build`, hence by `prepublishOnly`) enforces this; do not remove it from the build chain.
@@ -77,6 +78,20 @@ The normalized streams every runner emits — persisted to `runs/<id>.ndjson` an
 - **Cross-refs** — the SSE event names carrying these (`run-event` v1, `ui-event` v2) are in section 2; the `runs/<id>.ndjson` append-only format is in section 3. The web bundle's mirror (`web/app/src/protocol/ui-events.ts`) is held type-exact by `src/server/api-types.test.ts`.
 
 Breaking: removing or renaming a v1 `AgentEvent` type or a v2 `UiEvent` `type`/`UiItem` kind; removing a field consumers read; narrowing an enum so a previously emitted value disappears; or dropping a parity capability from a backend. Additive is fine (new optional field, new event type — protocol v2 event types are additive by design; a new `ToolKind`/`StopReason` member is additive). Required path: read old + new shapes for at least one minor release (old NDJSON must still replay), and follow the parity requirement when adding a backend — a new runner is not compatible until it emits every matrix capability (`AGENT_PROTOCOL.md` §9). See also `AGENT_PROTOCOL.md` for the full schema, per-backend mapping, and new-runner checklist.
+
+## 8. In-band agent marker vocabulary (`src/handoff.ts`, `src/runs/task-markers.ts`)
+
+The plain-text markers the handoff contract asks every agent to emit and the engine parses from
+turn text: `CEZ:DONE` (#347), `CEZ:MONITORING` (#490), and the task-reference markers
+`CEZ:PR=<n>` / `CEZ:ISSUE=<n>` / `CEZ:TITLE=<phrase>` (spec 2026-07-18-task-ref-markers). These
+are an agent-facing contract: skills, prompts, and running agents rely on an emitted marker
+meaning what it meant when their session started.
+
+Breaking: removing or renaming a marker, or changing what an emitted marker does (e.g. making
+`CEZ:PR` gate an action instead of steering display). Additive is fine — a new `CEZ:*` marker is
+inert prose to older cezars, which is the property that keeps the vocabulary forward-compatible.
+Required path for a change: keep parsing the old spelling for at least one minor release while
+the instructions emit the new one.
 
 ## Cockpit UI redesign waiver (spec `.ai/specs/2026-07-14-cockpit-ui-redesign.md`) — EXPIRED at R7
 

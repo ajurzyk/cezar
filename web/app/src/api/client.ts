@@ -16,6 +16,7 @@ import type {
   FinishResponse,
   GitCommitResponse,
   GitPushResponse,
+  GithubCommentsData,
   GithubData,
   GroupResponse,
   HealthResponse,
@@ -260,6 +261,16 @@ export function getGithub(
   return get<GithubData>(`/api/github${search ? `?${search}` : ''}`, opts)
 }
 
+/** The full comment thread for one issue/PR (#499). Degrades to `{ available: false, reason }`
+ *  server-side — an unreachable thread is a one-line hint in the detail view, not an ApiError. */
+export function getGithubComments(
+  kind: 'issue' | 'pr',
+  number: number,
+  opts?: ReadOptions,
+): Promise<GithubCommentsData> {
+  return get<GithubCommentsData>(`/api/github/comments/${kind}/${number}`, opts)
+}
+
 /** The run's worktree diff against its base, as unified-diff text. Also the plain-text
  *  "(no worktree — …)" sentence for runs that executed in the repo working tree. */
 export function getRunDiff(id: string, opts?: ReadOptions): Promise<string> {
@@ -385,6 +396,13 @@ export function getOpenTargets(opts?: ReadOptions): Promise<OpenTargetsResponse>
 /** Open the run's worktree in the chosen local app. 409 with `path` when it could not launch. */
 export function openRunIn(id: string, target: string): Promise<{ opened: boolean; path: string }> {
   return mutate<{ opened: boolean; path: string }>('POST', runPath(id, '/open-in'), { target })
+}
+
+/** Diff pane "open in default app" (#365, LOCAL MODE ONLY): opens one worktree file with the
+ *  OS's default handler for its type — not the file manager, a specific file. 409 (server's own
+ *  words) in hosted mode, for a path outside the worktree, or when no app could be launched. */
+export function openRunFileInApp(id: string, path: string): Promise<{ opened: boolean; path: string }> {
+  return mutate<{ opened: boolean; path: string }>('POST', runPath(id, '/open-in'), { target: 'default', path })
 }
 
 /** `git add -A && git commit` in the run's worktree (R5). Every predictable git failure —

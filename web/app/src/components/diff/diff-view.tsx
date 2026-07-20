@@ -6,6 +6,8 @@ import { DiffStatLabel } from '@/components/diff-stat'
 import { highlight, highlightSync, langForPath, type SynToken } from '@/lib/highlighter'
 import { cn } from '@/lib/utils'
 
+import { ImagePreview, shouldPreviewImage } from './image-preview'
+
 import {
   buildSplitRows,
   buildUnifiedRows,
@@ -37,7 +39,15 @@ import { overlaySegments } from './word-diff'
 /** Past this many patch lines a file skips syntax highlighting — plaintext beats jank. */
 const HIGHLIGHT_MAX_LINES = 1500
 
-export function DiffView({ files, mode = 'unified', wrap = false, loadFileText, className }: DiffProps) {
+export function DiffView({
+  files,
+  mode = 'unified',
+  wrap = false,
+  loadFileText,
+  imageSrc,
+  onOpenInApp,
+  className,
+}: DiffProps) {
   const stat: DiffStat = useMemo(
     () => ({
       adds: files.reduce((sum, file) => sum + file.adds, 0),
@@ -61,6 +71,8 @@ export function DiffView({ files, mode = 'unified', wrap = false, loadFileText, 
           mode={mode}
           wrap={wrap}
           loadFileText={loadFileText}
+          imageSrc={imageSrc}
+          onOpenInApp={onOpenInApp}
         />
       ))}
     </div>
@@ -80,11 +92,15 @@ function DiffFileCard({
   mode,
   wrap,
   loadFileText,
+  imageSrc,
+  onOpenInApp,
 }: {
   file: DiffFileChange
   mode: 'unified' | 'split'
   wrap: boolean
   loadFileText?: (path: string) => Promise<string | null>
+  imageSrc?: (path: string) => string
+  onOpenInApp?: (path: string) => void
 }) {
   const [open, setOpen] = useState(true)
   const badge = STATUS_BADGE[file.status]
@@ -125,7 +141,11 @@ function DiffFileCard({
               {badge}
             </span>
           ) : null}
-          {file.binary ? (
+          {file.image ? (
+            <span className="shrink-0 rounded-sm bg-muted px-1.5 py-px text-[10px] font-medium text-muted-foreground">
+              image
+            </span>
+          ) : file.binary ? (
             <span className="shrink-0 rounded-sm bg-muted px-1.5 py-px text-[10px] font-medium text-muted-foreground">
               binary
             </span>
@@ -135,7 +155,16 @@ function DiffFileCard({
           </span>
         </button>
       </header>
-      {open ? <DiffFileBody file={file} mode={mode} wrap={wrap} loadFileText={loadFileText} /> : null}
+      {open ? (
+        <DiffFileBody
+          file={file}
+          mode={mode}
+          wrap={wrap}
+          loadFileText={loadFileText}
+          imageSrc={imageSrc}
+          onOpenInApp={onOpenInApp}
+        />
+      ) : null}
     </section>
   )
 }
@@ -145,11 +174,15 @@ function DiffFileBody({
   mode,
   wrap,
   loadFileText,
+  imageSrc,
+  onOpenInApp,
 }: {
   file: DiffFileChange
   mode: 'unified' | 'split'
   wrap: boolean
   loadFileText?: (path: string) => Promise<string | null>
+  imageSrc?: (path: string) => string
+  onOpenInApp?: (path: string) => void
 }) {
   const parsed = useMemo(() => parsePatch(file.patch), [file.patch])
   // The trailing (after-last-hunk) region has an unknown length — only offer it when a
@@ -191,6 +224,11 @@ function DiffFileBody({
     [mode, parsed.hunks, gaps, expanded],
   )
 
+  // Only images with no text diff to lose take the preview branch — see `shouldPreviewImage`.
+  // An SVG git reports as text keeps its rows below, exactly as `DiffFallback` renders it.
+  if (shouldPreviewImage(file)) {
+    return <ImagePreview file={file} imageSrc={imageSrc} onOpenInApp={onOpenInApp} />
+  }
   if (file.binary) {
     return <Note>Binary file — no text diff.</Note>
   }

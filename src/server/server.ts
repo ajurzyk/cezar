@@ -4,6 +4,7 @@ import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Hono, type Context } from 'hono';
 import { serve, type ServerType } from '@hono/node-server';
+import { bodyLimit } from 'hono/body-limit';
 import { streamSSE } from 'hono/streaming';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
@@ -25,7 +26,7 @@ import { planChain, slugify } from '../planner.js';
 import { discoverSkills } from '../skills.js';
 import { refreshTeamSkills } from '../skills-remote.js';
 import { appendHandoffHeartbeat, handoffProgressExcerpt, readHandoff } from '../handoff.js';
-import { markStarted, onTodosChanged, readTodos, removeTodo, startTodosWatch, type TodoItem } from '../todos.js';
+import { markStarted, onTodosChanged, readTodos, removeTodo, startTodosWatch, todoTaskText, type TodoItem } from '../todos.js';
 import type { RunEvent, RunRecord, RunStatus, RunStore } from '../runs/store.js';
 import { isV2WireEventType } from '../runs/ui-event-sink.js';
 import type { RunManager } from '../workflows/run.js';
@@ -39,6 +40,7 @@ import {
   commitAll,
   createOrSwitchBranch,
   imageMimeType,
+  isOsOpenableImage,
   pushCurrentBranch,
   readWorktreePath,
 } from './git-changes.js';
@@ -47,10 +49,10 @@ import { reviewGateEnabled } from '../runs/review-gate.js';
 import { readUiState, uiStatePath } from '../ui-state.js';
 import { resolveCapabilities } from './capabilities.js';
 import { resolveForge } from './forge/index.js';
-import { fetchGithub } from './github.js';
+import { fetchGithub, fetchGithubComments } from './github.js';
 import { ensureLaunchKey } from './launch-key.js';
 import { openInTerminal } from './open-in-terminal.js';
-import { agentCliRunner, detectOpenTargets, openInApp } from './open-in-app.js';
+import { agentCliRunner, detectOpenTargets, openFileInDefaultApp, openInApp } from './open-in-app.js';
 import { createDraftPr } from './pr.js';
 import { ASSET_CACHE_CONTROL, BUILD_HINT_HTML, assetContentType, isSafeAssetFilename, resolveGetRequest } from './static-ui.js';
 
@@ -118,7 +120,11 @@ const startRunSchema = z
   .object({
     workflow: z.string().min(1).optional(),
     steps: z.array(workflowStepSchema).min(1).max(8).optional(),
-    task: z.string().min(1),
+    // The primary agent prompt handed to the spawned runner. Bounded like the
+    // other prompt fields (`systemPrompt` 20k, message `text` 100k) so an
+    // unbounded body can't be piped into a spawned process (#429). 100k chars
+    // (~25k tokens) is well past any hand-written task.
+    task: z.string().min(1).max(100_000, 'task must be at most 100000 characters'),
     model: z.string().optional(),
     // Agent backend for this task (falls back to config `defaultRunner`).
     runner: z.enum(['claude', 'codex', 'opencode']).optional(),
@@ -158,6 +164,12 @@ const startRunSchema = z
       )
       .max(4)
       .optional(),
+    // Inbox follow-up (#374): the todo the composer was prefilled from
+    // (`/new?skill=&ref=&todo=t1`). On a successful start the entry is marked
+    // started — the same bookkeeping POST /api/todos/:id/start does, so the
+    // audit trail survives the composer detour. Bounded like every other
+    // string here; a todo id is a short generated key.
+    todoId: z.string().min(1).max(200, 'todoId must be at most 200 characters').optional(),
   })
   .refine((b) => Boolean(b.workflow) !== Boolean(b.steps), {
     message: 'provide either "workflow" or "steps", not both',
@@ -168,7 +180,8 @@ const pickSchema = z.object({
 });
 
 const planSchema = z.object({
-  task: z.string().trim().min(1),
+  // Same bound as `startRunSchema.task` — this flows into `planChain` (#429).
+  task: z.string().trim().min(1).max(100_000, 'task must be at most 100000 characters'),
 });
 
 // A saved workflow carries full `steps` OR the builder's `skills` stack
@@ -177,7 +190,9 @@ const planSchema = z.object({
 const saveWorkflowSchema = z
   .object({
     name: z.string().trim().min(1).max(80),
-    description: z.string().optional(),
+    // Written into a YAML file on disk (#429) — a workflow description is a
+    // short blurb, so a 2k cap is generous without allowing a file-bloat write.
+    description: z.string().max(2_000, 'description must be at most 2000 characters').optional(),
     steps: z.array(workflowStepSchema).min(1).max(8).optional(),
     skills: z.array(z.string().trim().min(1)).min(1).max(8).optional(),
     overwrite: z.boolean().optional(),
@@ -194,6 +209,11 @@ const parseWorkflowSchema = z.object({
 // DB): today just the last-used task source, so the form preselects what you
 // actually run. Unknown keys pass through — future prefs won't need a schema
 // dance.
+
+/** Entry cap on the `skillUsage` map (#408). A real skill catalog is dozens of entries; this
+ *  bounds the ui-state.json write without ever rejecting a legitimate one. */
+const SKILL_USAGE_MAX_ENTRIES = 200;
+
 const uiStateSchema = z
   .object({
     lastTask: z
@@ -208,6 +228,24 @@ const uiStateSchema = z
     lastWorktree: z.boolean().optional(),
     lastAutonomous: z.boolean().optional(),
     lastGenerateFollowups: z.boolean().optional(),
+    // Skill selection frequency (#408): name → times chosen, incremented on a successful run
+    // start from EITHER composer (`/new`'s SourcePill and the follow-up `SkillsPicker`). Drives
+    // the shared `orderSkillsByUsage` sort (web/app/src/lib/skills.ts) so both pickers float the
+    // skills a user actually reaches for above the rest, within the existing project-first
+    // grouping. ADDITIVE, like the rest of ui-state — the client always PUTs the whole map
+    // because the top-level merge below is shallow.
+    //
+    // Bounded on all three axes (key length, value, entry count) like every neighbour here: this
+    // map is written straight to `ui-state.json`, which the cockpit GETs on every load and this
+    // route re-reads on every PUT, so an unbounded map is an unbounded file write. Keys are skill
+    // names (`.min(1).max(200)`, matching `lastTask.ref`); SKILL_USAGE_MAX_ENTRIES sits far above
+    // any real catalog while capping the file at a few tens of KB.
+    skillUsage: z
+      .record(z.string().min(1).max(200), z.number().int().min(0).max(1_000_000))
+      .refine((usage) => Object.keys(usage).length <= SKILL_USAGE_MAX_ENTRIES, {
+        message: `skillUsage must have at most ${SKILL_USAGE_MAX_ENTRIES} entries`,
+      })
+      .optional(),
     // Runs area presentation (#348): the sidebar-list + detail pane, or the
     // full-width table ("task manager") view.
     runsView: z.enum(['list', 'table']).optional(),
@@ -271,6 +309,16 @@ const gitCommitSchema = z.object({
   message: z.string().trim().min(1, 'commit message must not be empty').max(5_000),
 });
 
+// "Open in…" (#open-in / #365): `target` selects the app; `path` (optional, worktree-relative)
+// narrows the target's own worktree/repo-root default to one file — used by the diff pane's
+// "open in default app" action for images. Containment is re-checked server-side via
+// `readWorktreePath`; this schema only shapes the request.
+const openInSchema = z.object({
+  // A short bound (#429): matched against a downstream allowlist, so an editor id is never long.
+  target: z.string().trim().min(1, 'target required').max(200),
+  path: z.string().max(1_000).optional(),
+});
+
 const messageSchema = z
   .object({
     text: z.string().max(100_000).default(''),
@@ -289,6 +337,29 @@ const messageSchema = z
     message: 'message needs text or at least one image',
   });
 
+// Resume-turn text for `POST /api/runs/:id/continue` (#429). Bounded like the
+// live-session message `text`; optional — an empty body re-runs the last turn.
+const continueSchema = z.object({
+  text: z.string().max(100_000, 'text must be at most 100000 characters').optional(),
+});
+
+// `POST /api/runs/:id/archive` (#429) — no body archives; `{archived:false}`
+// un-archives. A tiny schema so the route follows the safeParse convention.
+const archiveSchema = z.object({
+  archived: z.boolean().optional(),
+});
+
+// Request-body size guards (#429). A generous global cap keeps a single
+// localhost request from being unbounded (the largest legit body is 4 pasted
+// images at ~7 MB base64 each); the ui-state PUT gets a much tighter cap since
+// it only ever carries small GUI prefs.
+const GLOBAL_BODY_LIMIT = 32 * 1024 * 1024; // 32 MiB
+const UI_STATE_BODY_LIMIT = 128 * 1024; // 128 KiB
+// Belt-and-braces cap on the number of top-level ui-state keys so the
+// `.passthrough()` schema can't accumulate an unbounded key set (#429). Very
+// generous for GUI prefs; over-limit is a 400, never a silent strip.
+const UI_STATE_MAX_KEYS = 200;
+
 export function createApp(deps: ServerDeps): Hono {
   const { repoRoot, store, manager, version, update, bindHost } = deps;
   const dataDir = join(repoRoot, '.ai/cezar');
@@ -300,6 +371,10 @@ export function createApp(deps: ServerDeps): Hono {
   if (capabilities().followups) startTodosWatch(dataDir);
   const launchKey = ensureLaunchKey(dataDir); // bookmarklet auto-start secret (spec 011)
   const app = new Hono();
+
+  // Reject oversized request bodies before they reach any handler (#429). GETs
+  // and SSE carry no body, so this only ever gates the mutating routes.
+  app.use('*', bodyLimit({ maxSize: GLOBAL_BODY_LIMIT }));
 
   // ---- static GUI ----------------------------------------------------------
   const webDir = resolveWebDir();
@@ -372,17 +447,26 @@ export function createApp(deps: ServerDeps): Hono {
     // Additive fields only below — the pre-forge shape is the most
     // externally-depended-on JSON in the app (BACKWARD_COMPATIBILITY.md §2).
     const forge = resolveForge(repo);
+    const caps = capabilities();
     return c.json({
       version,
       latestVersion: update?.latest,
-      repoRoot,
+      // Health is CORS-open and, in hosted mode, reachable off the loopback —
+      // so any site/host that reads it would learn the developer's absolute
+      // checkout path and username (#431). Local mode keeps the full path (the
+      // protected bookmarklet shape); hosted/remote mode trims it to a basename.
+      // NB this narrows the VALUE of a field named in BACKWARD_COMPATIBILITY.md
+      // §2: the field is always present and a string, but under CEZ_REMOTE it is
+      // no longer an absolute path. Deliberate — a hosted cockpit's paths are on
+      // a machine the reader does not have anyway. See §2's `repoRoot` note.
+      repoRoot: caps.localHandoff ? repoRoot : basename(repoRoot),
       repo,
       checks,
       defaultRunner: config.defaultRunner,
       // Non-blocking: cached availability or null-until-warm — health must never pay a `gh`
       // shell-out (the bookmarklet aborts its port probe at 800 ms). See detectGithubCached.
       forge: forge ? { kind: forge.kind, ...(forge.detectCached() ?? {}) } : null,
-      capabilities: capabilities(),
+      capabilities: caps,
     });
   });
 
@@ -396,10 +480,15 @@ export function createApp(deps: ServerDeps): Hono {
   // The read path is shared with the CLI (`src/ui-state.ts`) so `cezar serve` can honour a
   // preference set here — #391's dismissed skills banner — from one notion of the file.
   app.get('/api/ui-state', async (c) => c.json(await readUiState(repoRoot)));
-  app.put('/api/ui-state', async (c) => {
+  app.put('/api/ui-state', bodyLimit({ maxSize: UI_STATE_BODY_LIMIT }), async (c) => {
     const parsed = uiStateSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
       return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
+    }
+    // `.passthrough()` keeps unknown prefs (BACKWARD_COMPATIBILITY §3), but a
+    // single request may not stuff an unbounded key set (#429).
+    if (Object.keys(parsed.data).length > UI_STATE_MAX_KEYS) {
+      return c.json({ error: `ui-state has too many keys (max ${UI_STATE_MAX_KEYS})` }, 400);
     }
     const merged = { ...(await readUiState(repoRoot)), ...parsed.data };
     try {
@@ -529,6 +618,26 @@ export function createApp(deps: ServerDeps): Hono {
     return usage ? { ...run, usage } : run;
   };
 
+  // The inbox half of a composer launch (#374). Since the cockpit's "▶ Run"
+  // prefills `/new` instead of calling POST /api/todos/:id/start (never launch
+  // blind — #355), the todo id rides along on the composer's POST /api/runs and
+  // lands here: `markStarted` writes `startedTaskId`, so the entry leaves the
+  // inbox (`visibleTodos()`) and stays in todos.json as the audit trail, and a
+  // second launch of the same entry no longer double-starts it.
+  //
+  // Deliberately best-effort: bookkeeping must never cost the user their task,
+  // so an unknown, stale or already-started id (markStarted → false) and any I/O
+  // failure only log. The run has already been created by the time we get here.
+  const noteTodoStarted = async (todoId: string, taskId: string): Promise<void> => {
+    try {
+      if (!(await markStarted(dataDir, todoId, taskId))) {
+        console.warn(`[cezar] inbox entry ${todoId} not marked started (unknown or already started)`);
+      }
+    } catch (err) {
+      console.warn(`[cezar] could not mark inbox entry ${todoId} started: ${String(err)}`);
+    }
+  };
+
   app.get('/api/runs', (c) => c.json(store.listRuns().map(withUsage)));
 
   // Registered before the `/:id/...` routes so "archive-finished" never
@@ -537,8 +646,13 @@ export function createApp(deps: ServerDeps): Hono {
 
   app.post('/api/runs/:id/archive', async (c) => {
     const id = c.req.param('id');
-    const body = (await c.req.json().catch(() => ({}))) as { archived?: unknown };
-    const run = store.setArchived(id, body.archived !== false);
+    // An empty/absent body archives (the common case); a malformed body degrades
+    // to `{}` just as before, but a wrong-typed `archived` is now a 400 (#429).
+    const parsed = archiveSchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) {
+      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
+    }
+    const run = store.setArchived(id, parsed.data.archived !== false);
     return run ? c.json(run) : c.json({ error: 'not found' }, 404);
   });
 
@@ -591,9 +705,14 @@ export function createApp(deps: ServerDeps): Hono {
           400,
         );
       }
-      return c.json({ runs: manager.startVariants(workflow, input, variants) }, 201);
+      const runs = manager.startVariants(workflow, input, variants);
+      // The entry points at the first variant — the thread the composer navigates to.
+      const first = runs[0];
+      if (parsed.data.todoId && first) await noteTodoStarted(parsed.data.todoId, first.id);
+      return c.json({ runs }, 201);
     }
     const run = manager.startRun(workflow, input);
+    if (parsed.data.todoId) await noteTodoStarted(parsed.data.todoId, run.id);
     return c.json(run, 201);
   });
 
@@ -756,8 +875,12 @@ export function createApp(deps: ServerDeps): Hono {
   app.post('/api/runs/:id/continue', async (c) => {
     const id = c.req.param('id');
     if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
-    const body = (await c.req.json().catch(() => ({}))) as { text?: unknown };
-    const result = manager.continueRun(id, typeof body.text === 'string' ? body.text : undefined);
+    // Bounded resume text (#429); an empty/absent body still just re-runs.
+    const parsed = continueSchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) {
+      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
+    }
+    const result = manager.continueRun(id, parsed.data.text);
     if (!result.ok) return c.json({ error: result.error }, 409);
     return c.json({ continued: true });
   });
@@ -780,6 +903,8 @@ export function createApp(deps: ServerDeps): Hono {
     if (!sessionId) return c.json({ error: 'no agent session to resume' }, 409);
     const cwd = run.worktreePath && existsSync(run.worktreePath) ? run.worktreePath : repoRoot;
     const command = resumeCommand(run.runner, sessionId);
+    // Fails closed on an id we do not recognise — see resumeCommand (#431).
+    if (!command) return c.json({ error: 'the recorded session id has an unexpected shape' }, 409);
     const opened = await openInTerminal(cwd, command);
     if (!opened) {
       return c.json({ error: 'no terminal emulator found', command: `cd '${cwd}' && ${command}` }, 409);
@@ -804,19 +929,83 @@ export function createApp(deps: ServerDeps): Hono {
         409,
       );
     }
-    const body = (await c.req.json().catch(() => ({}))) as { target?: unknown };
-    const target = typeof body.target === 'string' ? body.target : '';
-    if (!target) return c.json({ error: 'target required' }, 400);
+    // Follows the safeParse convention (#429); the downstream allowlist match is the real
+    // injection guard, this just validates the shape.
+    const parsedBody = openInSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsedBody.success) {
+      return c.json({ error: parsedBody.error.issues.map((i) => i.message).join('; ') }, 400);
+    }
+    const { target, path: relPath } = parsedBody.data;
     const dir = run.worktreePath && existsSync(run.worktreePath) ? run.worktreePath : repoRoot;
 
-    // Coding-agent CLI handoff (#cli-handoff): open a terminal in the worktree that resumes THIS
-    // run's session when the chosen CLI is the run's own runner (and a session exists), or starts
-    // a fresh CLI there otherwise. Same terminal launcher the Terminal button uses.
+    // Diff pane "open in OS default app" (#365): one worktree file, opened with the platform's
+    // default handler for its type — not a directory in the file manager (that's `finder`
+    // above) and not a session takeover (editors/CLIs above). `path` is re-validated against
+    // the worktree here regardless of what the schema allowed, so a stale/forged path can never
+    // escape it.
+    if (target === 'default') {
+      if (!run.worktreePath || !existsSync(run.worktreePath)) {
+        return c.json({ error: NO_WORKTREE }, 409);
+      }
+      if (!relPath) return c.json({ error: 'path required for the default-app target' }, 400);
+      const result = await readWorktreePath(run.worktreePath, relPath);
+      if (result.kind !== 'file') {
+        return c.json(
+          { error: result.kind === 'dir' ? `not a file: ${relPath}` : result.error },
+          409,
+        );
+      }
+      // This route's whole contract is "preview an image in its default app", and containment
+      // alone does not enforce it. Without this gate any regular file in the worktree — a
+      // `.command`/`.desktop` an agent just wrote, an `.exe` — would be handed to the OS
+      // launcher, which EXECUTES it. Not remotely reachable (random run ids, same-origin, local
+      // mode), so: defense in depth.
+      //
+      // Deliberately `isOsOpenableImage`, NOT the raw route's `imageMimeType`: that list allows
+      // SVG on the strength of an `<img>` + no-script CSP the OS launcher never applies (the
+      // default `.svg` handler is usually a browser, which would run the file's `<script>`).
+      if (!isOsOpenableImage(result.path)) {
+        // Say which rule refused, in the route's own words — "limited to images" would be a lie
+        // to someone holding an SVG, which IS an image and DOES preview inline.
+        return c.json(
+          {
+            error: imageMimeType(result.path)
+              ? `SVG can carry scripts, so it previews inline but is never handed to the OS: ${result.path}`
+              : `opening in the default app is limited to images: ${result.path}`,
+          },
+          409,
+        );
+      }
+      const filePath = join(run.worktreePath, result.path);
+      const opened = await openFileInDefaultApp(filePath);
+      if (!opened) return c.json({ error: `could not open ${result.path}`, path: filePath }, 409);
+      return c.json({ opened: true, path: filePath });
+    }
+
+    // Coding-agent CLI handoff (#cli-handoff, #402): open a terminal in the worktree that resumes
+    // THIS run's session when the chosen CLI is the run's own runner (and a session exists), or
+    // starts a fresh CLI there otherwise. Same terminal launcher the Terminal button uses.
+    // Records that predate the runner choice carry no `runner` at all — they default to Claude
+    // everywhere else (resumeCommand, the client's resumeHint/cliTargetResumes), so the match
+    // check defaults the same way here; without it, a legacy run's own Claude CLI would never
+    // resume its own session, only ever launch fresh.
+    // A run the engine still owns never resumes: `sessionId` is seeded when the agent step STARTS
+    // (workflows/run.ts), so a running/queued/waiting run already carries one, and resuming it
+    // would attach a SECOND CLI process to the transcript the engine is actively writing. Those
+    // picks launch the CLI fresh in the worktree — the same degradation as a cross-runner pick,
+    // and what the client's cliTargetResumes now labels. Resume-after-finish is untouched.
     const cliRunner = agentCliRunner(target);
     if (cliRunner) {
-      const sessionId = [...run.steps].reverse().find((s) => s.sessionId)?.sessionId;
-      const command =
-        sessionId && cliRunner === run.runner ? resumeCommand(cliRunner, sessionId) : cliRunner;
+      const engineOwnsSession =
+        run.status === 'running' || run.status === 'queued' || run.status === 'waiting';
+      const sessionId = engineOwnsSession
+        ? undefined
+        : [...run.steps].reverse().find((s) => s.sessionId)?.sessionId;
+      // An id resumeCommand refuses (#431) degrades to a fresh CLI in the worktree,
+      // exactly like a run that never recorded a session.
+      const resume =
+        sessionId && cliRunner === (run.runner ?? 'claude') ? resumeCommand(cliRunner, sessionId) : null;
+      const command = resume ?? cliRunner;
       const opened = await openInTerminal(dir, command);
       if (!opened) {
         return c.json({ error: 'no terminal emulator found', command: `cd '${dir}' && ${command}` }, 409);
@@ -1103,8 +1292,7 @@ export function createApp(deps: ServerDeps): Hono {
       return c.json({ error: parsedBody.error.issues.map((i) => i.message).join('; ') }, 400);
     }
 
-    let task = (todo.suggestedPrompt ?? todo.summary).trim() || todo.summary;
-    if (todo.suggestedArgs) task += `\n\nArguments: ${todo.suggestedArgs}`;
+    let task = todoTaskText(todo);
     if (parsedBody.data?.prompt) task += `\n\n${parsedBody.data.prompt}`;
 
     let workflow: WorkflowDef | undefined;
@@ -1232,6 +1420,21 @@ export function createApp(deps: ServerDeps): Hono {
     const limit = Number.parseInt(c.req.query('limit') ?? '', 10);
     return c.json(
       await fetchGithub(repoRoot, c.req.query('refresh') === '1', Number.isFinite(limit) ? limit : 30),
+    );
+  });
+
+  // The full comment thread for one issue/PR (#499). Additive sibling of /api/github — lazy
+  // (fetched only while a detail view is open), zod-validated params, 400 on garbage, and the
+  // same in-payload availability degrade (gh missing / offline / 404 all render as a hint).
+  const commentsParams = z.object({
+    kind: z.enum(['issue', 'pr']),
+    number: z.coerce.number().int().positive(),
+  });
+  app.get('/api/github/comments/:kind/:number', async (c) => {
+    const parsed = commentsParams.safeParse({ kind: c.req.param('kind'), number: c.req.param('number') });
+    if (!parsed.success) return c.json({ error: 'invalid kind or number' }, 400);
+    return c.json(
+      await fetchGithubComments(repoRoot, parsed.data.kind, parsed.data.number, c.req.query('refresh') === '1'),
     );
   });
 
@@ -1463,9 +1666,38 @@ function resolveWebDir(): string {
   return join(here, '..', '..', 'web');
 }
 
-/** The CLI command that reopens a run's session for interactive take-over,
- *  per backend. Legacy/undefined records default to Claude. */
-function resumeCommand(runner: string | undefined, sessionId: string): string {
+/**
+ * The session id shape every backend actually mints: UUIDs (claude/codex) and
+ * the CLIs' own slug-ish ids. No character here is special to bash, AppleScript
+ * OR cmd.exe, and a leading `-` is refused so the id can never be read as an
+ * option by the CLI it is passed to (same dash-guard as `isSafeGitRef`, #431).
+ * Bounded, like every other input that reaches a spawned process.
+ */
+const SAFE_SESSION_ID = /^[A-Za-z0-9._][A-Za-z0-9._-]{0,199}$/;
+
+/** True for session ids safe to splice into the take-over command (see above). */
+export function isSafeSessionId(sessionId: string): boolean {
+  return SAFE_SESSION_ID.test(sessionId);
+}
+
+/**
+ * The CLI command that reopens a run's session for interactive take-over, per
+ * backend. Legacy/undefined records default to Claude. Returns null when the id
+ * is not a shape we recognise — callers degrade (no take-over) rather than
+ * splice it into a shell.
+ *
+ * Validate, don't quote (#431): the session id is the only variable spliced
+ * into the command string, and `openInTerminal` runs that string through bash
+ * on darwin/linux but through `cmd /K` on win32. cmd.exe does not treat `'` as
+ * a quote character, so POSIX-quoting the id handed Windows users a literal
+ * `claude --resume '9f8e…'` and Claude answered "no conversation found".
+ * Constraining the charset to one with no metacharacter in ANY of those shells
+ * needs no quoting at all and fails closed on an unexpected id — a stronger
+ * guarantee than escaping, and platform-independent. Ids are UUID/CLI-minted
+ * today; this keeps a future source safe.
+ */
+export function resumeCommand(runner: string | undefined, sessionId: string): string | null {
+  if (!isSafeSessionId(sessionId)) return null;
   switch (runner) {
     case 'codex':
       return `codex resume ${sessionId}`;

@@ -338,6 +338,31 @@ describe('GitToolbar renders policy fixtures verbatim', () => {
     expect(link.getAttribute('target')).toBe('_blank')
   })
 
+  it('view-pr with a non-http href renders disabled, not as a clickable no-op (#431)', () => {
+    const onAction = vi.fn()
+    render(
+      <GitToolbar
+        bar={{
+          primary: { id: 'view-pr', label: 'View PR', enabled: true, href: 'javascript:void(0)' },
+          secondary: [],
+          menu: [],
+        }}
+        mode="unified"
+        wrap={false}
+        onModeChange={noop}
+        onWrapChange={noop}
+        onAction={onAction}
+      />,
+    )
+    // No link at all — and the fallback button is inert, with the reason as its tooltip.
+    expect(document.querySelector('a[data-action="view-pr"]')).toBeNull()
+    const button = toolbarAction('view-pr')!
+    expect(button.disabled).toBe(true)
+    expect(button.title).toContain('View PR unavailable')
+    fireEvent.click(button)
+    expect(onAction).not.toHaveBeenCalled()
+  })
+
   it('shows the branch chip and the aggregate ± stat', () => {
     renderToolbar({ primary: { id: 'commit', label: 'Commit', enabled: true }, secondary: [], menu: [] })
     expect(document.querySelector('[data-slot="branch-chip"]')?.textContent).toContain('cez/abc12345')

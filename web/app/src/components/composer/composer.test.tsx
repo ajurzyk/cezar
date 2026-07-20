@@ -230,6 +230,16 @@ describe('/ skills autocomplete (#380)', () => {
     expect(rendered[2]!.textContent).toContain('global-deploy')
   })
 
+  it('the menu is clamped to the popper available height (mobile keyboard, #mobile-kb)', async () => {
+    const { textarea } = renderComposer()
+    type(textarea, '/')
+    await screen.findByText('om-fix')
+    const menu = document.querySelector('[data-slot="composer-menu"]')!
+    // The clamp keeps the list inside the visual viewport once PopoverContent's
+    // keyboard-aware collisionPadding has shrunk the popper's available space.
+    expect(menu.className).toContain('--radix-popover-content-available-height')
+  })
+
   it('mid-word slashes (URLs) never open the menu', () => {
     const { textarea } = renderComposer()
     type(textarea, 'see https://example.com/x')

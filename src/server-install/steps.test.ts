@@ -17,6 +17,7 @@ function makeCtx(over: {
   return {
     state: { schema: 1, installed: false, primaryPort: 4321, steps: {} },
     ui: over.ui ?? createAutoUi(),
+    instance: 'default',
     runner,
     save: async () => {},
     dryRun: over.dryRun ?? false,

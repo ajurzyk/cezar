@@ -39,7 +39,14 @@ import {
   normalizePromptTemplates,
   resolveAutoApply,
 } from '@/lib/prompt-templates'
-import { isProjectSkill, orderSkillsByRecency, searchSkills, searchWorkflows, skillKeywords } from '@/lib/skills'
+import {
+  bumpSkillUsage,
+  isProjectSkill,
+  orderSkillsByUsage,
+  searchSkills,
+  searchWorkflows,
+  skillKeywords,
+} from '@/lib/skills'
 import { submitShortcutHint } from '@/lib/use-submit-shortcut'
 import { cn } from '@/lib/utils'
 
@@ -55,7 +62,6 @@ import {
   buildCreateRunBody,
   modelsForRunner,
   pushRecentSource,
-  recentSkillNames,
   resolveModel,
   resolveRunner,
   resolveSource,
@@ -117,7 +123,15 @@ export function NewTaskRoute() {
 
   // ---- effective picker values (rules in new-task-form.ts, mirrored from legacy) -----------
   const recentSources = uiState.data?.recentSources
-  const skillList = orderSkillsByRecency(skills.data ?? [], recentSkillNames(recentSources))
+  // Memoized so the picker gets a STABLE array identity across renders that don't actually
+  // change the catalog or the usage stats (#408 — a raw `orderSkillsByUsage(...)` call here
+  // would create a new array on EVERY render, including ones unrelated to skills/usage).
+  const skillsData = skills.data
+  const skillUsage = uiState.data?.skillUsage
+  const skillList = useMemo(
+    () => orderSkillsByUsage(skillsData ?? [], skillUsage),
+    [skillsData, skillUsage],
+  )
   const workflowList = workflows.data?.workflows ?? []
   const sourcesReady =
     skills.data !== undefined && workflows.data !== undefined && !uiState.isPending
@@ -291,6 +305,12 @@ export function NewTaskRoute() {
         worktree: worktreeOn,
         autonomous: autonomousOn,
         generateFollowups: generateFollowupsOn,
+        // #374: when the Inbox's "Run" sent us here, hand the entry's id back so the server
+        // records this run on it and it leaves the inbox — the audit trail the old
+        // POST /api/todos/:id/start kept, minus the blind launch. Empty otherwise.
+        // Deliberately not gated on generateFollowupsOn (#444): turning off follow-up
+        // generation for THIS task must not stop the entry it came from being marked started.
+        todoId: deepLink.todo,
       }),
     )
     // Remember what was actually run so the next visit preselects it (legacy
@@ -302,6 +322,14 @@ export function NewTaskRoute() {
       ...(worktreeToggleShown ? { lastWorktree: worktreeOn } : {}),
       lastAutonomous: autonomousOn,
       ...(followupsToggleShown ? { lastGenerateFollowups: generateFollowupsOn } : {}),
+      // Frequency sort (#408): only a SKILL pick counts — the map is keyed by skill name, and a
+      // workflow choice here doesn't select one directly. Gated on the CURRENT map being known:
+      // the PUT merge is shallow, so bumping off an errored ui-state query (`sourcesReady` only
+      // rules out `isPending`, not a failed fetch) would send a one-entry map and wipe every
+      // accumulated count.
+      ...(source.source === 'skill' && uiState.data !== undefined
+        ? { skillUsage: bumpSkillUsage(uiState.data.skillUsage, source.ref) }
+        : {}),
     })
       .then(() => queryClient.invalidateQueries({ queryKey: queryKeys.uiState }))
       .catch(() => {})
@@ -326,6 +354,7 @@ export function NewTaskRoute() {
           variants,
           images: plan.images,
           generateFollowups: generateFollowupsOn,
+          todoId: deepLink.todo, // #374: planning first must not lose the inbox entry
         }),
       )
       // Only remember a choice the user was actually offered (#471, the `lastWorktree` rule):
@@ -705,7 +734,13 @@ function SourcePill({
               onValueChange={setSearch}
               onInput={() => listRef.current?.scrollTo(0, 0)}
             />
-            <CommandList ref={listRef} data-slot="source-menu" className="max-h-72">
+            {/* The 3rem headroom is the CommandInput row: the popper's available-height var
+                covers the whole popover, and the list must leave the search box visible. */}
+            <CommandList
+              ref={listRef}
+              data-slot="source-menu"
+              className="max-h-[min(18rem,calc(var(--radix-popover-content-available-height)-3rem))]"
+            >
               {nothingMatches ? <CommandEmpty>Nothing matches.</CommandEmpty> : null}
               {/* Project skills lead, Global trails everything — the closer a skill lives
                   to the repo, the more likely it's the one being picked. */}

@@ -11,9 +11,10 @@ import { AgentBrowser, readTestEnv } from './agent-browser'
  * suite seeds real entries exactly like smoke.e2e.ts's SSE-badge test does (same data-dir
  * resolution, same save/restore discipline) and asserts real cards render LIVE over the
  * stream, no reload. Dismiss is honestly reachable (DELETE only rewrites todos.json, which
- * this suite restores) and is exercised below. Run is NOT: `POST /api/todos/:id/start`
- * starts a real run — the shared env's run list must not grow side effects (the github
- * suite's read-only rule), so the Run flow stays unit-pinned in routes/inbox.test.tsx.
+ * this suite restores) and is exercised below. Run is a client-side navigation to a prefilled
+ * `/new` (#374 — it no longer POSTs `/api/todos/:id/start` itself, so no run is ever created
+ * just by clicking it) but a full new-task submit is its own surface with its own coverage, so
+ * the Run flow past the navigation stays unit-pinned in routes/inbox.test.tsx.
  */
 
 const artifactsDir = resolve(import.meta.dirname, '../../../.ai/qa/artifacts_e2e')

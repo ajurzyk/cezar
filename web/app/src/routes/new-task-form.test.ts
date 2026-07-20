@@ -8,7 +8,6 @@ import {
   MODELS_BY_RUNNER,
   modelsForRunner,
   pushRecentSource,
-  recentSkillNames,
   resolveModel,
   resolveRunner,
   resolveSource,
@@ -229,7 +228,7 @@ describe('startedRunPath (legacy handleStarted: select the first run)', () => {
   })
 })
 
-describe('pushRecentSource / recentSkillNames (recency, #picker)', () => {
+describe('pushRecentSource (recency, #picker)', () => {
   const s = (ref: string, source: TaskSource['source'] = 'skill'): TaskSource => ({ source, ref })
 
   it('prepends newest and dedups the same source+ref', () => {
@@ -252,10 +251,5 @@ describe('pushRecentSource / recentSkillNames (recency, #picker)', () => {
 
   it('handles an undefined starting list', () => {
     expect(pushRecentSource(undefined, s('a'))).toEqual([s('a')])
-  })
-
-  it('recentSkillNames keeps only skill refs, in order', () => {
-    expect(recentSkillNames([s('a'), s('w', 'workflow'), s('b')])).toEqual(['a', 'b'])
-    expect(recentSkillNames(undefined)).toEqual([])
   })
 })
