@@ -766,8 +766,8 @@ describe('the hand-to-agent run (legacy three-way body)', () => {
 
 // ---- #408: frequency sort ----------------------------------------------------------------------
 
-describe('the skills dropdown frequency sort (#408 item 1, shared with project-first #2)', () => {
-  it('orders skills by usage count within each locality group', async () => {
+describe('the skills dropdown frequency sort (#408 item 1, re-tiered by #519)', () => {
+  it('promotes used skills into "Most used" ahead of locality, frequency descending', async () => {
     stubFetch({
       'GET /api/ui-state': () => jsonResponse({ skillUsage: { 'team-x': 9, 'g-review': 1 } }),
     })
@@ -778,9 +778,9 @@ describe('the skills dropdown frequency sort (#408 item 1, shared with project-f
       expect(document.querySelectorAll('[data-slot="gh-skill-option"]')).toHaveLength(3),
     )
     const options = [...document.querySelectorAll<HTMLElement>('[data-slot="gh-skill-option"]')]
-    // Project skill still leads (locality wins, #2) — frequency only reorders WITHIN "Global":
-    // team-x (9 picks) now leads g-review (1 pick), reversing the fixture's server order.
-    expect(options.map((option) => option.dataset.skill)).toEqual(['om-fix', 'team-x', 'g-review'])
+    // Most used leads (#519): team-x (9 picks) then g-review (1 pick), BOTH above the unused
+    // project skill om-fix — usage now outranks locality instead of only reordering within it.
+    expect(options.map((option) => option.dataset.skill)).toEqual(['team-x', 'g-review', 'om-fix'])
   })
 
   it('no usage stats at all falls back to the plain project-first order (#2)', async () => {

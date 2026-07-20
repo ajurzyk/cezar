@@ -36,7 +36,14 @@ import {
   normalizePromptTemplates,
   resolveAutoApply,
 } from '@/lib/prompt-templates'
-import { bumpSkillUsage, isProjectSkill, searchSkills, searchWorkflows, skillKeywords } from '@/lib/skills'
+import {
+  bumpSkillUsage,
+  isProjectSkill,
+  partitionSkillsForDisplay,
+  searchSkills,
+  searchWorkflows,
+  skillKeywords,
+} from '@/lib/skills'
 import { isSubmitShortcut, submitShortcutHint } from '@/lib/use-submit-shortcut'
 import { cn } from '@/lib/utils'
 
@@ -53,7 +60,7 @@ import { readFollowupPrompt, writeFollowupPrompt } from './hand-to-agent-draft'
  * survives switching between issues — it is a way of working, not a property of one item) —
  * `github.tsx` also persists it to localStorage (#408) so it survives a reload and pre-fills a
  * hand-off you have never touched (`hand-to-agent-draft.ts`). `skills` arrives already ordered
- * project-first-then-frequency (`orderSkillsByUsage`, #408) — this component just renders it.
+ * most-used → project → global (`orderSkillsByUsage`, #519) — this component just renders it.
  *
  * The selected skills render as an always-visible chip row OUTSIDE the dropdown — the legacy
  * invariant "the filter can't hide your selection", carried over: cmdk may filter the list,
@@ -201,7 +208,12 @@ export function HandToAgent({
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <WorkflowPicker workflows={workflows} value={workflow} onChange={onWorkflowChange} />
-        <SkillsPicker skills={skills} selected={validSkills} onToggle={toggleSkill} />
+        <SkillsPicker
+          skills={skills}
+          skillUsage={uiState.data?.skillUsage}
+          selected={validSkills}
+          onToggle={toggleSkill}
+        />
         <PromptTemplateMenu templates={templates} onInsert={insertPromptTemplate} />
       </div>
 
@@ -364,16 +376,18 @@ function WorkflowPicker({
 
 /**
  * The skills dropdown: multi-select — toggling keeps it open, because picking a chain is
- * several toggles — grouped Project skills (bold) before Global, per #377. Every row carries
- * a read-only "View skill" eye (spec §Skills): it opens the SAME detail component the
- * Settings catalog renders, as a dialog, without toggling the row.
+ * several toggles — grouped Most used (#519), then Project skills (bold) before Global, per
+ * #377. Every row carries a read-only "View skill" eye (spec §Skills): it opens the SAME
+ * detail component the Settings catalog renders, as a dialog, without toggling the row.
  */
 function SkillsPicker({
   skills,
+  skillUsage,
   selected,
   onToggle,
 }: {
   skills: readonly Skill[]
+  skillUsage: Readonly<Record<string, number>> | undefined
   selected: readonly string[]
   onToggle: (name: string) => void
 }) {
@@ -381,10 +395,9 @@ function SkillsPicker({
   const [search, setSearch] = useState('')
   const [preview, setPreview] = useState<Skill | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
-  // #484: rank matches in JS, then split into Project/Global groups (cmdk's own sort is unreliable here).
-  const matched = searchSkills(skills, search)
-  const project = matched.filter(isProjectSkill)
-  const global = matched.filter((skill) => !isProjectSkill(skill))
+  // #484: rank matches in JS, then split into the #519 tiers (cmdk's own sort is unreliable here).
+  const matched = searchSkills(skills, search, skillUsage)
+  const { mostUsed, project, global } = partitionSkillsForDisplay(matched, skillUsage)
 
   const skillItem = (skill: Skill, emphasized: boolean) => {
     const isSelected = selected.includes(skill.name)
@@ -455,7 +468,14 @@ function SkillsPicker({
               onInput={() => listRef.current?.scrollTo(0, 0)}
             />
             <CommandList ref={listRef} data-slot="gh-skill-menu" className="max-h-[min(16rem,calc(var(--radix-popover-content-available-height)-3rem))]">
-              {project.length === 0 && global.length === 0 ? <CommandEmpty>Nothing matches.</CommandEmpty> : null}
+              {mostUsed.length === 0 && project.length === 0 && global.length === 0 ? (
+                <CommandEmpty>Nothing matches.</CommandEmpty>
+              ) : null}
+              {mostUsed.length > 0 ? (
+                <CommandGroup heading="Most used">
+                  {mostUsed.map((skill) => skillItem(skill, isProjectSkill(skill)))}
+                </CommandGroup>
+              ) : null}
               {project.length > 0 ? (
                 <CommandGroup heading="Project skills">{project.map((skill) => skillItem(skill, true))}</CommandGroup>
               ) : null}
