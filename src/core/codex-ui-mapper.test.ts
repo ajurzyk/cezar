@@ -838,6 +838,32 @@ describe('codex reasoning text survives replay (#528)', () => {
     expect(reasoningAt(events, 'item.completed')).toMatchObject({ text: 'authoritative' });
   });
 
+  it('persists snapshot-only array summaries for replay', () => {
+    const events = fold([
+      started({ summary: [], content: [] }),
+      completed({ summary: ['Inspecting the conflict.', 'Choosing the compatible resolution.'], content: [] }),
+    ]);
+    expect(replayedText(events)).toBe('Inspecting the conflict.\nChoosing the compatible resolution.');
+  });
+
+  it('joins array content while keeping it authoritative over streamed text', () => {
+    const events = fold([
+      started({ summary: [], content: [] }),
+      textDelta('partial streamed text'),
+      completed({ summary: ['Short summary.'], content: ['First raw part.', 'Second raw part.'] }),
+    ]);
+    expect(replayedText(events)).toBe('First raw part.\nSecond raw part.');
+  });
+
+  it('keeps streamed raw reasoning ahead of an array summary snapshot', () => {
+    const events = fold([
+      started({ summary: [], content: [] }),
+      textDelta('Full streamed reasoning.'),
+      completed({ summary: ['Public summary.'], content: [] }),
+    ]);
+    expect(replayedText(events)).toBe('Full streamed reasoning.');
+  });
+
   it('accumulates both summary delta methods into the summary channel', () => {
     const events = fold([
       started({}),
