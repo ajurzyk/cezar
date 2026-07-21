@@ -548,7 +548,7 @@ export function normalizeEvents(
     switch (kind) {
       case 'committed': {
         if (row.sha) event.sha = row.sha;
-        if (row.message) event.message = row.message.split('\n')[0].slice(0, COMMIT_MESSAGE_CAP);
+        if (row.message) event.message = (row.message.split('\n')[0] ?? '').slice(0, COMMIT_MESSAGE_CAP);
         if (row.html_url) event.url = row.html_url;
         break;
       }
@@ -620,10 +620,81 @@ export function __clearCommentsCacheForTests(): void {
   commentsCache.clear();
 }
 
+const TIMELINE_PER_PAGE = 100;
+
+/** What the bounded timeline page loop returns. `stoppedShort` means "the timeline may have more
+ *  rows than we fetched" and has exactly three causes — the page cap, the budget floor, and a
+ *  failure on page ≥ 2. All three shorten the `commented` stream the same way, so all three feed
+ *  `truncated` and arm the comments top-up; the cause does not change the remedy. A short page is
+ *  the one exit that does NOT set it: that is the timeline genuinely ending. */
+type TimelinePages = { rows: unknown[]; stoppedShort: boolean };
+
+/**
+ * Walk `/issues/{n}/timeline` under ONE shared time budget.
+ *
+ * `gh api --paginate` is not used here: it pages *"until there are no more pages of results"* and
+ * exposes no page-limit flag, so the only way to bound the walk is to hand-roll it. The cap that
+ * `paginateCounts` gets comes from being a JS cursor loop, not from a `gh` flag.
+ *
+ * The budget is a **total**, not a per-page allowance. `gh()` takes its timeout per invocation, so
+ * ten sequential spawns at the 15 s default would put the ceiling at 150 s — an order of magnitude
+ * worse than the single `--paginate` spawn this replaces. The loop tracks a deadline and passes
+ * each page whatever remains.
+ *
+ * Exported for unit tests; `run` is injected so the loop is testable without shelling out.
+ */
+export async function fetchTimelinePages(
+  run: (page: number, timeoutMs: number) => Promise<string>,
+  opts: { maxPages?: number; budgetMs?: number; minPageMs?: number; now?: () => number } = {},
+): Promise<TimelinePages> {
+  const maxPages = opts.maxPages ?? TIMELINE_MAX_PAGES;
+  const budgetMs = opts.budgetMs ?? TIMELINE_BUDGET_MS;
+  const minPageMs = opts.minPageMs ?? TIMELINE_MIN_PAGE_MS;
+  const now = opts.now ?? Date.now;
+
+  const deadline = now() + budgetMs;
+  const rows: unknown[] = [];
+  let stoppedShort = false;
+  let page = 1;
+
+  for (; page <= maxPages; page++) {
+    const remaining = deadline - now();
+    // Never spawn a page that cannot finish. A bare `remaining <= 0` guard catches only the exact
+    // boundary; the realistic case is 300 ms left, which spawns gh with a 300 ms timeout, throws,
+    // and looks indistinguishable from a real endpoint failure.
+    if (remaining < minPageMs) {
+      stoppedShort = true;
+      break;
+    }
+    let parsed: unknown[];
+    try {
+      parsed = z.array(z.unknown()).parse(JSON.parse(await run(page, remaining)));
+    } catch (err) {
+      // Page 1 rethrows so the caller's inner catch can decide whether substitution helps —
+      // nothing was fetched, so there is nothing to lose. A failure on any later page keeps the
+      // pages already in hand: discarding nine good pages to re-fetch comments-only is strictly
+      // worse than what the loop already holds.
+      if (page === 1) throw err;
+      stoppedShort = true;
+      break;
+    }
+    rows.push(...parsed);
+    if (parsed.length < TIMELINE_PER_PAGE) break; // short page — the real end of the timeline
+  }
+  if (page > maxPages) stoppedShort = true; // fell out on the page cap
+
+  return { rows, stoppedShort };
+}
+
 /**
  * The conversation thread for one issue/PR, lazily. `{owner}`/`{repo}` in the gh api paths are
  * filled from the worktree's remote by gh itself, so no extra handle lookup. Everything degrades:
  * gh missing/offline → `{ available: false, reason }`, a 404 → a "not found" hint — never a throw.
+ *
+ * Since #525 the thread is sourced from `/issues/{n}/timeline`, which returns comments AND events
+ * in one stream: `commented` rows go through the unchanged `normalizeComments`, the rest through
+ * `normalizeEvents`. `comments[]` therefore keeps its exact pre-#525 shape, contents and cap
+ * (BACKWARD_COMPATIBILITY.md §2) — see the top-up below for the one case that needed defending.
  */
 export async function fetchGithubComments(
   repoRoot: string,
@@ -635,16 +706,89 @@ export async function fetchGithubComments(
   const key = `${kind}#${number}`;
   const hit = commentsCache.get(key);
   if (!refresh && hit && Date.now() - hit.at < CACHE_MS) return hit.data;
+  // PR conversation comments live on the issues endpoint too — always use it for the body thread.
+  const legacyComments = () =>
+    gh(repoRoot, ['api', `repos/{owner}/{repo}/issues/${number}/comments`, '--paginate']);
   try {
-    // PR conversation comments live on the issues endpoint too — always use it for the body thread.
-    const commentsOut = await gh(repoRoot, ['api', `repos/{owner}/{repo}/issues/${number}/comments`, '--paginate']);
-    const parts: ForgeComment[][] = [normalizeComments(JSON.parse(commentsOut))];
+    let commentRows: unknown[] = [];
+    let events: ForgeTimelineEvent[] | undefined;
+    let eventsTruncated = false;
+    let stoppedShort = false;
+
+    try {
+      const pages = await fetchTimelinePages((page, timeoutMs) =>
+        gh(
+          repoRoot,
+          [
+            'api',
+            '-H',
+            'Accept: application/vnd.github+json',
+            `repos/{owner}/{repo}/issues/${number}/timeline?per_page=${TIMELINE_PER_PAGE}&page=${page}`,
+          ],
+          timeoutMs,
+        ),
+      );
+      stoppedShort = pages.stoppedShort;
+      commentRows = pages.rows.filter(
+        (r) => (r as { event?: unknown } | null)?.event === 'commented',
+      );
+      const normalized = normalizeEvents(pages.rows);
+      events = normalized.events;
+      eventsTruncated = normalized.truncated;
+
+      // Comments top-up. The two ENTRY caps are independent, but the FETCH budget is not: today's
+      // call is an unbounded --paginate over a comments-only endpoint, so every comment is fetched
+      // and mergeThread picks the oldest 200 from the complete set. Under the timeline those same
+      // 200 slots are filled from at most 1000 rows in which events compete with comments — so on
+      // a 1500-row thread with 250 interleaved comments, comments[] would return ~167 where today
+      // it returns 200. Same §2 defect class as a combined entry cap, arriving via the source set.
+      //
+      // The trigger deliberately over-fires: it cannot distinguish "comments were cut off" from
+      // "this thread just has few comments", because the second is only knowable by fetching them.
+      // So on an event-heavy thread with 30 comments it re-fetches 30 complete comments. Accepted
+      // — it fires only past ~1000 timeline rows, behind the 60 s LRU, and the alternative is a §2
+      // regression. In the other direction the threshold is provably sound: with ≥200 commented
+      // rows already in the oldest-first prefix, mergeThread's oldest-200 cut lies inside it.
+      if (stoppedShort && commentRows.length < THREAD_ENTRY_CAP) {
+        // Its OWN nested catch. The inner handler's remedy is the fallback — which is this very
+        // call — and the outer handler returns { available: false, comments: [] }, emptying a
+        // thread that was about to render. So a thrown top-up is swallowed: keep the commented
+        // rows the timeline already returned and carry on. That is at worst the short list the
+        // safeguard existed to avoid, never worse than not having attempted it.
+        try {
+          commentRows = z.array(z.unknown()).parse(JSON.parse(await legacyComments()));
+        } catch {
+          // keep the timeline's own commented rows
+        }
+      }
+    } catch (timelineErr) {
+      // Scoped INSIDE the existing outer catch on purpose: the outer handler's /404|not found/i
+      // branch would otherwise turn a timeline 404 into an empty thread. ENOENT is the one failure
+      // the fallback cannot rescue — nothing will work, and a second spawn fails identically.
+      const message = timelineErr instanceof Error ? timelineErr.message : String(timelineErr);
+      if (/ENOENT/.test(message)) throw timelineErr;
+      // Every other endpoint-level failure substitutes the legacy comments call. It is a
+      // substitution, not a retry — a different endpoint, which typically still answers. (A 403
+      // attaches to the token rather than the endpoint, so it cannot succeed either; not
+      // special-cased, since rate-limit replies are immediate and it costs one fast spawn.)
+      commentRows = z.array(z.unknown()).parse(JSON.parse(await legacyComments()));
+      events = undefined;
+    }
+
+    const parts: ForgeComment[][] = [normalizeComments(commentRows)];
     if (kind === 'pr') {
       const reviewsOut = await gh(repoRoot, ['api', `repos/{owner}/{repo}/pulls/${number}/reviews`, '--paginate']);
       parts.push(normalizeReviews(JSON.parse(reviewsOut)));
     }
     const { comments, truncated } = mergeThread(parts);
-    const data: ForgeCommentsData = { available: true, comments, truncated: truncated || undefined };
+    const data: ForgeCommentsData = {
+      available: true,
+      comments,
+      // OR-folded exactly as before, so the pre-existing >200-comments trigger is preserved
+      // rather than replaced.
+      truncated: truncated || eventsTruncated || stoppedShort || undefined,
+    };
+    if (events) data.events = events;
     cacheComments(key, data);
     return data;
   } catch (err) {

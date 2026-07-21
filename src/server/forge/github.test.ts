@@ -14,7 +14,10 @@ vi.mock('node:child_process', async (importOriginal) => {
 });
 
 import {
+  __clearCommentsCacheForTests,
   detectGithubCached,
+  fetchGithubComments,
+  fetchTimelinePages,
   fetchCommentCounts,
   ghCheckRunSchema,
   ghTimelineEventSchema,
@@ -481,8 +484,8 @@ describe('normalizeEvents (#525)', () => {
     // it naively yields createdAt: null, which string-sorts to the top and reorders the thread.
     const { events } = normalizeEvents([commitRow()]);
     expect(events).toHaveLength(1);
-    expect(events[0].createdAt).toBe('2026-01-02T03:04:05.000Z');
-    expect(events[0].createdAt).not.toBeNull();
+    expect(events[0]!.createdAt).toBe('2026-01-02T03:04:05.000Z');
+    expect(events[0]!.createdAt).not.toBeNull();
   });
 
   it('normalizes a non-UTC author.date to UTC so the string sort stays correct', () => {
@@ -491,8 +494,8 @@ describe('normalizeEvents (#525)', () => {
     const { events } = normalizeEvents([
       commitRow({ author: { name: 'Ada', date: '2026-01-02T09:00:00+09:00' } }),
     ]);
-    expect(events[0].createdAt).toBe('2026-01-02T00:00:00.000Z');
-    expect(events[0].createdAt.endsWith('Z')).toBe(true);
+    expect(events[0]!.createdAt).toBe('2026-01-02T00:00:00.000Z');
+    expect(events[0]!.createdAt.endsWith('Z')).toBe(true);
   });
 
   it('uses the git author name for commits and the actor login for everything else', () => {
@@ -508,11 +511,11 @@ describe('normalizeEvents (#525)', () => {
         label: { name: 'bug', color: 'd73a4a' },
       },
     ]);
-    expect(events[0].actor).toBe('Ada Lovelace');
-    expect(events[0].avatarUrl).toBeUndefined();
+    expect(events[0]!.actor).toBe('Ada Lovelace');
+    expect(events[0]!.avatarUrl).toBeUndefined();
     expect(JSON.stringify(events[0])).not.toContain('ada@example.com');
-    expect(events[1].actor).toBe('octocat');
-    expect(events[1].avatarUrl).toBe('https://avatars/1');
+    expect(events[1]!.actor).toBe('octocat');
+    expect(events[1]!.avatarUrl).toBe('https://avatars/1');
   });
 
   it('drops unknown event types rather than throwing', () => {
@@ -568,20 +571,20 @@ describe('normalizeEvents (#525)', () => {
       'labeled', 'unlabeled', 'assigned', 'unassigned', 'renamed',
       'merged', 'closed', 'reopened', 'head_ref_force_pushed', 'cross-referenced', 'committed',
     ]);
-    expect(events[0].label).toEqual({ name: 'bug', color: 'd73a4a' });
-    expect(events[1].label).toEqual({ name: 'wip' }); // color omitted, not null
-    expect(events[2].subject).toBe('bob');
-    expect(events[4].subject).toBe('new title');
-    expect(events[9]).toMatchObject({ refNumber: 520, refTitle: 'Sibling work', refIsPr: true });
-    expect(events[10]).toMatchObject({ sha: SHA, message: 'fix(forge): bound the timeline page loop' });
+    expect(events[0]!.label).toEqual({ name: 'bug', color: 'd73a4a' });
+    expect(events[1]!.label).toEqual({ name: 'wip' }); // color omitted, not null
+    expect(events[2]!.subject).toBe('bob');
+    expect(events[4]!.subject).toBe('new title');
+    expect(events[9]!).toMatchObject({ refNumber: 520, refTitle: 'Sibling work', refIsPr: true });
+    expect(events[10]!).toMatchObject({ sha: SHA, message: 'fix(forge): bound the timeline page loop' });
   });
 
   it('caps the commit message at its first line and 120 chars', () => {
     const { events } = normalizeEvents([
       commitRow({ message: `${'x'.repeat(200)}\n\nA long body paragraph that must not appear.` }),
     ]);
-    expect(events[0].message).toBe('x'.repeat(120));
-    expect(events[0].message).not.toContain('body paragraph');
+    expect(events[0]!.message).toBe('x'.repeat(120));
+    expect(events[0]!.message).not.toContain('body paragraph');
   });
 
   it('resolves ids through id → sha → node_id → index, sha ahead of node_id', () => {
@@ -591,7 +594,7 @@ describe('normalizeEvents (#525)', () => {
       { event: 'cross-referenced', id: null, node_id: null, created_at: '2026-01-01T00:00:02Z', source: { issue: { number: 1 } } },
     ]);
     expect(events.map((e) => e.id)).toEqual([`evt-42`, `evt-${SHA}`, 'evt-2']);
-    expect(events[1].id).not.toContain('C_kwDOopaque');
+    expect(events[1]!.id).not.toContain('C_kwDOopaque');
   });
 
   it('keeps ids stable across a refetch that prepends an event', () => {
@@ -625,8 +628,8 @@ describe('normalizeEvents (#525)', () => {
 
     expect(truncated).toBe(true);
     expect(events).toHaveLength(200);
-    expect(events[events.length - 1].id).toBe('evt-249'); // newest retained
-    expect(events[0].id).toBe('evt-50'); // oldest 50 dropped
+    expect(events[events.length - 1]!.id).toBe('evt-249'); // newest retained
+    expect(events[0]!.id).toBe('evt-50'); // oldest 50 dropped
     expect(events.map((e) => e.createdAt)).toEqual([...events.map((e) => e.createdAt)].sort());
   });
 
@@ -637,5 +640,263 @@ describe('normalizeEvents (#525)', () => {
     const { events, truncated } = normalizeEvents(rows, 200);
     expect(events).toHaveLength(200);
     expect(truncated).toBe(false);
+  });
+});
+
+describe('fetchTimelinePages (#525)', () => {
+  const full = (n = 100) => JSON.stringify(Array.from({ length: n }, (_, i) => ({ event: 'closed', id: i })));
+
+  it('stops on a short page without flagging stoppedShort — that is the timeline ending', async () => {
+    const run = vi.fn(async () => full(40));
+    const { rows, stoppedShort } = await fetchTimelinePages(run);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(rows).toHaveLength(40);
+    expect(stoppedShort).toBe(false);
+  });
+
+  it('walks up to the page cap, then flags stoppedShort', async () => {
+    const run = vi.fn(async () => full(100)); // every page full → never a natural end
+    const { rows, stoppedShort } = await fetchTimelinePages(run, { maxPages: 10 });
+    expect(run).toHaveBeenCalledTimes(10);
+    expect(rows).toHaveLength(1000);
+    expect(stoppedShort).toBe(true);
+  });
+
+  it('shares ONE budget across pages instead of granting each the full timeout', async () => {
+    // The regression this guards: gh()'s timeout is per invocation, so passing the default to each
+    // page would make the loop's ceiling maxPages * budget (150 s), not budget (15 s).
+    let clock = 0;
+    const now = () => clock;
+    const handed: number[] = [];
+    const run = vi.fn(async (_page: number, timeoutMs: number) => {
+      handed.push(timeoutMs);
+      clock += 4_000; // each page burns 4 s of the shared 15 s
+      return full(100);
+    });
+
+    const { stoppedShort } = await fetchTimelinePages(run, { budgetMs: 15_000, minPageMs: 2_000, now });
+
+    // Each page is handed strictly LESS than the previous one — a shared, draining budget.
+    expect(handed).toEqual([15_000, 11_000, 7_000, 3_000]);
+    // 4 pages fit; the 5th would have 15_000 - 16_000 < 0 left, so the loop stops instead.
+    expect(run).toHaveBeenCalledTimes(4);
+    expect(stoppedShort).toBe(true);
+    expect(clock).toBeLessThanOrEqual(16_000); // NOT 10 * 15_000
+  });
+
+  it('never spawns a page that cannot finish — the min-page floor', async () => {
+    // Without the floor, 300 ms left spawns gh with a 300 ms timeout, which throws and looks
+    // exactly like a real endpoint failure.
+    let clock = 0;
+    const now = () => clock;
+    const run = vi.fn(async () => {
+      clock += 14_000; // leaves 1 s — under the 2 s floor
+      return full(100);
+    });
+    const { stoppedShort } = await fetchTimelinePages(run, { budgetMs: 15_000, minPageMs: 2_000, now });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(stoppedShort).toBe(true);
+  });
+
+  it('rethrows a page-1 failure so the caller can decide whether substitution helps', async () => {
+    const run = vi.fn(async () => { throw new Error('HTTP 404'); });
+    await expect(fetchTimelinePages(run)).rejects.toThrow('HTTP 404');
+  });
+
+  it('keeps pages already fetched when a later page fails, rather than discarding them', async () => {
+    // Falling back here would trade real events for a comments-only thread — strictly worse than
+    // what the loop already holds.
+    const run = vi.fn(async (page: number) => {
+      if (page === 5) throw new Error('HTTP 502');
+      return full(100);
+    });
+    const { rows, stoppedShort } = await fetchTimelinePages(run);
+    expect(rows).toHaveLength(400); // pages 1-4 kept
+    expect(stoppedShort).toBe(true);
+  });
+});
+
+describe('fetchGithubComments timeline integration (#525)', () => {
+  const repoRoot = '/tmp/repo';
+  const SHA = 'c'.repeat(40);
+
+  /** Route each `gh` invocation by the api path in its args. */
+  const routeGh = (handlers: {
+    timeline?: (page: number) => unknown;
+    comments?: () => unknown;
+    reviews?: () => unknown;
+  }) =>
+    execFileMock.mockImplementation((...args: unknown[]) => {
+      const argv = args[1] as string[];
+      const cb = args[args.length - 1] as (e: unknown, r: unknown) => void;
+      const path = argv.find((a) => a.includes('repos/{owner}/{repo}')) ?? '';
+      const ok = (v: unknown) => cb(null, { stdout: JSON.stringify(v), stderr: '' });
+      try {
+        if (path.includes('/timeline')) {
+          if (!handlers.timeline) return cb(new Error('HTTP 404'), null);
+          const page = Number(/[?&]page=(\d+)/.exec(path)?.[1] ?? '1');
+          return ok(handlers.timeline(page));
+        }
+        if (path.includes('/comments')) {
+          if (!handlers.comments) return cb(new Error('HTTP 500'), null);
+          return ok(handlers.comments());
+        }
+        if (path.includes('/reviews')) return ok(handlers.reviews ? handlers.reviews() : []);
+      } catch (err) {
+        return cb(err, null);
+      }
+      return cb(new Error(`unexpected gh call: ${argv.join(' ')}`), null);
+    });
+
+  const comment = (id: number) => ({
+    id,
+    user: { login: 'octocat', avatar_url: 'https://avatars/1' },
+    created_at: `2026-01-0${id}T00:00:00Z`,
+    body: `comment ${id}`,
+    html_url: `https://github.com/o/r/issues/1#issuecomment-${id}`,
+  });
+  const commented = (id: number) => ({ event: 'commented', ...comment(id) });
+
+  beforeEach(() => {
+    vi.stubEnv('CEZ_DRY_RUN', '');
+    execFileMock.mockReset();
+    __clearCommentsCacheForTests();
+  });
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('splits the timeline into unchanged comments and normalized events', async () => {
+    routeGh({
+      timeline: () => [
+        commented(1),
+        { event: 'labeled', id: 90, created_at: '2026-01-01T12:00:00Z', actor: { login: 'octocat' }, label: { name: 'bug', color: 'd73a4a' } },
+        { event: 'committed', created_at: null, sha: SHA, message: 'do the thing', author: { name: 'Ada', date: '2026-01-01T13:00:00Z' } },
+        commented(2),
+      ],
+    });
+
+    const data = await fetchGithubComments(repoRoot, 'issue', 1);
+
+    expect(data.available).toBe(true);
+    expect(data.comments.map((c) => c.id)).toEqual([1, 2]);
+    expect(data.comments.every((c) => c.kind === 'comment')).toBe(true);
+    expect(data.events?.map((e) => e.kind)).toEqual(['labeled', 'committed']);
+    expect(data.events?.[1]).toMatchObject({ sha: SHA, actor: 'Ada' });
+  });
+
+  it('returns comments[] byte-identical to the pre-#525 output for the same rows (§2)', async () => {
+    // THE backward-compatibility guarantee. The timeline's `commented` rows are shape-identical to
+    // the legacy endpoint's, and they go through the SAME normalizeComments — so the array a
+    // consumer sees must not move by a single field.
+    const raw = [comment(1), comment(2), comment(3)];
+    const expected = normalizeComments(raw);
+
+    routeGh({ timeline: () => raw.map((c) => ({ event: 'commented', ...c })) });
+    const viaTimeline = await fetchGithubComments(repoRoot, 'issue', 1);
+
+    __clearCommentsCacheForTests();
+    routeGh({ timeline: undefined, comments: () => raw }); // force the legacy path
+    const viaLegacy = await fetchGithubComments(repoRoot, 'issue', 1);
+
+    expect(viaTimeline.comments).toEqual(expected);
+    expect(viaTimeline.comments).toEqual(viaLegacy.comments);
+  });
+
+  it('falls back to the comments endpoint on a timeline 404, still populating comments[]', async () => {
+    // The outer catch's /404|not found/i branch would otherwise turn this into an empty thread —
+    // which is exactly why the timeline's catch is scoped INSIDE it.
+    routeGh({ timeline: undefined, comments: () => [comment(1), comment(2)] });
+
+    const data = await fetchGithubComments(repoRoot, 'issue', 1);
+
+    expect(data.available).toBe(true);
+    expect(data.comments).toHaveLength(2);
+    expect(data.events).toBeUndefined();
+    expect(data.reason).toBeUndefined();
+  });
+
+  it('does not attempt the fallback when gh is missing (ENOENT)', async () => {
+    execFileMock.mockImplementation((...args: unknown[]) => {
+      const cb = args[args.length - 1] as (e: unknown, r: unknown) => void;
+      cb(new Error('spawn gh ENOENT'), null);
+    });
+
+    const data = await fetchGithubComments(repoRoot, 'issue', 1);
+
+    expect(data.available).toBe(false);
+    expect(data.reason).toMatch(/gh CLI not found/);
+    expect(execFileMock).toHaveBeenCalledTimes(1); // no second spawn
+  });
+
+  it('tops up comments[] when the fetch stopped short on a comment-poor prefix', async () => {
+    // A page-capped, event-heavy timeline: the 10-page budget holds only 3 comments, but the
+    // thread really has 250. Without the top-up, comments[] silently returns 3.
+    const legacy = Array.from({ length: 250 }, (_, i) => comment(i + 1));
+    const labels = (page: number) =>
+      Array.from({ length: 100 }, (_, i) => ({
+        event: 'labeled', id: page * 100 + i, created_at: '2026-01-01T00:00:00Z',
+        actor: { login: 'a' }, label: { name: `l${page}-${i}` },
+      }));
+    routeGh({
+      // Every page is full, so the walk runs to the page cap → stoppedShort. Only page 1 carries
+      // comments, so the prefix holds 3 of the thread's real 250.
+      timeline: (page) => (page === 1 ? [...labels(1).slice(0, 97), commented(1), commented(2), commented(3)] : labels(page)),
+      comments: () => legacy,
+    });
+
+    const data = await fetchGithubComments(repoRoot, 'issue', 1);
+
+    expect(data.comments).toHaveLength(THREAD_ENTRY_CAP); // repaired, not 3
+    expect(data.truncated).toBe(true);
+    expect(data.events?.length).toBeGreaterThan(0); // events survived the top-up
+  });
+
+  it('swallows a throwing top-up and keeps the timeline commented rows', async () => {
+    // The one stated exception to the §2 guarantee — comments[] may be short here. It must NOT
+    // fall through to the fallback (the same call) or the outer catch (which empties the thread).
+    const labels = (page: number) =>
+      Array.from({ length: 100 }, (_, i) => ({
+        event: 'labeled', id: page * 100 + i, created_at: '2026-01-01T00:00:00Z',
+        actor: { login: 'a' }, label: { name: `l${page}-${i}` },
+      }));
+    routeGh({
+      timeline: (page) => (page === 1 ? [...labels(1).slice(0, 99), commented(1)] : labels(page)),
+      comments: undefined, // top-up throws
+    });
+
+    const data = await fetchGithubComments(repoRoot, 'issue', 1);
+
+    expect(data.available).toBe(true); // NOT the empty-thread path
+    expect(data.comments.map((c) => c.id)).toEqual([1]);
+    expect(data.truncated).toBe(true);
+  });
+
+  it('sets truncated when only the event stream was capped', async () => {
+    routeGh({
+      timeline: () => Array.from({ length: 250 }, (_, i) => ({
+        event: 'labeled', id: i,
+        created_at: new Date(Date.UTC(2026, 0, 1) + i * 60_000).toISOString(),
+        actor: { login: 'a' }, label: { name: `l${i}` },
+      })),
+    });
+
+    const data = await fetchGithubComments(repoRoot, 'issue', 1);
+
+    expect(data.events).toHaveLength(TIMELINE_EVENT_CAP);
+    expect(data.truncated).toBe(true);
+    expect(data.comments).toEqual([]); // comments untouched by event volume
+  });
+
+  it('still fetches PR reviews alongside the timeline', async () => {
+    routeGh({
+      timeline: () => [commented(1)],
+      reviews: () => [{
+        id: 500, user: { login: 'rev' }, body: 'LGTM', state: 'APPROVED',
+        submitted_at: '2026-01-05T00:00:00Z', html_url: 'https://github.com/o/r/pull/1#pullrequestreview-500',
+      }],
+    });
+
+    const data = await fetchGithubComments(repoRoot, 'pr', 1);
+
+    expect(data.comments.map((c) => c.kind)).toEqual(['comment', 'review']);
   });
 });
