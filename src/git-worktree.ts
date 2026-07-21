@@ -325,7 +325,11 @@ async function unresolvedConflicts(dir: string, porcelain: string): Promise<stri
   if (firstUnmerged) {
     return `${unmerged.length} unmerged path(s), e.g. ${firstUnmerged.slice(3)}`;
   }
-  // Only tracked, non-deleted paths can carry markers into the commit.
+  // Deleted paths have no content to scan. Untracked (`??`) ones are skipped
+  // even though `git add -A` will commit them: a conflict always lands in a
+  // tracked file, whereas an untracked fixture or doc that legitimately
+  // contains marker-shaped lines would otherwise wedge every autosave. False
+  // negatives here cost noise; false positives would cost the recovery point.
   const candidates = entries
     .filter((line) => !line.startsWith('D ') && !line.startsWith(' D') && !line.startsWith('??'))
     .map((line) => {
