@@ -57,6 +57,6 @@ Related implementation: PR #569.
 
 ### Phase 2: Cockpit and documentation
 
-- [ ] 2.1 Expose independent settings in API and UI
-- [ ] 2.2 Add cockpit regression coverage
-- [ ] 2.3 Document environment and zero-config behavior
+- [x] 2.1 Expose independent settings in API and UI — 41102ba
+- [x] 2.2 Add cockpit regression coverage — 41102ba
+- [x] 2.3 Document environment and zero-config behavior — 41102ba
