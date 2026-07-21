@@ -226,20 +226,24 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
   // The queued-run affordances (#472), passed only while the run is queued — so the bubbles
   // go read-only on the next `run` SSE frame once it starts. Errors surface through the
   // mutations' own state; a 409 means the run started, and the affordances vanish anyway.
-  const patchRun = usePatchRun(run.id)
-  const editQueued = useEditQueuedMessage(run.id)
-  const removeQueued = useRemoveQueuedMessage(run.id)
+  // Depend on the `mutateAsync` functions, NOT the mutation result objects: TanStack returns a
+  // fresh result object every render, so memoizing on those would rebuild `edit` — and with it
+  // every thread row — on each render, defeating the memo that exists because these threads get
+  // big enough to virtualize. `mutateAsync` is referentially stable.
+  const { mutateAsync: patchRunAsync } = usePatchRun(run.id)
+  const { mutateAsync: editQueuedAsync } = useEditQueuedMessage(run.id)
+  const { mutateAsync: removeQueuedAsync } = useRemoveQueuedMessage(run.id)
   const edit = useMemo(
     () =>
       queued ?
         {
-          onEditTask: (text: string) => void patchRun.mutateAsync({ task: text }).catch(() => {}),
+          onEditTask: (text: string) => void patchRunAsync({ task: text }).catch(() => {}),
           onEditMessage: (msgId: string, text: string) =>
-            void editQueued.mutateAsync({ msgId, message: { text } }).catch(() => {}),
-          onRemoveMessage: (msgId: string) => void removeQueued.mutateAsync(msgId).catch(() => {}),
+            void editQueuedAsync({ msgId, message: { text } }).catch(() => {}),
+          onRemoveMessage: (msgId: string) => void removeQueuedAsync(msgId).catch(() => {}),
         }
       : undefined,
-    [queued, patchRun, editQueued, removeQueued],
+    [queued, patchRunAsync, editQueuedAsync, removeQueuedAsync],
   )
 
   const rows = useMemo(() => buildThreadRows(run, thread, edit), [run, thread, edit])

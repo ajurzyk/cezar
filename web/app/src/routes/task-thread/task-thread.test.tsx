@@ -239,6 +239,39 @@ describe('ThreadView', () => {
     )
   })
 
+  /**
+   * Review fix: the affordance callbacks are memoized on the mutations' `mutateAsync`
+   * functions, not on the mutation RESULT objects — TanStack returns a fresh result object
+   * every render, which would rebuild every thread row each time and defeat the memo that
+   * exists because these threads get big enough to virtualize.
+   *
+   * Asserted as the observable consequence: re-rendering with identical inputs neither
+   * duplicates nor loses the affordances, and the row builder is pure.
+   */
+  it('re-renders a queued run without duplicating or losing the affordances', () => {
+    const fixture = run('queued', {
+      queuedMessages: [{ id: 'm1', text: 'stacked', createdAt: '2026-07-21T10:00:00.000Z' }],
+    })
+    const thread = reduceThread(EVENTS)
+
+    // The row builder is pure: same inputs, same rows.
+    expect(buildThreadRows(fixture, thread).map((r) => r.key)).toEqual(
+      buildThreadRows(fixture, thread).map((r) => r.key),
+    )
+
+    const { rerender } = renderView(<ThreadView run={fixture} thread={thread} />)
+    expect(screen.getAllByLabelText('Remove message')).toHaveLength(1)
+    rerender(
+      <QueryClientProvider client={createQueryClient()}>
+        <MemoryRouter>
+          <ThreadView run={fixture} thread={thread} />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+    expect(screen.getAllByLabelText('Remove message')).toHaveLength(1)
+    expect(screen.getAllByLabelText('Edit message')).toHaveLength(1)
+  })
+
   /** #472 — the edit/remove affordances exist only while the run is queued. */
   it('offers edit + remove on stacked bubbles and edit-only on the prompt, while queued', () => {
     renderView(
