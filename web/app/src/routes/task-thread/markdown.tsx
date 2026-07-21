@@ -1,5 +1,5 @@
 import { memo } from 'react'
-import { Streamdown, type CodeHighlighterPlugin } from 'streamdown'
+import { Streamdown, defaultRemarkPlugins, type CodeHighlighterPlugin } from 'streamdown'
 
 import { SYN_THEME, highlight, highlightSync, supportedLanguages } from '@/lib/highlighter'
 
@@ -33,17 +33,77 @@ const shikiPlugin: CodeHighlighterPlugin = {
   },
 }
 
+interface MdastNode {
+  type: string
+  value?: string
+  children?: MdastNode[]
+}
+
+/**
+ * Turn every newline inside a text node into a hard `break` — CommonMark's "a single newline is
+ * just a space" rule, disabled.
+ *
+ * Needed only for text a HUMAN typed (#524). An LLM writes real markdown and means the CommonMark
+ * reading; a person hitting Enter in a textarea means a line break, and collapsing those would
+ * reflow their message into one paragraph. `remark-breaks` does exactly this, but it is not a
+ * dependency here and `unist-util-visit` is only a transitive one — an mdast tree is plain
+ * objects, so the walk is cheaper to inline than either import is to take on.
+ *
+ * Only `text` nodes are split, which is what keeps it safe: `code` and `inlineCode` carry their
+ * content in `value` with no children, so fences and spans are never touched.
+ */
+function remarkHardBreaks() {
+  const walk = (node: MdastNode): void => {
+    if (!node.children) return
+    const out: MdastNode[] = []
+    for (const child of node.children) {
+      if (child.type === 'text' && child.value?.includes('\n')) {
+        const parts = child.value.split(/\r?\n/)
+        parts.forEach((part, index) => {
+          // A trailing newline would otherwise emit a dangling `break`, padding every message
+          // that ends in Enter with a blank line.
+          if (index > 0 && !(part === '' && index === parts.length - 1)) out.push({ type: 'break' })
+          if (part) out.push({ type: 'text', value: part })
+        })
+      } else {
+        walk(child)
+        out.push(child)
+      }
+    }
+    node.children = out
+  }
+  return walk
+}
+
+/**
+ * Streamdown's `remarkPlugins` prop REPLACES its defaults rather than extending them, so passing
+ * a bare `[remarkHardBreaks]` would silently drop remark-gfm (links, tables, strikethrough, task
+ * lists) and its code-meta plugin — user text would lose the very autolinking this whole change
+ * exists to make consistent between the two sides. Compose onto the defaults instead.
+ */
+const HARD_BREAKS = [...Object.values(defaultRemarkPlugins), remarkHardBreaks]
+
 /**
  * Memoized per message (Streamdown additionally memoizes per block): during streaming only the
  * message whose `children` string actually grew re-renders — the research doc's one hard rule
  * for markdown in chat threads.
+ *
+ * `breaks` opts into hard line breaks — set it for user-authored text, leave it off for the
+ * assistant's (see `remarkHardBreaks`).
  */
-export const Markdown = memo(function Markdown({ children }: { children: string }) {
+export const Markdown = memo(function Markdown({
+  children,
+  breaks = false,
+}: {
+  children: string
+  breaks?: boolean
+}) {
   return (
     <Streamdown
       className="thread-markdown"
       plugins={{ code: shikiPlugin }}
       shikiTheme={[SYN_THEME, SYN_THEME]}
+      remarkPlugins={breaks ? HARD_BREAKS : undefined}
       // Copy + language chip on every fence (the deliverable); download is file-manager noise
       // in a chat, and table export dropdowns are R5-territory chrome.
       controls={{ code: { copy: true, download: false }, table: false, mermaid: false }}

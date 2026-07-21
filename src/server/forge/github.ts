@@ -545,7 +545,20 @@ export async function createDraftPr(input: DraftPrInput): Promise<DraftPrOutcome
   }
 
   // Final autosave: the branch must hold everything before it leaves the box.
-  await autosaveCommit(worktree);
+  // This is the LAST flush — unlike the turn-end and run-finalize ones there is
+  // no later autosave to pick the work up, so a refusal (conflicted tree) or a
+  // failed commit has to stop the publish instead of silently opening a PR from
+  // a branch that is missing the run's final state.
+  const saved = await autosaveCommit(worktree, 'pre-PR');
+  if (saved === 'refused') {
+    return {
+      ok: false,
+      error: 'worktree has unresolved merge conflicts — resolve them, then publish again',
+    };
+  }
+  if (saved === 'failed') {
+    return { ok: false, error: 'could not commit the final changes — check git status in the worktree' };
+  }
 
   // DRY-RUN (CEZ_DRY_RUN=1): no push, no gh — simulate success with a fake PR
   // URL so the whole review → PR flow is testable without GitHub.

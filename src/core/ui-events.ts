@@ -327,6 +327,36 @@ export interface UiPermissionResolvedEvent {
   optionId: string;
 }
 
+/** One option in an AskUser question — see `src/core/ask.ts`. */
+export interface UiAskOption {
+  label: string;
+  description?: string;
+}
+
+/** One structured multiple-choice question — modeled on Claude Code's
+ *  `AskUserQuestion` (see `src/core/ask.ts`). */
+export interface UiAskQuestion {
+  id?: string;
+  header: string;
+  question: string;
+  options: UiAskOption[];
+  multiSelect?: boolean;
+}
+
+/**
+ * The agent asked the user a structured multiple-choice question via a
+ * `CEZ:ASK` marker (spec `2026-07-18-askuser-across-runners`). Emitted by the
+ * RunManager off the assembled turn text — uniform across claude/codex/opencode
+ * with no per-backend mapper work. The run parks `waiting`; the cockpit renders
+ * clickable option chips. Resolution is client-side — the next user message for
+ * the run closes the card — so there is no separate `ask.resolved` event.
+ */
+export interface UiAskRequestedEvent {
+  type: 'ask.requested';
+  requestId: string;
+  questions: UiAskQuestion[];
+}
+
 /**
  * Cumulative-for-session raw telemetry.
  * claude: `result.usage` + `total_cost_usd`; codex:
@@ -364,6 +394,7 @@ export type UiEvent =
   | UiPlanUpdatedEvent
   | UiPermissionRequestedEvent
   | UiPermissionResolvedEvent
+  | UiAskRequestedEvent
   | UiUsageUpdatedEvent
   | UiImageEvent;
 

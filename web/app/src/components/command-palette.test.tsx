@@ -96,9 +96,16 @@ function renderPalette({
   skills = [] as Skill[],
   theme,
   forge = true,
-}: { runs?: RunRecord[]; skills?: Skill[]; theme?: Theme; forge?: boolean } = {}) {
+  uiState = {} as Record<string, unknown>,
+}: {
+  runs?: RunRecord[]
+  skills?: Skill[]
+  theme?: Theme
+  forge?: boolean
+  uiState?: Record<string, unknown>
+} = {}) {
   if (theme) localStorage.setItem(THEME_STORAGE_KEY, theme)
-  serve({ '/api/runs': runs, '/api/skills': skills, '/api/health': health(forge) })
+  serve({ '/api/runs': runs, '/api/skills': skills, '/api/health': health(forge), '/api/ui-state': uiState })
   render(
     <QueryClientProvider client={createQueryClient()}>
       <ThemeProvider>
@@ -344,6 +351,21 @@ describe('Skills group', () => {
       (item) => item.getAttribute('data-skill'),
     )
     expect(names).toEqual(['project-review', 'project-fix', 'project-plan', 'global-deploy', 'team-release'])
+  })
+
+  it('lists most-used skills first, across localities (#519)', async () => {
+    renderPalette({ skills: MIXED, uiState: { skillUsage: { 'team-release': 5, 'project-fix': 2 } } })
+    openWith({ metaKey: true })
+    await screen.findByText('project-review')
+
+    // Used skills lead frequency-descending regardless of locality; the unused rest keeps
+    // the #377 project-first split.
+    await waitFor(() => {
+      const names = [...document.querySelectorAll('[data-slot="palette-skill"]')].map(
+        (item) => item.getAttribute('data-skill'),
+      )
+      expect(names).toEqual(['team-release', 'project-fix', 'project-review', 'project-plan', 'global-deploy'])
+    })
   })
 
   it('selecting a skill client-navigates to the prefilling /new?skill=…', async () => {

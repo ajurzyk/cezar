@@ -243,6 +243,20 @@ describe('assigning a template to a skill', () => {
     expect(options[1]?.querySelector('.font-semibold')).toBeNull()
   })
 
+  it('lists most-used skills first, across localities (#519)', async () => {
+    // g-review is global but USED — it now leads the unused project skill om-fix.
+    serve({ skillUsage: { 'g-review': 3 } })
+    renderSection()
+    await waitFor(() => expect(rows()).toHaveLength(DEFAULT_PROMPT_TEMPLATES.length))
+
+    await openPicker(rows()[0]!)
+    await waitFor(() =>
+      expect(document.querySelectorAll('[data-slot="prompt-template-skill-option"]')).toHaveLength(2),
+    )
+    const options = [...document.querySelectorAll<HTMLElement>('[data-slot="prompt-template-skill-option"]')]
+    expect(options.map((o) => o.dataset.skill)).toEqual(['g-review', 'om-fix'])
+  })
+
   it('assigning shows a chip and Save PUTs the skills alongside the template', async () => {
     serve()
     renderSection()

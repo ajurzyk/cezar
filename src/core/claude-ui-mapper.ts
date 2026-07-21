@@ -155,7 +155,9 @@ function mapAssistant(msg: Record<string, unknown>, state: ClaudeUiMapperState):
       const item: UiMessageItem = { kind: 'message', id: `item_${++itemSeq}`, role: 'assistant', text: raw.text };
       if (parentItemId !== undefined) item.parentItemId = parentItemId;
       events.push({ type: 'item.started', item }, { type: 'item.completed', item });
-    } else if (raw.type === 'thinking' && typeof raw.thinking === 'string') {
+    } else if (raw.type === 'thinking' && typeof raw.thinking === 'string' && raw.thinking.trim() !== '') {
+      // Blank `thinking` is skipped: it carries no information and would only
+      // mint a dead "Thinking —" row in the session view (#528).
       const item: UiReasoningItem = { kind: 'reasoning', id: `item_${++itemSeq}`, text: raw.thinking };
       if (parentItemId !== undefined) item.parentItemId = parentItemId;
       events.push({ type: 'item.started', item }, { type: 'item.completed', item });

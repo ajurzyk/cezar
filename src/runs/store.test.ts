@@ -716,6 +716,97 @@ describe('RunStore — agent-declared marker refs (spec 2026-07-18-task-ref-mark
   });
 });
 
+describe('RunStore — referenced-issue discovery (spec 2026-07-21-report-ref-discovery)', () => {
+  let dataDir: string;
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), 'cez-store-'));
+  });
+  afterEach(() => {
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  const freshRun = (task = 'task') => {
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({ title: 't', workflow: 'w', task, steps: [] });
+    return { store, run };
+  };
+
+  it('adopts a single issue link and seeds issueNumber', () => {
+    const { store, run } = freshRun();
+    store.appendEvent(run.id, {
+      type: 'result',
+      result: 'Fixing https://github.com/open-mercato/cezar/issues/433 now.',
+    });
+    const loaded = store.getRun(run.id);
+    expect(loaded?.referencedIssueUrl).toBe('https://github.com/open-mercato/cezar/issues/433');
+    expect(loaded?.issueNumber).toBe(433);
+  });
+
+  it('tracks issues independently of a created PR', () => {
+    const { store, run } = freshRun();
+    store.appendEvent(run.id, {
+      type: 'result',
+      result:
+        'Opened a draft pull request: https://github.com/open-mercato/cezar/pull/42 closing https://github.com/open-mercato/cezar/issues/7',
+    });
+    const loaded = store.getRun(run.id);
+    expect(loaded?.pullRequestUrl).toBe('https://github.com/open-mercato/cezar/pull/42');
+    expect(loaded?.referencedIssueUrl).toBe('https://github.com/open-mercato/cezar/issues/7');
+    expect(loaded?.issueNumber).toBe(7);
+  });
+
+  it('ambiguity clears the chip and takes back the number the janitor seeded', () => {
+    const { store, run } = freshRun();
+    store.appendEvent(run.id, {
+      type: 'result',
+      result: 'See https://github.com/open-mercato/cezar/issues/1',
+    });
+    expect(store.getRun(run.id)?.issueNumber).toBe(1);
+    store.appendEvent(run.id, {
+      type: 'result',
+      result: 'Also https://github.com/open-mercato/cezar/issues/2',
+    });
+    const loaded = store.getRun(run.id);
+    expect(loaded?.referencedIssueUrl).toBeUndefined();
+    expect(loaded?.issueNumber).toBeUndefined();
+  });
+
+  it('disambiguates several issue links by the number named in the task prompt', () => {
+    const { store, run } = freshRun('om-auto-fix-issue 433');
+    store.appendEvent(run.id, {
+      type: 'result',
+      result:
+        'Working https://github.com/open-mercato/cezar/issues/433, related to https://github.com/open-mercato/cezar/issues/12.',
+    });
+    expect(store.getRun(run.id)?.referencedIssueUrl).toBe(
+      'https://github.com/open-mercato/cezar/issues/433',
+    );
+  });
+
+  it('a declared CEZ:ISSUE filters the candidates and owns issueNumber', () => {
+    const { store, run } = freshRun();
+    store.appendEvent(run.id, {
+      type: 'result',
+      result:
+        'See https://github.com/open-mercato/cezar/issues/1 and https://github.com/open-mercato/cezar/issues/2',
+    });
+    store.applyMarkerRefs(run.id, { issue: 2 });
+    const loaded = store.getRun(run.id);
+    expect(loaded?.referencedIssueUrl).toBe('https://github.com/open-mercato/cezar/issues/2');
+    expect(loaded?.issueNumber).toBe(2);
+  });
+
+  it('never overwrites a marker-owned issueNumber from a stray link', () => {
+    const { store, run } = freshRun();
+    store.applyMarkerRefs(run.id, { issue: 500 });
+    store.appendEvent(run.id, {
+      type: 'result',
+      result: 'Mentioned in https://github.com/open-mercato/cezar/issues/9',
+    });
+    expect(store.getRun(run.id)?.issueNumber).toBe(500);
+  });
+});
+
 describe('RunStore — seq survives a restart (#424 symptom class)', () => {
   let dataDir: string;
 

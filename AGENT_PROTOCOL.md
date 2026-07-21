@@ -205,9 +205,25 @@ type UiEvent =
   | UiPlanUpdatedEvent       // 'plan.updated'     — entries: PlanEntry[] (FULL replacement, ACP semantics)
   | UiPermissionRequestedEvent  // 'permission.requested' — RESERVED (types only; wired when approvals become optional)
   | UiPermissionResolvedEvent   // 'permission.resolved'  — RESERVED
+  | UiAskRequestedEvent      // 'ask.requested'    — requestId, questions[] (AskUser; the cockpit renders option chips)
   | UiUsageUpdatedEvent      // 'usage.updated'    — usage: TokenUsage, costUsd? (cumulative-for-session)
   | UiImageEvent;            // 'image'            — itemId?, mediaType, data (base64; manager re-emits URL)
 ```
+
+**AskUser (`ask.requested`, #473).** Unlike every other `UiEvent`, this one is
+**not** produced by a per-backend mapper. The agent asks a structured
+multiple-choice question by ending a turn with a `CEZ:ASK <json>` control marker
+(a sibling of `CEZ:DONE` / `CEZ:MONITORING`); the RunManager detects it on the
+*assembled* turn text — uniform across claude, codex and opencode with no mapper
+work — validates the payload (`src/core/ask.ts`, modeled on Claude Code's
+`AskUserQuestion`: 1–4 questions, 2–4 options each, `header` ≤12 chars), emits
+`ask.requested` and parks the run `waiting`. The cockpit renders clickable option
+chips; the user's pick (or a free-form reply) rides the normal reply seam
+(`POST /api/runs/:id/messages`), and the card resolves client-side when that
+message lands (no `ask.resolved` event). A malformed marker degrades to plain
+text — the prose fallback is never made worse. A native `AskUserQuestion`
+control-protocol bridge for claude (the `control_request can_use_tool` path) is a
+possible future enhancement; the marker is the portable baseline.
 
 `item.completed` carries **snapshots**, not deltas — safe to persist. `item.delta`
 carries **appends** to one field of a live item and must not be persisted as a
@@ -272,7 +288,11 @@ or a new fixture set forgets one — a named row fails. The matrix:
 - tool status `running`, `completed`, `failed`
 - reasoning items (thinking / reasoning items / reasoning parts)
 - structured diffs (Edit input / fileChange.changes / patch parts)
-- sub-agent task items (Task / review-mode items / subtask parts)
+- sub-agent task items (Task / review-mode span / subtask parts) — one item per
+  sub-agent: codex's `enteredReviewMode`/`exitedReviewMode` pair folds into a
+  single `task` item with a running→completed lifecycle, so a consumer counting
+  task items counts agents, not frames (spec
+  `.ai/specs/2026-07-20-grouped-subagent-display.md`, #474)
 - `usage.updated` with raw token counts
 - `turn.completed` with a `stopReason`
 - sub-agent **nesting** via `parentItemId` (claude + opencode; codex has no wire
