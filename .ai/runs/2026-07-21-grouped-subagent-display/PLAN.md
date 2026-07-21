@@ -12,7 +12,7 @@
 
 | Phase | Step | Title | Status | Commit |
 |-------|------|-------|--------|--------|
-| 1 | 1.1 | Sub-agent collector (`subagent-dock.ts`) | todo | — |
+| 1 | 1.1 | Sub-agent collector (`subagent-dock.ts`) | done | 83804c9 |
 | 1 | 1.2 | Codex mapper: fold review mode into one task item | todo | — |
 | 1 | 1.3 | `mock:subagents` trigger in the claude mock | todo | — |
 | 1 | 1.4 | AgentsDock component + task-thread mount | todo | — |
