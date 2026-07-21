@@ -1,5 +1,5 @@
 import { MessageSquareTextIcon, SearchXIcon } from 'lucide-react'
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { Link, useLocation, useParams } from 'react-router'
 
 import { ApiError } from '@/api/client'
@@ -27,7 +27,8 @@ import {
 import { ContinueAction } from './follow-up-engine'
 import { AgentsDock } from './agents-dock'
 import { PlanDock, planCounts } from './plan-dock'
-import { collectSubagents } from './subagent-dock'
+import { collectSubagents, subagentChildren } from './subagent-dock'
+import { SubagentSheet } from './subagent-sheet'
 import { AcceptCelebration, ReviewPanel } from './review-panel'
 import { queuePosition } from './run-actions'
 import { RunHeader } from './run-header'
@@ -136,6 +137,14 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
   // The Agents dock's data: the current fan-out's sub-agents, or [] when there is none to
   // show (#474). Derived from the same reduced turns the thread renders — no new subscription.
   const agents = useMemo(() => collectSubagents(thread.turns), [thread.turns])
+  // The drill-down's whole state: which agent is open. Ephemeral by design (spec Q2/Q5) —
+  // sub-agents have no stable identity outside their run, so there is nothing to persist.
+  const [openAgentId, setOpenAgentId] = useState<string | undefined>(undefined)
+  const openAgent = agents.find((entry) => entry.id === openAgentId)
+  const openAgentChildren = useMemo(
+    () => (openAgentId === undefined ? [] : subagentChildren(thread.turns, openAgentId)),
+    [thread.turns, openAgentId],
+  )
   // The legacy session-open rule (web/app.js `updateDetail`): the composer can deliver while
   // the engine owns a live session — running queues the message, waiting answers it.
   const sessionOpen = run.status === 'running' || run.status === 'waiting'
@@ -206,6 +215,14 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
 
       <AcceptCelebration status={run.status} />
 
+      {/* The drill-down for whichever Agents-dock row was clicked. Rendered outside the dock
+          so the sheet's portal is not affected by the dock's collapse state. */}
+      <SubagentSheet
+        agent={openAgent}
+        entries={openAgentChildren}
+        onClose={() => setOpenAgentId(undefined)}
+      />
+
       {/* The dock region (mockup `.dock`): plan dock, paused hint, then the composer.
           `bottom: var(--kb)` is the iOS keyboard lift — 0 until the visualViewport watcher
           publishes an inset. */}
@@ -222,7 +239,7 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
         <div className="mx-auto flex w-full max-w-[820px] flex-col gap-2.5">
           {/* Agents above the plan: the fan-out is the more urgent "what is happening now",
               and it is transient — the plan outlives it. Keyed by run id like the plan dock. */}
-          <AgentsDock key={`agents:${run.id}`} runId={run.id} agents={agents} />
+          <AgentsDock key={`agents:${run.id}`} runId={run.id} agents={agents} onSelect={setOpenAgentId} />
 
           {plan !== undefined && plan.length > 0 ? (
             // Keyed by run id: the collapse default re-derives per task (see PlanDock).

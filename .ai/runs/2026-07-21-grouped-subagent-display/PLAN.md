@@ -15,8 +15,8 @@
 | 1 | 1.1 | Sub-agent collector (`subagent-dock.ts`) | done | bd205e4 |
 | 1 | 1.2 | Codex mapper: fold review mode into one task item | done | 40d23aa |
 | 1 | 1.3 | `mock:subagents` trigger in the claude mock | done | ad2ed43 |
-| 1 | 1.4 | AgentsDock component + task-thread mount | done | pending |
-| 2 | 2.1 | SubagentSheet drill-down + dock row buttons | todo | — |
+| 1 | 1.4 | AgentsDock component + task-thread mount | done | e021935 |
+| 2 | 2.1 | SubagentSheet drill-down + dock row buttons | done | pending |
 | 2 | 2.2 | Finished-run parity from replayed state | todo | — |
 | 3 | 3.1 | e2e smoke, opencode mapper hardening, mockup sync | todo | — |
 

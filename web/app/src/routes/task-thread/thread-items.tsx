@@ -383,8 +383,12 @@ export function ToolCard({
 }
 
 /** A sub-agent entry inside a Task card — one level deep by design, so nested tools render
- *  without their own children. `scope` is the parent card's cache key, extended per child. */
-function NestedEntry({ entry, scope }: { entry: ThreadEntry; scope?: string }) {
+ *  without their own children. `scope` is the parent card's cache key, extended per child.
+ *
+ *  Exported for the sub-agent sheet (#474), which renders the SAME child entries in a focused
+ *  panel: the drill-down must look like the inline nesting, not like a second renderer that
+ *  drifts from it. */
+export function NestedEntry({ entry, scope }: { entry: ThreadEntry; scope?: string }) {
   switch (entry.kind) {
     case 'message':
       return <AssistantMessage text={entry.text} />
