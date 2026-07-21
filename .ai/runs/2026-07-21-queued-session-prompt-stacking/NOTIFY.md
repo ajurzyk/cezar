@@ -24,3 +24,12 @@
 - DECISION: `origin/main` moved mid-run (67cdd2f → 8c22ab9) and #524 made `UserBubble` render markdown — the same component this work extends. Merged and kept BOTH; the inline editor edits the raw markdown source, not the rendered output. Re-verified with unit tests and a fresh browser run.
 - Pre-existing e2e failures (settings/github/task-thread tabs) PROVEN pre-existing by checking out clean origin/main, rebuilding, and reproducing the identical 4 failures there.
 - FINDING beyond scope: turning on the new `ExactKeys` mirror guard surfaced four RunRecord fields that had silently drifted out of the web mirror (`autonomous`, `referencedIssueUrl`, `referencedIssueCandidates`, `worktreeReclaimedAt`). Mirrored them — shipping a knowingly-failing guard was not an option.
+
+## 2026-07-21T12:25:00Z — review pass complete, run finished
+- `om-auto-review-pr` found 3 issues in my own diff, all fixed with regression tests, gate re-run after each batch (3160 tests green):
+  1. MAJOR — `flushDeferred` dropped its buffer before sending, silently losing a message the session refused (the exact failure `deferMessage` exists to prevent).
+  2. minor — bounds ran before the ladder resolved, so an over-long message to a finished run answered `400 prompt too long` instead of the truthful `409 session closed`.
+  3. minor — affordances memoized on TanStack's mutation RESULT objects (fresh each render), rebuilding every thread row per render and defeating the virtualization memo.
+- VERDICT: no blockers remain. Posted as a COMMENT, not a formal review: GitHub refuses `addPullRequestReview` on your own PR. Pipeline label deliberately left at `review` (not `merge-queue`) — this PR has no formal approval and needs a human one.
+- Labels: review, feature, needs-qa, priority-medium, risk-medium. PR flipped to ready. Manual-QA instructions posted.
+- Lock released.
