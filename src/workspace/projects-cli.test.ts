@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -20,8 +20,8 @@ describe('cezar projects CLI', () => {
   let io: ProjectsCommandIo & { out: string[]; err: string[] };
 
   beforeEach(() => {
-    home = mkdtempSync(join(tmpdir(), 'cez-projects-cli-'));
-    repos = mkdtempSync(join(tmpdir(), 'cez-projects-cli-repos-'));
+    home = mkdtempSync(join(realpathSync(tmpdir()), 'cez-projects-cli-'));
+    repos = mkdtempSync(join(realpathSync(tmpdir()), 'cez-projects-cli-repos-'));
     process.env.CEZ_HOME = home;
     clearProjectProbeCache();
     const out: string[] = [];

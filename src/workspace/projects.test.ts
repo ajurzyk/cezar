@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -26,8 +26,8 @@ describe('workspace projects', () => {
   let repos: string;
 
   beforeEach(() => {
-    home = mkdtempSync(join(tmpdir(), 'cez-workspace-'));
-    repos = mkdtempSync(join(tmpdir(), 'cez-repos-'));
+    home = mkdtempSync(join(realpathSync(tmpdir()), 'cez-workspace-'));
+    repos = mkdtempSync(join(realpathSync(tmpdir()), 'cez-repos-'));
     process.env.CEZ_HOME = home; // paths.ts sends all workspace paths here
     clearProjectProbeCache();
   });

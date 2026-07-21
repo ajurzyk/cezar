@@ -3,6 +3,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -59,9 +60,9 @@ describe('workspace projects API', () => {
   let store: RunStore;
 
   beforeEach(() => {
-    home = mkdtempSync(join(tmpdir(), 'cez-workspace-'));
-    repoRoot = mkdtempSync(join(tmpdir(), 'cez-projects-boot-'));
-    otherRoot = mkdtempSync(join(tmpdir(), 'cez-projects-other-'));
+    home = mkdtempSync(join(realpathSync(tmpdir()), 'cez-workspace-'));
+    repoRoot = mkdtempSync(join(realpathSync(tmpdir()), 'cez-projects-boot-'));
+    otherRoot = mkdtempSync(join(realpathSync(tmpdir()), 'cez-projects-other-'));
     process.env.CEZ_HOME = home; // paths.ts sends all workspace paths here
     store = RunStore.open(join(repoRoot, '.ai/cezar'));
     delete process.env.CEZ_REMOTE;
