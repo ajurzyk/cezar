@@ -223,15 +223,15 @@ describe('workspace projects API', () => {
       expect((await getProjects()).projects).toEqual([]);
     });
 
-    it('hosted mode: a folder outside projectsDir is refused, one inside is registered', async () => {
-      // Hosted narrows `/api/fs/browse` to projectsDir; the register route
+    it('hosted mode: a folder outside browseRoot is refused, one inside is registered', async () => {
+      // Hosted narrows `/api/fs/browse` to browseRoot; the register route
       // re-checks the same containment, or a hand-made POST would walk around
       // the narrowing entirely.
       const checkoutRoot = join(home, 'checkouts');
       const inside = join(checkoutRoot, 'app');
       mkdirSync(inside, { recursive: true });
       await mergeWriteWorkspaceConfig((config) => {
-        config.projectsDir = checkoutRoot;
+        config.browseRoot = checkoutRoot;
       });
       process.env.CEZ_REMOTE = '1';
       const refused = await post({ root: otherRoot });
@@ -251,7 +251,7 @@ describe('workspace projects API', () => {
       const checkoutRoot = join(home, 'checkouts');
       mkdirSync(checkoutRoot, { recursive: true });
       await mergeWriteWorkspaceConfig((config) => {
-        config.projectsDir = checkoutRoot;
+        config.browseRoot = checkoutRoot;
       });
       process.env.CEZ_REMOTE = '1';
       const exists = await post({ root: otherRoot }); // real folder, outside
@@ -273,7 +273,7 @@ describe('workspace projects API', () => {
       const checkoutRoot = join(home, 'checkouts');
       mkdirSync(checkoutRoot, { recursive: true });
       await mergeWriteWorkspaceConfig((config) => {
-        config.projectsDir = checkoutRoot;
+        config.browseRoot = checkoutRoot;
       });
       process.env.CEZ_REMOTE = '1';
       const typo = join(checkoutRoot, 'my-porject');
@@ -289,7 +289,7 @@ describe('workspace projects API', () => {
       const checkoutRoot = join(home, 'checkouts');
       mkdirSync(checkoutRoot, { recursive: true });
       await mergeWriteWorkspaceConfig((config) => {
-        config.projectsDir = checkoutRoot;
+        config.browseRoot = checkoutRoot;
       });
       const escape = join(checkoutRoot, 'escape');
       symlinkSync(otherRoot, escape);
