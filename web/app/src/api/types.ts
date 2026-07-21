@@ -92,6 +92,8 @@ export interface RunRecord {
    *  Display tier only: `pullRequestUrl` (the PR this task CREATED) wins, and the
    *  Draft-PR / Create-PR action gates ignore it. Read via `taskPrUrl()`. */
   referencedPullRequestUrl?: string
+  /** The issue this task is ABOUT — discovered from an issue URL in the prompt or transcript. */
+  referencedIssueUrl?: string
   /** The PR/issue number this task is ABOUT (task auto-naming spec) — display tier only. */
   prNumber?: number
   issueNumber?: number

@@ -743,6 +743,14 @@ describe('RunStore — referenced-issue discovery (spec 2026-07-21-report-ref-di
     expect(loaded?.issueNumber).toBe(433);
   });
 
+  it('seeds an issue link while the run is still queued', () => {
+    const { store, run } = freshRun('Fix https://github.com/open-mercato/cezar/issues/554');
+    const loaded = store.getRun(run.id);
+    expect(loaded?.status).toBe('queued');
+    expect(loaded?.referencedIssueUrl).toBe('https://github.com/open-mercato/cezar/issues/554');
+    expect(loaded?.issueNumber).toBe(554);
+  });
+
   it('tracks issues independently of a created PR', () => {
     const { store, run } = freshRun();
     store.appendEvent(run.id, {
