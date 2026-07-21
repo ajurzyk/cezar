@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseAskMarker, stripAskMarker, type AskRequest } from '../core/ask.js';
 import { type AgentSession } from '../core/claude-cli-runner.js';
@@ -24,7 +24,7 @@ import { loadConfig } from '../config.js';
 import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff, worktreeShortstat } from '../git-worktree.js';
 import { getRepoInfo } from '../server/git.js';
 import { loadWorkflows } from './load.js';
-import type { RunRecord, RunStore } from '../runs/store.js';
+import type { QueuedMessage, RunRecord, RunStore } from '../runs/store.js';
 import { reclaimWorktrees, rematerializeReclaimedWorktree } from '../runs/retention.js';
 import { extractTaskRefs, refineTaskRefs, titleRefNumber } from '../runs/task-refs.js';
 import { parseTaskMarkers, stripTaskMarkers } from '../runs/task-markers.js';
@@ -96,6 +96,11 @@ interface ActiveRun {
   autosaveTimer?: NodeJS.Timeout;
   /* The screenshot counter lives on `RunManager.queuedImageSeq` (#472), keyed by
    * run id — a queued run persists attachments with no `ActiveRun` at all. */
+  /** Has a session EVER opened on this run (#472)? `session` alone cannot answer
+   *  it — teardown sets it back to `undefined`, so a closed session and one that
+   *  never opened look identical. This distinguishes "still starting up, buffer
+   *  the message" from "genuinely closed, 409". */
+  sessionEverOpened?: boolean;
   /** Autonomous mode (#autonomous): never park at `waiting` — auto-nudge the agent to keep
    *  going until it signals done or the safety cap is hit. */
   autonomous?: boolean;
@@ -256,6 +261,9 @@ export class RunManager {
    *  the manager rather than the `ActiveRun` so a *queued* run — which has no
    *  `ActiveRun` at all — can persist attachments. Seeded lazily from disk. */
   private readonly queuedImageSeq = new Map<string, number>();
+  /** Messages that landed in the dequeue → session-open gap (#472), flushed as
+   *  ordinary follow-up turns the moment the session opens. In-memory only. */
+  private readonly deferredMessages = new Map<string, ContentBlock[][]>();
   private pumping = false;
   /**
    * Runs normally isolate in worktrees and may execute in parallel. When that
@@ -661,6 +669,165 @@ export class RunManager {
   }
 
   /**
+   * Still waiting for a slot? Checked against the engine's own queue rather than
+   * the record's `status` (#472): the record is written by `execute()` a tick
+   * after `pump()` dequeues, so a status read can see `queued` for a run that has
+   * already started. `pendingJobs` is deleted synchronously at dequeue, so it is
+   * the authoritative answer for "can this prompt still be amended".
+   */
+  private isQueued(runId: string): boolean {
+    return this.pendingJobs.has(runId);
+  }
+
+  /** Split `ContentBlock[]` into the persisted shape a stacked message holds. */
+  private toQueuedMessage(runId: string, content: ContentBlock[]): QueuedMessage {
+    const text = content
+      .filter((b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n');
+    const images = content
+      .filter((b): b is Extract<ContentBlock, { type: 'image' }> => b.type === 'image')
+      .map((b) => this.persistImage(runId, b.source.media_type, b.source.data, 'pasted'))
+      .filter((saved): saved is PersistedAttachment => saved !== null)
+      .map((saved) => saved.url);
+    return {
+      id: randomUUID(),
+      text,
+      ...(images.length ? { images } : {}),
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * Append a prompt message onto a still-queued run (#472). Returns the stored
+   * entry, or null when the run has already started — the caller then falls
+   * through to `deferMessage`.
+   */
+  enqueueMessage(runId: string, content: ContentBlock[]): QueuedMessage | null {
+    if (!this.isQueued(runId)) return null;
+    const run = this.store.getRun(runId);
+    if (!run) return null;
+    const message = this.toQueuedMessage(runId, content);
+    this.store.updateRun(runId, { queuedMessages: [...(run.queuedMessages ?? []), message] });
+    return message;
+  }
+
+  /** Edit a stacked message in place. Null when the run started or the id is unknown. */
+  editQueuedMessage(runId: string, msgId: string, content: ContentBlock[]): QueuedMessage | null {
+    if (!this.isQueued(runId)) return null;
+    const run = this.store.getRun(runId);
+    const stack = run?.queuedMessages;
+    if (!stack) return null;
+    const at = stack.findIndex((m) => m.id === msgId);
+    if (at < 0) return null;
+    const replacement = { ...this.toQueuedMessage(runId, content), id: msgId, createdAt: stack[at]!.createdAt };
+    const next = [...stack];
+    next[at] = replacement;
+    this.store.updateRun(runId, { queuedMessages: next });
+    // Images the edit dropped are now orphans.
+    this.dropOrphanImages(runId, stack[at]!.images ?? [], next);
+    return replacement;
+  }
+
+  /** Remove a stacked message and its now-orphaned attachments. */
+  removeQueuedMessage(runId: string, msgId: string): boolean {
+    if (!this.isQueued(runId)) return false;
+    const run = this.store.getRun(runId);
+    const stack = run?.queuedMessages;
+    if (!stack) return false;
+    const target = stack.find((m) => m.id === msgId);
+    if (!target) return false;
+    const next = stack.filter((m) => m.id !== msgId);
+    this.store.updateRun(runId, { queuedMessages: next });
+    this.dropOrphanImages(runId, target.images ?? [], next);
+    return true;
+  }
+
+  /**
+   * Delete image files no longer referenced by anything (#472). Best effort — a
+   * leftover file is harmless and goes with the run. Never touches a URL still
+   * referenced by another stacked entry or by the initial prompt's `taskImages`.
+   */
+  private dropOrphanImages(runId: string, candidates: string[], stack: QueuedMessage[]): void {
+    if (!candidates.length) return;
+    const run = this.store.getRun(runId);
+    const referenced = new Set([
+      ...(run?.taskImages ?? []),
+      ...stack.flatMap((m) => m.images ?? []),
+    ]);
+    for (const url of candidates) {
+      if (referenced.has(url)) continue;
+      const name = url.split('/').pop();
+      // Defend the join against a crafted URL: only a bare file name may be deleted.
+      if (!name || name.includes('..') || name.includes('/') || name.includes('\\')) continue;
+      try {
+        rmSync(join(this.dataDir, 'runs', `${runId}-images`, name), { force: true });
+      } catch {
+        /* best effort */
+      }
+    }
+  }
+
+  /**
+   * Edit the initial prompt of a still-queued run (#472). Re-derives the
+   * heuristic title and the PR/issue chips, but never re-runs the LLM namer —
+   * it already fired at creation and a second model call per edit is unjustified.
+   */
+  editTask(runId: string, task: string): boolean {
+    if (!this.isQueued(runId)) return false;
+    const run = this.store.getRun(runId);
+    if (!run) return false;
+    const workflow = this.pendingJobs.get(runId)?.workflow;
+    const skillHint = workflow?.steps.find((s) => stepKind(s) === 'agent' && s.skill)?.skill?.trim();
+    const refs = refineTaskRefs(extractTaskRefs(task), skillHint);
+    // Hand-edited titles always win (#389): `user` beats the heuristic, and a
+    // `marker` title the agent declared beats it too.
+    const keepTitle = run.titleOrigin === 'user' || run.titleOrigin === 'marker';
+    this.store.updateRun(runId, {
+      task,
+      ...(keepTitle || !workflow ? {} : { title: makeRunTitle(task, workflow) }),
+      ...(refs.prNumber !== undefined ? { prNumber: refs.prNumber } : {}),
+      ...(refs.issueNumber !== undefined ? { issueNumber: refs.issueNumber } : {}),
+    });
+    return true;
+  }
+
+  /**
+   * Buffer a message that arrived in the gap between dequeue and session-open
+   * (#472). `pump()` has already folded the stack and `execute()` is spawning the
+   * backend, so there is nothing left to amend and no session to deliver into —
+   * without this rung the message would 409, a genuinely dropped message in the
+   * feature built to stop dropping them. Flushed as an ordinary follow-up turn
+   * the instant the session opens; dropped if the run never starts, which the
+   * existing error path already surfaces.
+   *
+   * The buffer lives on the manager rather than the `ActiveRun` because the
+   * `ActiveRun` does not exist yet for part of this window.
+   */
+  deferMessage(runId: string, content: ContentBlock[]): boolean {
+    // The window spans two sub-states: `starting` (no `ActiveRun` yet) and the
+    // longer stretch where the `ActiveRun` exists but the backend is still being
+    // spawned. `execute()` deletes the run from `starting` as soon as it builds
+    // the state — seconds before the session opens — so checking `starting`
+    // alone would reopen exactly the drop this rung exists to close.
+    const state = this.active.get(runId);
+    const startingUp = this.starting.has(runId) || (state !== undefined && !state.sessionEverOpened && !state.cancelled);
+    if (!startingUp) return false;
+    const pending = this.deferredMessages.get(runId) ?? [];
+    pending.push(content);
+    this.deferredMessages.set(runId, pending);
+    return true;
+  }
+
+  /** Deliver anything `deferMessage` buffered, once the session is live. */
+  private flushDeferred(runId: string): void {
+    const pending = this.deferredMessages.get(runId);
+    if (!pending?.length) return;
+    this.deferredMessages.delete(runId);
+    for (const content of pending) this.sendMessage(runId, content);
+  }
+
+  /**
    * Deliver a user message into the run's live claude session (mid-turn or
    * while `waiting`). Returns false when there is no open session — the GUI
    * then offers "Continue" instead.
@@ -980,6 +1147,8 @@ export class RunManager {
       { onUiEvent: (event) => sink.handle(event) },
     );
     state.session = session;
+    state.sessionEverOpened = true;
+    this.flushDeferred(runId);
     state.currentStepId = stepId;
     state.interrupt = () => session.interrupt();
     if (session.pid !== undefined) registerRunProcess(runId, session.pid);
@@ -1453,6 +1622,8 @@ export class RunManager {
       return err instanceof Error ? err.message : String(err);
     }
     state.session = session;
+    state.sessionEverOpened = true;
+    this.flushDeferred(runId);
     state.currentStepId = step.id;
     state.interrupt = () => session.interrupt();
     if (session.pid !== undefined) registerRunProcess(runId, session.pid);

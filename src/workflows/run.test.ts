@@ -1,9 +1,10 @@
 import { execFile } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import type { ContentBlock } from '../core/agent-runner.js';
 import { createWorktree } from '../git-worktree.js';
 import { RunStore, type RunRecord } from '../runs/store.js';
 import { RunManager } from './run.js';
@@ -790,5 +791,195 @@ describe('RunManager.persistImage without a session (#472)', () => {
     const saved = persist('run-d', 'pasted');
     expect(saved?.name).toBe('pasted-2.png');
     expect(readFileSync(join(imagesDir('run-d'), 'pasted-1.png'), 'utf8')).toBe('original');
+  });
+});
+
+/**
+ * #472 — the queued-stack mutators. Driven against a directly-seeded
+ * `pendingJobs` so the mutators are tested independently of scheduling; the real
+ * dequeue path is covered end-to-end by the `hydrateQueuedInput` suite.
+ */
+describe('RunManager queued-stack mutators (#472)', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  let manager: RunManager;
+  const PNG = Buffer.from('png').toString('base64');
+
+  const WORKFLOW: WorkflowDef = {
+    name: '(planned)',
+    source: 'built-in',
+    steps: [{ id: 'task', name: 'Do the task', prompt: '{{task}}' }],
+  };
+
+  const text = (t: string): ContentBlock[] => [{ type: 'text', text: t }];
+  const image = (): ContentBlock => ({
+    type: 'image',
+    source: { type: 'base64', media_type: 'image/png', data: PNG },
+  });
+
+  /** Seed a run that the engine still holds as queued. */
+  const seedQueued = (task = 'ship it') => {
+    const record = store.createRun({ title: 't', workflow: 'w', task, steps: [] });
+    (
+      manager as unknown as {
+        pendingJobs: Map<string, { workflow: WorkflowDef; input: { task: string } }>;
+      }
+    ).pendingJobs.set(record.id, { workflow: WORKFLOW, input: { task } });
+    return record;
+  };
+  const dequeue = (id: string) =>
+    (manager as unknown as { pendingJobs: Map<string, unknown> }).pendingJobs.delete(id);
+  const imagesDir = (id: string) => join(repoRoot, '.ai/cezar', 'runs', `${id}-images`);
+
+  beforeEach(() => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-stack-'));
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot);
+  });
+
+  afterEach(() => {
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  it('appends messages in order while queued', () => {
+    const r = seedQueued();
+    const first = manager.enqueueMessage(r.id, text('also update the changelog'));
+    const second = manager.enqueueMessage(r.id, text('and bump the version'));
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    expect(store.getRun(r.id)?.queuedMessages?.map((m) => m.text)).toEqual([
+      'also update the changelog',
+      'and bump the version',
+    ]);
+  });
+
+  it('persists attached images and records their URLs', () => {
+    const r = seedQueued();
+    const msg = manager.enqueueMessage(r.id, [image(), { type: 'text', text: 'like this' }]);
+    expect(msg?.images).toEqual([`/api/runs/${r.id}/images/pasted-1.png`]);
+    expect(existsSync(join(imagesDir(r.id), 'pasted-1.png'))).toBe(true);
+  });
+
+  it('refuses every mutation once the run has been dequeued', () => {
+    const r = seedQueued();
+    const msg = manager.enqueueMessage(r.id, text('while queued'))!;
+    dequeue(r.id);
+
+    expect(manager.enqueueMessage(r.id, text('too late'))).toBeNull();
+    expect(manager.editQueuedMessage(r.id, msg.id, text('too late'))).toBeNull();
+    expect(manager.removeQueuedMessage(r.id, msg.id)).toBe(false);
+    expect(manager.editTask(r.id, 'too late')).toBe(false);
+    // …and the stack is untouched by the refused calls.
+    expect(store.getRun(r.id)?.queuedMessages?.map((m) => m.text)).toEqual(['while queued']);
+  });
+
+  it('edits a message in place, keeping its id and createdAt', () => {
+    const r = seedQueued();
+    const msg = manager.enqueueMessage(r.id, text('typo here'))!;
+    const edited = manager.editQueuedMessage(r.id, msg.id, text('fixed now'))!;
+    expect(edited.id).toBe(msg.id);
+    expect(edited.createdAt).toBe(msg.createdAt);
+    expect(store.getRun(r.id)?.queuedMessages).toEqual([edited]);
+  });
+
+  it('returns null when the message id is unknown', () => {
+    const r = seedQueued();
+    expect(manager.editQueuedMessage(r.id, 'nope', text('x'))).toBeNull();
+    expect(manager.removeQueuedMessage(r.id, 'nope')).toBe(false);
+  });
+
+  it('removes a message and unlinks its orphaned images', () => {
+    const r = seedQueued();
+    const msg = manager.enqueueMessage(r.id, [image()])!;
+    const file = join(imagesDir(r.id), 'pasted-1.png');
+    expect(existsSync(file)).toBe(true);
+
+    expect(manager.removeQueuedMessage(r.id, msg.id)).toBe(true);
+    expect(store.getRun(r.id)?.queuedMessages).toEqual([]);
+    expect(existsSync(file)).toBe(false);
+  });
+
+  /** Never delete a file another entry still points at. */
+  it('keeps an image that a surviving message still references', () => {
+    const r = seedQueued();
+    const first = manager.enqueueMessage(r.id, [image()])!;
+    const shared = first.images![0]!;
+    // A second entry deliberately pointing at the same file.
+    const second = manager.enqueueMessage(r.id, text('see above'))!;
+    store.updateRun(r.id, {
+      queuedMessages: store
+        .getRun(r.id)!
+        .queuedMessages!.map((m) => (m.id === second.id ? { ...m, images: [shared] } : m)),
+    });
+
+    manager.removeQueuedMessage(r.id, first.id);
+    expect(existsSync(join(imagesDir(r.id), 'pasted-1.png'))).toBe(true);
+  });
+
+  /** Same rule against the initial prompt's own attachments. */
+  it('keeps an image still referenced by taskImages', () => {
+    const r = seedQueued();
+    const msg = manager.enqueueMessage(r.id, [image()])!;
+    store.updateRun(r.id, { taskImages: [msg.images![0]!] });
+
+    manager.removeQueuedMessage(r.id, msg.id);
+    expect(existsSync(join(imagesDir(r.id), 'pasted-1.png'))).toBe(true);
+  });
+
+  it('edits the task and re-derives the heuristic title and refs', () => {
+    const r = seedQueued('fix the thing');
+    expect(manager.editTask(r.id, 'fix the login bug in issue #123')).toBe(true);
+    const updated = store.getRun(r.id)!;
+    expect(updated.task).toBe('fix the login bug in issue #123');
+    expect(updated.title).not.toBe('t');
+    expect(updated.issueNumber).toBe(123);
+  });
+
+  /** Hand-edited titles always win (#389). */
+  it('leaves a user-owned title alone when the task is edited', () => {
+    const r = seedQueued('fix the thing');
+    store.updateRun(r.id, { titleSummary: 'My own title', titleOrigin: 'user' });
+    manager.editTask(r.id, 'completely different task now');
+    expect(store.getRun(r.id)?.titleSummary).toBe('My own title');
+    expect(store.getRun(r.id)?.title).toBe('t');
+  });
+
+  it('defers a message only while the run is starting up', () => {
+    const r = seedQueued();
+    const starting = (manager as unknown as { starting: Set<string> }).starting;
+
+    // Not starting yet → the ladder falls through to 409.
+    expect(manager.deferMessage(r.id, text('nope'))).toBe(false);
+
+    starting.add(r.id);
+    expect(manager.deferMessage(r.id, text('buffer me'))).toBe(true);
+    expect(
+      (manager as unknown as { deferredMessages: Map<string, ContentBlock[][]> }).deferredMessages.get(
+        r.id,
+      ),
+    ).toHaveLength(1);
+  });
+
+  /**
+   * The sub-window that `starting` alone misses: `execute()` drops the run from
+   * `starting` as soon as it builds the ActiveRun, seconds before the backend is
+   * spawned. A message arriving there must still buffer, not 409.
+   */
+  it('still defers after `starting` is cleared but before the session opens', () => {
+    const r = seedQueued();
+    (manager as unknown as { active: Map<string, unknown> }).active.set(r.id, {
+      cancelled: false,
+      sessionEverOpened: undefined,
+    });
+    expect(manager.deferMessage(r.id, text('mid-spawn'))).toBe(true);
+  });
+
+  it('stops deferring once a session has opened (a closed session is a real 409)', () => {
+    const r = seedQueued();
+    (manager as unknown as { active: Map<string, unknown> }).active.set(r.id, {
+      cancelled: false,
+      sessionEverOpened: true,
+    });
+    expect(manager.deferMessage(r.id, text('too late'))).toBe(false);
   });
 });
