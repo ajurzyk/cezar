@@ -202,6 +202,24 @@ describe('sidebar wiring', () => {
     expect(document.querySelector('[data-slot="task-quick-list"]')).not.toBeNull()
   })
 
+  it('hides add-project chrome when health reports single-project mode', async () => {
+    serve({
+      '/api/health': {
+        ...HEALTH,
+        capabilities: { ...HEALTH.capabilities, singleProject: true },
+      },
+      '/api/todos': [],
+      '/api/projects': { projects: [PROJECT], bootProject: 'cezar', projectsDir: '/home/me/cezar/projects' },
+      '/api/runs': [],
+    })
+    renderShell()
+
+    await waitFor(() => expect(versionChip()).not.toBeNull())
+    expect(screen.queryByRole('button', { name: 'Add project' })).toBeNull()
+    expect(screen.getByRole('link', { name: /New task/ })).toBeTruthy()
+    expect(screen.getByRole('navigation', { name: 'Main' })).toBeTruthy()
+  })
+
   it('renders one collapsible group per project once the workspace has two', async () => {
     serve({
       '/api/health': HEALTH,
