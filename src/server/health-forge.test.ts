@@ -59,7 +59,7 @@ describe('GET /api/health — forge + capabilities', () => {
     createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test', ...over });
 
   const health = async (over: Partial<ServerDeps> = {}): Promise<HealthBody> => {
-    const res = await makeApp(over).request('/api/health');
+    const res = await apiRequest(makeApp(over), '/api/health');
     expect(res.status).toBe(200);
     return (await res.json()) as HealthBody;
   };
