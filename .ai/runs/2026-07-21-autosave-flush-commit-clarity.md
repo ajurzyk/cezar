@@ -80,6 +80,8 @@ exist — `src/index.ts:87-118` has no such case) and the stale docstrings.
 
 ## Progress
 
+PR: #533
+
 > Convention: `- [ ]` pending, `- [x]` done. Append ` — <commit sha>` when a step lands. Do not rename step titles.
 
 ### Phase 1: Label autosave commits by reason
