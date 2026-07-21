@@ -44,8 +44,8 @@ export function AddProjectDialog({
   open: boolean
   onOpenChange: (open: boolean) => void
 }) {
-  // `null` = the browse root, wherever the server puts it (home locally, the checkout root when
-  // hosted). The dialog never spells that path itself — it only ever echoes what it was told.
+  // `null` = the independently configured browse root. The dialog never spells that path itself
+  // — it only ever echoes what it was told.
   const [path, setPath] = useState<string | null>(null)
   const [selected, setSelected] = useState<FsBrowseDir | null>(null)
   const listing = useFsBrowse(path)
