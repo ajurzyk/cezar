@@ -109,8 +109,9 @@ describe('settings → bookmarklets against the live dry-run server', () => {
     const generic = hrefOf(linkIn('bm-generic'))
 
     // The protected deep-link grammar (BACKWARD_COMPATIBILITY.md §1), baked with the real key,
-    // now under this project's own URL prefix (multi-project spec, step 3.6).
-    expect(generic).toContain(`'/p/${bootProject}/new?'+q`)
+    // now under this project's own URL prefix (multi-project spec, step 3.6). The whole target
+    // is asserted — origin AND scope — because the generated code opens it as one absolute URL.
+    expect(generic).toContain(`open('${baseUrl}/p/${bootProject}/new?'+q,'_blank')`)
     expect(generic).toMatch(/auto=0&key=[^&]+&ref=/)
     // A real key, not the empty-string fallback of a failed fetch.
     expect(generic).toMatch(/key=[^&]+&/)
