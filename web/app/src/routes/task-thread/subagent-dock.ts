@@ -164,6 +164,32 @@ function findLastIndex<T>(items: T[], predicate: (item: T) => boolean): number {
 }
 
 /**
+ * One agent by id, WITHOUT the dock's visibility rule.
+ *
+ * The sheet must outlive the dock: a user who opens a drill-down and then sends a message
+ * opens a new turn, which can hide the dock (Q6) — and reading the open panel out from under
+ * them because a *different* surface decided to yield would be inexcusable. So the sheet
+ * resolves its agent from the turns directly, and closes only when the user closes it.
+ */
+export function findSubagent(turns: ThreadTurn[], id: string): SubagentSummary | undefined {
+  for (let i = turns.length - 1; i >= 0; i -= 1) {
+    const item = turns[i]!.items.find((entry) => entry.id === id && isRootTaskItem(entry))
+    if (item === undefined || item.kind !== 'tool') continue
+    const children = subagentChildren(turns, id)
+    const summary: SubagentSummary = {
+      id: item.id,
+      title: splitToolTitle(item.title).detail ?? item.title,
+      status: item.status,
+      toolCalls: children.filter((child) => child.kind === 'tool').length,
+    }
+    const agentType = agentTypeOf(item)
+    if (agentType !== undefined) summary.agentType = agentType
+    return summary
+  }
+  return undefined
+}
+
+/**
  * The children the sheet renders for one agent — the same cross-turn relation the dock counts,
  * exposed so the drill-down and the row count can never drift apart.
  */

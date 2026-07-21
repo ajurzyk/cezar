@@ -5,6 +5,7 @@ import type { ToolStatus, UiToolItem } from '@/protocol/ui-events'
 import {
   activeSubagent,
   collectSubagents,
+  findSubagent,
   subagentChildren,
   subagentCounts,
 } from './subagent-dock'
@@ -223,6 +224,41 @@ describe('activeSubagent', () => {
 
   it('is undefined with no agents', () => {
     expect(activeSubagent([])).toBeUndefined()
+  })
+})
+
+describe('findSubagent — the sheet outlives the dock', () => {
+  // The bug this pins: resolving the open agent from `collectSubagents` meant that sending a
+  // message while a drill-down was open hid the dock (Q6) AND slammed the sheet shut.
+  it('still resolves an agent after the dock has yielded to the transcript', () => {
+    const turns = [
+      turn('turn-1', [task('a', 'completed'), childTool('c1', 'a', 'Ran npm test')]),
+      turn('turn-2', [childText('m', 'nobody', 'a later assistant message')]),
+    ]
+    expect(collectSubagents(turns)).toEqual([]) // the dock is gone…
+    expect(findSubagent(turns, 'a')).toMatchObject({ id: 'a', status: 'completed', toolCalls: 1 })
+  })
+
+  it('reports the same summary the dock row shows while both are visible', () => {
+    const turns = [
+      turn('turn-1', [
+        task('a', 'running', { input: { subagent_type: 'reviewer' } }),
+        childTool('c1', 'a', 'Ran npm test'),
+      ]),
+    ]
+    const [row] = collectSubagents(turns)
+    const found = findSubagent(turns, 'a')!
+    expect(found.id).toBe(row!.id)
+    expect(found.title).toBe(row!.title)
+    expect(found.status).toBe(row!.status)
+    expect(found.toolCalls).toBe(row!.toolCalls)
+    expect(found.agentType).toBe(row!.agentType)
+  })
+
+  it('is undefined for an unknown id and for a NESTED task item', () => {
+    const turns = [turn('turn-1', [task('a', 'running'), task('nested', 'running', { parentItemId: 'a' })])]
+    expect(findSubagent(turns, 'ghost')).toBeUndefined()
+    expect(findSubagent(turns, 'nested')).toBeUndefined()
   })
 })
 

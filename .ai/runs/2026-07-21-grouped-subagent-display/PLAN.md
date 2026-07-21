@@ -18,7 +18,8 @@
 | 1 | 1.4 | AgentsDock component + task-thread mount | done | e021935 |
 | 2 | 2.1 | SubagentSheet drill-down + dock row buttons | done | a094ea4 |
 | 2 | 2.2 | Finished-run parity from replayed state | done | 87ac53a |
-| 3 | 3.1 | e2e smoke, opencode mapper hardening, mockup sync | done | pending |
+| 3 | 3.1 | e2e smoke, opencode mapper hardening, mockup sync | done | 06436c3 |
+| 3 | 3.2-review-fix | Sheet outlives the dock's Q6 visibility rule | done | pending |
 
 ## Goal
 

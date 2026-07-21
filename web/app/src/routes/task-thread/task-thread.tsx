@@ -27,7 +27,7 @@ import {
 import { ContinueAction } from './follow-up-engine'
 import { AgentsDock } from './agents-dock'
 import { PlanDock, planCounts } from './plan-dock'
-import { collectSubagents, subagentChildren } from './subagent-dock'
+import { collectSubagents, findSubagent, subagentChildren } from './subagent-dock'
 import { SubagentSheet } from './subagent-sheet'
 import { AcceptCelebration, ReviewPanel } from './review-panel'
 import { queuePosition } from './run-actions'
@@ -140,7 +140,12 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
   // The drill-down's whole state: which agent is open. Ephemeral by design (spec Q2/Q5) —
   // sub-agents have no stable identity outside their run, so there is nothing to persist.
   const [openAgentId, setOpenAgentId] = useState<string | undefined>(undefined)
-  const openAgent = agents.find((entry) => entry.id === openAgentId)
+  // Resolved from the turns, NOT from `agents`: the dock can yield to the transcript (Q6)
+  // while a sheet is open, and that must not slam the panel shut mid-read.
+  const openAgent = useMemo(
+    () => (openAgentId === undefined ? undefined : findSubagent(thread.turns, openAgentId)),
+    [thread.turns, openAgentId],
+  )
   const openAgentChildren = useMemo(
     () => (openAgentId === undefined ? [] : subagentChildren(thread.turns, openAgentId)),
     [thread.turns, openAgentId],
