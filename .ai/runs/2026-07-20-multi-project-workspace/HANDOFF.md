@@ -1,35 +1,34 @@
 # Handoff — 2026-07-20-multi-project-workspace
 
-**Last updated (cp6):** 2026-07-21T10:15:00Z — was 2026-07-21T07:30:00Z (cp5)
+**Last updated (run end):** 2026-07-21T14:00:00Z — was 2026-07-21T10:15:00Z (cp6)
 **Branch:** feat/multi-project-workspace
 **PR:** https://github.com/open-mercato/cezar/pull/521 (three-signal lock held by pkarw)
-**Current phase/step:** Phase 5 Step 5.1
-**Last commit:** a0fb7f4 — test(e2e): pin the shared env registry shape + grouped-sidebar coverage (step 4.5)
+**Current phase/step:** COMPLETE — every Tasks row is `done`
+**Last commit:** 66a4fe9 — fix(projects): split hosted containment so an in-root typo says so (step 5.7)
 
 ## What just happened
 
-- **Phase 4 complete (4.1–4.5).** `GET /api/fs/browse` with realpath
-  containment; `POST /api/projects` + the folder-browser dialog;
-  `POST /api/projects/checkout` with `checkout-progress` SSE and partial-clone
-  cleanup; `DELETE /api/projects/:id` + the global Projects settings pane; and
-  a fix-forward that pins the shared e2e env's registry shape.
-- **Checkpoint 6 green**: typecheck, 3098/3098 unit, test:unit 31/31, build +
-  check:pack, test:package 8/8. E2E 166 passed / 3 failed — exactly the three
-  documented pre-existing residuals.
-- Phase 3's earlier work and its two defect fixes are recorded in
-  `checkpoint-5-checks.md`; Phase 4's security review of the browse containment,
-  the clone cleanup guard, and the deregister-only removal is in
-  `checkpoint-6-checks.md`.
-
-## Next concrete action
-
-- Dispatch **Step 5.1**: docs — AGENTS.md routing rows, README multi-project
-  section, `.env.example`. Then 5.2 (`cezar projects` CLI) and 5.3 (file the
-  `liveInstancesExist()` follow-up issue), then the final gate.
+- **The spec is fully implemented.** All 32 Tasks rows are `done` — Phases 1-2
+  from the creator run, Phases 3-5 across this resume, plus five fix-forward
+  Steps appended during it (3.8, 4.5, 5.4, 5.5-5.7).
+- **Final gate green**: typecheck; vitest **3131/3131** across 191 files;
+  test:unit 31/31; build + check:pack; test:package 8/8. Integration suite
+  **166 passed / 3 failed**, those three proven pre-existing by a merge-base
+  comparison (`final-gate-checks.md`).
+- **Two review rounds ran.** The first (full-diff, compatibility + security)
+  returned `request-changes` on committed mock debris and a redirect dropping
+  query+hash; both fixed in 5.5. The second (re-review of the fix commits)
+  returned `approve`, and corrected this run's own diagnosis of an e2e flake.
+- **Five real defects were found and fixed during this resume** — see
+  `NOTIFY.md`: the latent Step-3.1 scope-provider effect-ordering bug; e2e
+  polluting the operator's real `~/.cezar/config.json`; e2e depending on the
+  operator's local registry shape; `worktreeRetentionDefault` being a
+  do-nothing setting the UI advertised as working; and a hosted-mode
+  existence oracle on `POST /api/projects`.
 
 ## Blockers / open questions
 
-- None blocking. Two carry-forward notes:
+- None blocking. Carry-forward notes:
   - **Branch is 29 ahead / 20 behind `origin/main`.** Merge `main` before this
     lands; two of the four residual e2e failures trace to `mock-claude.mjs`
     turn semantics that `main` has since changed (#473).

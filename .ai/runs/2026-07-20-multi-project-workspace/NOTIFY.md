@@ -114,3 +114,12 @@
 - This experiment was run because two earlier "pre-existing" claims in this run turned out to be wrong. Worth keeping as the standard for this repo's residuals.
 - Style-compliance pass SKIPPED with reason: the repo has no lint/format/prettier/design script in `package.json` and no design-system skill installed — no tooling exists to run.
 - Deliberately NOT done: merging the 20 commits this branch is behind `origin/main`. That is a conflict-resolution decision for a human with merge intent, not for an autonomous resume; flagged in the final gate record and the PR summary.
+
+## 2026-07-21T14:00:00Z — om-auto-continue-pr-loop resume END
+- **Status: complete.** Every one of the 32 Tasks rows is `done`. PR: https://github.com/open-mercato/cezar/pull/521
+- This resume entered at Step 3.3 and landed 3.3-3.8, 4.1-4.5, 5.1-5.7 — the whole of Phases 3, 4 and 5 plus five fix-forward Steps appended when checks surfaced real problems.
+- Final gate: typecheck; vitest 3131/3131 across 191 files; test:unit 31/31; build + check:pack; test:package 8/8. Integration suite 166 passed / 3 failed, all three proven pre-existing by merge-base comparison.
+- Two review rounds. Round 1 (full diff, compatibility + security) → `request-changes` on committed mock debris and a settings redirect dropping query+hash. Round 2 (re-review of the fix commits) → `approve`, and it corrected this run's own wrong diagnosis of the e2e flake, which is recorded rather than quietly overwritten.
+- Defects found and fixed that were NOT in the plan: the Step-3.1 `ProjectScopeProvider` cleanup-ordering bug (cross-project requests going out unprefixed); e2e mutating the operator's real `~/.cezar/config.json`; e2e coupling to local registry shape; `worktreeRetentionDefault` doing nothing while the UI said it worked; a hosted-mode directory-existence oracle on `POST /api/projects`; and a flaky spec this PR itself introduced.
+- Recurring lesson for future resumes on this repo, now in HANDOFF's environment caveats: `npm test` EXCLUDES e2e, and three separate "pre-existing" attributions in this run were wrong until tested. Prove residuals against the merge-base rather than asserting them.
+- Carry-forward for a human: merge `main` (branch is 20 behind), the `GET /api/config` retention-display rough edge, follow-up issue #535, and the accepted non-blocking review findings listed in `final-gate-checks.md`.
