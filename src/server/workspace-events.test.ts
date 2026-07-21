@@ -215,6 +215,40 @@ describe('GET /api/workspace/events', () => {
     ]);
   });
 
+  it('a removed project re-added on the same slug resumes flowing on an already-open stream', async () => {
+    const other = await buildOtherContext();
+
+    const ws = await openStream('/api/workspace/events');
+    await ws.readUntil('event: ping');
+
+    // Remove the project through the API — the stream must drop its attach
+    // entry with the disposed context…
+    const del = await app.request(`/api/projects/${other.id}`, { method: 'DELETE' });
+    expect(del.status).toBe(200);
+    await ws.readUntil('event: project-removed');
+
+    // …so that the SAME slug, re-registered and rebuilt, attaches its NEW
+    // store (regression: the attach guard kept the stale entry, and the
+    // rebuilt context's events were silently lost until reconnect).
+    const readded = await registerProject(otherRoot);
+    expect(readded.id).toBe(other.id);
+    expect((await app.request(`/api/p/${readded.id}/runs`)).status).toBe(200);
+    const rebuilt = contexts.peek(readded.id)?.store;
+    expect(rebuilt).toBeDefined();
+    expect(rebuilt).not.toBe(other.store);
+    const run = (rebuilt as RunStore).createRun({
+      title: 're-added',
+      workflow: 'quick-task',
+      task: 'r',
+      steps: [],
+    });
+
+    const body = await ws.readUntil(`"id":"${run.id}"`);
+    expect(payloadsOf<{ id: string; project: string }>(body, 'run')).toEqual([
+      { ...JSON.parse(JSON.stringify(run)), project: readded.id },
+    ]);
+  });
+
   it('relays workspace-level bus events under their own names (project-added/removed, checkout-progress)', async () => {
     const ws = await openStream('/api/workspace/events');
     await ws.readUntil('event: ping');

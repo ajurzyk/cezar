@@ -71,7 +71,7 @@ import { ProjectContextError, ProjectContexts, type ProjectContext } from './pro
 import { reviewGateEnabled } from '../runs/review-gate.js';
 import { readUiState, uiStatePath } from '../ui-state.js';
 import { expandTilde } from '../paths.js';
-import { resolveCapabilities } from './capabilities.js';
+import { isLoopbackHost, resolveCapabilities } from './capabilities.js';
 import {
   browseDirectory,
   isInsideBrowseRoot,
@@ -575,6 +575,16 @@ const archiveSchema = z.object({
 const GLOBAL_BODY_LIMIT = 32 * 1024 * 1024; // 32 MiB
 const UI_STATE_BODY_LIMIT = 128 * 1024; // 128 KiB
 
+/** The name half of a Host header — `localhost:4321` → `localhost`,
+ *  `[::1]:4321` → `[::1]`. A bracketed IPv6 literal keeps its brackets
+ *  (`isLoopbackHost` strips them itself); an unbracketed IPv6 spelling is
+ *  nonstandard in a Host header and simply fails the loopback test closed. */
+function stripHostPort(host: string): string {
+  const bracketed = /^(\[[^\]]+\])(?::\d+)?$/.exec(host);
+  if (bracketed?.[1]) return bracketed[1];
+  return host.replace(/:\d+$/, '');
+}
+
 /** The shared write-side half of BOTH ui-state routes (per-repo `/api/ui-state`
  *  and workspace `/api/workspace/ui-state`) — the factored split the
  *  multi-project spec calls for instead of a copy: parse with the route's own
@@ -692,6 +702,26 @@ export function createApp(deps: ServerDeps): Hono {
   const workspaceEvents = deps.workspaceEvents ?? new WorkspaceEventBus();
 
   const app = new Hono();
+
+  // DNS-rebinding guard, FIRST — before any route (including the CORS-open
+  // health) can answer. A browser at attacker.example whose DNS record flips
+  // to 127.0.0.1 sends requests that are same-origin to the attacker's page;
+  // the one tell left is the Host header, which still names the attacker's
+  // domain. In local mode every legitimate caller addresses the cockpit as
+  // localhost/127.x/[::1] (the bookmarklet's health probe included), so any
+  // other Host is refused outright. Hosted mode (`CEZ_REMOTE=1` or a
+  // non-loopback bind) is exempt — the operator deliberately exposed the
+  // server behind a hostname/proxy this code cannot enumerate. A missing Host
+  // header passes: browsers (the rebinding vector) always send one, and
+  // requiring it would break non-browser scripts and the test harness.
+  app.use('*', async (c, next) => {
+    if (!capabilities().localHandoff) return next();
+    const host = c.req.header('host');
+    if (host !== undefined && !isLoopbackHost(stripHostPort(host))) {
+      return c.json({ error: 'forbidden host' }, 403);
+    }
+    return next();
+  });
 
   // Reject oversized request bodies before they reach any handler (#429). GETs
   // and SSE carry no body, so this only ever gates the mutating routes.
@@ -2313,10 +2343,21 @@ export function createApp(deps: ServerDeps): Hono {
       });
 
       // Workspace-level events (project-added / project-removed /
-      // checkout-progress) — relayed verbatim under their own names.
-      const offWorkspace = workspaceEvents.on(
-        (event, data) => void stream.writeSSE({ event, data: JSON.stringify(data) }),
-      );
+      // checkout-progress) — relayed verbatim under their own names. A
+      // removal also drops the project's attach entry: the id guard in
+      // `attach` would otherwise pin the DISPOSED context forever, so a
+      // project removed and re-added on the same slug would rebuild a fresh
+      // context whose events never reach this already-open stream.
+      const offWorkspace = workspaceEvents.on((event, data) => {
+        if (event === 'project-removed') {
+          const removed = (data as { id?: string }).id;
+          if (removed !== undefined && attached.has(removed)) {
+            attached.get(removed)?.detach();
+            attached.delete(removed);
+          }
+        }
+        void stream.writeSSE({ event, data: JSON.stringify(data) });
+      });
 
       stream.onAbort(() => {
         offBuilt();
