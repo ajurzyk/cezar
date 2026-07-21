@@ -17,12 +17,12 @@
 | 1 | 1.3 | `RunManager` stack mutators | done | 98d1858 |
 | 1 | 1.4 | `hydrateQueuedInput` + `pump()` wiring | done | dd83a3b |
 | 1 | 1.5 | Routes | done | b7d8b55 |
-| 1 | 1.6 | Client types + hooks | done | (backfilled at checkpoint) |
-| 2 | 2.1 | Composer queued branch | done | (backfilled at checkpoint) |
-| 2 | 2.2 | Stacked bubbles | done | (backfilled at checkpoint) |
-| 2 | 2.3 | Inline edit / remove | done | (backfilled at checkpoint) |
-| 3 | 3.1 | E2E | done | (backfilled at checkpoint) |
-| 3 | 3.2 | Docs | done | (backfilled at checkpoint) |
+| 1 | 1.6 | Client types + hooks | done | f0a058e |
+| 2 | 2.1 | Composer queued branch | done | 721faa1 |
+| 2 | 2.2 | Stacked bubbles | done | 9275471 |
+| 2 | 2.3 | Inline edit / remove | done | 5b283ae |
+| 3 | 3.1 | E2E | done | 5aea278 |
+| 3 | 3.2 | Docs | done | cd0b0f2 |
 
 ## Goal
 
