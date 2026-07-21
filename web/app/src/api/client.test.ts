@@ -148,10 +148,17 @@ describe('request shapes', () => {
     },
     {
       name: 'continueRun (with text)',
-      call: () => continueRun('run-1', 'keep going'),
+      call: () => continueRun('run-1', { text: 'keep going' }),
       path: '/api/runs/run-1/continue',
       method: 'POST',
       body: { text: 'keep going' },
+    },
+    {
+      name: 'continueRun (runner + model override, #401)',
+      call: () => continueRun('run-1', { runner: 'codex', model: 'gpt-5.1-codex' }),
+      path: '/api/runs/run-1/continue',
+      method: 'POST',
+      body: { runner: 'codex', model: 'gpt-5.1-codex' },
     },
     { name: 'deleteRun', call: () => deleteRun('run-1'), path: '/api/runs/run-1', method: 'DELETE' },
     // Inbox actions (R6 1.2): the exact legacy endpoints, ids URL-encoded like every other path.
@@ -161,10 +168,27 @@ describe('request shapes', () => {
     // omitted (the case above) sends none at all — the pre-#413 call shape.
     {
       name: 'startTodo (with prompt)',
-      call: () => startTodo('todo/1', 'Also add tests.'),
+      call: () => startTodo('todo/1', { prompt: 'Also add tests.' }),
       path: '/api/todos/todo%2F1/start',
       method: 'POST',
       body: { prompt: 'Also add tests.' },
+    },
+    {
+      // #401: an Inbox card that picked a backend. No pick → the bodyless POST above, unchanged.
+      name: 'startTodo (runner + model override, #401)',
+      call: () => startTodo('todo/1', { runner: 'codex', model: 'gpt-5.1-codex' }),
+      path: '/api/todos/todo%2F1/start',
+      method: 'POST',
+      body: { runner: 'codex', model: 'gpt-5.1-codex' },
+    },
+    {
+      // Auto ('') and a single-backend host are filtered out by the caller, so a body that
+      // reaches the wire never carries an empty model or a redundant runner.
+      name: 'startTodo (model only, #401)',
+      call: () => startTodo('todo/1', { model: 'opus' }),
+      path: '/api/todos/todo%2F1/start',
+      method: 'POST',
+      body: { model: 'opus' },
     },
     {
       name: 'openRunInCli',

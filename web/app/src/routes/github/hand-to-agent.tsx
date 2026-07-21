@@ -15,6 +15,8 @@ import { Link } from 'react-router'
 import { createRun, putUiState } from '@/api/client'
 import { queryKeys, useUiState } from '@/api/queries'
 import type { GithubItem, Skill, WorkflowDef } from '@/api/types'
+import { EnginePills, engineBody, useResolvedEngine, type EnginePick } from '@/components/engine-pills'
+import { chipClass } from '@/components/picker-pill'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import {
@@ -61,6 +63,7 @@ import { readFollowupPrompt, writeFollowupPrompt } from './hand-to-agent-draft'
  * `github.tsx` also persists it to localStorage (#408) so it survives a reload and pre-fills a
  * hand-off you have never touched (`hand-to-agent-draft.ts`). `skills` arrives already ordered
  * most-used → project → global (`orderSkillsByUsage`, #519) — this component just renders it.
+ * The runner/model pills (#401) are route state for the same reason.
  *
  * The selected skills render as an always-visible chip row OUTSIDE the dropdown — the legacy
  * invariant "the filter can't hide your selection", carried over: cmdk may filter the list,
@@ -79,6 +82,8 @@ export function HandToAgent({
   onWorkflowChange,
   selectedSkills,
   onSkillsChange,
+  engine,
+  onEngineChange,
   queuedRunId,
   onQueued,
 }: {
@@ -89,6 +94,9 @@ export function HandToAgent({
   onWorkflowChange: (workflow: string | null) => void
   selectedSkills: readonly string[]
   onSkillsChange: (skills: readonly string[]) => void
+  /** Which backend runs it (#401) — route state, like the pickers above. */
+  engine: EnginePick
+  onEngineChange: (engine: EnginePick) => void
   /** The run already queued from this item, if any — renders the "✓ queued" affordance. */
   queuedRunId: string | null
   onQueued: (url: string, runId: string) => void
@@ -102,6 +110,7 @@ export function HandToAgent({
   // component state (#408) — restores whatever was typed for THIS item, so switching away and
   // back (or a page refresh) never loses it.
   const [prompt, setPrompt] = useState(() => readFollowupPrompt(item.url))
+  const resolved = useResolvedEngine(engine)
   const promptRef = useRef<HTMLTextAreaElement>(null)
   useEffect(() => {
     writeFollowupPrompt(item.url, prompt)
@@ -137,15 +146,16 @@ export function HandToAgent({
   useEffect(() => {
     // Reads/writes go through refs, never a setState updater: StrictMode double-invokes those in
     // dev, which would double-apply the ref bookkeeping (the composer's #double-paste hazard).
-    const resolved = resolveAutoApply(promptRefValue.current, autoAppliedRef.current, autoText)
-    autoAppliedRef.current = resolved.applied
-    if (resolved.text !== promptRefValue.current) setPrompt(resolved.text)
+    const autoApplied = resolveAutoApply(promptRefValue.current, autoAppliedRef.current, autoText)
+    autoAppliedRef.current = autoApplied.applied
+    if (autoApplied.text !== promptRefValue.current) setPrompt(autoApplied.text)
     // `autoText` is a derived STRING, so this fires only when the assigned set really changes —
     // not on every render that rebuilds the skills array.
   }, [autoText])
 
   const start = useMutation({
-    mutationFn: () => createRun(githubRunBody(item, workflow, validSkills, prompt)),
+    mutationFn: () =>
+      createRun(githubRunBody(item, workflow, validSkills, prompt, engineBody(resolved))),
     onSuccess: (created) => {
       // The GitHub tab never starts variants, so the answer is a single record.
       const run = 'runs' in created ? created.runs[0] : created
@@ -214,6 +224,7 @@ export function HandToAgent({
           selected={validSkills}
           onToggle={toggleSkill}
         />
+        <EnginePills pick={engine} onChange={onEngineChange} disabled={start.isPending} />
         <PromptTemplateMenu templates={templates} onInsert={insertPromptTemplate} />
       </div>
 
@@ -287,10 +298,6 @@ export function HandToAgent({
   )
 }
 
-/** The pickers' shared trigger chip — the /new footer's pill grammar. */
-const triggerClass =
-  'inline-flex h-[26px] items-center gap-1.5 rounded-full border border-border bg-card px-2.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground'
-
 /**
  * The workflow dropdown: single-select, and — legacy parity — selecting the chosen workflow
  * again deselects it (no workflow means the toggled skills, or quick-task, drive the run).
@@ -322,7 +329,7 @@ function WorkflowPicker({
           type="button"
           data-slot="gh-workflow-trigger"
           aria-label="Choose a workflow"
-          className={cn(triggerClass, value && 'border-foreground/60 font-mono text-[11.5px] font-semibold text-foreground')}
+          className={cn(chipClass, value && 'border-foreground/60 font-mono text-[11.5px] font-semibold text-foreground')}
         >
           <WorkflowIcon aria-hidden="true" className="size-3 shrink-0 text-violet" />
           <span className="max-w-44 truncate">{value ?? 'workflow'}</span>
@@ -452,7 +459,7 @@ function SkillsPicker({
             type="button"
             data-slot="gh-skills-trigger"
             aria-label="Choose skills"
-            className={cn(triggerClass, selected.length > 0 && 'border-foreground/60 font-semibold text-foreground')}
+            className={cn(chipClass, selected.length > 0 && 'border-foreground/60 font-semibold text-foreground')}
           >
             <SparklesIcon aria-hidden="true" className="size-3 shrink-0 text-violet" />
             skills{selected.length > 0 ? ` · ${selected.length}` : ''}

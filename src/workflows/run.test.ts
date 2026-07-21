@@ -144,6 +144,136 @@ describe('RunManager.recordTurnEnd', () => {
 });
 
 /**
+ * `continueRun` runner/model override (#401): the follow-up composer can pick which backend and
+ * model reopen the session. The override is persisted as the run's current backend BEFORE the
+ * continuation is scheduled (so `runContinuation` reads it off the record); omitted fields
+ * preserve the run's current choice. We stub the private continuation so no live session
+ * starts — the assertion is only the synchronous record persistence.
+ */
+describe('RunManager.continueRun override', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  let manager: RunManager;
+
+  beforeEach(() => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-continue-'));
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot);
+    // No live agent — we only assert the synchronous persistence continueRun does before it
+    // hands off to the (stubbed) continuation.
+    (manager as unknown as { runContinuation: () => Promise<void> }).runContinuation = async () => {};
+  });
+
+  afterEach(() => {
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  /** A finished run with a resumable session on the `claude`/`sonnet` backend. */
+  function resumableRun(): string {
+    const record = store.createRun({
+      title: 't',
+      workflow: 'quick-task',
+      task: 't',
+      runner: 'claude',
+      model: 'sonnet',
+      steps: [{ id: 's1', name: 'Work', kind: 'agent' }],
+    });
+    store.updateRun(record.id, { status: 'done', finishedAt: new Date().toISOString() });
+    store.updateStep(record.id, 's1', { sessionId: 'sess-1' });
+    return record.id;
+  }
+
+  it('persists a runner + model override as the run current backend', () => {
+    const id = resumableRun();
+    expect(manager.continueRun(id, { runner: 'codex', model: 'gpt-5.1-codex' })).toEqual({ ok: true });
+    const after = store.getRun(id);
+    expect(after?.runner).toBe('codex');
+    expect(after?.model).toBe('gpt-5.1-codex');
+  });
+
+  it('an omitted override preserves the run current backend/model (backward compat)', () => {
+    const id = resumableRun();
+    expect(manager.continueRun(id, { text: 'keep going' })).toEqual({ ok: true });
+    const after = store.getRun(id);
+    expect(after?.runner).toBe('claude');
+    expect(after?.model).toBe('sonnet');
+  });
+
+  it("an empty model clears the pin so the runner picks the model (auto)", () => {
+    const id = resumableRun();
+    manager.continueRun(id, { model: '' });
+    expect(store.getRun(id)?.model).toBeUndefined();
+    // Runner untouched → the run keeps its backend.
+    expect(store.getRun(id)?.runner).toBe('claude');
+  });
+
+  it("rejects a model that is recognizably another runner's preset (no corruption persisted)", () => {
+    const id = resumableRun();
+    // The review's corruption case (#401): a codex preset landing on a claude continuation.
+    const result = manager.continueRun(id, { model: 'gpt-5.1-codex' });
+    expect(result).toEqual({ ok: false, error: "model 'gpt-5.1-codex' is not a claude model" });
+    expect(store.getRun(id)?.model).toBe('sonnet');
+    expect(store.getRun(id)?.runner).toBe('claude');
+  });
+
+  it('a runner-only switch clears the previous backend model pin instead of carrying it over', () => {
+    const id = resumableRun(); // claude/sonnet
+    // The composer sends only `runner` when the user switches backend without touching the
+    // model pill (it displays `auto` at that point). The inherited `sonnet` pin belongs to
+    // claude and must not reach the codex runner via `runContinuation`'s `model: record.model`.
+    expect(manager.continueRun(id, { runner: 'codex' })).toEqual({ ok: true });
+    const after = store.getRun(id);
+    expect(after?.runner).toBe('codex');
+    expect(after?.model).toBeUndefined();
+  });
+
+  it('a runner-only switch keeps a free-form model id — only known foreign presets are cleared', () => {
+    const record = store.createRun({
+      title: 't',
+      workflow: 'quick-task',
+      task: 't',
+      runner: 'claude',
+      model: 'my-org/custom-tune',
+      steps: [{ id: 's1', name: 'Work', kind: 'agent' }],
+    });
+    store.updateRun(record.id, { status: 'done', finishedAt: new Date().toISOString() });
+    store.updateStep(record.id, 's1', { sessionId: 'sess-1' });
+    expect(manager.continueRun(record.id, { runner: 'codex' })).toEqual({ ok: true });
+    expect(store.getRun(record.id)?.model).toBe('my-org/custom-tune');
+  });
+
+  it('a runner-only continue on the SAME backend keeps the pin (no spurious clear)', () => {
+    const id = resumableRun(); // claude/sonnet
+    expect(manager.continueRun(id, { runner: 'claude' })).toEqual({ ok: true });
+    expect(store.getRun(id)?.model).toBe('sonnet');
+  });
+
+  it('guards legacy records too — no persisted runner resolves to claude, like runContinuation', () => {
+    const record = store.createRun({ title: 't', workflow: 'quick-task', task: 't', steps: [{ id: 's1', name: 'Work', kind: 'agent' }] });
+    store.updateRun(record.id, { status: 'done', finishedAt: new Date().toISOString() });
+    store.updateStep(record.id, 's1', { sessionId: 'sess-1' });
+    const result = manager.continueRun(record.id, { model: 'gpt-5.1-codex' });
+    expect(result.ok).toBe(false);
+    expect(store.getRun(record.id)?.model).toBeUndefined();
+  });
+
+  it('keeps free-form model ids working — only cross-runner presets are rejected', () => {
+    const id = resumableRun();
+    expect(manager.continueRun(id, { model: 'my-custom-alias' })).toEqual({ ok: true });
+    expect(store.getRun(id)?.model).toBe('my-custom-alias');
+  });
+
+  it('refuses to continue a run with no resumable session (no override persisted)', () => {
+    const record = store.createRun({ title: 't', workflow: 'quick-task', task: 't', runner: 'claude', steps: [] });
+    store.updateRun(record.id, { status: 'done' });
+    const result = manager.continueRun(record.id, { runner: 'codex' });
+    expect(result.ok).toBe(false);
+    expect(store.getRun(record.id)?.runner).toBe('claude');
+  });
+});
+
+/**
  * Optional review gate (#489, spec 2026-07-18-optional-review-gate): the
  * terminal `settleSuccess` transition parks a changed run at `review` ONLY when
  * the gate is enabled (config toggle over `CEZ_REVIEW_GATE`, default off) and the
