@@ -22,7 +22,9 @@ import type {
   HealthResponse,
   LaunchKeyResponse,
   MessageInput,
+  EditQueuedMessageResponse,
   MessageResponse,
+  RemoveQueuedMessageResponse,
   OpenInCliResponse,
   OpenTargetsResponse,
   ParsedWorkflow,
@@ -454,6 +456,27 @@ export function sendMessage(id: string, message: MessageInput): Promise<MessageR
     text: message.text ?? '',
     images: message.images ?? [],
   })
+}
+
+/** Replace a stacked message on a still-queued run (#472). 404 unknown run/message,
+ *  409 once the run has started. */
+export function editQueuedMessage(
+  id: string,
+  msgId: string,
+  message: MessageInput,
+): Promise<EditQueuedMessageResponse> {
+  return mutate<EditQueuedMessageResponse>('PATCH', runPath(id, `/queued-messages/${encodeURIComponent(msgId)}`), {
+    text: message.text ?? '',
+    images: message.images ?? [],
+  })
+}
+
+/** Drop a stacked message from a still-queued run (#472). */
+export function removeQueuedMessage(id: string, msgId: string): Promise<RemoveQueuedMessageResponse> {
+  return mutate<RemoveQueuedMessageResponse>(
+    'DELETE',
+    runPath(id, `/queued-messages/${encodeURIComponent(msgId)}`),
+  )
 }
 
 /** Repo-view branch action (R5): switch to an existing branch, or create one (from `from` or

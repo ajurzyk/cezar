@@ -72,6 +72,10 @@ export interface RunRecord {
   task: string
   /** URLs of images attached to the initial task prompt (#image-display). */
   taskImages?: string[]
+  /** Prompt messages stacked onto the run while it waits for a free agent slot (#472).
+   *  Folded into the prompt at dequeue — never delivered as their own turns. Editable and
+   *  removable only while `status === 'queued'`. Absent on every pre-#472 run. */
+  queuedMessages?: QueuedMessage[]
   model?: string
   runner?: Runner
   /** Echo of the extra system prompt the run used (POST override or config default). */
@@ -103,8 +107,20 @@ export interface RunRecord {
   markerRefs?: { pr?: number; issue?: number }
   /** The referenced tier's working set (distinct PR URLs spotted, capped server-side). */
   referencedPrCandidates?: string[]
+  /** The issue this task is ABOUT (spec 2026-07-21-report-ref-discovery): auto-discovered from
+   *  `github.com/…/issues/N` links in the conversation. Display-only; never gates actions. */
+  referencedIssueUrl?: string
+  /** The referenced-issue working set, persisted like `referencedPrCandidates`. Capped. */
+  referencedIssueCandidates?: string[]
+  /** Autonomous mode (#autonomous): the run never parks at `waiting` or the terminal `review`
+   *  gate. Absent = falsy = not autonomous. */
+  autonomous?: boolean
   /** Absent when the run executed in the repo working tree rather than its own worktree. */
   worktreePath?: string
+  /** Set when count-based retention (#483) reclaimed the worktree DIRECTORY (the branch is
+   *  kept): the dir is gone but recoverable, and the run is out of the retention budget until
+   *  it is re-materialized. */
+  worktreeReclaimedAt?: string
   branch?: string
   baseBranch?: string
   /** Parallel variants (spec 010): runs sharing a groupId are one group. */
@@ -613,9 +629,13 @@ export interface MessageInput {
 }
 
 /** `PATCH /api/runs/:id` (#389). `title`: trimmed server-side, 1–300 chars. The edit sets both
- *  `title` and `titleSummary`, so it wins over any auto-summary. Answers the updated record. */
+ *  `title` and `titleSummary`, so it wins over any auto-summary. Answers the updated record.
+ *  `task` (#472): the initial prompt, editable only while the run is still queued — any other
+ *  status answers `409 run already started`. 1–100 000 chars, and bounded again by the folded
+ *  total across the task and its stack. */
 export interface PatchRunInput {
   title?: string
+  task?: string
 }
 
 /** Per-runner default model preset (Settings → Agents, R6 1.5): the composer preselects this
@@ -746,8 +766,36 @@ export interface CreatePrResponse {
   dryRun?: boolean
 }
 
+/** `POST /api/runs/:id/messages` answers one of three shapes (#472), by how far the run has got:
+ *  `delivered` — a live session took it; `queued` — still waiting for a slot, so it was stacked
+ *  onto the prompt (the stored entry rides along); `deferred` — the run is mid-spawn, so it was
+ *  buffered and will arrive as an ordinary follow-up turn the moment the session opens. Anything
+ *  else is still a `409`. Pre-#472 clients only ever saw `delivered` and keep working. */
 export interface MessageResponse {
-  delivered: boolean
+  delivered?: boolean
+  queued?: boolean
+  deferred?: boolean
+  message?: QueuedMessage
+}
+
+/** One prompt message stacked onto a queued run (#472). */
+export interface QueuedMessage {
+  id: string
+  text: string
+  /** `/api/runs/:id/images/…` URLs — attachments are persisted, never inlined. */
+  images?: string[]
+  createdAt: string
+}
+
+/** `PATCH /api/runs/:id/queued-messages/:msgId` (#472) — replaces the entry's text and images.
+ *  `404` unknown run or message id; `409 run already started`. */
+export interface EditQueuedMessageResponse {
+  message: QueuedMessage
+}
+
+/** `DELETE /api/runs/:id/queued-messages/:msgId` (#472). */
+export interface RemoveQueuedMessageResponse {
+  removed: boolean
 }
 
 /** `POST /api/runs/:id/open-in-cli` — a terminal was spawned with `command` running in it.

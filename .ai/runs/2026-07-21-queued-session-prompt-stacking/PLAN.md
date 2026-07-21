@@ -17,7 +17,7 @@
 | 1 | 1.3 | `RunManager` stack mutators | done | 98d1858 |
 | 1 | 1.4 | `hydrateQueuedInput` + `pump()` wiring | done | dd83a3b |
 | 1 | 1.5 | Routes | done | b7d8b55 |
-| 1 | 1.6 | Client types + hooks | todo | — |
+| 1 | 1.6 | Client types + hooks | done | (backfilled at checkpoint) |
 | 2 | 2.1 | Composer queued branch | todo | — |
 | 2 | 2.2 | Stacked bubbles | todo | — |
 | 2 | 2.3 | Inline edit / remove | todo | — |

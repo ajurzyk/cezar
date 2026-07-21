@@ -16,6 +16,7 @@ import type {
   ProcessUsage as WebProcessUsage,
   RepoInfo as WebRepoInfo,
   RunEvent as WebRunEvent,
+  QueuedMessage as WebQueuedMessage,
   RunRecord as WebRunRecord,
   RunStatus as WebRunStatus,
   Skill as WebSkill,
@@ -65,7 +66,7 @@ import type {
   UiEventType,
   UiItem,
 } from '../core/ui-events.js';
-import type { RunEvent, RunRecord, RunStatus, StepState, StepStatus } from '../runs/store.js';
+import type { QueuedMessage, RunEvent, RunRecord, RunStatus, StepState, StepStatus } from '../runs/store.js';
 import type { Skill } from '../skills.js';
 import type { TodoItem } from '../todos.js';
 import type { WorkflowLoadIssue, loadWorkflows } from '../workflows/load.js';
@@ -95,6 +96,20 @@ import type { GroupResponse, GroupVariant, PickVariantResponse } from './server.
 /** Mutual assignability. `[…]` wrappers stop a naked union from distributing. */
 type Exact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 
+/**
+ * Key-set equality — and it is NOT redundant with `Exact` (#472).
+ *
+ * `Exact` is blind to a missing OPTIONAL property: a type carrying an extra `foo?: T`
+ * stays mutually assignable with one that lacks `foo` entirely, so both directions pass
+ * and the guard reads `true`. Since most of `RunRecord` is optional, `Exact` alone would
+ * have let a whole un-mirrored field through — verified by deleting the mirrored field
+ * and watching the build stay green. `keyof` sees optional keys, so this catches it.
+ *
+ * Use BOTH for every hand-mirrored record: `Exact` for shapes and value types,
+ * `ExactKeys` for presence.
+ */
+type ExactKeys<A, B> = Exact<keyof A, keyof B>;
+
 /** Each `true` is one assertion the compiler makes. A drift turns it into `false`, which is
  *  not assignable to `true` — and the file stops compiling. */
 const guards = {
@@ -102,6 +117,13 @@ const guards = {
   stepStatus: true satisfies Exact<StepStatus, WebStepStatus>,
   stepState: true satisfies Exact<StepState, WebStepState>,
   runRecord: true satisfies Exact<RunRecord, WebRunRecord>,
+  /** #472 — the queued prompt stack. `runRecord` above already fails if the field itself
+   *  drifts; this pins the element type on its own so a change inside it is named. */
+  queuedMessage: true satisfies Exact<QueuedMessage, WebQueuedMessage>,
+  /** Presence guards — the ones that actually catch an un-mirrored optional field. */
+  runRecordKeys: true satisfies ExactKeys<RunRecord, WebRunRecord>,
+  queuedMessageKeys: true satisfies ExactKeys<QueuedMessage, WebQueuedMessage>,
+  stepStateKeys: true satisfies ExactKeys<StepState, WebStepState>,
   runEvent: true satisfies Exact<RunEvent, WebRunEvent>,
   processUsage: true satisfies Exact<ProcessUsage, WebProcessUsage>,
   backendCheck: true satisfies Exact<BackendCheck, WebBackendCheck>,
@@ -167,5 +189,40 @@ describe('web api types mirror the server', () => {
   it('holds every guard', () => {
     expect(Object.values(guards).every((v) => v === true)).toBe(true);
     expect(Object.keys(guards).length).toBeGreaterThan(15);
+  });
+
+  /**
+   * The guards are only worth their compile time if `Exact` actually bites. A
+   * mirror test that cannot fail is worse than none — it reads as coverage.
+   * These pin the failure modes that matter for a hand-mirrored type: a field
+   * added on one side only, and a field whose optionality diverges.
+   */
+  it('detects a REQUIRED field added server-side but not mirrored', () => {
+    type Server = { a: string; b: number };
+    type Web = { a: string };
+    const missing: Exact<Server, Web> = false;
+    expect(missing).toBe(false);
+  });
+
+  /**
+   * The gap `ExactKeys` exists to close, pinned so nobody "simplifies" it away:
+   * `Exact` alone passes an un-mirrored OPTIONAL field, which is most of RunRecord.
+   */
+  it('needs ExactKeys to detect an un-mirrored OPTIONAL field', () => {
+    type Server = { a: string; b?: number };
+    type Web = { a: string };
+    // Exact says these match — they are mutually assignable. This is the blind spot.
+    const exactIsFooled: Exact<Server, Web> = true;
+    // ExactKeys is not fooled: 'a' | 'b' is not 'a'.
+    const keysCatchIt: ExactKeys<Server, Web> = false;
+    expect(exactIsFooled).toBe(true);
+    expect(keysCatchIt).toBe(false);
+  });
+
+  it('detects an optionality mismatch', () => {
+    type Server = { a?: string };
+    type Web = { a: string };
+    const diverged: Exact<Server, Web> = false;
+    expect(diverged).toBe(false);
   });
 });
