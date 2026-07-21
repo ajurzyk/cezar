@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { MemoryRouter } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { queryKeys, workspaceQueryKeys } from '@/api/queries'
 import { createQueryClient } from '@/api/query-client'
 import type { ConfigResponse, RepoResponse, Runner } from '@/api/types'
 import { Toaster, resetToasts } from '@/components/ui/toaster'
@@ -82,9 +83,23 @@ function serve({
   )
 }
 
+/** Seeds the step-3.2 route gates — boot id (legacy redirect) + registry (known-check) — so a
+ *  flat entry URL lands scoped immediately. The boot project mounts UNSCOPED, so the exact
+ *  `/api/*` paths this file's fetch stub matches stay byte-identical. */
+function gateSeededClient() {
+  const client = createQueryClient()
+  client.setQueryData(queryKeys.health, { bootProject: 'boot' })
+  client.setQueryData(workspaceQueryKeys.projects, {
+    projects: [],
+    bootProject: 'boot',
+    projectsDir: '~/cezar/projects',
+  })
+  return client
+}
+
 function renderAt(entry: string) {
   render(
-    <QueryClientProvider client={createQueryClient()}>
+    <QueryClientProvider client={gateSeededClient()}>
       <MemoryRouter initialEntries={[entry]}>
         <AppRoutes />
         <Toaster />

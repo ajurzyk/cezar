@@ -15,6 +15,7 @@ import type {
   WorkflowsResponse,
 } from '@/api/types'
 import { Toaster, resetToasts } from '@/components/ui/toaster'
+import { githubTaskRef } from '@/lib/github-task'
 
 import { GithubIndexRoute, GithubRoute, groupCommitRuns, type ThreadRow } from './github'
 import { readFollowupPrompt, readFollowupSelection, writeFollowupSelection } from './hand-to-agent-draft'
@@ -212,6 +213,13 @@ const detail = () => document.querySelector('[data-slot="gh-detail-inner"]')
 const promptField = () =>
   document.querySelector<HTMLTextAreaElement>('[data-slot="gh-custom-prompt"]')!
 const promptValue = () => promptField().value
+
+/** What the composer PRE-FILLS the box with for issue 142 (#524): the item's reference, and
+ *  nothing else — no quoted body. `githubTaskRef`'s own byte-for-byte shape is pinned in
+ *  `lib/github-task.test.ts`; here it is the baseline every box assertion measures against. */
+const BASE = githubTaskRef(ISSUE_142)
+/** The box with `extra` stacked below the pre-filled reference, `insertTemplate`'s separator. */
+const baseWith = (extra: string) => `${BASE}\n\n${extra}`
 
 // ---- lists + detail ---------------------------------------------------------------------------
 
@@ -1062,6 +1070,24 @@ describe('the hand-to-agent run (legacy three-way body)', () => {
     expect(document.querySelector('[data-slot="gh-queued-flag"]')).not.toBeNull()
   })
 
+  it('a custom prompt is handed over WITH the item reference, not instead of it (#524)', async () => {
+    const sent = stubFetch()
+    await openDetail()
+
+    // The exact prompt from the bug report: it names no number and no URL of its own.
+    fireEvent.change(promptField(), {
+      target: { value: 'Port this one to develop and close original PR' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /Run agent on this issue/ }))
+
+    await waitFor(() => expect(document.querySelector('[data-slot="gh-queued"]')).not.toBeNull())
+    const posted = sent.find((request) => request.method === 'POST' && request.path === '/api/runs')
+    const { task } = posted?.body as { task: string }
+    expect(task).toContain('Port this one to develop and close original PR')
+    expect(task).toContain('#142')
+    expect(task).toContain(ISSUE_142.url)
+  })
+
   it('a selected workflow rides the POST, with toggled skills as a prompt hint', async () => {
     const sent = stubFetch()
     await openDetail()
@@ -1330,11 +1356,20 @@ describe('the follow-up prompt draft (#408 item 4)', () => {
         'Add --json flag',
       ),
     )
-    expect(promptValue()).toBe('')
+    // Untouched means its OWN pre-filled reference (#524), never issue 142's text.
+    expect(promptValue()).toBe(githubTaskRef(ISSUE_139))
 
     // Switch back — the first item's draft is restored.
     fireEvent.click(document.querySelector('[data-slot="gh-row"][data-number="142"]')!)
     await waitFor(() => expect(promptValue()).toBe('Also add a test.'))
+  })
+
+  it('an untouched box stores no draft — the pre-fill leaves no trace (#524)', async () => {
+    stubFetch()
+    await openDetail()
+
+    await waitFor(() => expect(promptValue()).toBe(BASE))
+    expect(readFollowupPrompt(ISSUE_142.url)).toBe('')
   })
 
   it('a page reload restores the draft too (localStorage, not just component state)', async () => {
@@ -1361,7 +1396,8 @@ describe('the follow-up prompt draft (#408 item 4)', () => {
     cleanup()
     stubFetch()
     await openDetail()
-    expect(promptValue()).toBe('')
+    // Spent → back to the untouched pre-fill, not to an empty box.
+    expect(promptValue()).toBe(BASE)
   })
 
   it('spending the draft clears the textarea THERE AND THEN, not only on the next mount', async () => {
@@ -1375,7 +1411,7 @@ describe('the follow-up prompt draft (#408 item 4)', () => {
 
     // Storage and UI must agree without a remount: leaving the text on screen while the entry is
     // gone from storage means it silently vanishes the next time you come back.
-    await waitFor(() => expect(promptValue()).toBe(''))
+    await waitFor(() => expect(promptValue()).toBe(BASE))
     expect(readFollowupPrompt(ISSUE_142.url)).toBe('')
   })
 })
@@ -1499,7 +1535,7 @@ describe('the follow-up prompt template menu (#413)', () => {
     await waitFor(() =>
       expect(screen.getByLabelText('Custom prompt')).toHaveProperty(
         'value',
-        'Also add or update tests covering this change.',
+        baseWith('Also add or update tests covering this change.'),
       ),
     )
   })
@@ -1517,7 +1553,10 @@ describe('the follow-up prompt template menu (#413)', () => {
 
     await selectOption('custom-1')
     await waitFor(() =>
-      expect(screen.getByLabelText('Custom prompt')).toHaveProperty('value', 'Custom instructions.'),
+      expect(screen.getByLabelText('Custom prompt')).toHaveProperty(
+        'value',
+        baseWith('Custom instructions.'),
+      ),
     )
   })
 
@@ -1529,7 +1568,7 @@ describe('the follow-up prompt template menu (#413)', () => {
     await waitFor(() =>
       expect(screen.getByLabelText('Custom prompt')).toHaveProperty(
         'value',
-        'Also add or update tests covering this change.',
+        baseWith('Also add or update tests covering this change.'),
       ),
     )
 
@@ -1538,7 +1577,28 @@ describe('the follow-up prompt template menu (#413)', () => {
     await waitFor(() =>
       expect(screen.getByLabelText('Custom prompt')).toHaveProperty(
         'value',
-        'Also add or update tests covering this change.\n\nAlso update any relevant documentation or comments.',
+        baseWith(
+          'Also add or update tests covering this change.\n\nAlso update any relevant documentation or comments.',
+        ),
+      ),
+    )
+  })
+
+  it('an EDITED box honours the caret — a template lands mid-text, not appended (#524)', async () => {
+    // The pre-fill (#524) means an untouched box must append rather than splice above the
+    // reference, but that must not cost `insertTemplate`'s documented mid-text case: the user
+    // clicked back into the box to fix a typo, then picked a template.
+    stubFetch()
+    await openDetail()
+
+    fireEvent.change(promptField(), { target: { value: 'ALPHA OMEGA' } })
+    await waitFor(() => expect(promptValue()).toBe('ALPHA OMEGA'))
+    promptField().setSelectionRange(5, 5)
+
+    await chooseTemplate('add-tests')
+    await waitFor(() =>
+      expect(promptValue()).toBe(
+        'ALPHA\n\nAlso add or update tests covering this change.\n\nOMEGA',
       ),
     )
   })
@@ -1603,22 +1663,31 @@ describe('templates assigned to a skill auto-apply when a skill is picked', () =
     await openDetail()
 
     await pickSkill('om-fix')
+    // Stacked BELOW the pre-filled reference (#524) — auto-apply adds to the item context, it
+    // never replaces it, the same rule the composed task text follows.
     await waitFor(() =>
-      expect(screen.getByLabelText('Custom prompt')).toHaveProperty('value', 'Follow the fix rules.'),
+      expect(screen.getByLabelText('Custom prompt')).toHaveProperty(
+        'value',
+        baseWith('Follow the fix rules.'),
+      ),
     )
   })
 
-  it('deselecting the skill takes the auto-applied text back out again', async () => {
+  it('deselecting the skill takes the auto-applied text back out again, leaving the reference', async () => {
     stubFetch(ASSIGNED)
     await openDetail()
 
     await pickSkill('om-fix')
     await waitFor(() =>
-      expect(screen.getByLabelText('Custom prompt')).toHaveProperty('value', 'Follow the fix rules.'),
+      expect(screen.getByLabelText('Custom prompt')).toHaveProperty(
+        'value',
+        baseWith('Follow the fix rules.'),
+      ),
     )
 
     await pickSkill('om-fix')
-    await waitFor(() => expect(screen.getByLabelText('Custom prompt')).toHaveProperty('value', ''))
+    // Back to the pre-fill, NOT to empty: deselecting a skill must not strip the item context.
+    await waitFor(() => expect(screen.getByLabelText('Custom prompt')).toHaveProperty('value', BASE))
   })
 
   it('NEVER overwrites a prompt the user already typed in', async () => {
@@ -1643,7 +1712,7 @@ describe('templates assigned to a skill auto-apply when a skill is picked', () =
     await waitFor(() =>
       expect(document.querySelector('[data-slot="gh-skill-chip"][data-skill="g-review"]')).not.toBeNull(),
     )
-    expect(screen.getByLabelText('Custom prompt')).toHaveProperty('value', '')
+    expect(screen.getByLabelText('Custom prompt')).toHaveProperty('value', BASE)
   })
 })
 

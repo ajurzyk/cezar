@@ -53,12 +53,44 @@ export function serverInstancesDir(): string {
  * The `default` instance keeps the original `~/.cezar/server.json`; a named
  * (domain-keyed) instance lives at `~/.cezar/server-instances/<slug>.json`, so
  * a second install for a different domain never resumes or clobbers the first.
- * Distinct from the per-project registry the multi-project switcher keeps under
- * `~/.cezar/instances/` — they coexist.
+ * Distinct from the per-user project registry the multi-project workspace keeps
+ * inside `~/.cezar/config.json` (see `workspaceConfigPath`) — they coexist.
  */
 export function serverStatePath(instance: string = DEFAULT_SERVER_INSTANCE): string {
   if (instance === DEFAULT_SERVER_INSTANCE) return join(cezarHomeDir(), 'server.json');
   return join(serverInstancesDir(), `${instance}.json`);
+}
+
+/**
+ * Per-user workspace config (spec 2026-07-20-multi-project-workspace): schema
+ * version, global defaults, and the project registry — every repo cezar has
+ * been booted in. Lives directly under `cezarHomeDir()`, so the `CEZ_HOME`
+ * override applies (tests/containers never touch a real home dir).
+ */
+export function workspaceConfigPath(): string {
+  return join(cezarHomeDir(), 'config.json');
+}
+
+/**
+ * Global GUI state — the workspace twin of the per-repo
+ * `.ai/cezar/ui-state.json`. Cross-project UI prefs live here; per-project
+ * state (pinned runs, templates) stays in each repo's file.
+ */
+export function workspaceUiStatePath(): string {
+  return join(cezarHomeDir(), 'ui-state.json');
+}
+
+/**
+ * Expand a leading `~` to the user's home. Lives here with the other homedir
+ * logic (see the module note above — one place owns `homedir()`): the
+ * `projectsDir` setting is stored as the user wrote it (a literal `~`), so
+ * every consumer that must touch the REAL directory — the writability probe on
+ * `PUT /api/workspace/config`, the hosted-mode browse root in
+ * `src/server/fs-browse.ts` — expands it through this one helper.
+ */
+export function expandTilde(path: string): string {
+  if (path === '~') return homedir();
+  return path.startsWith('~/') ? join(homedir(), path.slice(2)) : path;
 }
 
 /**

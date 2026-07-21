@@ -10,7 +10,7 @@ import {
   SearchXIcon,
 } from 'lucide-react'
 import * as React from 'react'
-import { Link, useNavigate } from 'react-router'
+import { Link, useNavigate } from '@/lib/project-router'
 
 import { archiveFinished, patchRun } from '@/api/client'
 import { useRunUsage } from '@/api/global-events'

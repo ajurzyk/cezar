@@ -8,6 +8,8 @@ import {
   serverInstancesDir,
   serverLockPath,
   serverStatePath,
+  workspaceConfigPath,
+  workspaceUiStatePath,
 } from './paths.js';
 
 describe('paths', () => {
@@ -33,6 +35,18 @@ describe('paths', () => {
     process.env.CEZ_HOME = '/tmp/cez-home-test';
     expect(serverStatePath(DEFAULT_SERVER_INSTANCE)).toBe('/tmp/cez-home-test/server.json');
     expect(serverLockPath(DEFAULT_SERVER_INSTANCE)).toBe('/tmp/cez-home-test/server.install.lock');
+  });
+
+  it('workspace config/ui-state live directly under the cezar home', () => {
+    delete process.env.CEZ_HOME;
+    expect(workspaceConfigPath()).toBe(join(homedir(), '.cezar', 'config.json'));
+    expect(workspaceUiStatePath()).toBe(join(homedir(), '.cezar', 'ui-state.json'));
+  });
+
+  it('workspace paths honor the CEZ_HOME override', () => {
+    process.env.CEZ_HOME = '/tmp/cez-home-test';
+    expect(workspaceConfigPath()).toBe('/tmp/cez-home-test/config.json');
+    expect(workspaceUiStatePath()).toBe('/tmp/cez-home-test/ui-state.json');
   });
 
   it('a named instance lives under server-instances/, keyed by slug', () => {

@@ -86,6 +86,18 @@ export interface CodexUiMapperState {
    *  `turn/plan/updated`), so a latch that outlived its turn would gag the item
    *  arm for the rest of the session and strand the dock on a stale checklist. */
   readonly planFromNotification: boolean;
+  /** The open review-mode item's id, or `null` when review mode is not active.
+   *
+   *  Codex announces review mode as two disjoint frames (`enteredReviewMode`,
+   *  `exitedReviewMode`) with different ids. Mapped literally that is two
+   *  childless `task` items — which the Agents dock would read as two separate
+   *  sub-agents that each did nothing (spec
+   *  `.ai/specs/2026-07-20-grouped-subagent-display.md` §"Codex-mapper fix",
+   *  #474). This latch folds the pair into ONE item with a running→completed
+   *  lifecycle: the entered frame opens it, the exited frame completes that
+   *  same id. An unpaired exit falls back to its own item, so a stream that
+   *  starts mid-review still renders. */
+  readonly reviewItemId: string | null;
 }
 
 export interface CodexUiMapping {
@@ -102,6 +114,7 @@ export function createCodexUiState(): CodexUiMapperState {
     outputs: new Map(),
     reasonings: new Map(),
     planFromNotification: false,
+    reviewItemId: null,
   };
 }
 
@@ -182,9 +195,28 @@ function mapTurnEnd(
 ): CodexUiMapping {
   let turnSeq = state.turnSeq;
   const turnId = turnIdOf(params) ?? state.currentTurnId ?? `turn_${++turnSeq}`;
+  // A review span still open when the turn ends never gets its `exitedReviewMode` — an
+  // interrupted, cancelled or failed turn simply stops. Close it here, or the item stays
+  // `running` forever and the Agents dock reads a finished run as a live fan-out (#474).
+  // The status follows the turn: a turn that failed did not complete its review.
+  const events: UiEvent[] = [];
+  if (state.reviewItemId !== null) {
+    events.push({
+      type: 'item.completed',
+      item: {
+        kind: 'tool',
+        id: state.reviewItemId,
+        name: 'enteredReviewMode',
+        toolKind: 'task',
+        title: 'Review',
+        status: failed ? 'failed' : 'completed',
+      },
+    });
+  }
+  events.push({ type: 'turn.completed', turnId, stopReason: turnStopReason(params, failed) });
   return {
-    events: [{ type: 'turn.completed', turnId, stopReason: turnStopReason(params, failed) }],
-    state: { ...state, turnSeq, currentTurnId: null },
+    events,
+    state: { ...state, turnSeq, currentTurnId: null, reviewItemId: null },
   };
 }
 
@@ -298,6 +330,12 @@ function mapItemLifecycle(
   const id = str(raw.id);
   if (id === undefined) return { events: [], state };
 
+  // Review mode is a PAIR of frames describing one span of work — folded into a
+  // single lifecycle before the generic arm, which knows only one frame at a time.
+  if (type === 'enteredReviewMode' || type === 'exitedReviewMode') {
+    return mapReviewMode(raw, id, type, eventType, state);
+  }
+
   const item =
     type === 'agentMessage'
       ? messageItem(raw, id)
@@ -321,6 +359,74 @@ function mapItemLifecycle(
   }
   if (state.knownItems.has(id)) return { events, state };
   return { events, state: { ...state, knownItems: new Set(state.knownItems).add(id) } };
+}
+
+/**
+ * §7.1: review-mode items → tool(kind task) — but ONE item for the pair, not two.
+ *
+ * `enteredReviewMode` opens the item (`running`); `exitedReviewMode` completes
+ * **that same id**, so the cockpit sees one "Review" span with a lifecycle instead
+ * of two childless task items that would read as two sub-agents (spec
+ * `.ai/specs/2026-07-20-grouped-subagent-display.md` §"Codex-mapper fix", #474).
+ *
+ * The fallback matters: an exit with no open item — a resumed thread, a replay that
+ * starts mid-review — still maps to its own completed item, so no frame is dropped.
+ */
+function mapReviewMode(
+  raw: Record<string, unknown>,
+  id: string,
+  type: 'enteredReviewMode' | 'exitedReviewMode',
+  eventType: ItemEventType,
+  state: CodexUiMapperState,
+): CodexUiMapping {
+  const reviewItem = (itemId: string, name: string, status: ToolStatus): UiToolItem => ({
+    kind: 'tool',
+    id: itemId,
+    name,
+    toolKind: 'task',
+    // One stable title across the lifecycle: the row must not rename itself on exit.
+    title: 'Review',
+    status,
+  });
+
+  if (type === 'enteredReviewMode') {
+    const status = toolStatus(raw, eventType);
+    const events: UiEvent[] = [];
+    // A second entered frame with no intervening exit displaces the open span. Settle the
+    // displaced item rather than leaking a permanently `running` row — the same rule the
+    // opencode mapper's subtask slot follows.
+    if (state.reviewItemId !== null && state.reviewItemId !== id) {
+      events.push({
+        type: 'item.completed',
+        item: reviewItem(state.reviewItemId, 'enteredReviewMode', 'completed'),
+      });
+    }
+    events.push({ type: eventType, item: reviewItem(id, type, status) });
+    // Latch on the RESOLVED status, not the event phase: an entered frame that already
+    // carries a terminal wire status closes the span whichever lifecycle phase it arrived in,
+    // and one that is still in progress stays open even on an `item/completed` frame.
+    const settled = status !== 'running' && status !== 'pending';
+    return { events, state: { ...state, reviewItemId: settled ? null : id } };
+  }
+
+  const openId = state.reviewItemId;
+  if (openId === null) {
+    // Unpaired exit — today's shape, under the exit frame's own id.
+    return {
+      events: [{ type: 'item.completed', item: reviewItem(id, type, toolStatus(raw, 'item.completed')) }],
+      state,
+    };
+  }
+  return {
+    events: [
+      {
+        type: 'item.completed',
+        // The item was introduced by the entered frame, so it keeps that identity.
+        item: reviewItem(openId, 'enteredReviewMode', toolStatus(raw, 'item.completed')),
+      },
+    ],
+    state: { ...state, reviewItemId: null },
+  };
 }
 
 /** `agentMessage` → message item; `phase` commentary|final_answer→'commentary'|'final'. */
@@ -440,18 +546,6 @@ function toolItem(
       item = { kind: 'tool', id, name: type, toolKind: display.toolKind, title: display.title, status };
       break;
     }
-    case 'enteredReviewMode':
-    case 'exitedReviewMode':
-      // §7.1: review-mode items → tool(kind task).
-      item = {
-        kind: 'tool',
-        id,
-        name: type,
-        toolKind: 'task',
-        title: type === 'enteredReviewMode' ? 'Entered review mode' : 'Exited review mode',
-        status,
-      };
-      break;
     default: {
       // Unknown item types stay visible as generic tool cards (v1 parity —
       // a future codex tool must not silently vanish from the thread).

@@ -20,7 +20,7 @@ import { todosPath } from '../todos.js';
 import type { AgentEvent, ContentBlock } from '../core/agent-runner.js';
 import { discoverSkills, type Skill } from '../skills.js';
 import { materializeSkillDir } from '../skills-remote.js';
-import { loadConfig } from '../config.js';
+import { loadConfig, resolveWorktreeRetention } from '../config.js';
 import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff, worktreeShortstat } from '../git-worktree.js';
 import { getRepoInfo } from '../server/git.js';
 import { loadWorkflows } from './load.js';
@@ -30,6 +30,7 @@ import { extractTaskRefs, refineTaskRefs, titleRefNumber } from '../runs/task-re
 import { parseTaskMarkers, stripTaskMarkers } from '../runs/task-markers.js';
 import { autoNamingActive, generateRunName, liveTitleUpdatesEnabled, postValidateTitle } from '../runs/auto-name.js';
 import { reviewGateEnabled } from '../runs/review-gate.js';
+import { WorkspaceSemaphore } from '../workspace/semaphore.js';
 import { UiEventSink } from '../runs/ui-event-sink.js';
 import { chainStepNote, DEFAULT_ALLOWED_TOOLS, stepKind, type WorkflowDef, type WorkflowStepDef } from './types.js';
 
@@ -217,7 +218,8 @@ const VARIANT_HINTS: Record<string, string | undefined> = {
  * relay live to the GUI). No GitHub choreography — agent steps and shell
  * checks with bounded retry loops, plus live sessions: the last agent step
  * stays open for follow-ups (`waiting`) until "finish", idle timeout, or
- * cancel. Runs queue behind `maxParallel` slots and each run executes in its
+ * cancel. Runs queue behind the workspace-wide `maxParallel` slots (the shared
+ * `WorkspaceSemaphore`, spec 2026-07-20 step 2.5) and each run executes in its
  * own git worktree on a `cez/<id8>` branch (spec 006), autosave-committed at
  * turn end and before a draft PR — plus every 90 s when opted in via
  * CEZ_AUTOSAVE=1 (#471). Each autosave records its trigger in the commit
@@ -253,26 +255,81 @@ export class RunManager {
    *  triggers one pause, not a burst. Cleared in dropActive when the run leaves the registry. */
   private readonly memoryPausing = new Set<string>();
 
+  /** Unsubscribe handle for the constructor's `onUsage` subscription — released
+   *  by dispose() so a torn-down manager stops receiving sampler ticks. */
+  private readonly offUsage: () => void;
+
+  /** The workspace-wide parallel-cap semaphore + cached resource config
+   *  (spec 2026-07-20, step 2.5). Boot constructs ONE and every manager shares
+   *  it; the private fallback keeps single-manager callers and tests working. */
+  private readonly semaphore: WorkspaceSemaphore;
+
+  /** Unregister handle for this manager's semaphore membership — released by
+   *  dispose() so a torn-down project stops counting against the cap. */
+  private readonly offSemaphore: () => void;
+
   constructor(
     private readonly store: RunStore,
     private readonly repoRoot: string,
+    options: { semaphore?: WorkspaceSemaphore } = {},
   ) {
     this.dataDir = join(repoRoot, '.ai/cezar');
+    this.semaphore = options.semaphore ?? new WorkspaceSemaphore();
+    this.offSemaphore = this.semaphore.register({
+      busySlots: () => this.busySlots(),
+      pump: () => void this.pump(),
+    });
     // Memory guard (#memory-guard): the shared process-tree sampler already ticks ~every 2 s for
     // the runs table; piggyback on it to enforce the per-task memory ceiling.
-    onUsage((snapshot) => void this.enforceMemoryLimit(snapshot));
+    this.offUsage = onUsage((snapshot) => void this.enforceMemoryLimit(snapshot));
   }
 
   /**
-   * Pause any active run whose whole process tree exceeds `config.memoryLimitMb`, freeing its
-   * slot so the queue advances (#memory-guard). "Pause" closes the session — freeing the tree's
+   * Release everything this manager owns without touching run records
+   * (multi-project workspace, spec 2026-07-20: a removed project's context is
+   * torn down while the process lives on). Unsubscribes the shared usage
+   * sampler — before dispose() existed that subscription lived for the whole
+   * process — clears every per-run idle/autosave timer, releases any held
+   * repo-root locks, and empties the queued state so nothing fires later.
+   * Live sessions are NOT ended here: run lifecycle stays the caller's policy;
+   * dispose only guarantees the manager makes no further moves on its own.
+   */
+  dispose(): void {
+    this.offUsage();
+    this.offSemaphore();
+    for (const state of this.active.values()) {
+      this.clearIdleTimer(state);
+      this.clearAutosaveTimer(state);
+      state.releaseRepoRoot?.();
+      state.releaseRepoRoot = undefined;
+    }
+    this.active.clear();
+    this.waiting.clear();
+    this.starting.clear();
+    this.queue.length = 0;
+    this.pendingJobs.clear();
+    this.memoryPausing.clear();
+    this.lastNamerKey.clear();
+  }
+
+  /**
+   * Pause any active run whose whole process tree exceeds the WORKSPACE
+   * `resources.memoryLimitMb`, freeing its slot so the queue advances
+   * (#memory-guard). "Pause" closes the session — freeing the tree's
    * memory — and leaves the run resumable via Continue; a loud warning explains why. No-op when
    * no limit is set or the sampler has no data (e.g. `ps`/PowerShell unavailable).
    */
   private async enforceMemoryLimit(snapshot: Record<string, ProcessUsage>): Promise<void> {
-    const runIds = Object.keys(snapshot);
+    // The sampler is module-global (one `ps` for the whole process), so with
+    // multiple projects a snapshot carries EVERY project's runs. Act only on
+    // rows this manager owns (multi-project spec, step 2.4).
+    const runIds = Object.keys(snapshot).filter((runId) => this.active.has(runId));
     if (runIds.length === 0) return;
-    const limitMb = (await loadConfig(this.repoRoot)).memoryLimitMb;
+    // Workspace limit from the shared semaphore's in-memory cache (step 2.5:
+    // refreshed at boot and on PUT /api/workspace/config — never N per-tick
+    // file reads across N projects). Legacy per-repo `memoryLimitMb` keys are
+    // ignored post-migration.
+    const limitMb = this.semaphore.memoryLimitMb();
     if (!limitMb || limitMb <= 0) return;
     const limitBytes = limitMb * 1024 * 1024;
     for (const runId of runIds) {
@@ -382,8 +439,23 @@ export class RunManager {
   }
 
   /**
-   * Start queued runs while parallel slots are free. `maxParallel` comes from
-   * `.ai/cezar/config.json` (default 2); a non-git directory degrades to 1
+   * Slots this manager holds against the workspace-wide cap. `waiting` runs
+   * don't hold a slot (#347): an idle claude process costs memory but no
+   * tokens, queued work progressing matters more, and the idle timeout already
+   * bounds how long a session can sit open. Because the exemption lives HERE —
+   * in the count, not in any acquire path — a message into a `waiting` run
+   * (sendMessage) resumes it immediately even when that momentarily exceeds
+   * `maxParallel`, including when other projects saturate the cap.
+   */
+  private busySlots(): number {
+    return this.active.size + this.starting.size - this.waiting.size;
+  }
+
+  /**
+   * Start queued runs while parallel slots are free. The cap is the WORKSPACE
+   * `resources.maxParallel` (default 2), cached in the shared semaphore and
+   * counted across every manager (spec 2026-07-20, step 2.5) — legacy per-repo
+   * `maxParallel` keys are ignored. A non-git directory degrades to 1
    * sequential run in the repo root (spec 006 degradation rule).
    */
   private async pump(): Promise<void> {
@@ -391,12 +463,12 @@ export class RunManager {
     this.pumping = true;
     try {
       const repo = await getRepoInfo(this.repoRoot);
-      const maxParallel = repo ? (await loadConfig(this.repoRoot)).maxParallel : 1;
-      // `waiting` runs don't hold a slot (#347). A message into a waiting run
-      // resumes it even when that momentarily exceeds maxParallel — resumed
-      // conversations must never be blocked by the queue.
-      const busy = () => this.active.size + this.starting.size - this.waiting.size;
-      while (this.queue.length > 0 && busy() < maxParallel) {
+      const maxParallel = this.semaphore.maxParallel();
+      // `waiting` runs don't hold a slot (#347) — see busySlots(). The check
+      // below is the only slot gate: resumes never pass through it.
+      const capacity = () =>
+        this.semaphore.busy() < maxParallel && (repo !== null || this.busySlots() < 1);
+      while (this.queue.length > 0 && capacity()) {
         const runId = this.queue.shift();
         if (!runId) break;
         const job = this.pendingJobs.get(runId);
@@ -555,7 +627,7 @@ export class RunManager {
    *  lifecycle. `review`/live runs are excluded by the selector. */
   private async enforceRetention(): Promise<void> {
     try {
-      const keep = (await loadConfig(this.repoRoot)).worktreeRetention;
+      const keep = await resolveWorktreeRetention(this.repoRoot);
       await reclaimWorktrees(this.repoRoot, this.store, keep);
     } catch {
       // retention is best-effort; swallow so terminal transitions never break.

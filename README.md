@@ -251,7 +251,8 @@ Three words, no jargon — **task**, **skill**, **chain**:
 Five moves that make the cockpit worth the browser tab:
 
 - 🗃️ **Queue + orchestration.** Start as many tasks as you like: cezar runs up to
-  `maxParallel` at once (default **2**; a non-git directory always runs one) and
+  `maxParallel` at once across every project (default **2**; a non-git directory
+  always runs one) and
   holds the rest in a FIFO queue with visible positions (`#1`, `#2`, …). Cancel a
   queued task before it starts; the queue even survives a cockpit restart —
   everything still `queued` is re-enqueued in order. It's the orchestration layer
@@ -300,6 +301,70 @@ The cockpit is a React app served pre-built from the package — `npx cezar-cli`
 still means no build step and no dev server on your machine — with a dark/light
 theme, a ⌘K command palette, and bookmarklets that launch a task straight from
 a GitHub page.
+
+---
+
+## Multiple projects, one cockpit
+
+One `cezar serve` hosts **every repo you work in**, not just the one you started
+it in. Each repo cezar boots in registers itself in a per-user registry at
+`~/.cezar/config.json` — the workspace file that also holds the global knobs
+(the parallel cap, the memory ceiling, the checkout root). Nothing is added to
+the repo: per-project state stays exactly where it was, in that repo's
+`.ai/cezar/`.
+
+Every view is project-scoped:
+
+```
+/p/<projectId>/            tasks · git · github · skills · workflows · settings
+```
+
+`<projectId>` is a slug derived from the folder name (`my-app`, then `my-app-2`
+on a collision), and `/p/default/…` always means the project cezar was started
+in. The sidebar shows one collapsible group per project — each with its own nav
+and task list — and the new-task composer names the project it will run in.
+
+**Adding a project** — the **+** button beside *New task*:
+
+- 📂 **Open local folder…** browses your home directory in a folder picker and
+  registers the folder you pick.
+- ⬇️ **Clone from GitHub…** clones with your logged-in `gh` into the checkout
+  root (**Settings → Projects**, default `~/cezar/projects`) with live progress,
+  then registers the clone. Close the dialog and the clone is killed and its
+  partial directory removed.
+
+Removing a project (**Settings → Projects**) drops the registry entry only — the
+repo and its `.ai/cezar/` are never touched, so re-adding it later finds all its
+tasks intact. The project cezar is currently serving can't be removed: it
+re-registers itself at the next start.
+
+**From the terminal** — the same registry, no cockpit required (handy over ssh):
+
+```bash
+cezar projects                    # list: id, branch or status, path
+cezar projects add ~/code/api     # register a folder (defaults to the current repo)
+cezar projects remove api         # drop the registry entry; the repo is untouched
+```
+
+These read and write `~/.cezar/config.json` directly, so they work with the
+server stopped, and `CEZ_HOME` selects which workspace they operate on.
+
+Settings split along the same line: **Agents**, **Worktrees**, **Bookmarklets**,
+**Prompt templates** and **MCP** describe one repo and live under
+`/p/<projectId>/settings`; **Appearance**, **Notifications**, **Resources**,
+**Projects** and **Keyboard** are yours or the machine's and live at
+`/settings/global`.
+
+**Old URLs keep working.** Every unprefixed path — `/`, `/tasks/<id>`,
+`/settings`, and the whole `/api/…` surface — still answers exactly as before,
+bound to the project cezar was started in; the cockpit redirects flat paths to
+their `/p/<boot>/…` twin. Existing bookmarks, bookmarklets and scripts need no
+change.
+
+> **Hosted cockpit?** In [remote mode](#remote-access-host-cezar-on-a-server)
+> the folder picker is narrowed from your home directory to the checkout root —
+> a remote viewer has no business enumerating the host's whole home. Adding and
+> cloning projects keep working.
 
 ---
 
@@ -473,7 +538,6 @@ never blocks startup):
   // path as `./name`, not a bare `name`. Pin `ref` to a full commit SHA to freeze
   // the source against a moving branch head — cezar verifies it resolves to
   // exactly that commit, and reports it as `team.commit`.
-  "maxParallel": 2,          // how many tasks may run at once (non-git dirs always run 1)
   "worktreeRetention": 10,   // keep the last N finished worktrees on disk; 0 = unlimited (branch always kept)
   "defaultRunner": "claude", // agent backend: "claude" (default) · "codex" · "opencode"
   "plannerModel": "sonnet",  // model the "Plan first" button uses to draft chains
@@ -483,6 +547,14 @@ never blocks startup):
 
 Run data (`runs.json`, NDJSON event logs, worktrees, `todos.json`) is
 git-ignored automatically; your workflows and skills stay committable.
+
+Settings that belong to *you* rather than to a repo — the parallel cap
+(`maxParallel`, default **2**), the per-task memory ceiling and the checkout
+root — live once in `~/.cezar/config.json`, alongside the
+[project registry](#multiple-projects-one-cockpit), and are edited from
+**Settings → Resources** and **Settings → Projects**. A `maxParallel` left over
+in a repo's `.ai/cezar/config.json` is imported into the workspace file the
+first time cezar boots there, and ignored afterwards.
 
 ---
 
