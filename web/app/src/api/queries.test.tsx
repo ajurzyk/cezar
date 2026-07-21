@@ -14,6 +14,7 @@ import {
   useRun,
   useRunChanges,
   useRuns,
+  useSkills,
 } from './queries'
 
 const fetchMock = vi.fn<typeof fetch>()
@@ -82,6 +83,8 @@ describe('queryKeys', () => {
       expect(queryKeys.runs.list()).toEqual(['proj-a', 'runs', 'list'])
       expect(queryKeys.health).toEqual(['proj-a', 'health'])
       expect(queryKeys.todos).toEqual(['proj-a', 'todos'])
+      expect(queryKeys.skills).toEqual(['proj-a', 'skills'])
+      expect(queryKeys.skillsReady).toEqual(['proj-a', 'skills', 'ready'])
       expect(queryKeys.agentConfig).toEqual(['proj-a', 'agent-config'])
       expect(queryKeys.agentConfigFile('claude.project.settings')).toEqual([
         'proj-a',
@@ -97,6 +100,39 @@ describe('queryKeys', () => {
     } finally {
       setApiScope(null)
     }
+  })
+})
+
+describe('useSkills', () => {
+  it('renders the fast catalog, then converges when the cold team cache is ready', async () => {
+    let resolveReady!: (response: Response) => void
+    fetchMock.mockImplementation(async (input) => {
+      if (String(input) === '/api/skills') {
+        return json([{ name: 'local', source: 'ai', body: '', path: '/repo/local.md' }])
+      }
+      if (String(input) === '/api/skills?wait=1') {
+        return new Promise<Response>((resolve) => {
+          resolveReady = resolve
+        })
+      }
+      return new Response(null, { status: 404 })
+    })
+
+    const { result } = renderHook(() => useSkills(), { wrapper: wrapper() })
+    await waitFor(() => expect(result.current.data?.map((skill) => skill.name)).toEqual(['local']))
+    await waitFor(() => expect(resolveReady).toBeTypeOf('function'))
+
+    resolveReady(
+      json([
+        { name: 'local', source: 'ai', body: '', path: '/repo/local.md' },
+        { name: 'om-fix', source: 'team', body: '', path: 'skills/om-fix/SKILL.md' },
+      ]),
+    )
+
+    await waitFor(() =>
+      expect(result.current.data?.map((skill) => skill.name)).toEqual(['local', 'om-fix']),
+    )
+    expect(fetchMock.mock.calls.map(([path]) => path)).toEqual(['/api/skills', '/api/skills?wait=1'])
   })
 })
 

@@ -198,7 +198,7 @@ describe('refresh (#384: selection and scroll survive)', () => {
       expect(requests.some((r) => r.method === 'POST' && r.url === '/api/skills/refresh')).toBe(true),
     )
     // The refreshed catalog rendered (the new team skill is in the list)…
-    await waitFor(() => expect(rowNames()).toEqual(['om-fix', 'om-review', 'zebra-global', 'team-new']))
+    await waitFor(() => expect(rowNames()).toEqual(['om-fix', 'om-review', 'team-new', 'zebra-global']))
 
     // …but the pane was updated IN PLACE: same scroll container, same scroll offset, same
     // selection — the legacy innerHTML rebuild lost all three.
