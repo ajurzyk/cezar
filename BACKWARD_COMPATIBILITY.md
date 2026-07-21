@@ -28,7 +28,9 @@ Consumed by the bundled React cockpit (`web/dist`, shipped in lockstep — low r
 - Variants: `GET /api/groups/:groupId`, `POST /api/groups/:groupId/pick`
 - Inbox: `GET /api/todos`, `DELETE /api/todos/:id`, `POST /api/todos/:id/start` — present always, but **gated** on `CEZ_FOLLOWUPS=1` (#471, off by default): the GET degrades to `200 []` and the two mutators answer `409`. The routes themselves must keep existing and must behave exactly as before once the flag is on.
 - SSE: `GET /api/events` (global), `GET /api/runs/:id/events` (replay + live, dedup by `seq`)
-- Repo/GitHub: `GET /api/github`, `GET /api/repo`, `GET /api/repo/{diff,changes}`, `GET /api/repo/commit/:sha`, `POST /api/repo/branch`, `GET/PUT /api/config`, `GET/PUT /api/ui-state`
+- Repo/GitHub: `GET /api/github`, `GET /api/github/comments/:kind/:number`, `GET /api/repo`, `GET /api/repo/{diff,changes}`, `GET /api/repo/commit/:sha`, `POST /api/repo/branch`, `GET/PUT /api/config`, `GET/PUT /api/ui-state`
+  - `GET /api/github/comments/:kind/:number` (#499) returns `{available, reason?, comments[], truncated?, events?}`. `events?` is additive (#525) and may be absent entirely when the timeline fetch degrades; `comments[]` keeps its exact shape, contents and cap regardless of event volume.
+- Worktrees: `GET /api/worktrees`, `POST /api/worktrees/reclaim`
 - SSE event names: `run-event` (v1), `ui-event` (v2 dotted types)
 
 Breaking: removing/renaming a route; making a previously optional body field required; removing a response field; changing an SSE event name (`run`, `run-event`, `run-deleted`, `todos`, `usage`, `ping`) or the `seq` dedup contract; narrowing `/api/health` CORS or its fields; changing `/new` query parameters (breaks saved bookmarklets). Required path: additive first; if removal is unavoidable, keep the old route/field answering for one minor release and note it in the CHANGELOG. `/api/health` and `/new` deserve extra caution — they live in users' browsers, not in this repo.
