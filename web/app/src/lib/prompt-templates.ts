@@ -153,13 +153,22 @@ export function autoApplyText(
  *
  * `previousAuto` is what this function last returned as `applied` ('' on first run). Returning it
  * back out (rather than having the caller track it) keeps the whole rule pure and testable.
+ *
+ * `base` is text the box is PRE-FILLED with and that auto-apply must preserve rather than
+ * overwrite — the GitHub hand-off's item reference (#524). "Untouched" widens to "still exactly
+ * the base", and auto-applied text stacks below it, blank-line separated like `insertTemplate`.
+ * The Inbox passes no base, where `base === ''` reduces this to the original rule exactly.
  */
 export function resolveAutoApply(
   current: string,
   previousAuto: string,
   nextAuto: string,
+  base = '',
 ): { text: string; applied: string } {
-  if (current === '' || current === previousAuto) return { text: nextAuto, applied: nextAuto }
+  if (current === base || current === previousAuto) {
+    const text = base && nextAuto ? `${base}\n\n${nextAuto}` : base || nextAuto
+    return { text, applied: text }
+  }
   // The user owns the box now — leave it alone, and keep remembering the auto text we wrote, so
   // that clearing it back to empty later re-opens the door above.
   return { text: current, applied: previousAuto }

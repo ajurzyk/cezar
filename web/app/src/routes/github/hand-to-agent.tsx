@@ -29,7 +29,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { toast } from '@/components/ui/toaster'
 import { PromptTemplateMenu } from '@/components/prompt-template-menu'
 import { SkillPreviewDialog } from '@/components/skill-detail'
-import { githubRunBody } from '@/lib/github-task'
+import { githubRunBody, githubTaskRef } from '@/lib/github-task'
 import {
   autoApplyText,
   insertTemplate,
@@ -90,15 +90,22 @@ export function HandToAgent({
   const uiState = useUiState()
   // A skill deleted since it was toggled must not reach the server (legacy rule).
   const validSkills = selectedSkills.filter((name) => skills.some((skill) => skill.name === name))
-  // Optional custom prompt (#gh-custom-prompt): empty → the default "Fix GitHub issue #N …"
-  // text. The route remounts this component per item (key={item.url}); the DRAFT — not plain
-  // component state (#408) — restores whatever was typed for THIS item, so switching away and
-  // back (or a page refresh) never loses it.
-  const [prompt, setPrompt] = useState(() => readFollowupPrompt(item.url))
+  // The box is PRE-FILLED with the item's reference (#524) rather than starting empty: what you
+  // see is what the agent gets, and it is editable — the previous "empty means the default
+  // prompt" contract made the composed text invisible, so a user typing their own instruction
+  // could not tell the item context had been dropped. Refs only, never the quoted body: a wall
+  // of issue text is unreadable in a box you are meant to edit, and the URL is right there.
+  const base = githubTaskRef(item)
+  // The route remounts this component per item (key={item.url}); the DRAFT — not plain component
+  // state (#408) — restores whatever was typed for THIS item, so switching away and back (or a
+  // page refresh) never loses it. No draft stored → the pre-fill.
+  const [prompt, setPrompt] = useState(() => readFollowupPrompt(item.url) || base)
   const promptRef = useRef<HTMLTextAreaElement>(null)
   useEffect(() => {
-    writeFollowupPrompt(item.url, prompt)
-  }, [item.url, prompt])
+    // An untouched box stores NOTHING — persisting the pre-fill would leave a draft behind for
+    // every GitHub item ever opened, which is exactly what the store's "no trace" rule avoids.
+    writeFollowupPrompt(item.url, prompt === base ? '' : prompt)
+  }, [item.url, prompt, base])
 
   // Follow-up prompt templates (#413): built-in unless the user has edited them in Settings →
   // Prompt templates (`ui-state.json`'s `promptTemplates`).
@@ -108,7 +115,11 @@ export function HandToAgent({
   )
   const insertPromptTemplate = (snippet: string) => {
     const el = promptRef.current
-    const caret = el?.selectionStart ?? prompt.length
+    // Honour the caret only when the box actually HAS one — i.e. it is focused. An untouched
+    // textarea reports `selectionStart === 0`, which since #524's pre-fill would splice the
+    // template ABOVE the item reference; appending is what "add an instruction" means when the
+    // user never put a caret anywhere.
+    const caret = el && document.activeElement === el ? el.selectionStart : prompt.length
     const result = insertTemplate(prompt, caret, snippet)
     setPrompt(result.text)
     // Restore focus + caret after the state update repaints the textarea. The menu's Popover
@@ -130,12 +141,14 @@ export function HandToAgent({
   useEffect(() => {
     // Reads/writes go through refs, never a setState updater: StrictMode double-invokes those in
     // dev, which would double-apply the ref bookkeeping (the composer's #double-paste hazard).
-    const resolved = resolveAutoApply(promptRefValue.current, autoAppliedRef.current, autoText)
+    // `base` is passed so the PRE-FILLED reference still reads as "untouched" and auto-applied
+    // template text stacks below it instead of wiping it (#524).
+    const resolved = resolveAutoApply(promptRefValue.current, autoAppliedRef.current, autoText, base)
     autoAppliedRef.current = resolved.applied
     if (resolved.text !== promptRefValue.current) setPrompt(resolved.text)
     // `autoText` is a derived STRING, so this fires only when the assigned set really changes —
     // not on every render that rebuilds the skills array.
-  }, [autoText])
+  }, [autoText, base])
 
   const start = useMutation({
     mutationFn: () => createRun(githubRunBody(item, workflow, validSkills, prompt)),
@@ -163,7 +176,8 @@ export function HandToAgent({
       // only the store would leave the textarea showing text that no longer exists anywhere —
       // text that then vanishes on the next remount.
       writeFollowupPrompt(item.url, '')
-      setPrompt('')
+      setPrompt(base)
+      autoAppliedRef.current = ''
       void queryClient.invalidateQueries({ queryKey: queryKeys.runs.all })
     },
     onError: (error) => toast(error.message, { tone: 'danger' }),
@@ -235,7 +249,7 @@ export function HandToAgent({
         value={prompt}
         onChange={(event) => setPrompt(event.target.value)}
         onKeyDown={submitShortcut}
-        placeholder={`Add instructions for the agent… (empty uses the default "${item.kind === 'pr' ? 'Address' : 'Fix'} #${item.number}" prompt)`}
+        placeholder={`Instructions for the agent… (#${item.number} and its link are always sent)`}
         className="mt-3 min-h-20 text-[13px]"
       />
 

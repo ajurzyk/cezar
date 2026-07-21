@@ -63,4 +63,37 @@ describe('Markdown', () => {
     expect(document.querySelector('[data-streamdown="code-block"]')).not.toBeNull()
     expect(document.body.textContent).not.toContain('```')
   })
+
+  // `breaks` — hard line breaks for human-typed text (#524).
+  describe('breaks', () => {
+    it('off by default: a single newline is CommonMark paragraph glue', () => {
+      const { container } = render(<Markdown>{'line one\nline two'}</Markdown>)
+      expect(container.querySelector('br')).toBeNull()
+    })
+
+    it('on: a single newline becomes a hard break, so a typed message keeps its shape', () => {
+      const { container } = render(<Markdown breaks>{'line one\nline two'}</Markdown>)
+      expect(container.querySelectorAll('br')).toHaveLength(1)
+      expect(container.querySelectorAll('p')).toHaveLength(1)
+    })
+
+    it('on: blank lines still start a new paragraph', () => {
+      const { container } = render(<Markdown breaks>{'one\n\ntwo'}</Markdown>)
+      expect(container.querySelectorAll('p')).toHaveLength(2)
+    })
+
+    it('on: markdown still parses — the breaks plugin only splits text nodes', () => {
+      render(<Markdown breaks>{'A **bold** claim\nand `code`.'}</Markdown>)
+      expect(document.querySelector('[data-streamdown="strong"]')?.textContent).toBe('bold')
+      expect(document.querySelector('[data-streamdown="inline-code"]')?.textContent).toBe('code')
+    })
+
+    it('on: a fenced block keeps its own newlines, blank lines and all', () => {
+      render(<Markdown breaks>{'```js\na\n\nb\n```'}</Markdown>)
+      const body = document.querySelector('[data-streamdown="code-block-body"]')
+      expect(body?.querySelector('br')).toBeNull()
+      expect(body?.textContent).toContain('a')
+      expect(body?.textContent).toContain('b')
+    })
+  })
 })
