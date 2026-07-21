@@ -12,11 +12,11 @@
 
 | Phase | Step | Title | Status | Commit |
 |-------|------|-------|--------|--------|
-| 1 | 1.1 | `queuedMessage` schema + record field | done | (backfilled at checkpoint) |
-| 1 | 1.2 | `persistImage` without a session | done | (backfilled at checkpoint) |
-| 1 | 1.3 | `RunManager` stack mutators | done | (backfilled at checkpoint) |
-| 1 | 1.4 | `hydrateQueuedInput` + `pump()` wiring | done | (backfilled at checkpoint) |
-| 1 | 1.5 | Routes | done | (backfilled at checkpoint) |
+| 1 | 1.1 | `queuedMessage` schema + record field | done | 163e6ff |
+| 1 | 1.2 | `persistImage` without a session | done | 415d486 |
+| 1 | 1.3 | `RunManager` stack mutators | done | 98d1858 |
+| 1 | 1.4 | `hydrateQueuedInput` + `pump()` wiring | done | dd83a3b |
+| 1 | 1.5 | Routes | done | b7d8b55 |
 | 1 | 1.6 | Client types + hooks | todo | — |
 | 2 | 2.1 | Composer queued branch | todo | — |
 | 2 | 2.2 | Stacked bubbles | todo | — |

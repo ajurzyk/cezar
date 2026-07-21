@@ -1,25 +1,27 @@
 # Handoff — 2026-07-21-queued-session-prompt-stacking
 
-**Last updated:** 2026-07-21T11:40:00Z
+**Last updated:** 2026-07-21T11:41:00Z
 **Branch:** `feat/queued-session-prompt-stacking`
-**PR:** not yet opened
-**Current phase/step:** Phase 1 Step 1.1 (not started)
-**Last commit:** — (run folder commit pending)
+**PR:** https://github.com/open-mercato/cezar/pull/553 (draft)
+**Current phase/step:** Phase 1 complete except Step 1.6 — resume at **Step 1.6 (client types + hooks)**
+**Last commit:** `b7d8b55` — feat(server): expose the queued prompt stack over HTTP (#472)
 
 ## What just happened
-- Run folder seeded from `.ai/specs/2026-07-21-queued-session-prompt-stacking.md` (11 Steps / 3 Phases).
-- Triage confirmed every file/line citation in the spec against current `main` (`67cdd2f`): `pump()` at `run.ts:389-426`, `pendingJobs` at `:240`, `recover()` at `:439`, `sendMessage` at `:650`, `persistImage` at `:1665` (`state.imageSeq` at `:1679`, its only reader), `cancel()` at `:623`, `messageSchema` at `server.ts:307`, `patchRunSchema` at `:288` (currently `title`-only), the messages route at `:851-872`, `buildThreadRows` at `task-thread.tsx:97-124`, and the `sessionOpen` gate at `:136`. All accurate — no spec drift.
+- Steps 1.1 – 1.5 landed, one commit each. Checkpoint 1 passed: `npm run typecheck` clean, `npm test` **3010/3010 across 175 files**, no regressions.
+- The feature's core claim is proven end-to-end: a real queued run under `maxParallel: 1` receives a `{{task}}` carrying both stacked messages, in order, with an edit applied and the pre-edit text absent — while the record still holds `task` and the stack separately.
+- Two deliberate deviations from the spec's letter (both in `checkpoint-1-checks.md`): stacked attachments ride a separate `stackedImages` input field rather than `input.images`; `deferMessage` gates on a new `sessionEverOpened` flag rather than the `starting` set alone.
 
 ## Next concrete action
-- Start Phase 1 Step 1.1: add `queuedMessageSchema` + optional `queuedMessages` to `src/runs/store.ts`, with the "not in `redactPatch`" reason commented alongside the existing `task` comment.
+- **Step 1.6** — mirror `QueuedMessage`, the new request/response shapes and hooks into `web/app/src/api/{types,client,queries}.ts`, and extend `src/server/api-types.test.ts` so the mirror is *asserted* (a compile-time equivalence per entry plus a case that fails when a server field is added and not mirrored), not merely un-broken.
 
 ## Blockers / open questions
-- None. The spec's 10 Open Questions were resolved with autonomous defaults (documented in its "Resolved assumptions" section and posted on #472); no row needs human confirmation before merge.
+- None.
 
 ## Environment caveats
-- Dev runtime runnable: unknown (not yet exercised this run)
-- Browser / UI checks: pending — attempt at the Phase 2 checkpoint
-- Database/migration state: n/a — no migration in this feature (optional `runs.json` field only)
+- Dev runtime runnable: not yet exercised — first needed at the Phase 2 checkpoint for screenshots.
+- Browser / UI checks: skipped so far, correctly — nothing user-facing has landed until Step 2.1.
+- Database/migration state: n/a — the only state change is one optional `runs.json` field.
+- **Scrub `CEZ_*` env vars before running the gate.** A cezar-launched shell exports `CEZ_REMOTE` / `CEZ_DRY_RUN`, which leak into the test runner's fixtures.
 
 ## Worktree
 - Path: `/home/pkarw/Projects/cezar/.ai/cezar/worktrees/d2bac3b9-f1bc-418a-8382-710ba7ff5563`
