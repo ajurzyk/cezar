@@ -1,6 +1,6 @@
 # Clone dialog checkout-root settings link
 
-Status: draft · Date: 2026-07-21 · Issue: #561 · Extends: spec 2026-07-20-multi-project-workspace
+Status: implemented · Date: 2026-07-21 · Issue: #561 · Extends: spec 2026-07-20-multi-project-workspace
 
 ## Problem
 
