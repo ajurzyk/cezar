@@ -44,6 +44,7 @@ import type {
   RunCommitsResponse,
   RepoResponse,
   Runner,
+  RunnerModelCatalogResponse,
   RunRecord,
   WorktreeEntry,
   SaveWorkflowInput,
@@ -199,6 +200,11 @@ const runPath = (id: string, suffix = ''): string => `/api/runs/${encodeURICompo
 /** Version, update check, repo/branch, and the tool probes behind the Tools menu. */
 export function getHealth(opts?: ReadOptions): Promise<HealthResponse> {
   return get<HealthResponse>('/api/health', opts)
+}
+
+/** Host-local Codex catalog. Workspace-level: one CLI/account serves every project. */
+export function getRunnerModels(opts?: ReadOptions): Promise<RunnerModelCatalogResponse> {
+  return get<RunnerModelCatalogResponse>('/api/models?runner=codex', opts)
 }
 
 /** The bookmarklet auto-start secret (spec 011). Fetched to compare against `/new?key=` —

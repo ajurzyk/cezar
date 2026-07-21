@@ -48,6 +48,7 @@ describe('scopeApiPath — scoped', () => {
   it('leaves workspace-level routes alone — they are single-mount, prefixing would 404', () => {
     setApiScope('cezar')
     expect(scopeApiPath('/api/health')).toBe('/api/health')
+    expect(scopeApiPath('/api/models?runner=codex')).toBe('/api/models?runner=codex')
     expect(scopeApiPath('/api/projects')).toBe('/api/projects')
     expect(scopeApiPath('/api/workspace/events')).toBe('/api/workspace/events')
     expect(scopeApiPath('/api/workspace/config')).toBe('/api/workspace/config')

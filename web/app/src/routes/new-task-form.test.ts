@@ -7,6 +7,7 @@ import {
   buildCreateRunBody,
   MODELS_BY_RUNNER,
   modelsForRunner,
+  modelCatalogStatus,
   pushRecentSource,
   resolveModel,
   resolveRunner,
@@ -53,7 +54,7 @@ describe('resolveRunner (legacy preselection order)', () => {
   })
 })
 
-describe('model presets (legacy MODELS_BY_RUNNER, mirrored faithfully)', () => {
+describe('model option resolution', () => {
   it('every runner leads with auto (empty id — no model flag sent)', () => {
     for (const models of Object.values(MODELS_BY_RUNNER)) {
       expect(models[0]).toMatchObject({ id: '', label: 'auto' })
@@ -66,10 +67,16 @@ describe('model presets (legacy MODELS_BY_RUNNER, mirrored faithfully)', () => {
     ])
   })
 
-  it('codex: gpt-*-codex ids', () => {
-    expect(modelsForRunner('codex').map((m) => m.id)).toEqual([
-      '', 'gpt-5.1-codex', 'gpt-5.1-codex-mini', 'gpt-5-codex',
-    ])
+  it('codex: auto plus host-discovered and custom ids', () => {
+    const catalog = { runner: 'codex' as const, models: [{ id: 'gpt-future', label: 'Future', description: 'New' }], source: 'live' as const, stale: false }
+    expect(modelsForRunner('codex', catalog, ['legacy-id']).map((m) => m.id)).toEqual(['', 'gpt-future', 'legacy-id'])
+    expect(modelsForRunner('codex', catalog, ['legacy-id']).at(-1)?.desc).toBe('Custom or legacy model')
+  })
+
+  it('reports stale and unavailable Codex catalogs without exposing reasons', () => {
+    expect(modelCatalogStatus('codex', { runner: 'codex', models: [], source: 'cache', stale: true, reason: 'raw' })).toBe('Using cached Codex model list')
+    expect(modelCatalogStatus('codex', { runner: 'codex', models: [], source: 'unavailable', stale: false, reason: 'raw' })).toBe('Latest Codex models unavailable')
+    expect(modelCatalogStatus('claude', undefined, true)).toBeUndefined()
   })
 
   it('opencode: provider/model ids, newest Anthropic + OpenAI', () => {
@@ -78,10 +85,9 @@ describe('model presets (legacy MODELS_BY_RUNNER, mirrored faithfully)', () => {
     ])
   })
 
-  it('resolveModel keeps a pick that exists for the runner and resets to auto otherwise', () => {
+  it('resolveModel keeps known picks and arbitrary Codex pins', () => {
     expect(resolveModel('opus', 'claude')).toBe('opus')
-    // Switching runner invalidates a foreign model id — what is shown is what is sent.
-    expect(resolveModel('opus', 'codex')).toBe('')
+    expect(resolveModel('custom-codex-id', 'codex')).toBe('custom-codex-id')
     expect(resolveModel(null, 'claude')).toBe('')
   })
 
@@ -92,8 +98,8 @@ describe('model presets (legacy MODELS_BY_RUNNER, mirrored faithfully)', () => {
     // An explicit pick — including explicitly picking auto ('') — beats the preset.
     expect(resolveModel('sonnet', 'claude', defaults)).toBe('sonnet')
     expect(resolveModel('', 'claude', defaults)).toBe('')
-    // A configured id the runner does not offer is ignored, not sent blind.
-    expect(resolveModel(null, 'codex', defaults)).toBe('')
+    // Configured Codex ids remain representable even when discovery is unavailable.
+    expect(resolveModel(null, 'codex', defaults)).toBe('not-a-preset')
     // No preset for the runner → auto, exactly as before.
     expect(resolveModel(null, 'opencode', defaults)).toBe('')
   })

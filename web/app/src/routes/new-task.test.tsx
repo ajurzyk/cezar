@@ -159,6 +159,7 @@ function serve(overrides: {
       const body = init?.body ? (JSON.parse(String(init.body)) as unknown) : undefined
       requests.push({ method, url, body })
       if (url === '/api/health') return json(data.health)
+      if (url === '/api/models?runner=codex') return json({ runner: 'codex', models: [{ id: 'gpt-future', label: 'gpt-future', description: 'Newest' }], source: 'live', stale: false })
       if (url === '/api/skills') return json(data.skills)
       if (url === '/api/workflows' && method === 'GET') return json(data.workflows)
       if (url === '/api/workflows' && method === 'POST') {
@@ -285,7 +286,7 @@ describe('picker data flows', () => {
     fireEvent.pointerDown(document.querySelector('[data-slot="model-pill"]') as HTMLElement)
     options = await screen.findAllByRole('menuitemradio')
     const labels = options.map((o) => o.textContent ?? '')
-    expect(labels.some((l) => l.includes('gpt-5.1-codex'))).toBe(true)
+    expect(labels.some((l) => l.includes('gpt-future'))).toBe(true)
     expect(labels.some((l) => l.includes('opus'))).toBe(false)
   })
 

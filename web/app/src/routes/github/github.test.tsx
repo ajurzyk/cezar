@@ -170,6 +170,7 @@ function stubFetch(overrides: Record<string, () => Response> = {}): SentRequest[
       if (method === 'GET' && path === '/api/github?limit=1000') return jsonResponse(GITHUB)
       if (method === 'GET' && path === '/api/workflows') return jsonResponse(WORKFLOWS)
       if (method === 'GET' && path === '/api/skills') return jsonResponse(SKILLS)
+      if (method === 'GET' && path === '/api/models?runner=codex') return jsonResponse({ runner: 'codex', models: [{ id: 'gpt-future', label: 'gpt-future', description: 'Newest' }], source: 'live', stale: false })
       if (method === 'POST' && path === '/api/runs') {
         return jsonResponse({
           id: 'run-1',
@@ -921,7 +922,7 @@ describe('the hand-to-agent backend pills (#401)', () => {
 
     await waitFor(() => expect(document.querySelector('[data-slot="runner-pill"]')).not.toBeNull())
     await pickPill('runner-pill', 'codex')
-    await pickPill('model-pill', 'gpt-5.1-codex')
+    await pickPill('model-pill', 'gpt-future')
 
     fireEvent.click(screen.getByRole('button', { name: /Run agent on this issue/ }))
 
@@ -929,7 +930,7 @@ describe('the hand-to-agent backend pills (#401)', () => {
     expect(postedRun(sent)).toMatchObject({
       workflow: 'quick-task',
       runner: 'codex',
-      model: 'gpt-5.1-codex',
+      model: 'gpt-future',
     })
   })
 

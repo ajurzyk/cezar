@@ -38,6 +38,20 @@ export type StepStatus =
  *  choice and are Claude by definition (see `resumeCommand` in the server). */
 export type Runner = 'claude' | 'codex' | 'opencode'
 
+export interface RunnerModelOption {
+  id: string
+  label: string
+  description: string
+}
+
+export interface RunnerModelCatalogResponse {
+  runner: Runner
+  models: RunnerModelOption[]
+  source: 'live' | 'cache' | 'unavailable'
+  stale: boolean
+  reason?: string
+}
+
 export interface StepState {
   id: string
   name: string
@@ -425,6 +439,8 @@ export interface ChangedFile {
 export interface ChangesPayload {
   files: ChangedFile[]
   stat: { adds: number; dels: number; files: number }
+  /** Additive context for review tasks whose worktree HEAD no longer matches their own branch. */
+  repointedHead?: { headBranch: string; taskBranch: string }
 }
 
 /** `GET /api/runs/:id/files?path=` — a directory listing or one file (size-capped, binary

@@ -9,6 +9,7 @@ import { setApiScope } from './project-scope'
 import {
   queryKeys,
   useHealth,
+  useRunnerModels,
   usePatchRun,
   usePutAgentConfigFile,
   useRun,
@@ -52,6 +53,16 @@ const HEALTH = {
   checks: [],
   defaultRunner: 'claude',
 }
+
+describe('useRunnerModels', () => {
+  it('loads the workspace Codex catalog', async () => {
+    fetchMock.mockResolvedValue(json({ runner: 'codex', models: [{ id: 'gpt-future', label: 'Future', description: '' }], source: 'live', stale: false }))
+    const { result } = renderHook(() => useRunnerModels(), { wrapper: wrapper() })
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    expect(result.current.data?.models[0]?.id).toBe('gpt-future')
+    expect(fetchMock.mock.calls.at(-1)?.[0]).toBe('/api/models?runner=codex')
+  })
+})
 
 describe('queryKeys', () => {
   // Step 3.2 invalidates by these. Keeping them stable and hierarchical is the whole contract:
