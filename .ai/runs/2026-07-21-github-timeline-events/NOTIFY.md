@@ -14,3 +14,6 @@ Append-only, UTC timestamps, newest at the bottom.
   → "rejects an open-in with no target (400)" fails with 409≠400. Verified against a clean
   `origin/main` worktree: **fails there too**, so it is pre-existing drift, not this branch's doing.
   Not fixed here (out of scope); noted so the final gate is not misread as green-with-a-regression.
+- **2026-07-21T11:32Z — checkpoint 1** (after Step 1.5). Phase 1 server side complete and green:
+  typecheck clean, 101 forge tests passing, 30 new cases. UI verification skipped — nothing
+  user-visible has changed yet (first UI step is 1.7). See `checkpoint-1-checks.md`.
