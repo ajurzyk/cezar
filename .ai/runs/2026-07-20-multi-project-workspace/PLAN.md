@@ -36,7 +36,7 @@
 | 3 | 3.6 | Project-scoped bookmarklets (per-project launch-key URLs) | done | f07b7ba |
 | 3 | 3.7 | BACKWARD_COMPATIBILITY.md: `/p/*` URLs + bookmarklet redirect | done | b7d410a |
 | 3 | 3.8 | Realign the e2e suite with the project-scoped URL grammar (fix-forward from checkpoint 5) | done | 0616b58 |
-| 4 | 4.1 | `GET /api/fs/browse` (home-rooted, realpath containment, `CEZ_REMOTE` restriction) | todo | |
+| 4 | 4.1 | `GET /api/fs/browse` (home-rooted, realpath containment, `CEZ_REMOTE` restriction) | done | af5e8ec |
 | 4 | 4.2 | Folder-browser dialog → `POST /api/projects` | todo | |
 | 4 | 4.3 | `POST /api/projects/checkout` + `checkout-progress` SSE + partial-clone cleanup + dialog flow | todo | |
 | 4 | 4.4 | Global Projects settings pane: list/remove, `projectsDir` field with inline validation | todo | |

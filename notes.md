@@ -1,0 +1,1 @@
+mock notes — 2026-07-21T06:57:17.761Z: The cezar process restarted while you were working on this task. Read the handoff file (CEZ_HANDOFF_FILE) to recover context, then continue the task from where you left off.

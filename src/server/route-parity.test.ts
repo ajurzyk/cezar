@@ -160,7 +160,7 @@ describe('project-route alias parity (unprefixed vs /api/p/<boot> vs /api/p/defa
       expect(keys, expected).toContain(expected);
     }
     // Workspace-level routes must NOT be mirrored under /api/p/.
-    for (const workspaceOnly of ['GET /health', 'GET /projects']) {
+    for (const workspaceOnly of ['GET /health', 'GET /projects', 'GET /fs/browse']) {
       expect(keys, workspaceOnly).not.toContain(workspaceOnly);
     }
   });

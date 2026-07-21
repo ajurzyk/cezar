@@ -61,7 +61,9 @@ import { mergeWriteWorkspaceUiState, readWorkspaceUiState } from '../workspace/u
 import { ProjectContextError, ProjectContexts, type ProjectContext } from './project-context.js';
 import { reviewGateEnabled } from '../runs/review-gate.js';
 import { readUiState, uiStatePath } from '../ui-state.js';
+import { expandTilde } from '../paths.js';
 import { resolveCapabilities } from './capabilities.js';
+import { browseDirectory, resolveBrowseRoot } from './fs-browse.js';
 import { resolveForge } from './forge/index.js';
 import { fetchGithub, fetchGithubComments } from './github.js';
 import { ensureLaunchKey } from './launch-key.js';
@@ -543,14 +545,6 @@ function parseUiStateBody<S extends z.ZodTypeAny>(
   return { data: parsed.data as z.infer<S> };
 }
 
-/** Expand a leading `~` to the user's home — the `projectsDir` probe validates
- *  the REAL directory while the config keeps the literal `~` form the user
- *  wrote (see the `projectsDir` note in src/workspace/config.ts). */
-function expandTilde(path: string): string {
-  if (path === '~') return homedir();
-  return path.startsWith('~/') ? join(homedir(), path.slice(2)) : path;
-}
-
 /** The `projectsDir` writability probe (multi-project spec, "API Contracts"):
  *  `mkdir -p`, `access W_OK`, then a real create/delete round-trip — W_OK alone
  *  can lie (e.g. a read-only mount still reports writable permission bits).
@@ -899,6 +893,32 @@ export function createApp(deps: ServerDeps): Hono {
       // A read-only home degrades to an unsaved pref, never a crash.
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
     }
+  });
+
+  // ---- filesystem browse (multi-project spec, step 4.1) --------------------
+  // WORKSPACE-level and same-origin: the directory picker behind "Add project
+  // → open local folder". Directories only, and every answer is contained in a
+  // single root — see src/server/fs-browse.ts for the containment rule and why
+  // it is realpath-based. The root is the ONLY thing decided here: hosted mode
+  // (`CEZ_REMOTE=1` / non-loopback bind — the same `localHandoff` predicate the
+  // open-in-* endpoints use) narrows it from the operator's home to
+  // `projectsDir`, because a remote viewer has no business enumerating the
+  // host's whole home. Read per request, so a `CEZ_REMOTE` flip applies live.
+  app.get('/api/fs/browse', async (c) => {
+    let projectsDir = defaultWorkspaceConfig().projectsDir;
+    try {
+      projectsDir = (await loadWorkspaceConfig()).projectsDir;
+    } catch {
+      // unreadable workspace — the default checkout root is the honest fallback
+    }
+    const root = resolveBrowseRoot(!capabilities().localHandoff, projectsDir);
+    const result = await browseDirectory({
+      root,
+      path: c.req.query('path'),
+      showHidden: c.req.query('showHidden') === '1',
+    });
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json(result.body);
   });
 
   // The bookmarklet generator bakes this key into the `javascript:` URLs —
