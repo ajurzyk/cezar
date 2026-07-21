@@ -8,6 +8,7 @@ import {
   getHealth,
   getLaunchKey,
   getOpenTargets,
+  getProjectRuns,
   getProjects,
   getRepo,
   getRunCommit,
@@ -24,6 +25,7 @@ import {
   getTodos,
   getUiState,
   getWorkflows,
+  getWorkspaceUiState,
   getWorktrees,
   patchRun,
   sendMessage,
@@ -115,6 +117,9 @@ export const queryKeys = {
  */
 export const workspaceQueryKeys = {
   projects: ['workspace', 'projects'] as const,
+  /** `~/.cezar/ui-state.json` via `GET/PUT /api/workspace/ui-state` (step 2.7) — cross-project
+   *  GUI prefs, e.g. the sidebar's per-project collapse map (step 3.3). */
+  uiState: ['workspace', 'ui-state'] as const,
 }
 
 /** The workspace project registry (`GET /api/projects`): the `/p/:projectId` route gate's
@@ -160,6 +165,24 @@ export function useRuns() {
   return useQuery({
     queryKey: queryKeys.runs.list(),
     queryFn: ({ signal }) => getRuns({ signal }),
+  })
+}
+
+/**
+ * One project's run list by EXPLICIT id — the sidebar's per-group task lists (step 3.3), which
+ * must read projects the mounted scope cannot reach. Keyed `[projectId, 'runs', 'list']`: for
+ * the ACTIVE project that is the very entry `useRuns()` fills and the stream patches, so the
+ * two views share one cache; for any other project it is that project's own entry, kept fresh
+ * by refetch-on-expand rather than by the stream (the stream filter applies only the active
+ * scope's events). `enabled: false` parks the fetch — a COLLAPSED group costs one registry
+ * row, never a runs request (spec, "40 registered projects" row) — while still reading any
+ * cached answer, which is what lets a collapsed group keep its attention badge.
+ */
+export function useProjectRuns(projectId: string, enabled = true) {
+  return useQuery({
+    queryKey: [projectId, 'runs', 'list'] as const,
+    queryFn: ({ signal }) => getProjectRuns(projectId, { signal }),
+    enabled,
   })
 }
 
@@ -352,6 +375,15 @@ export function useUiState() {
   return useQuery({
     queryKey: queryKeys.uiState,
     queryFn: ({ signal }) => getUiState({ signal }),
+  })
+}
+
+/** The cross-project GUI state (`~/.cezar/ui-state.json`). Read once and cached — the sidebar
+ *  applies its own writes optimistically and PUTs behind a debounce, so nothing polls this. */
+export function useWorkspaceUiState() {
+  return useQuery({
+    queryKey: workspaceQueryKeys.uiState,
+    queryFn: ({ signal }) => getWorkspaceUiState({ signal }),
   })
 }
 

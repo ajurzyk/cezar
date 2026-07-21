@@ -46,6 +46,7 @@ import type {
   TodoItem,
   UiState,
   WorkflowsResponse,
+  WorkspaceUiState,
 } from './types'
 import { scopeApiPath } from './project-scope'
 
@@ -203,6 +204,14 @@ export function getProjects(opts?: ReadOptions): Promise<ProjectsResponse> {
 /** The authoritative run list — sorted newest-first by the server. */
 export function getRuns(opts?: ReadOptions): Promise<ApiRun[]> {
   return get<ApiRun[]>('/api/runs', opts)
+}
+
+/** One project's run list by EXPLICIT id (`GET /api/p/:projectId/runs`, step 3.3): the sidebar
+ *  reads non-active projects' tasks, which the active-scope `send()` prefix cannot reach. An
+ *  already-`/api/p/`-prefixed path passes through `scopeApiPath` untouched, so this stays
+ *  correct whatever scope is mounted. */
+export function getProjectRuns(projectId: string, opts?: ReadOptions): Promise<ApiRun[]> {
+  return get<ApiRun[]>(`/api/p/${encodeURIComponent(projectId)}/runs`, opts)
 }
 
 export function getRun(id: string, opts?: ReadOptions): Promise<ApiRun> {
@@ -478,6 +487,18 @@ export function deleteWorkflow(name: string): Promise<DeleteWorkflowResponse> {
 /** Merges server-side (the stored object spread under the patch) and answers the merged state. */
 export function putUiState(patch: UiState): Promise<UiState> {
   return mutate<UiState>('PUT', '/api/ui-state', patch)
+}
+
+/** The cross-project GUI state (`~/.cezar/ui-state.json`, step 2.7). Workspace-level:
+ *  `scopeApiPath` never prefixes `/api/workspace/*`. */
+export function getWorkspaceUiState(opts?: ReadOptions): Promise<WorkspaceUiState> {
+  return get<WorkspaceUiState>('/api/workspace/ui-state', opts)
+}
+
+/** Shallow top-level merge server-side, same as its per-repo twin — send whole top-level
+ *  objects (`{ sidebar: {...} }`), never a nested leaf alone. Answers the merged state. */
+export function putWorkspaceUiState(patch: WorkspaceUiState): Promise<WorkspaceUiState> {
+  return mutate<WorkspaceUiState>('PUT', '/api/workspace/ui-state', patch)
 }
 
 /** Set/clear the agents' config knobs — base branch, default runner, system prompt, per-runner

@@ -258,6 +258,17 @@ export interface ProjectsResponse {
   projectsDir: string
 }
 
+/** `GET/PUT /api/workspace/ui-state` — cross-project GUI prefs in `~/.cezar/ui-state.json`
+ *  (multi-project spec, step 2.7). Passthrough like its per-repo twin (`UiState` below):
+ *  unknown keys round-trip untouched. `sidebar.collapsed` is the sidebar's per-project
+ *  collapse map (step 3.3) — `true` collapses a group, `false` pins it open, absent means
+ *  the default (the active project expands, the rest collapse). The PUT merges SHALLOWLY at
+ *  the top level server-side, so a writer must send the whole `sidebar` object, not a leaf. */
+export interface WorkspaceUiState {
+  sidebar?: { collapsed?: Record<string, boolean> } & Record<string, unknown>
+  [key: string]: unknown
+}
+
 /** `GET /api/launch-key` — the bookmarklet auto-start secret (spec 011). Fetched to COMPARE
  *  against the `?key=` query param (/new deep link) and to bake into the `javascript:` links
  *  the Settings → Skills bookmarklet panel generates (the legacy generator's exact use). The

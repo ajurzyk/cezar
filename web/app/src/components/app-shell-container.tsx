@@ -1,10 +1,11 @@
 import type { ReactNode } from 'react'
 
-import { useHealth, useTodos } from '@/api/queries'
+import { useHealth, useProjects, useTodos } from '@/api/queries'
 import type { HealthResponse } from '@/api/types'
 import { AppShell, type RepoChip } from '@/components/app-shell'
 import { CommandPalette } from '@/components/command-palette'
 import { ListViewProvider } from '@/components/list-view'
+import { ProjectGroups } from '@/components/project-groups'
 import { SkillsBanner } from '@/components/skills-banner'
 import { TaskQuickListContainer } from '@/components/task-quick-list'
 import { ToolsMenu } from '@/components/tools-menu'
@@ -46,6 +47,14 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
   // badge and the endpoint can only answer [], so the query parks rather than polls.
   const inboxAvailable = health.data?.capabilities.followups === true
   const todos = useTodos(inboxAvailable)
+  const registry = useProjects().data
+
+  // Multi-project sidebar only from the SECOND project on (multi-project spec, "Sidebar").
+  // With one registered project — or with the registry still loading, or unreachable — the
+  // group header would say nothing the repo chip does not already say, so the shell keeps the
+  // flat nav + single quick-list it has always had. That degenerate case is the upgrade path:
+  // an existing user boots the new version in their usual repo and sees no difference.
+  const projects = registry && registry.projects.length > 1 ? registry : null
 
   return (
     // The Active/Archived filter is shared by the quick-list below and the Tasks table (Step 3.4),
@@ -67,6 +76,23 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
         // the nav must not offer an Inbox this server will never fill.
         inboxAvailable={inboxAvailable}
         taskQuickList={<TaskQuickListContainer />}
+        // Present only in a multi-project workspace; `AppShell` renders the flat nav and the
+        // quick-list above whenever this slot is absent.
+        projectGroups={
+          projects ? (
+            <ProjectGroups
+              projects={projects.projects}
+              bootProjectId={projects.bootProject}
+              // The workspace's forge answer, applied to every group. `GET /api/projects`
+              // carries no per-project forge field, and probing one health endpoint per group
+              // would be exactly the N-shells-per-render cost the registry's cached probes
+              // exist to avoid. Per-project gating waits for the registry to carry the fact.
+              forgeAvailable={health.data?.forge?.available === true}
+              inboxAvailable={inboxAvailable}
+              inboxCount={todos.data?.length ?? null}
+            />
+          ) : undefined
+        }
         toolsMenu={<ToolsMenu health={health.data} />}
         banner={<SkillsBanner />}
       >
