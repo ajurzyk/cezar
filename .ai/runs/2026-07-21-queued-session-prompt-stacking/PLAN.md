@@ -12,7 +12,7 @@
 
 | Phase | Step | Title | Status | Commit |
 |-------|------|-------|--------|--------|
-| 1 | 1.1 | `queuedMessage` schema + record field | todo | — |
+| 1 | 1.1 | `queuedMessage` schema + record field | done | (backfilled at checkpoint) |
 | 1 | 1.2 | `persistImage` without a session | todo | — |
 | 1 | 1.3 | `RunManager` stack mutators | todo | — |
 | 1 | 1.4 | `hydrateQueuedInput` + `pump()` wiring | todo | — |

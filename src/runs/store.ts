@@ -40,6 +40,18 @@ const stepStateSchema = z.object({
   costUsd: z.number().optional(),
 });
 
+/** One prompt message stacked onto a run while it waits for a free agent slot
+ *  (#472). Folded into `{{task}}` at dequeue by `hydrateQueuedInput`; never
+ *  delivered as its own turn — a follow-up turn would reach only the first step
+ *  of a chain and would race the opening turn. */
+const queuedMessageSchema = z.object({
+  id: z.string(),
+  text: z.string(),
+  /** `/api/runs/:id/images/…` URLs — the base64 never enters `runs.json`. */
+  images: z.array(z.string()).optional(),
+  createdAt: z.string(),
+});
+
 const runRecordSchema = z.object({
   id: z.string(),
   title: z.string(),
@@ -54,6 +66,12 @@ const runRecordSchema = z.object({
     .optional(),
   workflow: z.string(),
   task: z.string(),
+  /** Prompt messages stacked onto this run while it was queued (#472). Optional:
+   *  `undefined` on every pre-#472 record reads as an empty stack. Like `task`,
+   *  `text` is the user's own prompt and is replayed into `{{task}}`, so it is
+   *  deliberately NOT in `redactPatch`'s field list — scrubbing it would corrupt
+   *  the run the same way scrubbing `task` would. */
+  queuedMessages: z.array(queuedMessageSchema).optional(),
   /** URLs of images attached to the initial task prompt, for the thread's first bubble
    *  (#image-display) — persisted like agent screenshots, served from `/images/`. */
   taskImages: z.array(z.string()).optional(),
@@ -152,6 +170,7 @@ const runRecordSchema = z.object({
 });
 
 export type StepState = z.infer<typeof stepStateSchema>;
+export type QueuedMessage = z.infer<typeof queuedMessageSchema>;
 export type RunRecord = z.infer<typeof runRecordSchema>;
 
 /** One persisted event line; `type` mirrors AgentEvent plus engine lifecycle. */
