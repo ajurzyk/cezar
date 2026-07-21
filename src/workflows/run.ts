@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseAskMarker, stripAskMarker, type AskRequest } from '../core/ask.js';
 import { type AgentSession } from '../core/claude-cli-runner.js';
@@ -94,8 +94,8 @@ interface ActiveRun {
   currentStepId?: string;
   idleTimer?: NodeJS.Timeout;
   autosaveTimer?: NodeJS.Timeout;
-  /** Running counter for persisted agent screenshots (`screenshot-<n>.png`). */
-  imageSeq?: number;
+  /* The screenshot counter lives on `RunManager.queuedImageSeq` (#472), keyed by
+   * run id — a queued run persists attachments with no `ActiveRun` at all. */
   /** Autonomous mode (#autonomous): never park at `waiting` — auto-nudge the agent to keep
    *  going until it signals done or the safety cap is hit. */
   autonomous?: boolean;
@@ -172,6 +172,20 @@ export function composeSystemPrompt(...parts: Array<string | undefined>): string
  * issue/PR (#357). `path` is only ever an absolute path under
  * `.ai/cezar/runs/<runId>-images/` (see `RunManager.persistImage`).
  */
+/** Highest `<prefix>-<n>.<ext>` suffix already present in a run's image dir (#472).
+ *  `screenshot-*` and `pasted-*` share one numbering space, so this scans both and
+ *  returns 0 for a missing/empty directory. */
+export function highestImageSeq(dir: string): number {
+  try {
+    return readdirSync(dir).reduce((max, name) => {
+      const m = /^(?:screenshot|pasted)-(\d+)\./.exec(name);
+      return m ? Math.max(max, Number(m[1])) : max;
+    }, 0);
+  } catch {
+    return 0;
+  }
+}
+
 export interface PersistedAttachment {
   name: string;
   url: string;
@@ -238,6 +252,10 @@ export class RunManager {
   // `waiting ⊆ active` — always cleared together via dropActive().
   private readonly waiting = new Set<string>();
   private readonly pendingJobs = new Map<string, { workflow: WorkflowDef; input: StartRunInput }>();
+  /** Per-run image counter behind `pasted-<n>` / `screenshot-<n>` (#472). Lives on
+   *  the manager rather than the `ActiveRun` so a *queued* run — which has no
+   *  `ActiveRun` at all — can persist attachments. Seeded lazily from disk. */
+  private readonly queuedImageSeq = new Map<string, number>();
   private pumping = false;
   /**
    * Runs normally isolate in worktrees and may execute in parallel. When that
@@ -660,7 +678,7 @@ export class RunManager {
     // these as user attachments (vs. agent tool screenshots) on disk (#357).
     const persisted = content
       .filter((b): b is Extract<ContentBlock, { type: 'image' }> => b.type === 'image')
-      .map((b) => this.persistImage(runId, state, b.source.media_type, b.source.data, 'pasted'))
+      .map((b) => this.persistImage(runId, b.source.media_type, b.source.data, 'pasted'))
       .filter((saved): saved is PersistedAttachment => saved !== null);
     const images = persisted.map((saved) => saved.url);
     this.store.appendEvent(runId, {
@@ -850,7 +868,7 @@ export class RunManager {
     const sink = this.makeUiSink(runId, stepId);
     const onEvent = (event: AgentEvent) => {
       if (event.type === 'image') {
-        const saved = this.persistImage(runId, state, event.mediaType, event.data);
+        const saved = this.persistImage(runId, event.mediaType, event.data);
         if (saved) this.store.appendEvent(runId, { type: 'image', stepId, ...saved });
         return;
       }
@@ -1122,7 +1140,7 @@ export class RunManager {
     if (input.images?.length) {
       const persisted = input.images
         .filter((b): b is Extract<ContentBlock, { type: 'image' }> => b.type === 'image')
-        .map((b) => this.persistImage(runId, state, b.source.media_type, b.source.data, 'pasted'))
+        .map((b) => this.persistImage(runId, b.source.media_type, b.source.data, 'pasted'))
         .filter((saved): saved is PersistedAttachment => saved !== null);
       if (persisted.length) {
         this.store.updateRun(runId, { taskImages: persisted.map((p) => p.url) });
@@ -1323,7 +1341,7 @@ export class RunManager {
     const sink = this.makeUiSink(runId, step.id);
     const onEvent = (event: AgentEvent) => {
       if (event.type === 'image') {
-        const saved = this.persistImage(runId, state, event.mediaType, event.data);
+        const saved = this.persistImage(runId, event.mediaType, event.data);
         if (saved) emit({ type: 'image', stepId: step.id, ...saved });
         return;
       }
@@ -1664,7 +1682,6 @@ export class RunManager {
    */
   private persistImage(
     runId: string,
-    state: ActiveRun,
     mediaType: string,
     data: string,
     namePrefix: string = 'screenshot',
@@ -1676,13 +1693,32 @@ export class RunManager {
         : /webp/.test(mediaType) ? 'webp'
         : /gif/.test(mediaType) ? 'gif'
         : 'img';
-      state.imageSeq = (state.imageSeq ?? 0) + 1;
-      const name = `${namePrefix}-${state.imageSeq}.${ext}`;
       const dir = join(this.dataDir, 'runs', `${runId}-images`);
       mkdirSync(dir, { recursive: true });
-      const path = join(dir, name);
-      writeFileSync(path, Buffer.from(data, 'base64'));
-      return { name, url: `/api/runs/${runId}/images/${name}`, path };
+      // Seed from the highest numeric suffix already on disk, NOT the file count:
+      // `screenshot-*` and `pasted-*` share one numbering space, so counting would
+      // re-issue a live number after any deletion. Only matters on the first write
+      // of a process (restart case) — afterwards the map is authoritative.
+      let seq = this.queuedImageSeq.get(runId);
+      if (seq === undefined) seq = highestImageSeq(dir);
+      // `persistImage` is fully synchronous, so two pastes cannot interleave between
+      // the read of the counter and the write. The exclusive-create flag is the
+      // belt-and-braces guard for a stale seed: it degrades to a renamed file rather
+      // than a silent overwrite.
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        seq += 1;
+        const name = `${namePrefix}-${seq}.${ext}`;
+        const path = join(dir, name);
+        try {
+          writeFileSync(path, Buffer.from(data, 'base64'), { flag: 'wx' });
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'EEXIST') continue;
+          throw err;
+        }
+        this.queuedImageSeq.set(runId, seq);
+        return { name, url: `/api/runs/${runId}/images/${name}`, path };
+      }
+      return null;
     } catch {
       return null;
     }
