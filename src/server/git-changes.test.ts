@@ -136,12 +136,13 @@ describe('collectChanges — structured diff vs base', () => {
     writeFileSync(join(dir, 'reviewed.txt'), 'belongs to the reviewed PR\n');
     g(dir, 'add', '-A');
     g(dir, 'commit', '-m', 'reviewed change');
-    writeFileSync(join(dir, 'local.txt'), 'made by this review task\n');
+    writeFileSync(join(dir, 'reviewed.txt'), 'resolved locally by this review task\n');
+    g(dir, 'add', 'reviewed.txt');
 
     const result = await collectChanges(dir, 'main', { taskBranch: 'cez/task1234' });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.changes.files.map((file) => file.path)).toEqual(['local.txt']);
+    expect(result.changes.files.map((file) => file.path)).toEqual(['reviewed.txt']);
     expect(result.changes.repointedHead).toEqual({
       headBranch: 'review/pr-42',
       taskBranch: 'cez/task1234',
@@ -485,12 +486,12 @@ describe('session git API routes', () => {
     g(worktree, 'add', '-A');
     g(worktree, 'commit', '-m', 'reviewed change');
     g(worktree, 'branch', '-m', 'review/pr-42');
-    writeFileSync(join(worktree, 'local.txt'), 'uncommitted review work\n');
+    writeFileSync(join(worktree, 'reviewed.txt'), 'uncommitted conflict resolution\n');
 
     const res = await apiRequest(app, `/api/runs/${run.id}/changes`);
     expect(res.status).toBe(200);
     const body = (await res.json()) as ChangesPayload;
-    expect(body.files.map((file) => file.path)).toEqual(['local.txt']);
+    expect(body.files.map((file) => file.path)).toEqual(['reviewed.txt']);
     expect(body.repointedHead).toEqual({ headBranch: 'review/pr-42', taskBranch: 'task' });
   });
 
