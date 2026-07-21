@@ -34,7 +34,7 @@
 | 3 | 3.4 | New-task project pill: scope swap, per-project draft keys, scoped submit | done | e08c5bf |
 | 3 | 3.5 | Settings split: registry `scope` field, `/settings/global/*` sections, project sections | done | 088ddfd |
 | 3 | 3.6 | Project-scoped bookmarklets (per-project launch-key URLs) | done | f07b7ba |
-| 3 | 3.7 | BACKWARD_COMPATIBILITY.md: `/p/*` URLs + bookmarklet redirect | todo | |
+| 3 | 3.7 | BACKWARD_COMPATIBILITY.md: `/p/*` URLs + bookmarklet redirect | done | b7d410a |
 | 4 | 4.1 | `GET /api/fs/browse` (home-rooted, realpath containment, `CEZ_REMOTE` restriction) | todo | |
 | 4 | 4.2 | Folder-browser dialog → `POST /api/projects` | todo | |
 | 4 | 4.3 | `POST /api/projects/checkout` + `checkout-progress` SSE + partial-clone cleanup + dialog flow | todo | |
