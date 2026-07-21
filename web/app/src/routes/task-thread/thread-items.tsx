@@ -37,7 +37,13 @@ export { isNearBottom }
  */
 
 /** Right-aligned muted bubble — a v1 `user-message` line or the run's initial task. Renders any
- *  attached images inline; falls back to a count only when the URLs aren't available (older runs). */
+ *  attached images inline; falls back to a count only when the URLs aren't available (older runs).
+ *
+ *  The text renders as MARKDOWN, like `AssistantMessage` (#524): what a user sends is markdown as
+ *  often as what the agent replies — the GitHub hand-off prompt alone carries a `#N` heading-ish
+ *  line, a bare link and a `---` rule — and rendering one side raw made the same document look
+ *  broken on the way in and fine on the way out. `whitespace-pre-wrap` goes with it: Streamdown
+ *  owns the line breaks now, and leaving it on would double every blank line. */
 export function UserBubble({
   text,
   imageCount = 0,
@@ -51,9 +57,9 @@ export function UserBubble({
   return (
     <div
       data-slot="user-bubble"
-      className="max-w-[78%] self-end rounded-2xl rounded-br-md bg-muted px-[15px] py-2.5 text-[13.5px] leading-[1.55] whitespace-pre-wrap md:max-w-[70%]"
+      className="max-w-[78%] min-w-0 self-end rounded-2xl rounded-br-md bg-muted px-[15px] py-2.5 text-[13.5px] leading-[1.55] md:max-w-[70%]"
     >
-      {text}
+      <Markdown breaks>{text}</Markdown>
       {images.length > 0 ? (
         <span data-slot="user-images" className="mt-2 flex flex-wrap justify-end gap-1.5">
           {images.map((url) => (
