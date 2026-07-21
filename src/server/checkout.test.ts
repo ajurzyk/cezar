@@ -1,4 +1,13 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,13 +16,8 @@ import { RunStore } from '../runs/store.js';
 import type { RunManager } from '../workflows/run.js';
 import { mergeWriteWorkspaceConfig } from '../workspace/config.js';
 import { clearProjectProbeCache, registerProject } from '../workspace/projects.js';
-import {
-  checkoutRepo,
-  cleanupCheckout,
-  isValidCheckoutName,
-  parseRepoRef,
-  type CloneRunner,
-} from './checkout.js';
+import { checkoutRepo, cleanupCheckout, isValidCheckoutName, parseRepoRef, type CloneRunner } from './checkout.js';
+import { apiRequest } from './loopback-request.testkit.js';
 import {
   WorkspaceEventBus,
   createApp,
@@ -187,23 +191,37 @@ describe('checkoutRepo — clone, failure cleanup, existing target', () => {
     onLine('Cloning into ...');
     await mkdir(join(dir, '.git'), { recursive: true });
     await writeFile(join(dir, '.git', 'index.lock'), '', 'utf8');
-    return { ok: false, error: 'fatal: could not read Username: terminal prompts disabled' };
+    return {
+      ok: false,
+      error: 'fatal: could not read Username: terminal prompts disabled',
+    };
   };
 
   it('the CEZ_DRY_RUN fake clone lands a repo at <projectsDir>/<repo> and reports done', async () => {
     const result = await run({ run: undefined, checkoutId: 'co-1' });
-    expect(result).toMatchObject({ ok: true, name: 'cezar', target: join(root, 'cezar') });
+    expect(result).toMatchObject({
+      ok: true,
+      name: 'cezar',
+      target: join(root, 'cezar'),
+    });
     expect(existsSync(join(root, 'cezar', '.git'))).toBe(true);
     expect(readFileSync(join(root, 'cezar', 'README.md'), 'utf8')).toContain('cezar');
     // Progress reached the caller BEFORE the terminal event — the whole reason
     // the stream exists (a silent spinner is the failure mode).
-    expect(events.at(-1)).toEqual({ checkoutId: 'co-1', name: 'cezar', phase: 'done' });
+    expect(events.at(-1)).toEqual({
+      checkoutId: 'co-1',
+      name: 'cezar',
+      phase: 'done',
+    });
     expect(events.filter((e) => (e as { phase: string }).phase === 'cloning').length).toBeGreaterThan(0);
     expect(events.every((e) => (e as { checkoutId: string }).checkoutId === 'co-1')).toBe(true);
   });
 
   it('honors an explicit name and refuses a traversing one without touching the disk', async () => {
-    expect(await run({ name: 'my-checkout' })).toMatchObject({ ok: true, target: join(root, 'my-checkout') });
+    expect(await run({ name: 'my-checkout' })).toMatchObject({
+      ok: true,
+      target: join(root, 'my-checkout'),
+    });
     for (const name of ['../escape', 'a/b', '..']) {
       const result = await run({ name });
       expect(result, name).toMatchObject({ ok: false, status: 400 });
@@ -236,7 +254,11 @@ describe('checkoutRepo — clone, failure cleanup, existing target', () => {
   });
 
   it('degrades to { error, reason } + 503 when gh is not installed', async () => {
-    const missing: CloneRunner = async () => ({ ok: false, error: 'spawn gh ENOENT', notFound: true });
+    const missing: CloneRunner = async () => ({
+      ok: false,
+      error: 'spawn gh ENOENT',
+      notFound: true,
+    });
     const result = await run({ run: missing });
     expect(result).toMatchObject({ ok: false, status: 503 });
     expect(result).toHaveProperty('reason', expect.stringContaining('gh CLI not found'));
@@ -301,22 +323,31 @@ describe('POST /api/projects/checkout', () => {
   });
 
   const makeApp = (over: Partial<ServerDeps> = {}) =>
-    createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test', ...over });
+    createApp({
+      repoRoot,
+      store,
+      manager: {} as RunManager,
+      version: '0.0.0-test',
+      ...over,
+    });
 
   const post = async (body: unknown, over: Partial<ServerDeps> = {}) => {
-    const res = await makeApp(over).request('/api/projects/checkout', {
+    const res = await apiRequest(makeApp(over), '/api/projects/checkout', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
     });
     return {
       status: res.status,
-      body: (await res.json()) as Partial<RegisterProjectResponse> & { error?: string; reason?: string },
+      body: (await res.json()) as Partial<RegisterProjectResponse> & {
+        error?: string;
+        reason?: string;
+      },
     };
   };
 
   const listProjectsViaApi = async (): Promise<ProjectsResponse> =>
-    (await (await makeApp().request('/api/projects')).json()) as ProjectsResponse;
+    (await (await apiRequest(makeApp(), '/api/projects')).json()) as ProjectsResponse;
 
   /** Point the workspace at a temp checkout root, so nothing lands in `~`. */
   const useCheckoutRoot = () =>
@@ -332,7 +363,11 @@ describe('POST /api/projects/checkout', () => {
 
     const { status, body } = await post({ url: 'open-mercato/cezar', checkoutId: 'co-9' }, { workspaceEvents: bus });
     expect(status).toBe(200);
-    expect(body.project).toMatchObject({ name: 'cezar', source: 'checkout', status: 'ok' });
+    expect(body.project).toMatchObject({
+      name: 'cezar',
+      source: 'checkout',
+      status: 'ok',
+    });
     expect(body.project?.root).toBe(join(checkoutRoot, 'cezar'));
     expect(existsSync(join(checkoutRoot, 'cezar', '.git'))).toBe(true);
 
@@ -366,7 +401,9 @@ describe('POST /api/projects/checkout', () => {
     mkdirSync(existing, { recursive: true });
     writeFileSync(join(existing, 'precious.txt'), 'mine', 'utf8');
 
-    const { status, body } = await post({ url: 'https://github.com/open-mercato/cezar.git' });
+    const { status, body } = await post({
+      url: 'https://github.com/open-mercato/cezar.git',
+    });
     expect(status).toBe(409);
     expect(body.error).toContain('already exists');
     expect(body.project).toBeUndefined();
@@ -392,12 +429,19 @@ describe('POST /api/projects/checkout', () => {
     expect(existsSync(join(checkoutRoot, 'nope'))).toBe(false);
     expect((await listProjectsViaApi()).projects).toEqual([]);
     expect(seen.some((s) => s.event === 'project-added')).toBe(false);
-    expect(seen.at(-1)).toMatchObject({ event: 'checkout-progress', data: { phase: 'error' } });
+    expect(seen.at(-1)).toMatchObject({
+      event: 'checkout-progress',
+      data: { phase: 'error' },
+    });
   });
 
   it('degrades with { error, reason } when gh is unavailable', async () => {
     await useCheckoutRoot();
-    const cloneRunner: CloneRunner = async () => ({ ok: false, error: 'spawn gh ENOENT', notFound: true });
+    const cloneRunner: CloneRunner = async () => ({
+      ok: false,
+      error: 'spawn gh ENOENT',
+      notFound: true,
+    });
     const { status, body } = await post({ url: 'open-mercato/cezar' }, { cloneRunner });
     expect(status).toBe(503);
     expect(body.reason).toContain('gh auth login');

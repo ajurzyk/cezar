@@ -14,13 +14,9 @@ import { basename, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { RunStore } from '../runs/store.js';
 import type { RunManager } from '../workflows/run.js';
-import {
-  allocateProjectSlug,
-  clearProjectProbeCache,
-  listProjects,
-  registerProject,
-} from '../workspace/projects.js';
+import { allocateProjectSlug, clearProjectProbeCache, listProjects, registerProject } from '../workspace/projects.js';
 import { ProjectContexts } from './project-context.js';
+import { apiRequest } from './loopback-request.testkit.js';
 import { mergeWriteWorkspaceConfig } from '../workspace/config.js';
 import {
   WorkspaceEventBus,
@@ -86,16 +82,22 @@ describe('workspace projects API', () => {
   });
 
   const makeApp = (over: Partial<ServerDeps> = {}) =>
-    createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test', ...over });
+    createApp({
+      repoRoot,
+      store,
+      manager: {} as RunManager,
+      version: '0.0.0-test',
+      ...over,
+    });
 
   const getProjects = async (over: Partial<ServerDeps> = {}): Promise<ProjectsResponse> => {
-    const res = await makeApp(over).request('/api/projects');
+    const res = await apiRequest(makeApp(over), '/api/projects');
     expect(res.status).toBe(200);
     return (await res.json()) as ProjectsResponse;
   };
 
   const getHealth = async (over: Partial<ServerDeps> = {}): Promise<HealthBody> => {
-    const res = await makeApp(over).request('/api/health');
+    const res = await apiRequest(makeApp(over), '/api/health');
     expect(res.status).toBe(200);
     return (await res.json()) as HealthBody;
   };
@@ -125,7 +127,11 @@ describe('workspace projects API', () => {
         source: 'local',
       });
       expect(byId.get(boot.id)?.lastOpenedAt).toBe(boot.lastOpenedAt);
-      expect(byId.get(other.id)).toMatchObject({ id: other.id, root: other.root, status: 'not-git' });
+      expect(byId.get(other.id)).toMatchObject({
+        id: other.id,
+        root: other.root,
+        status: 'not-git',
+      });
       // Derived lazily by realpath lookup — the boot repo, not the other one.
       expect(body.bootProject).toBe(boot.id);
       expect(body.projectsDir).toBe('~/cezar/projects');
@@ -148,12 +154,17 @@ describe('workspace projects API', () => {
 
   describe('POST /api/projects — the folder-browser dialog (step 4.2)', () => {
     const post = async (body: unknown, over: Partial<ServerDeps> = {}) => {
-      const res = await makeApp(over).request('/api/projects', {
+      const res = await apiRequest(makeApp(over), '/api/projects', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
       });
-      return { status: res.status, body: (await res.json()) as RegisterProjectResponse & { error?: string } };
+      return {
+        status: res.status,
+        body: (await res.json()) as RegisterProjectResponse & {
+          error?: string;
+        },
+      };
     };
 
     it('registers a NON-GIT folder and answers the entry — the spec\'s "any folder works"', async () => {
@@ -319,8 +330,18 @@ describe('workspace projects API', () => {
     };
 
     const del = async (id: string, over: Partial<ServerDeps> = {}) => {
-      const res = await makeApp(over).request(`/api/projects/${id}`, { method: 'DELETE' });
-      return { status: res.status, body: (await res.json()) as { error?: string; removed?: boolean; id?: string; runningTasks?: number } };
+      const res = await apiRequest(makeApp(over), `/api/projects/${id}`, {
+        method: 'DELETE',
+      });
+      return {
+        status: res.status,
+        body: (await res.json()) as {
+          error?: string;
+          removed?: boolean;
+          id?: string;
+          runningTasks?: number;
+        },
+      };
     };
 
     it('deregisters the project, emits project-removed, and leaves every file on disk untouched', async () => {
@@ -358,7 +379,12 @@ describe('workspace projects API', () => {
       await contexts.context(other.id);
       const ctx = contexts.peek(other.id);
       expect(ctx).toBeDefined();
-      const run = ctx!.store.createRun({ title: 'live', workflow: 'quick-task', task: 'x', steps: [] });
+      const run = ctx!.store.createRun({
+        title: 'live',
+        workflow: 'quick-task',
+        task: 'x',
+        steps: [],
+      });
       expect(run.status).toBe('queued'); // one of the three statuses the engine still owns
 
       const refused = await del(other.id, { contexts });
@@ -428,7 +454,10 @@ describe('workspace projects API', () => {
       expect(Array.isArray(body.checks)).toBe(true);
       expect(body.defaultRunner).toBe('claude');
       expect(body.forge).toBeNull();
-      expect(body.capabilities).toEqual({ localHandoff: true, followups: false });
+      expect(body.capabilities).toEqual({
+        localHandoff: true,
+        followups: false,
+      });
       // New fields: registered projects enumerated, boot project named.
       expect(body.projects.map((p) => p.id).sort()).toEqual([boot.id, other.id].sort());
       expect(body.bootProject).toBe(boot.id);

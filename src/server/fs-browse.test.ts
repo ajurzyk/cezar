@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { workspaceConfigPath } from '../paths.js';
 import { RunStore } from '../runs/store.js';
 import type { RunManager } from '../workflows/run.js';
+import { apiRequest } from './loopback-request.testkit.js';
 import { createApp } from './server.js';
 import type { FsBrowseResponse } from './fs-browse.js';
 
@@ -52,7 +53,12 @@ describe('GET /api/fs/browse (step 4.1)', () => {
     const repoRoot = join(home, 'boot');
     mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
     store = RunStore.open(join(repoRoot, '.ai/cezar'));
-    app = createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test' });
+    app = createApp({
+      repoRoot,
+      store,
+      manager: {} as RunManager,
+      version: '0.0.0-test',
+    });
   });
 
   afterEach(() => {
@@ -69,7 +75,7 @@ describe('GET /api/fs/browse (step 4.1)', () => {
     for (const dir of [home, outside]) rmSync(dir, { recursive: true, force: true });
   });
 
-  const browse = (query = '') => app.request(`/api/fs/browse${query}`);
+  const browse = (query = '') => apiRequest(app, `/api/fs/browse${query}`);
   const body = async (res: Response) => (await res.json()) as FsBrowseResponse;
   const error = async (res: Response) => ((await res.json()) as { error: string }).error;
   const names = (payload: FsBrowseResponse) => payload.dirs.map((d) => d.name);
@@ -112,12 +118,7 @@ describe('GET /api/fs/browse (step 4.1)', () => {
   // ---- escape vectors ------------------------------------------------------
 
   it('rejects `..` traversal out of the root (absolute and relative spellings)', async () => {
-    for (const path of [
-      join(home, 'projects/../..'),
-      join(home, '..'),
-      '../..',
-      'projects/../../..',
-    ]) {
+    for (const path of [join(home, 'projects/../..'), join(home, '..'), '../..', 'projects/../../..']) {
       // Every case here is percent-encoded on the wire: the containment check
       // has to sit AFTER query decoding, which is where the handler reads it.
       const res = await browse(`?path=${encodeURIComponent(path)}`);
@@ -220,6 +221,6 @@ describe('GET /api/fs/browse (step 4.1)', () => {
   // ---- mounting ------------------------------------------------------------
 
   it('is workspace-level: never mirrored under /api/p/', async () => {
-    expect((await app.request('/api/p/default/fs/browse')).status).toBe(404);
+    expect((await apiRequest(app, '/api/p/default/fs/browse')).status).toBe(404);
   });
 });
