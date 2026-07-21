@@ -52,7 +52,7 @@ describe('autosave conflict guard (#471 follow-up)', () => {
   it('refuses to commit an unresolved merge', async () => {
     await startConflictingMerge();
     const before = await subject();
-    expect(await autosaveCommit(repo, 'turn end')).toBe(false);
+    expect(await autosaveCommit(repo, 'turn end')).toBe('refused');
     expect(await subject()).toBe(before); // nothing new landed
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('unmerged path'));
   });
@@ -63,7 +63,7 @@ describe('autosave conflict guard (#471 follow-up)', () => {
     // markers in the text — the exact shape of the original incident.
     await git(['add', 'a.txt']);
     const before = await subject();
-    expect(await autosaveCommit(repo, 'run finalize')).toBe(false);
+    expect(await autosaveCommit(repo, 'run finalize')).toBe('refused');
     expect(await subject()).toBe(before);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('leftover conflict markers'));
   });
@@ -72,20 +72,60 @@ describe('autosave conflict guard (#471 follow-up)', () => {
     await startConflictingMerge();
     writeFileSync(join(repo, 'a.txt'), 'resolved\n');
     await git(['add', 'a.txt']);
-    expect(await autosaveCommit(repo, 'turn end')).toBe(true);
+    expect(await autosaveCommit(repo, 'turn end')).toBe('committed');
     expect(await subject()).toBe('cezar autosave (turn end)');
   });
+
+  /**
+   * The guard deliberately skips untracked (`??`) paths, so a test that only
+   * writes a new file exercises nothing. Commit an innocuous version first,
+   * then overwrite it — that is the ` M` state the scan actually looks at.
+   */
+  async function trackThenRewrite(name: string, content: string): Promise<void> {
+    writeFileSync(join(repo, name), 'placeholder\n');
+    await git(['add', '-A']);
+    await git([...GIT_ID, 'commit', '-q', '-m', `add ${name}`]);
+    writeFileSync(join(repo, name), content);
+  }
+
+  const CONFLICT_HUNK = ['<<<<<<< HEAD', 'ours', '=======', 'theirs', '>>>>>>> other', ''].join('\n');
 
   it('does not mistake Markdown setext headings for conflict markers', async () => {
     // A bare `=======` line is an ordinary heading underline. Matching it would
     // refuse legitimate autosaves of this repo's own docs.
-    writeFileSync(join(repo, 'doc.md'), 'Title\n=======\n\nbody\n');
-    expect(await autosaveCommit(repo, 'turn end')).toBe(true);
+    await trackThenRewrite('doc.md', 'Title\n=======\n\nbody\n');
+    expect(await autosaveCommit(repo, 'turn end')).toBe('committed');
     expect(await subject()).toBe('cezar autosave (turn end)');
   });
 
+  it('does not trip on a file that merely documents conflict markers', async () => {
+    // A checked-in patch fixture, or docs explaining how to resolve a conflict,
+    // carry marker-shaped lines out of order or without the `=======` middle.
+    // Requiring the full ordered triple is what keeps those autosaving.
+    await trackThenRewrite(
+      'doc.md',
+      ['Resolving conflicts', '', '>>>>>>> is the end marker.', '<<<<<<< is the start marker.', ''].join('\n'),
+    );
+    expect(await autosaveCommit(repo, 'turn end')).toBe('committed');
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('still catches a real conflict hunk written by hand', async () => {
+    await trackThenRewrite('a.txt', CONFLICT_HUNK);
+    expect(await autosaveCommit(repo, 'pre-PR')).toBe('refused');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('leftover conflict markers'));
+  });
+
+  it('scans paths git reports quoted and octal-escaped', async () => {
+    // `café.txt` reads back from porcelain as `"caf\303\251.txt"`; leaving the
+    // escapes literal would make the file unopenable and hide a real conflict.
+    await trackThenRewrite('café.txt', CONFLICT_HUNK);
+    expect(await autosaveCommit(repo, 'turn end')).toBe('refused');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('café.txt'));
+  });
+
   it('is a quiet no-op on a clean tree', async () => {
-    expect(await autosaveCommit(repo, 'turn end')).toBe(false);
+    expect(await autosaveCommit(repo, 'turn end')).toBe('nothing-to-do');
     expect(warn).not.toHaveBeenCalled();
   });
 });

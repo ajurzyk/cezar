@@ -98,3 +98,17 @@ PR: #533
 ### Phase 3: Docs
 
 - [x] 3.1 Correct README and docstrings — fff538b
+
+### Phase 4: Review follow-ups (#533 review)
+
+The guard made `autosaveCommit` fallible in a new way, and the boolean return
+could not carry that. The pre-PR flush is the one call site where the "next
+flush picks it up" argument does not hold — it is the last one — so a refusal
+there was silently publishing a branch missing the run's final state.
+
+- [x] 4.1 `AutosaveResult` union; surface `refused`/`failed` from `createDraftPr`
+- [x] 4.2 Require `reason` (drop the `'turn end'` default that could mislabel silently)
+- [x] 4.3 Require the full ordered `<<<<<<< / ======= / >>>>>>>` triple, so files
+      that merely document conflict markers keep autosaving
+- [x] 4.4 Cap the marker scan at 2 MB per file; unescape git's octal path quoting
+- [x] 4.5 Tests for the publish-refusal path and the new scan cases
