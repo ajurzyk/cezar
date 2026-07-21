@@ -1,30 +1,42 @@
 # Handoff — 2026-07-21-grouped-subagent-display
 
-**Last updated:** 2026-07-21T10:22:30Z
+**Last updated:** 2026-07-21T11:10:00Z
 **Branch:** `feat/grouped-subagent-display`
-**PR:** not yet opened
-**Current phase/step:** Phase 2 Step 2.1
-**Last commit:** `e021935` — feat(cockpit): add the Agents dock above the composer
+**PR:** https://github.com/open-mercato/cezar/pull/550 (open, ready for review, `Closes #474`)
+**Current phase/step:** all 7 Steps `done`; in the review/autofix loop
+**Last commit:** `b71071f` — docs(runs): record review round 1 and its outcomes
 
 ## What just happened
-- Phase 1 landed complete (Steps 1.1–1.4): the pure collector, the codex review-mode fold,
-  the `mock:subagents` dry-run trigger, and the Agents dock mounted above the plan dock.
-- Checkpoint 1 passed: typecheck + 2975 vitest + 30 node:test green, design-guardian green,
-  and the dock verified in a real browser (`Agents · 2/2`, both rows correct) with screenshots.
+- All 3 phases / 7 Steps landed; final gate green (typecheck, 3007 vitest, 30 node:test, build,
+  test:package). New e2e spec 3/3.
+- PR #550 opened, labeled (via REST — `gh pr edit --add-label` silently no-ops here), claimed
+  then released for the reviewer skill.
+- **Adversarial review round 1** returned 4 major + 6 minor findings; all actioned in `73f15c7`.
+  Most consequential: the codex review latch survived turn end (a finished run would dock
+  forever), the collector's anchor rule dropped still-running agents, and the Step 3.1 opencode
+  "hardening" was rejected as a fabricated success and **reverted**.
+- **Round 2** (re-review of the fix batch) dispatched — fix batches are where new defects enter.
 
 ## Next concrete action
-- Step 2.1 — add `subagent-sheet.tsx` (controlled `Sheet`, header + child stream via a newly
-  exported `NestedEntry`, follow-tail scroll, empty state) and wire dock rows to open it via
-  the `onSelect` prop the dock already accepts.
+- Read round 2's findings; fix anything real, re-run the gate, push, and re-verify.
+- Then post the comprehensive PR summary comment and release the `in-progress` lock.
 
 ## Blockers / open questions
-- none
+- None blocking. One judgement call worth a human's eye: `mapTurnEnd` now emits a **synthetic**
+  `item.completed` for an unexited codex review span, while I rejected synthetic completions for
+  opencode subtasks. The distinction I drew: a turn ending is a definitive end-of-work signal
+  (nothing more can arrive for that span), whereas a displaced opencode subtask may still be
+  producing output. Round 2 was asked to challenge exactly this.
 
 ## Environment caveats
-- Dev runtime runnable: **yes** — test env is UP at `http://127.0.0.1:50261`
-  (`.ai/qa/test-env.json`); stop it with `.ai/scripts/test-env-down.sh`.
-- Browser / UI checks: **enabled** — agent-browser installed and driving Chrome successfully.
-- Database/migration state: n/a — cezar has no database.
+- Dev runtime runnable: **yes**. A test env may still be up on `http://127.0.0.1:50261`; stop it
+  with `.ai/scripts/test-env-down.sh`.
+- Browser / UI checks: **enabled** — agent-browser drives Chrome fine.
+- `npm run test:e2e` is red on this branch **and on `origin/main`** (7 identical pre-existing
+  failures). Always scrub `CEZ_REMOTE`/`CEZ_HANDOFF_FILE`/`CEZ_TASK_ID`/`CEZ_TODOS_FILE` before
+  running any gate command — they leak into spawned servers.
+- `gh pr edit --add-label` / `--body-file` exit 0 without applying. Use the REST endpoints
+  (`gh api repos/.../issues/N/labels`, `gh api -X PATCH repos/.../pulls/N`) and read back.
 
 ## Worktree
 - Path: `/home/pkarw/Projects/cezar/.ai/cezar/worktrees/a17a4bf6-0027-4ba5-85db-17727d70c1f0`
