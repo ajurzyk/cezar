@@ -30,8 +30,13 @@ rl.on('line', (line) => {
     }
     if (msg.method === 'thread/start') {
       emit({ method: 'thread/started', params: { thread: { id: 'th_mock_1' } } });
+      emit({ id: msg.id, result: { thread: { id: 'th_mock_1' } } });
+    } else if (process.env.MOCK_CODEX_REJECT_RESUME === '1') {
+      emit({ id: msg.id, error: { code: -32603, message: `no rollout found for thread id ${msg.params?.threadId ?? ''}` } });
+      rl.close();
+    } else {
+      emit({ id: msg.id, result: { thread: { id: msg.params?.threadId } } });
     }
-    emit({ id: msg.id, result: { thread: { id: 'th_mock_1' } } });
   } else if (msg.method === 'turn/start') {
     emit({ id: msg.id, result: { turn: { id: 'turn_mock_1' } } });
     emit({ method: 'turn/started', params: { turn: { id: 'turn_mock_1', status: 'inProgress', items: [] } } });

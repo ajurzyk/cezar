@@ -96,7 +96,7 @@ action in Settings), and codex sandbox escalation flows.
 | Surface | Today | File |
 | --- | --- | --- |
 | claude args | `--permission-mode acceptEdits`, `--allowedTools` default-deny, `Bash(prefix:*)` globs | `src/core/claude-cli-runner.ts:301-360` |
-| codex args | `sandbox: danger-full-access`, `approvalPolicy: never` (#563; `CEZ_CODEX_NETWORK=0` opts into network-blocked `workspace-write`) | `src/core/codex-app-server-runner.ts:287` |
+| codex args | `sandbox: danger-full-access`, `approvalPolicy: never` (#563; `CEZ_CODEX_NETWORK=0` opts into network-blocked `workspace-write`) | `src/core/codex-app-server-runner.ts:295` |
 | opencode | auto-approved permissions, `allowedTools` ignored | `src/core/opencode-server-runner.ts:39` |
 | Protocol | `permission.requested` / `permission.resolved` RESERVED; `PermissionOption` kinds `allow_once` / `allow_always` / `reject_once` / `reject_always` | `src/core/ui-events.ts:122-135, 296-312` |
 | Attention | `permission` already tops the priority ladder | `web/app/src/lib/attention.ts:16` |

@@ -104,7 +104,7 @@ afterEach(() => {
   document.documentElement.classList.remove('light')
 })
 
-const PROJECT_SECTIONS = ['agents', 'worktrees', 'bookmarklets', 'prompt-templates']
+const PROJECT_SECTIONS = ['agents', 'agent-config', 'worktrees', 'bookmarklets', 'prompt-templates']
 const GLOBAL_SECTIONS = ['appearance', 'notifications', 'resources', 'projects']
 
 describe('the section registry', () => {
@@ -113,8 +113,8 @@ describe('the section registry', () => {
     for (const id of [...PROJECT_SECTIONS, ...GLOBAL_SECTIONS]) {
       expect(byId.get(id as never)?.hidden).toBeUndefined()
     }
-    // Listed in the registry but hidden until implemented (later phases).
-    for (const id of ['mcp', 'keyboard']) {
+    // Listed in the registry but hidden until implemented (later phase).
+    for (const id of ['keyboard']) {
       expect(byId.get(id as never)?.hidden).toBe(true)
     }
   })
@@ -191,8 +191,8 @@ describe('the settings shell', () => {
   it('unfinished sections say so through the shared CenteredState template', () => {
     // Hidden sections are not routed (their URLs 404) — render the registry component
     // directly to pin the placeholder contract itself.
-    const Mcp = SETTINGS_SECTIONS.find((s) => s.id === 'mcp')!.component
-    render(<Mcp />)
+    const Keyboard = SETTINGS_SECTIONS.find((s) => s.id === 'keyboard')!.component
+    render(<Keyboard />)
     const state = document.querySelector('[data-slot="centered-state"]')
     expect(state?.textContent).toContain('later phase')
   })

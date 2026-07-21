@@ -9,6 +9,11 @@ import { createRunner } from '../core/runner-factory.js';
 import type { RunnerId } from '../core/agent-runner.js';
 import { modelConflictsWithRunner } from '../core/model-presets.js';
 import {
+  ModelIdentityError,
+  formatModelIdentity,
+  normalizeModelForBackend,
+} from '../core/model-identity.js';
+import {
   HANDOFF_ONLY_INSTRUCTIONS,
   HANDOFF_INSTRUCTIONS,
   appendHandoffHeartbeat,
@@ -20,6 +25,7 @@ import { todosPath } from '../todos.js';
 import type { AgentEvent, ContentBlock } from '../core/agent-runner.js';
 import { discoverSkills, type Skill } from '../skills.js';
 import { materializeSkillDir } from '../skills-remote.js';
+import { seedAgentConfigLocalLayer } from '../agent-config/seed.js';
 import { loadConfig, resolveWorktreeRetention } from '../config.js';
 import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff, worktreeShortstat } from '../git-worktree.js';
 import { getRepoInfo } from '../server/git.js';
@@ -801,8 +807,14 @@ export class RunManager {
     if (!['done', 'failed', 'cancelled', 'review'].includes(run.status)) {
       return { ok: false, error: `cannot continue a ${run.status} run` };
     }
-    const sessionId = [...run.steps].reverse().find((s) => s.sessionId)?.sessionId;
-    if (!sessionId) return { ok: false, error: 'no agent session to resume' };
+    const sessionStep = [...run.steps].reverse().find((s) => s.sessionId);
+    if (!sessionStep?.sessionId) return { ok: false, error: 'no agent session to resume' };
+    const targetRunner = opts.runner ?? run.runner ?? 'claude';
+    // Session ids are provider-owned opaque values. New records carry explicit
+    // affinity; for legacy records, the run's current runner is the conservative
+    // owner until a continuation emits a new, attributed session id (#562).
+    const sessionBackend = sessionStep.backend ?? run.runner ?? 'claude';
+    const resume = sessionBackend === targetRunner;
 
     // Follow-up runner/model override (#401): the composer lets the user pick which backend and
     // model handle this continuation. Omitted → the run's current backend/model is kept
@@ -815,7 +827,6 @@ export class RunManager {
       // this continuation will actually use (`opts.runner ?? record.runner ?? 'claude'` — the
       // same resolution `runContinuation` reads off the record). A model that is recognizably
       // another runner's preset would corrupt the run; free-form/custom ids pass untouched.
-      const targetRunner = opts.runner ?? run.runner ?? 'claude';
       if (opts.model && modelConflictsWithRunner(opts.model, targetRunner)) {
         return { ok: false, error: `model '${opts.model}' is not a ${targetRunner} model` };
       }
@@ -842,7 +853,13 @@ export class RunManager {
     const continuations = run.steps.filter((s) => s.id.startsWith('continue-')).length;
     const stepId = `continue-${continuations + 1}`;
     this.store.addStep(runId, { id: stepId, name: 'Continue', kind: 'agent' });
-    void this.runContinuation(runId, stepId, sessionId, opts.text?.trim() || 'Continue.').catch(
+    void this.runContinuation(
+      runId,
+      stepId,
+      resume ? sessionStep.sessionId : undefined,
+      targetRunner,
+      opts.text?.trim() || 'Continue.',
+    ).catch(
       (err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
         this.store.updateRun(runId, {
@@ -860,7 +877,8 @@ export class RunManager {
   private async runContinuation(
     runId: string,
     stepId: string,
-    sessionId: string,
+    sessionId: string | undefined,
+    backend: RunnerId,
     prompt: string,
   ): Promise<void> {
     // Continuation runs in the task's worktree when it still exists (spec
@@ -913,6 +931,7 @@ export class RunManager {
       iterations: 1,
       startedAt: new Date().toISOString(),
       sessionId,
+      backend,
     });
     this.store.appendEvent(runId, { type: 'step-start', stepId, name: 'Continue', kind: 'agent', iteration: 1 });
     this.store.appendEvent(runId, { type: 'user-message', stepId, text: prompt, imageCount: 0 });
@@ -934,7 +953,7 @@ export class RunManager {
       }
       this.store.appendEvent(runId, { ...event, stepId });
       if (event.type === 'session') {
-        this.store.updateStep(runId, stepId, { sessionId: event.sessionId });
+        this.store.updateStep(runId, stepId, { sessionId: event.sessionId, backend });
       }
       if (event.type === 'token-usage') {
         this.store.updateStep(runId, stepId, { tokensUsed: event.tokensUsed });
@@ -1010,7 +1029,44 @@ export class RunManager {
 
     // Backend + model come off the record: the run's current backend by default, or the
     // follow-up override that `continueRun` persisted before scheduling (#401).
-    const runner = createRunner(record?.runner ?? 'claude');
+    const continueBackend = backend;
+    // Apply the SAME canonical-identity gate the first spawn applies (#405, review M1).
+    // A follow-up may switch both runner and model (#401), so without this the record keeps
+    // asserting the identity the run STARTED with while a different model serves the turn —
+    // the exact defect this PR exists to remove — and the raw record string reaches the CLI
+    // in the un-normalised wire form the first step already converted away (`anthropic/opus`
+    // instead of `opus`). Fail loud here too rather than let the backend pick a default.
+    let continueModel: string | undefined;
+    try {
+      const normalized = normalizeModelForBackend(continueBackend, record?.model);
+      continueModel = normalized?.backendModel;
+      this.store.updateRun(runId, {
+        modelIdentity: normalized ? formatModelIdentity(normalized.identity) : undefined,
+      });
+    } catch (err) {
+      if (!(err instanceof ModelIdentityError)) throw err;
+      const failedAt = new Date().toISOString();
+      sink.sessionEnded('error', err.message);
+      this.store.updateStep(runId, stepId, {
+        status: 'failed',
+        error: err.message,
+        finishedAt: failedAt,
+      });
+      this.store.updateRun(runId, {
+        status: 'failed',
+        error: `continue failed: ${err.message}`,
+        finishedAt: failedAt,
+        currentStepId: undefined,
+      });
+      this.store.appendEvent(runId, {
+        type: 'lifecycle',
+        message: `continue failed — ${err.message}`,
+      });
+      this.dropActive(runId);
+      void this.pump();
+      return;
+    }
+    const runner = createRunner(continueBackend);
     const session = runner.startSession(
       {
         // The Continue step is a fresh agent session on the same run — the
@@ -1025,9 +1081,9 @@ export class RunManager {
         allowedTools: DEFAULT_ALLOWED_TOOLS,
         additionalDirectories: [join(this.dataDir, 'runs')],
         env: this.agentEnv(runId, generateFollowups),
-        model: record?.model,
+        model: continueModel,
         sessionId,
-        resume: true,
+        resume: sessionId !== undefined,
         timeoutMs: 0,
       },
       onEvent,
@@ -1097,11 +1153,24 @@ export class RunManager {
     // Extra system prompt (R2 2.3): POST override > config default; echoed on
     // the record so the UI/API can show what the run actually used.
     const extraSystemPrompt = resolveExtraSystemPrompt(input.systemPrompt, config.systemPrompt);
+    // Canonical provider/model identity (#405) — the normalised `provider/model`
+    // the task ran with, persisted for cost attribution / reproducible replay
+    // beside the free-text `model`. Best-effort here (a per-step `runner`/`model`
+    // can still override below); the authoritative fail-loud gate is at spawn.
+    let modelIdentity: string | undefined;
+    try {
+      const normalized = normalizeModelForBackend(taskBackend, input.model);
+      modelIdentity = normalized ? formatModelIdentity(normalized.identity) : undefined;
+    } catch {
+      // An unresolvable task-level model surfaces loudly at the step below; the
+      // metadata echo stays absent rather than guessing.
+    }
     this.store.updateRun(runId, {
       status: 'running',
       startedAt: new Date().toISOString(),
       runner: taskBackend,
       systemPrompt: extraSystemPrompt,
+      modelIdentity,
     });
     emit({ type: 'lifecycle', message: `run started — workflow "${workflow.name}" (runner: ${taskBackend})` });
 
@@ -1146,6 +1215,12 @@ export class RunManager {
           baseBranch: wt.baseBranch,
         });
         emit({ type: 'note', message: `worktree ready — branch ${wt.branch} (base ${wt.baseBranch})` });
+        // Seed from this manager's project root: each multi-project context has
+        // its own manager/repoRoot and must never copy another project's layer.
+        const seededConfig = await seedAgentConfigLocalLayer(this.repoRoot, state.cwd).catch(() => []);
+        if (seededConfig.length > 0) {
+          emit({ type: 'note', message: `seeded personal agent config: ${seededConfig.join(', ')}` });
+        }
         this.armAutosave(state);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -1386,7 +1461,8 @@ export class RunManager {
     }
 
     const sessionId = randomUUID();
-    this.store.updateStep(runId, step.id, { sessionId });
+    const backend = step.runner ?? taskBackend;
+    this.store.updateStep(runId, step.id, { sessionId, backend });
 
     const stepRecord = this.store.getRun(runId)?.steps.find((s) => s.id === step.id);
     const startTokens = stepRecord?.tokensUsed ?? 0;
@@ -1408,7 +1484,7 @@ export class RunManager {
       emit({ ...event, stepId: step.id });
       if (event.type === 'session') {
         // Codex/OpenCode mint their own session id — persist it so resume works.
-        this.store.updateStep(runId, step.id, { sessionId: event.sessionId });
+        this.store.updateStep(runId, step.id, { sessionId: event.sessionId, backend });
       }
       if (event.type === 'token-usage') {
         this.store.updateStep(runId, step.id, { tokensUsed: startTokens + event.tokensUsed });
@@ -1473,7 +1549,27 @@ export class RunManager {
       }
     };
 
-    const runner = createRunner(step.runner ?? taskBackend);
+    const stepBackend = step.runner ?? taskBackend;
+    // Normalise the selected model to canonical `provider/model` and back to the
+    // backend's own wire form via the ONE shared mapper (#405). Fail-loud: an
+    // unresolvable model (e.g. a bare id on opencode) returns the step error
+    // instead of letting the backend silently substitute its default.
+    let backendModel: string | undefined;
+    try {
+      const normalized = normalizeModelForBackend(stepBackend, step.model ?? input.model);
+      backendModel = normalized?.backendModel;
+      // Persist the identity of what ACTUALLY runs (#405, review M1). The run-start echo
+      // (line ~993) is best-effort from `taskBackend`/`input.model`; a per-step `runner`/`model`
+      // override makes it assert a model that never ran. Re-write it here, from the resolved
+      // step identity, so the record — the product of this PR — is always one that ran.
+      this.store.updateRun(runId, {
+        modelIdentity: normalized ? formatModelIdentity(normalized.identity) : undefined,
+      });
+    } catch (err) {
+      if (err instanceof ModelIdentityError) return err.message;
+      throw err;
+    }
+    const runner = createRunner(stepBackend);
     let session: AgentSession;
     try {
       session = runner.startSession(
@@ -1495,7 +1591,7 @@ export class RunManager {
           // The handoff file lives outside the worktree — grant access.
           additionalDirectories: [join(this.dataDir, 'runs')],
           env: this.agentEnv(runId, followupsEnabled() && input.generateFollowups !== false),
-          model: step.model ?? input.model,
+          model: backendModel,
           sessionId,
           // Interactive sessions have no wall clock — the idle timer rules.
           timeoutMs: interactive ? 0 : undefined,

@@ -101,7 +101,7 @@ class CodexSession implements AgentSession {
    *  same item doesn't re-emit the full text on top of the deltas. */
   private readonly streamedItems = new Set<string>();
   private tokensUsed = 0;
-  private ready: Promise<void>;
+  private ready!: Promise<void>;
   private autoEndTimer: NodeJS.Timeout | undefined;
   private eofTermTimer: NodeJS.Timeout | undefined;
   private eofKillTimer: NodeJS.Timeout | undefined;
@@ -157,20 +157,33 @@ class CodexSession implements AgentSession {
     this.ready = this.bootstrap();
 
     this.result = (async (): Promise<AgentRunResult> => {
+      let sessionError: unknown;
       try {
-        for await (const line of readNdjson(this.child.stdout)) {
-          if (this.timedOut) break;
-          let msg: JsonRpcMessage;
-          try {
-            msg = JSON.parse(line) as JsonRpcMessage;
-          } catch {
-            continue; // not JSON-RPC — skip
+        const readLoop = async () => {
+          for await (const line of readNdjson(this.child.stdout)) {
+            if (this.timedOut) break;
+            let msg: JsonRpcMessage;
+            try {
+              msg = JSON.parse(line) as JsonRpcMessage;
+            } catch {
+              continue; // not JSON-RPC — skip
+            }
+            this.emitUi((state) => mapCodexNotification(msg, state));
+            this.dispatch(msg);
           }
-          this.emitUi((state) => mapCodexNotification(msg, state));
-          this.dispatch(msg);
-        }
+        };
+        // Start consuming stdout before awaiting bootstrap: JSON-RPC responses
+        // read here settle the initialize/thread/turn requests. Owning both
+        // promises makes every bootstrap rejection part of session.result.
+        await Promise.all([this.ready, readLoop()]);
       } catch (err) {
-        if (!this.timedOut) throw err;
+        if (!this.timedOut) {
+          sessionError = err;
+          // Bootstrap failed before a usable turn exists. Closing stdin lets
+          // app-server exit normally; end() also owns the TERM/KILL watchdog
+          // if a broken child ignores EOF.
+          this.end();
+        }
       } finally {
         if (deadline) clearTimeout(deadline);
         if (killTimer) clearTimeout(killTimer);
@@ -185,6 +198,7 @@ class CodexSession implements AgentSession {
       this.pending.clear();
 
       if (this.spawnFailed) throw this.spawnFailed;
+      if (sessionError) throw sessionError;
 
       const text = this.textChunks.join('\n').trim();
       const base: AgentRunResult = {

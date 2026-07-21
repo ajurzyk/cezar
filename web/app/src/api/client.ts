@@ -1,4 +1,6 @@
 import type {
+  AgentConfigFileContent,
+  AgentConfigListing,
   ApiRun,
   ArchiveFinishedResponse,
   CancelResponse,
@@ -46,6 +48,7 @@ import type {
   SaveWorkflowResponse,
   SetConfigInput,
   SetConfigResponse,
+  SetAgentConfigInput,
   SetWorkspaceConfigInput,
   Skill,
   StartTodoResponse,
@@ -262,6 +265,24 @@ export function getRepo(opts?: ReadOptions): Promise<RepoResponse> {
 /** The Settings → Agents knobs in one read (`GET /api/config`, additive R6 route). */
 export function getConfig(opts?: ReadOptions): Promise<ConfigResponse> {
   return get<ConfigResponse>('/api/config', opts)
+}
+
+/** The selected project's agent-owned config catalog and current file state. */
+export function getAgentConfig(opts: ReadOptions = {}): Promise<AgentConfigListing> {
+  return get<AgentConfigListing>('/api/agent-config', opts)
+}
+
+/** One selected-project config file's raw contents and optimistic version. */
+export function getAgentConfigFile(id: string, opts: ReadOptions = {}): Promise<AgentConfigFileContent> {
+  return get<AgentConfigFileContent>(`/api/agent-config/${encodeURIComponent(id)}`, opts)
+}
+
+/** Save inside the selected project scope; send() adds /api/p/:projectId. */
+export function putAgentConfigFile(
+  id: string,
+  body: SetAgentConfigInput,
+): Promise<AgentConfigFileContent> {
+  return mutate<AgentConfigFileContent>('PUT', `/api/agent-config/${encodeURIComponent(id)}`, body)
 }
 
 /** The main working tree's structured uncommitted diff vs HEAD (R5 repo view). 409 (as an

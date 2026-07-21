@@ -737,6 +737,28 @@ describe('CodexAppServerRunner v2 wiring (against the bundled mock app-server)',
       vi.unstubAllEnvs();
     }
   }, 30_000);
+
+  it('rejects a failed resume through session.result without an unhandled rejection', async () => {
+    const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 60_000 });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const session = runner.startSession({
+        userPrompt: 'continue',
+        cwd: process.cwd(),
+        sessionId: 'foreign-session',
+        resume: true,
+        env: { MOCK_CODEX_REJECT_RESUME: '1' },
+      });
+      await expect(session.result).rejects.toThrow('no rollout found for thread id foreign-session');
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(session.open).toBe(false);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  }, 30_000);
 });
 
 /**

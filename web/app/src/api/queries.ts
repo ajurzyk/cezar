@@ -3,6 +3,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   browseFs,
   checkoutProject,
+  getAgentConfig,
+  getAgentConfigFile,
   getConfig,
   getGithub,
   getGithubComments,
@@ -34,9 +36,10 @@ import {
   registerProject,
   removeProject,
   sendMessage,
+  putAgentConfigFile,
 } from './client'
 import { queryScope } from './project-scope'
-import type { CheckoutProjectInput, MessageInput, PatchRunInput } from './types'
+import type { CheckoutProjectInput, MessageInput, PatchRunInput, SetAgentConfigInput } from './types'
 
 /**
  * Query keys, in one place and exported, because they are a contract rather than an
@@ -102,6 +105,10 @@ export const queryKeys = {
   get config() {
     return [queryScope(), 'config'] as const
   },
+  get agentConfig() {
+    return [queryScope(), 'agent-config'] as const
+  },
+  agentConfigFile: (id: string) => [queryScope(), 'agent-config', 'file', id] as const,
   /** The worktree management panel (`GET /api/worktrees`, #483). */
   get worktrees() {
     return [queryScope(), 'worktrees'] as const
@@ -464,6 +471,38 @@ export function useUiState() {
   return useQuery({
     queryKey: queryKeys.uiState,
     queryFn: ({ signal }) => getUiState({ signal }),
+  })
+}
+
+/** The selected project's agent-owned config files and precedence metadata. */
+export function useAgentConfig() {
+  return useQuery({
+    queryKey: queryKeys.agentConfig,
+    queryFn: ({ signal }) => getAgentConfig({ signal }),
+  })
+}
+
+export function useAgentConfigFile(id: string | null) {
+  return useQuery({
+    queryKey: queryKeys.agentConfigFile(id ?? ''),
+    queryFn: ({ signal }) => getAgentConfigFile(id as string, { signal }),
+    enabled: id !== null,
+  })
+}
+
+export function usePutAgentConfigFile(id: string) {
+  const queryClient = useQueryClient()
+  // Capture the scope at hook render time. A save may finish after the user has
+  // switched projects; recomputing these getters in onSuccess would otherwise
+  // write the previous project's response into the newly active cache.
+  const listingKey = queryKeys.agentConfig
+  const fileKey = queryKeys.agentConfigFile(id)
+  return useMutation({
+    mutationFn: (body: SetAgentConfigInput) => putAgentConfigFile(id, body),
+    onSuccess: (result) => {
+      queryClient.setQueryData(fileKey, result)
+      void queryClient.invalidateQueries({ queryKey: listingKey })
+    },
   })
 }
 
