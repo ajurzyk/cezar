@@ -51,4 +51,4 @@ PR: #592
 ### Phase 2: Live shell integration
 
 - [x] 2.1 Wire active project and task/page data into the single AppShellContainer title writer — 368b0af
-- [ ] 2.2 Extend shell tests for scoped, boot, global, no-repo, navigation, and live updates
+- [x] 2.2 Extend shell tests for scoped, boot, global, no-repo, navigation, and live updates — 901f649
