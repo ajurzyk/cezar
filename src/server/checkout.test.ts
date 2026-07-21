@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -85,7 +85,7 @@ describe('checkout — the cleanup guard', () => {
   let root: string;
 
   beforeEach(() => {
-    root = mkdtempSync(join(tmpdir(), 'cez-checkout-root-'));
+    root = mkdtempSync(join(realpathSync(tmpdir()), 'cez-checkout-root-'));
   });
   afterEach(() => {
     rmSync(root, { recursive: true, force: true });
@@ -102,7 +102,7 @@ describe('checkout — the cleanup guard', () => {
   });
 
   it('REFUSES a directory outside the checkout root', async () => {
-    const outside = mkdtempSync(join(tmpdir(), 'cez-checkout-outside-'));
+    const outside = mkdtempSync(join(realpathSync(tmpdir()), 'cez-checkout-outside-'));
     writeFileSync(join(outside, 'precious.txt'), 'keep me', 'utf8');
     try {
       expect(await cleanupCheckout(root, outside)).toBe(false);
@@ -126,7 +126,7 @@ describe('checkout — the cleanup guard', () => {
     // The swap attack: the target we created is replaced by a link to somewhere
     // real. `realpath` alone would resolve it and (if the victim happened to sit
     // under the root) delete it — the lstat check is what stops the class.
-    const victim = mkdtempSync(join(tmpdir(), 'cez-checkout-victim-'));
+    const victim = mkdtempSync(join(realpathSync(tmpdir()), 'cez-checkout-victim-'));
     writeFileSync(join(victim, 'precious.txt'), 'keep me', 'utf8');
     const insideVictim = join(root, 'inside-victim');
     mkdirSync(insideVictim);
@@ -155,13 +155,19 @@ describe('checkout — the cleanup guard', () => {
 });
 
 describe('checkoutRepo — clone, failure cleanup, existing target', () => {
+  const savedDryRun = process.env.CEZ_DRY_RUN;
   let root: string;
 
   beforeEach(() => {
-    root = mkdtempSync(join(tmpdir(), 'cez-checkout-'));
+    root = mkdtempSync(join(realpathSync(tmpdir()), 'cez-checkout-'));
+    // The `run: undefined` tests exercise the CEZ_DRY_RUN fake clone; without
+    // this the default runner shells out to a real `gh repo clone`.
+    process.env.CEZ_DRY_RUN = '1';
   });
   afterEach(() => {
     rmSync(root, { recursive: true, force: true });
+    if (savedDryRun === undefined) delete process.env.CEZ_DRY_RUN;
+    else process.env.CEZ_DRY_RUN = savedDryRun;
   });
 
   const events: unknown[] = [];
@@ -272,8 +278,8 @@ describe('POST /api/projects/checkout', () => {
   let store: RunStore;
 
   beforeEach(() => {
-    home = mkdtempSync(join(tmpdir(), 'cez-checkout-home-'));
-    repoRoot = mkdtempSync(join(tmpdir(), 'cez-checkout-boot-'));
+    home = mkdtempSync(join(realpathSync(tmpdir()), 'cez-checkout-home-'));
+    repoRoot = mkdtempSync(join(realpathSync(tmpdir()), 'cez-checkout-boot-'));
     checkoutRoot = join(home, 'cezar', 'projects');
     process.env.CEZ_HOME = home;
     process.env.CEZ_DRY_RUN = '1';
