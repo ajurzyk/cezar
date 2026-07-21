@@ -17,8 +17,8 @@
 | 1 | 1.3 | `mock:subagents` trigger in the claude mock | done | ad2ed43 |
 | 1 | 1.4 | AgentsDock component + task-thread mount | done | e021935 |
 | 2 | 2.1 | SubagentSheet drill-down + dock row buttons | done | a094ea4 |
-| 2 | 2.2 | Finished-run parity from replayed state | done | pending |
-| 3 | 3.1 | e2e smoke, opencode mapper hardening, mockup sync | todo | — |
+| 2 | 2.2 | Finished-run parity from replayed state | done | 87ac53a |
+| 3 | 3.1 | e2e smoke, opencode mapper hardening, mockup sync | done | pending |
 
 ## Goal
 

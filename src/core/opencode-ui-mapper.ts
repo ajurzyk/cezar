@@ -498,8 +498,30 @@ function mapSubtask(
   if (description !== undefined) input.description = description;
   if (str(part.agent) !== undefined) input.agent = part.agent;
   if (Object.keys(input).length > 0) item.input = input;
+
+  // The scope is a SINGLE slot, so a subtask starting before the previous one's
+  // `session.idle` would strand that one `running` forever — invisible while
+  // sub-agents were only thread cards, but the Agents dock shows a stuck row and
+  // an odometer that can never reach N/N (spec
+  // `.ai/specs/2026-07-20-grouped-subagent-display.md` §Edge Cases, #474).
+  // Settle the displaced subtask instead of leaking it.
+  const events: UiEvent[] = [];
+  if (state.subtask !== null && state.subtask.id !== id) {
+    const displaced: UiToolItem = {
+      kind: 'tool',
+      id: state.subtask.id,
+      name: 'subtask',
+      toolKind: 'task',
+      title: state.subtask.title,
+      status: 'completed',
+    };
+    if (state.subtask.input !== undefined) displaced.input = state.subtask.input;
+    events.push({ type: 'item.completed', item: displaced });
+  }
+  events.push({ type: 'item.started', item });
+
   return {
-    events: [{ type: 'item.started', item }],
+    events,
     state: {
       ...state,
       startedItems: new Set(state.startedItems).add(id),
