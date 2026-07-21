@@ -19,7 +19,7 @@
 | 1 | 1.6 | Mirror `GithubTimelineEvent` / `events?` in `web/app/src/api/types.ts` | done | |
 | 1 | 1.7 | `EventRow` + client-side interleave + `labelColors` threading + header/empty-guard | done | |
 | 2 | 2.1 | Repo-handle resolution in `fetchGithubComments`, memoized per `repoRoot` (negatives only) | done | |
-| 2 | 2.2 | `fetchCommitChecks()` — batched aliased GraphQL, chunked at 50, `rollupToChecks` adapter | todo | |
+| 2 | 2.2 | `fetchCommitChecks()` — batched aliased GraphQL, chunked at 50, `rollupToChecks` adapter | done | |
 | 2 | 2.3 | Attach `checks` per SHA to `committed` events; degrade to absent on failure | todo | |
 | 2 | 2.4 | Render CI glyph on commit rows reusing `CHECKS_GLYPH`/`CHECKS_TONE` | todo | |
 | 2 | 2.5 | Client-side collapse of consecutive same-author commit runs + `aria-expanded` expander | todo | |

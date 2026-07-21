@@ -21,6 +21,7 @@ import {
   fetchGithubComments,
   fetchTimelinePages,
   fetchCommentCounts,
+  fetchCommitChecks,
   ghCheckRunSchema,
   ghTimelineEventSchema,
   mergeThread,
@@ -987,5 +988,75 @@ describe('resolveRepoHandle (#525 Phase 2)', () => {
     ghReturns('o/two');
     expect(await resolveRepoHandle('/tmp/b')).toEqual({ owner: 'o', name: 'two' });
     expect(execFileMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('fetchCommitChecks (#525 Phase 2)', () => {
+  const sha = (n: number) => String(n).padStart(40, '0');
+  const reply = (states: Array<string | null | 'missing'>) =>
+    JSON.stringify({
+      data: {
+        repository: Object.fromEntries(
+          states.map((state, i) => [
+            `c${i}`,
+            state === 'missing' ? null : { statusCheckRollup: state === null ? null : { state } },
+          ]),
+        ),
+      },
+    });
+
+  it('maps each alias back to its SHA', async () => {
+    const runGraphql = vi.fn(async () => reply(['SUCCESS', 'FAILURE', 'PENDING']));
+    const checks = await fetchCommitChecks(runGraphql, 'o', 'n', [sha(1), sha(2), sha(3)]);
+    expect(checks).toEqual({ [sha(1)]: 'passing', [sha(2)]: 'failing', [sha(3)]: 'pending' });
+  });
+
+  it('leaves an unknown SHA absent rather than null — the alias resolved null', async () => {
+    const runGraphql = vi.fn(async () => reply(['SUCCESS', 'missing']));
+    const checks = await fetchCommitChecks(runGraphql, 'o', 'n', [sha(1), sha(2)]);
+    expect(checks[sha(1)]).toBe('passing');
+    expect(sha(2) in checks).toBe(false);
+  });
+
+  it('distinguishes "no CI configured" (null) from "not looked up" (absent)', async () => {
+    const runGraphql = vi.fn(async () => reply([null]));
+    const checks = await fetchCommitChecks(runGraphql, 'o', 'n', [sha(1)]);
+    expect(sha(1) in checks).toBe(true);
+    expect(checks[sha(1)]).toBeNull();
+  });
+
+  it('chunks at 50 SHAs, and a failed chunk costs only its own glyphs', async () => {
+    const runGraphql = vi.fn(async (q: string) => {
+      // Chunk 2 fails; chunk 1 must survive it.
+      if (q.includes(sha(60))) throw new Error('HTTP 502');
+      return reply(Array.from({ length: 50 }, () => 'SUCCESS'));
+    });
+    const shas = Array.from({ length: 70 }, (_, i) => sha(i + 1));
+
+    const checks = await fetchCommitChecks(runGraphql, 'o', 'n', shas);
+
+    expect(runGraphql).toHaveBeenCalledTimes(2); // 70 → 50 + 20
+    expect(Object.keys(checks)).toHaveLength(50);
+    expect(checks[sha(1)]).toBe('passing');
+    expect(sha(60) in checks).toBe(false);
+  });
+
+  it('degrades to an empty map when every chunk fails, never throwing', async () => {
+    const runGraphql = vi.fn(async () => { throw new Error('offline'); });
+    await expect(fetchCommitChecks(runGraphql, 'o', 'n', [sha(1)])).resolves.toEqual({});
+  });
+
+  it('spawns nothing for an empty SHA list', async () => {
+    const runGraphql = vi.fn();
+    expect(await fetchCommitChecks(runGraphql, 'o', 'n', [])).toEqual({});
+    expect(runGraphql).not.toHaveBeenCalled();
+  });
+
+  it('embeds full 40-char SHAs — oid rejects abbreviated ones', async () => {
+    let sent = '';
+    const runGraphql = vi.fn(async (q: string) => { sent = q; return reply(['SUCCESS']); });
+    await fetchCommitChecks(runGraphql, 'o', 'n', [sha(1)]);
+    expect(sent).toContain(`object(oid: "${sha(1)}")`);
+    expect(sha(1)).toHaveLength(40);
   });
 });

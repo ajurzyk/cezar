@@ -718,6 +718,69 @@ export async function fetchTimelinePages(
   return { rows, stoppedShort };
 }
 
+/** SHAs per rollup query. Aliases resolve independently, so a chunk that fails costs only its own
+ *  glyphs — but an unbounded alias list would eventually blow the query size limit. */
+export const COMMIT_CHECKS_CHUNK = 50;
+
+/** One aliased `object(oid:)` per SHA. `oid` requires a FULL 40-char SHA in both literal and
+ *  variable form (`Could not coerce value "babda63" to GitObjectID`), which constrains fixtures
+ *  rather than production data — the timeline always supplies full SHAs. */
+function commitChecksQuery(shas: string[]): string {
+  const aliases = shas
+    .map((sha, i) => `    c${i}: object(oid: "${sha}") { ... on Commit { statusCheckRollup { state } } }`)
+    .join('\n');
+  return `query ($owner: String!, $name: String!) {\n  repository(owner: $owner, name: $name) {\n${aliases}\n  }\n}`;
+}
+
+const ghCommitChecksSchema = z.record(
+  z.string(),
+  z.object({ statusCheckRollup: z.object({ state: z.string().nullish() }).nullish() }).nullish(),
+);
+
+/**
+ * Rolled-up CI state per commit SHA, as a `sha → checks` map.
+ *
+ * Batched and aliased so a 40-commit PR costs one subprocess, not forty. Verified against the live
+ * API: each alias resolves independently and an unknown SHA comes back `null` rather than erroring
+ * the batch, so partial results degrade cleanly.
+ *
+ * Degrades to an empty map on any failure — exactly as `fetchCommentCounts` does for counts. The
+ * caller then leaves `checks` **absent**, which the UI renders as no glyph. Exported for tests;
+ * `runGraphql` is injected so this is testable without shelling out.
+ */
+export async function fetchCommitChecks(
+  runGraphql: GraphqlRunner,
+  owner: string,
+  name: string,
+  shas: string[],
+  chunkSize = COMMIT_CHECKS_CHUNK,
+): Promise<Record<string, ForgeTimelineEvent['checks']>> {
+  const out: Record<string, ForgeTimelineEvent['checks']> = {};
+  if (shas.length === 0) return out;
+
+  for (let i = 0; i < shas.length; i += chunkSize) {
+    const chunk = shas.slice(i, i + chunkSize);
+    try {
+      const raw = JSON.parse(await runGraphql(commitChecksQuery(chunk), { owner, name })) as {
+        data?: { repository?: unknown };
+      };
+      const repository = ghCommitChecksSchema.parse(raw?.data?.repository ?? {});
+      chunk.forEach((sha, index) => {
+        const node = repository[`c${index}`];
+        if (!node) return; // unknown SHA → alias resolved null; leave `checks` absent
+        // Adapt the single rollup state into the array shape `rollupToChecks` expects, so the
+        // existing FAILURE/PENDING/SUCCESS vocabulary is reused rather than duplicated.
+        out[sha] = node.statusCheckRollup
+          ? rollupToChecks([{ state: node.statusCheckRollup.state, status: null, conclusion: null }])
+          : null; // no CI configured — distinct from absent
+      });
+    } catch {
+      // A failed chunk costs only its own glyphs; the rest still resolve.
+    }
+  }
+  return out;
+}
+
 /**
  * The conversation thread for one issue/PR, lazily. `{owner}`/`{repo}` in the gh api paths are
  * filled from the worktree's remote by gh itself, so no extra handle lookup. Everything degrades:
