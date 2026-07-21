@@ -1,6 +1,6 @@
 # Execution plan — clone checkout-root settings link
 
-Status: in-progress
+Status: complete
 
 Source doc: .ai/specs/2026-07-21-clone-checkout-root-settings-link.md
 Issue: #561
@@ -53,4 +53,4 @@ PR: #571
 ### Phase 2: Verification and delivery
 
 - [x] 2.1 Run targeted validation, remove scope creep, and commit the implementation. — b4e9704
-- [ ] 2.2 Run the complete repository gate and both review passes; normalize the existing PR.
+- [x] 2.2 Run the complete repository gate and both review passes; normalize the existing PR. — 2907cf4
