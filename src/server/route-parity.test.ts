@@ -152,6 +152,9 @@ describe('project-route alias parity (unprefixed vs /api/p/<boot> vs /api/p/defa
       'POST /runs/archive-finished',
       'PUT /ui-state',
       'PUT /config',
+      'GET /agent-config',
+      'GET /agent-config/:id',
+      'PUT /agent-config/:id',
       'DELETE /runs/:id',
       'PATCH /runs/:id',
       'POST /todos/:id/start',
@@ -191,6 +194,7 @@ describe('project-route alias parity (unprefixed vs /api/p/<boot> vs /api/p/defa
     await expectParity('/runs', json('POST', {}));
     await expectParity('/ui-state', json('PUT', 'nonsense'));
     await expectParity('/config', json('PUT', { maxParallel: 99 }));
+    await expectParity('/agent-config/no-such-file', json('PUT', { content: '{}', version: null }));
     await expectParity('/workflows/parse', json('POST', { yaml: '' }));
     // 404: unknown ids.
     await expectParity('/runs/no-such-run/archive', json('POST', {}));
@@ -291,5 +295,31 @@ describe('project-route alias parity (unprefixed vs /api/p/<boot> vs /api/p/defa
       key: string;
     }).key;
     expect(otherKey).not.toBe(bootKey);
+  });
+
+  it('agent config resolves repo-local files from the selected project only', async () => {
+    const other = await registerProject(otherRoot);
+    mkdirSync(join(repoRoot, '.claude'), { recursive: true });
+    mkdirSync(join(otherRoot, '.claude'), { recursive: true });
+    writeFileSync(join(repoRoot, '.claude', 'settings.json'), '{"project":"boot"}', 'utf8');
+    writeFileSync(join(otherRoot, '.claude', 'settings.json'), '{"project":"other"}', 'utf8');
+
+    const boot = await app.request('/api/agent-config/claude.project.settings');
+    const scoped = await app.request(`/api/p/${other.id}/agent-config/claude.project.settings`);
+    expect((await boot.json()) as { content: string }).toMatchObject({ content: '{"project":"boot"}' });
+    expect((await scoped.json()) as { content: string }).toMatchObject({ content: '{"project":"other"}' });
+
+    const current = (await (await app.request(
+      `/api/p/${other.id}/agent-config/claude.project.settings`,
+    )).json()) as { version: string };
+    const updated = await app.request(`/api/p/${other.id}/agent-config/claude.project.settings`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ content: '{"project":"updated"}', version: current.version }),
+    });
+    expect(updated.status).toBe(200);
+    expect(
+      (await (await app.request('/api/agent-config/claude.project.settings')).json()) as { content: string },
+    ).toMatchObject({ content: '{"project":"boot"}' });
   });
 });

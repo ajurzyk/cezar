@@ -25,6 +25,7 @@ import { todosPath } from '../todos.js';
 import type { AgentEvent, ContentBlock } from '../core/agent-runner.js';
 import { discoverSkills, type Skill } from '../skills.js';
 import { materializeSkillDir } from '../skills-remote.js';
+import { seedAgentConfigLocalLayer } from '../agent-config/seed.js';
 import { loadConfig, resolveWorktreeRetention } from '../config.js';
 import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff, worktreeShortstat } from '../git-worktree.js';
 import { getRepoInfo } from '../server/git.js';
@@ -1201,6 +1202,12 @@ export class RunManager {
           baseBranch: wt.baseBranch,
         });
         emit({ type: 'note', message: `worktree ready — branch ${wt.branch} (base ${wt.baseBranch})` });
+        // Seed from this manager's project root: each multi-project context has
+        // its own manager/repoRoot and must never copy another project's layer.
+        const seededConfig = await seedAgentConfigLocalLayer(this.repoRoot, state.cwd).catch(() => []);
+        if (seededConfig.length > 0) {
+          emit({ type: 'note', message: `seeded personal agent config: ${seededConfig.join(', ')}` });
+        }
         this.armAutosave(state);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

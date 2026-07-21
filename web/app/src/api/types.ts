@@ -803,6 +803,59 @@ export interface SetConfigInput {
 /** The PUT answer: the same shape GET serves (the pre-R6 fields stayed, the rest is additive). */
 export type SetConfigResponse = ConfigResponse
 
+// ---- Agent config files (spec #404) --------------------------------------------------------
+
+export type AgentConfigFormat = 'json' | 'jsonc' | 'toml' | 'markdown'
+export type AgentConfigScope = 'user' | 'project' | 'local'
+export type AgentConfigKind = 'settings' | 'memory' | 'mcp'
+export type AgentConfigTracked = 'tracked' | 'gitignored' | 'outside-repo'
+
+export interface AgentConfigFile {
+  id: string
+  runners: Runner[]
+  kind: AgentConfigKind
+  scope: AgentConfigScope
+  label: string
+  path: string
+  format: AgentConfigFormat
+  tracked: AgentConfigTracked
+  seeded: boolean
+  holdsMcp: boolean
+  precedence: string
+  hotReload?: string
+  docsUrl: string
+  exists: boolean
+  size: number
+  version: string | null
+  writable: boolean
+  readOnlyReason?: string
+}
+
+export interface UserMcpListing {
+  path: string
+  servers: string[]
+  readable: boolean
+}
+
+export interface AgentConfigListing {
+  editable: boolean
+  files: AgentConfigFile[]
+  userMcp: UserMcpListing | null
+}
+
+export interface AgentConfigFileContent {
+  id: string
+  path: string
+  exists: boolean
+  content: string
+  version: string | null
+}
+
+export interface SetAgentConfigInput {
+  content: string
+  version: string | null
+}
+
 /** One materialized task worktree in the management panel (#483). `sizeBytes` is
  *  null when `du` is unavailable (Windows / missing). `reclaimable` = finished,
  *  has a directory, not yet reclaimed (retention's rule). */
