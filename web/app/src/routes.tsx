@@ -22,7 +22,7 @@ import { UnknownProjectRoute } from './routes/unknown-project'
 import { WorkflowsLoading } from './routes/workflows/workflows-loading'
 import { GitTabLoading } from './routes/task-git/git-tab-loading'
 import { ThreadLoading } from './routes/task-thread/thread-loading'
-import { visibleSettingsSections } from './routes/settings/registry'
+import { visibleSettingsSections, type SettingsSectionId } from './routes/settings/registry'
 import {
   SettingsIndexRoute,
   SettingsSectionRoute,
@@ -85,11 +85,35 @@ const WorkflowsRoute = lazy(() =>
 const SkillsRoute = lazy(() => import('./routes/skills').then((m) => ({ default: m.SkillsRoute })))
 
 /** `/settings/skills` moved to the top-level `/skills` (out of the Settings shell). Redirect —
- *  preserving the `?skill=` selection — so pasted links and saved bookmarklets still land.
- *  The scoped Navigate keeps the redirect inside the active project. */
+ *  preserving the `?skill=` selection and any hash — so pasted links and saved bookmarklets
+ *  still land. The scoped Navigate keeps the redirect inside the active project. */
 function SettingsSkillsRedirect() {
   const location = useLocation()
-  return <ScopedNavigate to={{ pathname: '/skills', search: location.search }} replace />
+  return (
+    <ScopedNavigate
+      to={{ pathname: '/skills', search: location.search, hash: location.hash }}
+      replace
+    />
+  )
+}
+
+/** A settings section that MOVED from the project area to the global one. Its own hop, not an
+ *  inline `<Navigate>`, because `settingsSectionPath` returns a bare pathname: only a component
+ *  can read `useLocation` and carry the query and hash across. Legacy flat URLs reach here on a
+ *  SECOND hop (`LegacyPathRedirect` first), and dropping either half there would silently undo
+ *  what that hop just preserved. Plain Navigate — the target is outside every project. */
+function MovedSettingsSectionRedirect({ sectionId }: { sectionId: SettingsSectionId }) {
+  const location = useLocation()
+  return (
+    <Navigate
+      to={{
+        pathname: settingsSectionPath('global', sectionId),
+        search: location.search,
+        hash: location.hash,
+      }}
+      replace
+    />
+  )
 }
 
 /** What renders while a redirect target is still being resolved (the boot id from `/api/health`,
@@ -390,12 +414,12 @@ export function AppRoutes() {
         {/* A section that MOVED out of the project area keeps its old URL working: every
             pre-3.5 bookmark and every legacy flat `/settings/appearance` (which the redirect
             below turns into `/p/<boot>/settings/appearance`) lands on the global twin instead
-            of a 404. Plain Navigate, not the scoped one — the target is outside every project. */}
+            of a 404 — query and hash intact across both hops. */}
         {visibleSettingsSections('global').map((section) => (
           <Route
             key={section.id}
             path={`settings/${section.id}`}
-            element={<Navigate to={settingsSectionPath('global', section.id)} replace />}
+            element={<MovedSettingsSectionRedirect sectionId={section.id} />}
           />
         ))}
 

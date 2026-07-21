@@ -79,6 +79,7 @@ function LocationProbe() {
       data-testid="location"
       data-pathname={location.pathname}
       data-search={location.search}
+      data-hash={location.hash}
     />
   )
 }
@@ -122,6 +123,10 @@ function currentPathname(): string | null {
 
 function currentSearch(): string | null {
   return screen.getByTestId('location').getAttribute('data-search')
+}
+
+function currentHash(): string | null {
+  return screen.getByTestId('location').getAttribute('data-hash')
 }
 
 /** The URL contract from the spec's "Routing — every surface is a URL" section, now under the
@@ -253,6 +258,23 @@ describe('the global settings area (/settings/global)', () => {
       renderAt(`/settings/${id}`)
       expect(currentPathname()).toBe(`/settings/global/${id}`)
     })
+
+    it(`/settings/${id} carries query AND hash through BOTH redirect hops`, () => {
+      // The legacy flat URL takes two hops — `LegacyPathRedirect` into the boot project, then
+      // the moved-section redirect out to the global twin. `settingsSectionPath` returns a bare
+      // pathname, so the second hop is exactly where a bookmark's `?…#…` used to disappear.
+      renderAt(`/settings/${id}?tab=x&y=a%2Fb#anchor`)
+      expect(currentPathname()).toBe(`/settings/global/${id}`)
+      expect(currentSearch()).toBe('?tab=x&y=a%2Fb')
+      expect(currentHash()).toBe('#anchor')
+    })
+
+    it(`/p/${BOOT}/settings/${id} carries query AND hash on the single hop`, () => {
+      renderAt(`/p/${BOOT}/settings/${id}?tab=x#anchor`)
+      expect(currentPathname()).toBe(`/settings/global/${id}`)
+      expect(currentSearch()).toBe('?tab=x')
+      expect(currentHash()).toBe('#anchor')
+    })
   }
 })
 
@@ -274,6 +296,16 @@ describe('legacy flat URLs redirect to the boot project', () => {
     renderAt(`/skills${search}`)
     expect(currentPathname()).toBe(`/p/${BOOT}/skills`)
     expect(currentSearch()).toBe(search)
+    expect(routeName()).toBe('skills')
+  })
+
+  it('preserves the hash too — /settings/skills through both hops', () => {
+    // `/settings/skills` moved to `/skills`, so a legacy flat link redirects twice. Query
+    // survival was already asserted; the hash is the half that was silently dropped.
+    renderAt('/settings/skills?skill=om-code-review#usage')
+    expect(currentPathname()).toBe(`/p/${BOOT}/skills`)
+    expect(currentSearch()).toBe('?skill=om-code-review')
+    expect(currentHash()).toBe('#usage')
     expect(routeName()).toBe('skills')
   })
 

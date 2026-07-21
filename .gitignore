@@ -21,3 +21,6 @@ skills-lock.json
 
 # local symlink into .agents/skills
 .claude/skills
+
+# mock-agent output from dry-run e2e (scripts/mock-claude.mjs appends here)
+/notes.md

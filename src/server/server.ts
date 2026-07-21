@@ -880,15 +880,16 @@ export function createApp(deps: ServerDeps): Hono {
     if (!requested.startsWith('/')) {
       return { status: 400, body: { error: `not a folder: ${spelled} is not an absolute path` } };
     }
-    // Existence is checked HERE rather than left to `registerProject` (which
-    // degrades a failed realpath to a plain resolve): a registry full of
-    // `missing` rows the user never had is worse than a 400 they can act on.
-    const info = await stat(requested).catch(() => null);
-    if (!info?.isDirectory()) return { status: 400, body: { error: `no such folder: ${spelled}` } };
     // Hosted mode: the same root the picker is narrowed to, re-checked — see
     // `isInsideBrowseRoot`. Local mode deliberately has NO containment: a
     // project under `/srv/code` is a normal local setup and `cezar serve`
     // registers it today.
+    //
+    // Asked BEFORE the stat, and that order is the security property: an
+    // out-of-root path must answer the SAME way whether or not it exists, or
+    // the route becomes the existence oracle fs-browse narrows the tree to
+    // prevent. Local mode is unaffected — it skips this block, so it still
+    // reaches the stat first.
     if (!capabilities().localHandoff) {
       const browseRoot = resolveBrowseRoot(true, await workspaceProjectsDir());
       if (!(await isInsideBrowseRoot(browseRoot, requested))) {
@@ -897,6 +898,11 @@ export function createApp(deps: ServerDeps): Hono {
         return { status: 400, body: { error: 'folder is outside the browsable root' } };
       }
     }
+    // Existence is checked HERE rather than left to `registerProject` (which
+    // degrades a failed realpath to a plain resolve): a registry full of
+    // `missing` rows the user never had is worse than a 400 they can act on.
+    const info = await stat(requested).catch(() => null);
+    if (!info?.isDirectory()) return { status: 400, body: { error: `no such folder: ${spelled}` } };
     // The boot-time auto-registration guard, applied to the manual gesture
     // too: `$HOME` and cezar's own task worktrees are exactly as wrong a
     // project root when a human clicks "Add project" as when `cezar serve`

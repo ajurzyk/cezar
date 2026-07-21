@@ -234,6 +234,26 @@ describe('workspace projects API', () => {
       expect(allowed.status).toBe(200);
       expect(allowed.body.project.root).toBe(await realpath(inside));
     });
+
+    it('hosted mode: an out-of-root path answers identically whether or not it exists', async () => {
+      // The containment check runs BEFORE the stat, so a remote caller cannot
+      // use the route as an existence oracle — probing `/etc/nginx` vs
+      // `/etc/nope` must not map the host layout the browse root hides.
+      const checkoutRoot = join(home, 'checkouts');
+      mkdirSync(checkoutRoot, { recursive: true });
+      await mergeWriteWorkspaceConfig((config) => {
+        config.projectsDir = checkoutRoot;
+      });
+      process.env.CEZ_REMOTE = '1';
+      const exists = await post({ root: otherRoot }); // real folder, outside
+      const absent = await post({ root: join(otherRoot, 'nope') }); // never existed
+      expect(exists.status).toBe(400);
+      expect(absent).toEqual(exists);
+      // …and neither leaks the probed spelling back (the `no such folder`
+      // message echoes it; the containment one deliberately does not).
+      expect(absent.body.error).not.toContain('nope');
+      expect((await getProjects()).projects).toEqual([]);
+    });
   });
 
   describe('DELETE /api/projects/:projectId — Settings → Projects remove (step 4.4)', () => {
