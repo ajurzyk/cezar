@@ -5,8 +5,12 @@ import type {
   ChangedFile as WebChangedFile,
   ChangesPayload as WebChangesPayload,
   ForgeInfo as WebForgeInfo,
+  GithubComment as WebGithubComment,
+  GithubCommentsData as WebGithubCommentsData,
   GithubData as WebGithubData,
   GithubItem as WebGithubItem,
+  GithubTimelineEvent as WebGithubTimelineEvent,
+  GithubTimelineEventKind as WebGithubTimelineEventKind,
   GroupResponse as WebGroupResponse,
   GroupVariant as WebGroupVariant,
   PickVariantResponse as WebPickVariantResponse,
@@ -74,7 +78,14 @@ import type { WorkflowDef, WorkflowStepDef } from '../workflows/types.js';
 import type { Capabilities } from './capabilities.js';
 import type { ForgeAvailability, ForgeKind } from './forge/index.js';
 import type { BranchResult, ChangedFile, ChangesPayload, CommitPayload, DirEntry } from './git-changes.js';
-import type { GithubData, GithubItem } from './github.js';
+import type {
+  ForgeComment,
+  ForgeCommentsData,
+  ForgeTimelineEvent,
+  ForgeTimelineEventKind,
+  GithubData,
+  GithubItem,
+} from './github.js';
 import type { LogEntry, RepoInfo, StatusEntry } from './git.js';
 import type { GroupResponse, GroupVariant, PickVariantResponse } from './server.js';
 
@@ -142,6 +153,21 @@ const guards = {
   todoItem: true satisfies Exact<TodoItem, WebTodoItem>,
   githubItem: true satisfies Exact<GithubItem, WebGithubItem>,
   githubData: true satisfies Exact<GithubData, WebGithubData>,
+  // The comment-thread payload (#499) and its timeline events (#525). ForgeComment was left
+  // unpinned when #499 landed, which is exactly the drift this closes: `GET
+  // /api/github/comments/:kind/:number` is a second consumer contract on the protected /api/github
+  // family, and nothing was checking that its two type declarations stayed in step.
+  //
+  // Known limit of the `Exact<>` mechanism, verified rather than assumed and true of EVERY pin
+  // here, not just these four: it catches a REQUIRED field added to one side, but NOT an optional
+  // one — `{a: string}` and `{a: string; b?: number}` are mutually assignable, so both `extends`
+  // arms hold. Adding `events?` to only one of the two declarations would therefore slip through.
+  // Worth knowing before trusting these as total coverage; tightening it would mean a key-set
+  // comparison rather than assignability, which is out of scope here.
+  githubComment: true satisfies Exact<ForgeComment, WebGithubComment>,
+  githubCommentsData: true satisfies Exact<ForgeCommentsData, WebGithubCommentsData>,
+  githubTimelineEvent: true satisfies Exact<ForgeTimelineEvent, WebGithubTimelineEvent>,
+  githubTimelineEventKind: true satisfies Exact<ForgeTimelineEventKind, WebGithubTimelineEventKind>,
   // Variant compare (spec 010): the compare view's columns and the pick answer.
   groupVariant: true satisfies Exact<GroupVariant, WebGroupVariant>,
   groupResponse: true satisfies Exact<GroupResponse, WebGroupResponse>,

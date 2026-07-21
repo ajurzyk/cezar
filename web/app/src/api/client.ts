@@ -333,9 +333,14 @@ export function getGithub(
 export function getGithubComments(
   kind: 'issue' | 'pr',
   number: number,
+  params: { refresh?: boolean } = {},
   opts?: ReadOptions,
 ): Promise<GithubCommentsData> {
-  return get<GithubCommentsData>(`/api/github/comments/${kind}/${number}`, opts)
+  // `refresh=1` is what busts the route's 60 s `commentsCache` (server.ts). Without it a manual
+  // refresh re-requests and is handed the same cached object — the caller must be able to say
+  // "actually go and ask gh", exactly as `getGithub` can.
+  const search = params.refresh ? '?refresh=1' : ''
+  return get<GithubCommentsData>(`/api/github/comments/${kind}/${number}${search}`, opts)
 }
 
 /** The run's worktree diff against its base, as unified-diff text. Also the plain-text

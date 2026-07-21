@@ -17,7 +17,7 @@ import type {
 import { Toaster, resetToasts } from '@/components/ui/toaster'
 import { githubTaskRef } from '@/lib/github-task'
 
-import { GithubIndexRoute, GithubRoute } from './github'
+import { GithubIndexRoute, GithubRoute, groupCommitRuns, type ThreadRow } from './github'
 import { readFollowupPrompt, readFollowupSelection, writeFollowupSelection } from './hand-to-agent-draft'
 
 beforeAll(() => {
@@ -458,12 +458,16 @@ describe('the comment thread', () => {
   const threadSection = () => document.querySelector('[data-slot="gh-thread"]')
   const entries = () => [...document.querySelectorAll<HTMLElement>('[data-slot="gh-thread-entry"]')]
 
-  it('renders a "Comments · N" section with each body through the markdown pipeline', async () => {
+  it('renders an "Activity · N comments" section with each body through the markdown pipeline', async () => {
     stubFetch(thread('issue', 142, { available: true, comments: [COMMENT_TEXT, COMMENT_IMAGE] }))
     renderAt('/github/issues/142')
 
     await waitFor(() => expect(threadSection()).not.toBeNull())
-    expect(document.querySelector('[data-slot="gh-thread-header"]')?.textContent).toBe('Comments · 2')
+    // Retitled by #525: heading a twenty-row list `Comments · 2` would be incoherent once events
+    // render, so the section is "Activity" and the comment count becomes a secondary.
+    expect(document.querySelector('[data-slot="gh-thread-header"]')?.textContent).toBe(
+      'Activity · 2 comments',
+    )
     expect(entries()).toHaveLength(2)
     expect(entries()[0]?.textContent).toContain('maya')
     expect(entries()[0]?.querySelector('[data-slot="gh-thread-body"]')?.textContent).toContain(
@@ -480,8 +484,8 @@ describe('the comment thread', () => {
     expect(img?.getAttribute('src')).toBe('https://example.com/shot.png')
   })
 
-  it('renders nothing for an empty thread — the count badge already said there were none', async () => {
-    stubFetch(thread('issue', 139, { available: true, comments: [] }))
+  it('renders nothing when BOTH streams are empty — the count badge already said so', async () => {
+    stubFetch(thread('issue', 139, { available: true, comments: [], events: [] }))
     renderAt('/github/issues/139')
 
     await waitFor(() => expect(detail()?.textContent).toContain('Add --json flag'))
@@ -523,6 +527,299 @@ describe('the comment thread', () => {
     const fallback = entries()[1]?.querySelector('[data-slot="gh-avatar-fallback"]')
     expect(fallback).not.toBeNull()
     expect(fallback?.textContent).toBe('n') // first letter of "noAvatar"
+  })
+
+  // ---- timeline events (#525) ----------------------------------------------
+
+  const events = () => [...document.querySelectorAll<HTMLElement>('[data-slot="gh-event-row"]')]
+  const SHA = 'abc1234' + 'f'.repeat(33)
+  const EVT = {
+    committed: {
+      id: `evt-${SHA}`, kind: 'committed' as const, actor: 'Ada Lovelace',
+      createdAt: '2026-01-02T00:00:00Z', sha: SHA, message: 'bound the timeline page loop',
+    },
+    labeled: {
+      id: 'evt-1', kind: 'labeled' as const, actor: 'octocat',
+      createdAt: '2026-01-03T00:00:00Z', label: { name: 'bug', color: 'd73a4a' },
+    },
+    merged: { id: 'evt-2', kind: 'merged' as const, actor: 'octocat', createdAt: '2026-01-04T00:00:00Z' },
+    crossRef: {
+      id: 'evt-3', kind: 'cross-referenced' as const, actor: 'octocat',
+      createdAt: '2026-01-05T00:00:00Z', refNumber: 520, refTitle: 'Sibling work',
+      refIsPr: true, url: 'https://github.com/o/r/pull/520',
+    },
+  }
+
+  it('renders a row per event kind, each carrying data-kind for keying', async () => {
+    stubFetch(thread('pr', 137, {
+      available: true, comments: [],
+      events: [
+        EVT.committed, EVT.labeled, EVT.merged, EVT.crossRef,
+        { id: 'evt-4', kind: 'assigned', actor: 'octocat', createdAt: '2026-01-06T00:00:00Z', subject: 'maya' },
+        { id: 'evt-5', kind: 'renamed', actor: 'octocat', createdAt: '2026-01-07T00:00:00Z', subject: 'A better title' },
+        { id: 'evt-6', kind: 'head_ref_force_pushed', actor: 'octocat', createdAt: '2026-01-08T00:00:00Z' },
+        { id: 'evt-7', kind: 'closed', actor: 'octocat', createdAt: '2026-01-09T00:00:00Z' },
+      ],
+    }))
+    renderAt('/github/prs/137')
+
+    await waitFor(() => expect(events()).toHaveLength(8))
+    expect(events().map((e) => e.dataset.kind)).toEqual([
+      'committed', 'labeled', 'merged', 'cross-referenced',
+      'assigned', 'renamed', 'head_ref_force_pushed', 'closed',
+    ])
+    expect(events()[0]?.textContent).toContain('Ada Lovelace')
+    expect(events()[0]?.textContent).toContain('abc1234') // short sha
+    expect(events()[0]?.textContent).toContain('bound the timeline page loop')
+    expect(events()[2]?.textContent).toContain('merged this')
+    expect(events()[3]?.textContent).toContain('#520')
+    expect(events()[4]?.textContent).toContain('assigned maya')
+    expect(events()[5]?.textContent).toContain('renamed this to A better title')
+    expect(events()[6]?.textContent).toContain('force-pushed')
+  })
+
+  it('renders a PR with events but ZERO comments — the motivating case', async () => {
+    // The empty guard used to key on comments alone, which would hide the whole feature on a
+    // merged PR carrying commits, labels and a merge event but no conversation.
+    stubFetch(thread('pr', 137, { available: true, comments: [], events: [EVT.committed, EVT.merged] }))
+    renderAt('/github/prs/137')
+
+    await waitFor(() => expect(threadSection()).not.toBeNull())
+    expect(events()).toHaveLength(2)
+    expect(entries()).toHaveLength(0)
+    expect(document.querySelector('[data-slot="gh-thread-header"]')?.textContent).toBe(
+      'Activity · 0 comments',
+    )
+  })
+
+  it('interleaves comments and events chronologically', async () => {
+    // The server returns two independently-capped arrays and deliberately does NOT merge them;
+    // ordering is presentation. This is the merge.
+    stubFetch(thread('pr', 137, {
+      available: true,
+      comments: [{ ...COMMENT_TEXT, createdAt: '2026-01-03T12:00:00Z' }],
+      events: [
+        { ...EVT.committed, createdAt: '2026-01-02T00:00:00Z' },
+        { ...EVT.merged, createdAt: '2026-01-04T00:00:00Z' },
+      ],
+    }))
+    renderAt('/github/prs/137')
+
+    await waitFor(() => expect(events()).toHaveLength(2))
+    const rows = [...document.querySelectorAll('[data-slot="gh-thread-entry"], [data-slot="gh-event-row"]')]
+    expect(rows.map((r) => (r as HTMLElement).dataset.slot ?? r.getAttribute('data-slot'))).toEqual([
+      'gh-event-row', 'gh-thread-entry', 'gh-event-row',
+    ])
+  })
+
+  it('sends refresh=1 on the BARE /github route too, where no :n is in the URL', async () => {
+    // The regression the first fix batch shipped: keying the open thread off the `:n` route param
+    // left the DEFAULT landing pages refreshing nothing, because with no `:n` the tab still shows
+    // a thread — `selected` falls back to items[0]. The refresh must follow what is rendered.
+    const threadRequests: string[] = []
+    stubFetch({ 'GET /api/github?refresh=1': () => jsonResponse(GITHUB) })
+    const origFetch = globalThis.fetch
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path.startsWith('/api/github/comments/')) threadRequests.push(path)
+      return (origFetch as typeof fetch)(input, init as RequestInit)
+    })
+
+    renderAt('/github') // no :n at all
+    await waitFor(() => expect(threadRequests.length).toBe(1))
+
+    fireEvent.click(document.querySelector<HTMLElement>('[data-slot="gh-refresh"]')!)
+
+    await waitFor(() => expect(threadRequests.some((p) => p.includes('refresh=1'))).toBe(true))
+  })
+
+  it('does not blank the open thread while refreshing it', async () => {
+    // The other half of that regression: the removeQueries predicate wiped the MOUNTED thread,
+    // resetting it to pending so the loading skeleton flashed under the user on every refresh.
+    stubFetch({ 'GET /api/github?refresh=1': () => jsonResponse(GITHUB) })
+    renderAt('/github/issues/142')
+
+    await waitFor(() => expect(document.querySelector('[data-slot="gh-thread"]')).not.toBeNull())
+
+    fireEvent.click(document.querySelector<HTMLElement>('[data-slot="gh-refresh"]')!)
+
+    // The thread stays rendered throughout — never replaced by the loading skeleton.
+    await waitFor(() => expect(document.querySelector('[data-slot="gh-thread"]')).not.toBeNull())
+    expect(document.querySelector('[data-slot="gh-thread-loading"]')).toBeNull()
+  })
+
+  it('orders a comment and an event made in the SAME second by their true order', async () => {
+    // The two streams carry different precisions: events go through toISOString() (`…00.000Z`),
+    // comments keep GitHub's `…00Z`. A raw string compare puts '.' (46) before 'Z' (90), so the
+    // event would always win a same-second tie regardless of what actually happened first.
+    stubFetch(thread('pr', 137, {
+      available: true,
+      comments: [{ ...COMMENT_TEXT, createdAt: '2026-01-03T10:00:00Z' }],
+      events: [{ ...EVT.merged, createdAt: '2026-01-03T10:00:00.000Z' }],
+    }))
+    renderAt('/github/prs/137')
+
+    await waitFor(() => expect(events()).toHaveLength(1))
+    const rows = [...document.querySelectorAll('[data-slot="gh-thread-entry"], [data-slot="gh-event-row"]')]
+    // Same instant → stable sort keeps insertion order, and comments are inserted first.
+    expect(rows[0]?.getAttribute('data-slot')).toBe('gh-thread-entry')
+  })
+
+  it('does not let an unparseable timestamp scramble the order', async () => {
+    // normalizeReviews emits createdAt: '' for a PENDING review that has a body, and
+    // Date.parse('') is NaN. An NaN comparator result coerces to +0, which makes the sort
+    // INCONSISTENT rather than crashing — the row lands wherever the engine leaves it. Pinned
+    // to the top explicitly instead.
+    stubFetch(thread('pr', 137, {
+      available: true,
+      comments: [
+        { ...COMMENT_TEXT, id: 91, createdAt: '' },
+        { ...COMMENT_TEXT, id: 92, createdAt: '2026-01-03T00:00:00Z' },
+      ],
+      events: [{ ...EVT.merged, createdAt: '2026-01-02T00:00:00Z' }],
+    }))
+    renderAt('/github/prs/137')
+
+    await waitFor(() => expect(entries()).toHaveLength(2))
+    const rows = [...document.querySelectorAll('[data-slot="gh-thread-entry"], [data-slot="gh-event-row"]')]
+    // The timestamp-less row first, then the ordered ones — deterministic, whatever else changes.
+    expect(rows.map((r) => r.getAttribute('data-slot'))).toEqual([
+      'gh-thread-entry', 'gh-event-row', 'gh-thread-entry',
+    ])
+  })
+
+  it('tints a label chip from the event colour', async () => {
+    stubFetch(thread('pr', 137, { available: true, comments: [], events: [EVT.labeled] }))
+    renderAt('/github/prs/137')
+
+    await waitFor(() => expect(events()).toHaveLength(1))
+    const chip = document.querySelector<HTMLElement>('[data-slot="gh-event-label"]')
+    expect(chip?.textContent).toBe('bug')
+    expect(chip?.style.borderColor).not.toBe('') // tinted, not the muted fallback
+  })
+
+  it('links a cross-reference out to the referenced thread', async () => {
+    stubFetch(thread('pr', 137, { available: true, comments: [], events: [EVT.crossRef] }))
+    renderAt('/github/prs/137')
+
+    await waitFor(() => expect(events()).toHaveLength(1))
+    expect(events()[0]?.querySelector('a')?.getAttribute('href')).toBe('https://github.com/o/r/pull/520')
+  })
+
+  it('renders comments unchanged when the server sent no events at all', async () => {
+    // The degraded path: the server fell back to the legacy comments-only fetch, so `events` is
+    // absent. The thread must render exactly as it did pre-#525.
+    stubFetch(thread('issue', 142, { available: true, comments: [COMMENT_TEXT] }))
+    renderAt('/github/issues/142')
+
+    await waitFor(() => expect(entries()).toHaveLength(1))
+    expect(events()).toHaveLength(0)
+    expect(threadSection()).not.toBeNull()
+  })
+
+  it.each([
+    ['passing', '✓', 'text-success'],
+    ['failing', '✗', 'text-danger'],
+    ['pending', '○', 'text-muted-foreground'],
+  ])('renders the %s CI glyph on a commit row', async (state, glyph, tone) => {
+    stubFetch(thread('pr', 137, {
+      available: true, comments: [],
+      events: [{ ...EVT.committed, checks: state as 'passing' | 'failing' | 'pending' }],
+    }))
+    renderAt('/github/prs/137')
+
+    await waitFor(() => expect(events()).toHaveLength(1))
+    const badge = document.querySelector<HTMLElement>('[data-slot="gh-commit-checks"]')
+    expect(badge?.getAttribute('data-checks')).toBe(state)
+    expect(badge?.textContent).toBe(glyph)
+    expect(badge?.className).toContain(tone)
+  })
+
+  it('renders no glyph when checks is null AND when it is absent', async () => {
+    // null = the commit has no CI configured; absent = the rollup query failed or was skipped.
+    // They look identical here on purpose, but stay distinct on the wire.
+    stubFetch(thread('pr', 137, {
+      available: true, comments: [],
+      events: [
+        // Distinct authors so the Phase-2 commit-run grouping does not collapse them — this case
+        // is about glyph rendering, not grouping.
+        { ...EVT.committed, id: 'evt-null', actor: 'Ada Lovelace', checks: null },
+        { ...EVT.committed, id: 'evt-absent', actor: 'Grace Hopper' }, // no `checks` key at all
+      ],
+    }))
+    renderAt('/github/prs/137')
+
+    await waitFor(() => expect(events()).toHaveLength(2))
+    expect(document.querySelectorAll('[data-slot="gh-commit-checks"]')).toHaveLength(0)
+  })
+
+  it('collapses a run of consecutive commits by one author, and expands on click', async () => {
+    const commit = (n: number, actor = 'Ada Lovelace') => ({
+      id: `evt-c${n}`, kind: 'committed' as const, actor,
+      createdAt: `2026-01-0${n}T00:00:00Z`, sha: String(n).repeat(40).slice(0, 40),
+      message: `commit number ${n}`, checks: 'passing' as const,
+    })
+    stubFetch(thread('pr', 137, {
+      available: true, comments: [],
+      events: [commit(1), commit(2), commit(3)],
+    }))
+    renderAt('/github/prs/137')
+
+    const group = () => document.querySelector<HTMLElement>('[data-slot="gh-commit-group"]')
+    await waitFor(() => expect(group()).not.toBeNull())
+
+    // Collapsed: one summary row, no individual commit rows.
+    expect(group()?.dataset.open).toBe('false')
+    expect(group()?.textContent).toContain('added 3 commits')
+    expect(group()?.querySelector('button')?.getAttribute('aria-expanded')).toBe('false')
+    expect(events()).toHaveLength(0)
+
+    fireEvent.click(group()!.querySelector('button')!)
+
+    // Expanded: each commit keeps its own message AND its own glyph — nothing is lost to the
+    // collapse, which is why grouping is client-side and the wire stays flat.
+    await waitFor(() => expect(events()).toHaveLength(3))
+    expect(group()?.querySelector('button')?.getAttribute('aria-expanded')).toBe('true')
+    expect(events()[0]?.textContent).toContain('commit number 1')
+    expect(events()[2]?.textContent).toContain('commit number 3')
+    expect(document.querySelectorAll('[data-slot="gh-commit-checks"]')).toHaveLength(3)
+  })
+
+  it('does not group a lone commit into a "1 commit" expander', async () => {
+    stubFetch(thread('pr', 137, { available: true, comments: [], events: [EVT.committed] }))
+    renderAt('/github/prs/137')
+
+    await waitFor(() => expect(events()).toHaveLength(1))
+    expect(document.querySelector('[data-slot="gh-commit-group"]')).toBeNull()
+  })
+
+  it('sends refresh=1 for the OPEN THREAD when the tab is manually refreshed', async () => {
+    // Asserts the PROPERTY (fresh data is actually requested), not the mechanism (a request went
+    // out). The first attempt at this fix only invalidated the query key, which made the client
+    // re-request WITHOUT `refresh=1` — and the route only busts its 60 s commentsCache when that
+    // param is present, so the user got the same stale object back and the test still passed.
+    const threadRequests: string[] = []
+    const sent = stubFetch({
+      'GET /api/github?refresh=1': () => jsonResponse(GITHUB),
+    })
+    const origFetch = globalThis.fetch
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path.startsWith('/api/github/comments/')) threadRequests.push(path)
+      return (origFetch as typeof fetch)(input, init as RequestInit)
+    })
+
+    renderAt('/github/issues/142')
+    await waitFor(() => expect(threadRequests.length).toBe(1))
+    expect(threadRequests[0]).toBe('/api/github/comments/issue/142') // initial load: no refresh
+
+    fireEvent.click(document.querySelector<HTMLElement>('[data-slot="gh-refresh"]')!)
+
+    // The re-request MUST carry refresh=1, or the server hands back its cached thread.
+    await waitFor(() =>
+      expect(threadRequests.some((p) => p === '/api/github/comments/issue/142?refresh=1')).toBe(true),
+    )
+    expect(sent.length).toBeGreaterThan(0)
   })
 
   it('shows a truncation row linking to GitHub when the thread was trimmed', async () => {
@@ -1476,5 +1773,56 @@ describe('templates assigned to a skill auto-apply when a skill is picked', () =
       expect(document.querySelector('[data-slot="gh-skill-chip"][data-skill="g-review"]')).not.toBeNull(),
     )
     expect(screen.getByLabelText('Custom prompt')).toHaveProperty('value', BASE)
+  })
+})
+
+/** The commit-run grouping helper (#525 Phase 2) — pure, so it is tested directly rather than
+ *  only through the rendered thread. Grouping is deliberately client-side: the wire stays a flat
+ *  list where each commit keeps its own message and CI glyph, so nothing is lost to a collapse
+ *  and the heuristic can change without a backward-compatibility conversation. */
+describe('groupCommitRuns', () => {
+  const commit = (id: string, actor: string): ThreadRow => ({
+    row: 'event',
+    event: { id, kind: 'committed', actor, createdAt: '2026-01-01T00:00:00Z', sha: 'a'.repeat(40) },
+  })
+  const label = (id: string): ThreadRow => ({
+    row: 'event',
+    event: { id, kind: 'labeled', actor: 'octocat', createdAt: '2026-01-01T00:00:00Z' },
+  })
+  const comment = (id: number): ThreadRow => ({
+    row: 'comment',
+    comment: { id, author: 'maya', createdAt: '2026-01-01T00:00:00Z', body: 'hi', kind: 'comment', url: 'u' },
+  })
+
+  it('groups consecutive commits by the same author', () => {
+    const out = groupCommitRuns([commit('a', 'Ada'), commit('b', 'Ada'), commit('c', 'Ada')])
+    expect(out).toHaveLength(1)
+    expect(out[0]).toMatchObject({ group: 'commits' })
+    expect((out[0] as { commits: unknown[] }).commits).toHaveLength(3)
+  })
+
+  it('ends a run at an author change', () => {
+    const out = groupCommitRuns([commit('a', 'Ada'), commit('b', 'Ada'), commit('c', 'Grace'), commit('d', 'Grace')])
+    expect(out).toHaveLength(2)
+    expect(out.every((g) => g.group === 'commits')).toBe(true)
+  })
+
+  it('ends a run at any non-commit row', () => {
+    const out = groupCommitRuns([commit('a', 'Ada'), commit('b', 'Ada'), label('l'), commit('c', 'Ada'), commit('d', 'Ada')])
+    expect(out.map((g) => g.group)).toEqual(['commits', 'single', 'commits'])
+  })
+
+  it('does not group a single commit', () => {
+    const out = groupCommitRuns([commit('a', 'Ada')])
+    expect(out).toEqual([{ group: 'single', entry: commit('a', 'Ada') }])
+  })
+
+  it('leaves a comment-only thread completely untouched', () => {
+    const entries = [comment(1), comment(2)]
+    expect(groupCommitRuns(entries)).toEqual(entries.map((entry) => ({ group: 'single', entry })))
+  })
+
+  it('handles an empty list', () => {
+    expect(groupCommitRuns([])).toEqual([])
   })
 })
