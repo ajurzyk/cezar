@@ -11,6 +11,7 @@ import type { AgentSession, SessionOptions } from './agent-runner.js';
 import { prependSystemPrompt } from './agent-runner.js';
 import { buildChildEnv } from './agent-env.js';
 import { AUTO_END_DELAY_MS, DEFAULT_RUN_TIMEOUT_MS } from './claude-cli-runner.js';
+import { parseModelIdentity } from './model-identity.js';
 import {
   createOpencodeUiState,
   mapOpencodeEvent,
@@ -293,8 +294,11 @@ class OpencodeSession implements AgentSession {
     // comes from the SSE `session.idle`, never from the HTTP response below.
     this.emitUi(opencodeTurnStarted);
     const body: Record<string, unknown> = { parts: [{ type: 'text', text }] };
-    const model = parseModel(this.spec.model);
-    if (model) body.model = model;
+    // `spec.model` arrives already normalised to canonical `provider/model`
+    // (the run wiring's fail-loud gate). Split it with the shared parser — the
+    // one every runner uses — into opencode's `{ providerID, modelID }`.
+    const id = parseModelIdentity(this.spec.model);
+    if (id) body.model = { providerID: id.provider, modelID: id.model };
     try {
       const res = await this.http('POST', `/session/${this.sessionId}/message`, body);
       this.absorbUsage(res);
@@ -495,14 +499,6 @@ function textOf(content: ContentBlock[]): string {
     .map((b) => b.text)
     .join('\n')
     .trim();
-}
-
-/** `provider/model` → `{ providerID, modelID }`; undefined for auto/empty. */
-function parseModel(model: string | undefined): { providerID: string; modelID: string } | undefined {
-  if (!model) return undefined;
-  const idx = model.indexOf('/');
-  if (idx <= 0) return undefined; // not in provider/model form — let opencode pick
-  return { providerID: model.slice(0, idx), modelID: model.slice(idx + 1) };
 }
 
 function stringField(obj: Record<string, unknown>, key: string): string | undefined {

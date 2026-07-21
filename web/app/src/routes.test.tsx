@@ -165,6 +165,7 @@ const ROUTE_CASES: Array<[url: string, route: string, title: string]> = [
   // the unscoped `/settings/global/*` area, covered in its own describe below.
   ['/settings', 'settings', 'Settings'],
   ['/settings/agents', 'settings-agents', 'Agents'],
+  ['/settings/agent-config', 'settings-agent-config', 'Agent config'],
   ['/settings/worktrees', 'settings-worktrees', 'Worktrees'],
   ['/settings/bookmarklets', 'settings-bookmarklets', 'Bookmarklets'],
   ['/settings/prompt-templates', 'settings-prompt-templates', 'Prompt templates'],
@@ -186,8 +187,7 @@ describe('scoped route map (/p/:projectId)', () => {
     expect(screen.queryByRole('heading', { name: 'Loading task…' })).toBeNull()
   })
 
-  // Hidden registry sections (mcp/keyboard) are deliberately NOT routed —
-  // their URLs stay honest 404s until the section ships (registry.tsx `hidden`).
+  // MCP lives inside Agent config; keyboard remains hidden and unrouted.
   const unknown = [
     '/nope-404',
     '/tasks',

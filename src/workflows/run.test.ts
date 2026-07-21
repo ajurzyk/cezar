@@ -192,6 +192,31 @@ describe('RunManager.continueRun override', () => {
     expect(after?.model).toBe('gpt-5.1-codex');
   });
 
+  it('starts fresh when Continue switches to a backend that does not own the session', () => {
+    const id = resumableRun();
+    const calls: unknown[][] = [];
+    (manager as unknown as { runContinuation: (...args: unknown[]) => Promise<void> }).runContinuation = async (...args) => {
+      calls.push(args);
+    };
+
+    expect(manager.continueRun(id, { runner: 'codex' })).toEqual({ ok: true });
+    expect(calls[0]?.[2]).toBeUndefined();
+    expect(calls[0]?.[3]).toBe('codex');
+  });
+
+  it('resumes when Continue stays on the backend that owns the session', () => {
+    const id = resumableRun();
+    store.updateStep(id, 's1', { backend: 'claude' });
+    const calls: unknown[][] = [];
+    (manager as unknown as { runContinuation: (...args: unknown[]) => Promise<void> }).runContinuation = async (...args) => {
+      calls.push(args);
+    };
+
+    expect(manager.continueRun(id, { runner: 'claude' })).toEqual({ ok: true });
+    expect(calls[0]?.[2]).toBe('sess-1');
+    expect(calls[0]?.[3]).toBe('claude');
+  });
+
   it('an omitted override preserves the run current backend/model (backward compat)', () => {
     const id = resumableRun();
     expect(manager.continueRun(id, { text: 'keep going' })).toEqual({ ok: true });

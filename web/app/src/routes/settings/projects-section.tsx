@@ -111,11 +111,15 @@ function ProjectsPane({
 /** The `projectsDir` field — edited locally, saved explicitly, and validated by the SERVER. */
 function CheckoutRootField({ projectsDir }: { projectsDir: string }) {
   const queryClient = useQueryClient()
-  // Same shape as the Resources pane's saver: the merged config the PUT answers with lands
-  // straight in the workspace-config query, so nothing refetches on a success.
+  // The merged config the PUT answers with lands straight in the workspace-config query. The
+  // projects response also carries projectsDir for the clone dialog, so invalidate that
+  // authoritative answer too; otherwise reopening Add project keeps the old root until reload.
   const save = useMutation({
     mutationFn: (next: string) => putWorkspaceConfig({ projectsDir: next }),
-    onSuccess: (result) => queryClient.setQueryData(workspaceQueryKeys.config, result),
+    onSuccess: (result) => {
+      queryClient.setQueryData(workspaceQueryKeys.config, result)
+      void queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.projects })
+    },
   })
   const [value, setValue] = useState(projectsDir)
   const trimmed = value.trim()

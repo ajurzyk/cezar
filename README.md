@@ -21,7 +21,7 @@ your phone, working your backlog while you're away.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](#license)
 ![Node 20+](https://img.shields.io/badge/Node-20%2B-339933)
-![TypeScript 5.x](https://img.shields.io/badge/TypeScript-5.x-3178c6)
+![TypeScript 7.x](https://img.shields.io/badge/TypeScript-7.x-3178c6)
 ![Zero config](https://img.shields.io/badge/config-zero-success)
 ![No database](https://img.shields.io/badge/database-none-success)
 
@@ -450,7 +450,7 @@ cezar is not married to one vendor. Every agent step runs through a single
 | Backend | CLI | How cezar drives it | Tool access |
 |---|---|---|---|
 | **Claude Code** (default) | [`claude`](https://github.com/anthropics/claude-code) | Headless `stream-json` mode. | Per-tool `--allowedTools` (`bashAllowlist` scopes `Bash`); `dontAsk` denies unapproved tools without prompting (`CEZ_APPROVAL_GATE=1` → `acceptEdits` + approval UI). |
-| **Codex** | [`codex`](https://github.com/openai/codex) | `codex app-server` — JSON-RPC over stdio, the same transport the Codex IDE extensions use. | Ignores `allowedTools`; runs its own `workspace-write` sandbox with `approvalPolicy: never` and network access on. |
+| **Codex** | [`codex`](https://github.com/openai/codex) | `codex app-server` — JSON-RPC over stdio, the same transport the Codex IDE extensions use. | Ignores `allowedTools`; the default auto mode uses `danger-full-access` with `approvalPolicy: never` (`CEZ_CODEX_NETWORK=0` opts into the network-blocked `workspace-write` sandbox). |
 | **OpenCode** | [`opencode`](https://opencode.ai) | `opencode serve` — a local HTTP server with an SSE event stream. | Ignores `allowedTools` entirely; every permission is auto-approved. |
 
 On startup cezar probes which CLIs are installed and the cockpit only offers
@@ -555,6 +555,19 @@ root — live once in `~/.cezar/config.json`, alongside the
 **Settings → Resources** and **Settings → Projects**. A `maxParallel` left over
 in a repo's `.ai/cezar/config.json` is imported into the workspace file the
 first time cezar boots there, and ignored afterwards.
+
+### Editing the agents' own config (Settings → Agent config)
+
+cezar picks *which* agent runs; **Settings → Agent config** lets you edit *how* it
+behaves — the raw config files Claude, Codex and OpenCode read for settings,
+MCP, and memory. In the multi-project cockpit the section is project-scoped:
+repo-relative files resolve from the selected project's root, while user-scope
+files continue to resolve from the agent's home.
+
+Each file keeps its native format and vendor-documented precedence. Tracked
+files reach task worktrees after commit; Claude's gitignored personal layer is
+seeded into each run's worktree. Editing is a local-machine capability, so a
+hosted cockpit (`CEZ_REMOTE=1`) is read-only and never serves home-file contents.
 
 ---
 

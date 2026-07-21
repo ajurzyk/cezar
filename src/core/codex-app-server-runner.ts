@@ -43,8 +43,11 @@ export interface CodexRunnerOptions {
  * `thread/resume` to reopen a stored thread for "Continue".
  *
  * Auth = the host's logged-in ChatGPT/Codex session (or CODEX_API_KEY). The
- * agent runs autonomously via `sandbox: workspace-write` + `approvalPolicy:
- * never` — Codex has no per-tool allowlist, so `spec.allowedTools` is ignored.
+ * agent runs autonomously via `sandbox: danger-full-access` +
+ * `approvalPolicy: never`, matching cezar's default auto permission mode
+ * (spec 2026-07-17-permission-modes). Codex has no per-tool allowlist, so
+ * `spec.allowedTools` is ignored. `CEZ_CODEX_NETWORK=0` retains the previous
+ * network-blocked `workspace-write` sandbox as an explicit restriction.
  */
 export class CodexAppServerRunner implements AgentRunner {
   readonly backend = 'codex' as const;
@@ -98,7 +101,7 @@ class CodexSession implements AgentSession {
    *  same item doesn't re-emit the full text on top of the deltas. */
   private readonly streamedItems = new Set<string>();
   private tokensUsed = 0;
-  private ready: Promise<void>;
+  private ready!: Promise<void>;
   private autoEndTimer: NodeJS.Timeout | undefined;
   private eofTermTimer: NodeJS.Timeout | undefined;
   private eofKillTimer: NodeJS.Timeout | undefined;
@@ -117,16 +120,7 @@ class CodexSession implements AgentSession {
     private readonly opts: SessionOptions,
   ) {
     try {
-      // Give the workspace-write sandbox network access so agent tools that need the network
-      // (gh, npm, git over https) work — otherwise `gh` fails with "error connecting to
-      // api.github.com" under codex while the same tool works under claude (#codex-network).
-      // `-c` is codex's documented config override (dotted key, TOML value); opt out with
-      // CEZ_CODEX_NETWORK=0.
-      const args = ['app-server'];
-      if (process.env.CEZ_CODEX_NETWORK !== '0') {
-        args.push('-c', 'sandbox_workspace_write.network_access=true');
-      }
-      this.child = nodeSpawn(bin, args, {
+      this.child = nodeSpawn(bin, ['app-server'], {
         cwd: spec.cwd,
         env: buildChildEnv({ backend: 'codex', extraEnv: spec.env }),
       });
@@ -163,20 +157,33 @@ class CodexSession implements AgentSession {
     this.ready = this.bootstrap();
 
     this.result = (async (): Promise<AgentRunResult> => {
+      let sessionError: unknown;
       try {
-        for await (const line of readNdjson(this.child.stdout)) {
-          if (this.timedOut) break;
-          let msg: JsonRpcMessage;
-          try {
-            msg = JSON.parse(line) as JsonRpcMessage;
-          } catch {
-            continue; // not JSON-RPC — skip
+        const readLoop = async () => {
+          for await (const line of readNdjson(this.child.stdout)) {
+            if (this.timedOut) break;
+            let msg: JsonRpcMessage;
+            try {
+              msg = JSON.parse(line) as JsonRpcMessage;
+            } catch {
+              continue; // not JSON-RPC — skip
+            }
+            this.emitUi((state) => mapCodexNotification(msg, state));
+            this.dispatch(msg);
           }
-          this.emitUi((state) => mapCodexNotification(msg, state));
-          this.dispatch(msg);
-        }
+        };
+        // Start consuming stdout before awaiting bootstrap: JSON-RPC responses
+        // read here settle the initialize/thread/turn requests. Owning both
+        // promises makes every bootstrap rejection part of session.result.
+        await Promise.all([this.ready, readLoop()]);
       } catch (err) {
-        if (!this.timedOut) throw err;
+        if (!this.timedOut) {
+          sessionError = err;
+          // Bootstrap failed before a usable turn exists. Closing stdin lets
+          // app-server exit normally; end() also owns the TERM/KILL watchdog
+          // if a broken child ignores EOF.
+          this.end();
+        }
       } finally {
         if (deadline) clearTimeout(deadline);
         if (killTimer) clearTimeout(killTimer);
@@ -191,6 +198,7 @@ class CodexSession implements AgentSession {
       this.pending.clear();
 
       if (this.spawnFailed) throw this.spawnFailed;
+      if (sessionError) throw sessionError;
 
       const text = this.textChunks.join('\n').trim();
       const base: AgentRunResult = {
@@ -287,7 +295,10 @@ class CodexSession implements AgentSession {
     const overrides = {
       model: this.spec.model,
       cwd: this.spec.cwd,
-      sandbox: 'workspace-write',
+      // Full access is the `auto` preset shared by all backends. Besides avoiding prompts, this
+      // keeps container installs working when bubblewrap cannot create a UID map (#563).
+      // CEZ_CODEX_NETWORK=0 remains the backwards-compatible explicit sandbox opt-out.
+      sandbox: process.env.CEZ_CODEX_NETWORK === '0' ? 'workspace-write' : 'danger-full-access',
       approvalPolicy: 'never',
     };
     if (this.spec.resume && this.spec.sessionId) {

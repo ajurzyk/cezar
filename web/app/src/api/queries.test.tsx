@@ -6,7 +6,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from './client'
 import { createQueryClient } from './query-client'
 import { setApiScope } from './project-scope'
-import { queryKeys, useHealth, usePatchRun, useRun, useRunChanges, useRuns } from './queries'
+import {
+  queryKeys,
+  useHealth,
+  usePatchRun,
+  usePutAgentConfigFile,
+  useRun,
+  useRunChanges,
+  useRuns,
+  useSkills,
+} from './queries'
 
 const fetchMock = vi.fn<typeof fetch>()
 
@@ -74,6 +83,15 @@ describe('queryKeys', () => {
       expect(queryKeys.runs.list()).toEqual(['proj-a', 'runs', 'list'])
       expect(queryKeys.health).toEqual(['proj-a', 'health'])
       expect(queryKeys.todos).toEqual(['proj-a', 'todos'])
+      expect(queryKeys.skills).toEqual(['proj-a', 'skills'])
+      expect(queryKeys.skillsReady).toEqual(['proj-a', 'skills', 'ready'])
+      expect(queryKeys.agentConfig).toEqual(['proj-a', 'agent-config'])
+      expect(queryKeys.agentConfigFile('claude.project.settings')).toEqual([
+        'proj-a',
+        'agent-config',
+        'file',
+        'claude.project.settings',
+      ])
       expect(queryKeys.github({ limit: 5 })).toEqual(['proj-a', 'github', 5])
       const scoped = queryKeys.runs.detail('a')
       setApiScope('proj-b')
@@ -82,6 +100,39 @@ describe('queryKeys', () => {
     } finally {
       setApiScope(null)
     }
+  })
+})
+
+describe('useSkills', () => {
+  it('renders the fast catalog, then converges when the cold team cache is ready', async () => {
+    let resolveReady!: (response: Response) => void
+    fetchMock.mockImplementation(async (input) => {
+      if (String(input) === '/api/skills') {
+        return json([{ name: 'local', source: 'ai', body: '', path: '/repo/local.md' }])
+      }
+      if (String(input) === '/api/skills?wait=1') {
+        return new Promise<Response>((resolve) => {
+          resolveReady = resolve
+        })
+      }
+      return new Response(null, { status: 404 })
+    })
+
+    const { result } = renderHook(() => useSkills(), { wrapper: wrapper() })
+    await waitFor(() => expect(result.current.data?.map((skill) => skill.name)).toEqual(['local']))
+    await waitFor(() => expect(resolveReady).toBeTypeOf('function'))
+
+    resolveReady(
+      json([
+        { name: 'local', source: 'ai', body: '', path: '/repo/local.md' },
+        { name: 'om-fix', source: 'team', body: '', path: 'skills/om-fix/SKILL.md' },
+      ]),
+    )
+
+    await waitFor(() =>
+      expect(result.current.data?.map((skill) => skill.name)).toEqual(['local', 'om-fix']),
+    )
+    expect(fetchMock.mock.calls.map(([path]) => path)).toEqual(['/api/skills', '/api/skills?wait=1'])
   })
 })
 
@@ -130,6 +181,42 @@ describe('useHealth', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('usePutAgentConfigFile', () => {
+  it('updates the project cache where the save started when the active project changes in flight', async () => {
+    let resolveFetch!: (response: Response) => void
+    fetchMock.mockImplementation(
+      () => new Promise<Response>((resolve) => {
+        resolveFetch = resolve
+      }),
+    )
+    const client = createQueryClient()
+    const scopedWrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    )
+    const file = {
+      id: 'claude.project.settings',
+      path: '/repo-a/.claude/settings.json',
+      exists: true,
+      content: '{"project":"a"}',
+      version: 'next',
+    }
+
+    setApiScope('proj-a')
+    const { result } = renderHook(() => usePutAgentConfigFile(file.id), { wrapper: scopedWrapper })
+    act(() => result.current.mutate({ content: file.content, version: 'previous' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/p/proj-a/agent-config/claude.project.settings')
+
+    setApiScope('proj-b')
+    resolveFetch(json(file))
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(client.getQueryData(['proj-a', 'agent-config', 'file', file.id])).toEqual(file)
+    expect(client.getQueryData(['proj-b', 'agent-config', 'file', file.id])).toBeUndefined()
+    setApiScope(null)
   })
 })
 

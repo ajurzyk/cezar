@@ -1,8 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useEffect } from 'react'
 
 import {
   browseFs,
   checkoutProject,
+  getAgentConfig,
+  getAgentConfigFile,
   getConfig,
   getGithub,
   getGithubComments,
@@ -24,6 +27,7 @@ import {
   getRunHandoff,
   getRuns,
   getSkills,
+  getSkillsWhenReady,
   getTodos,
   getUiState,
   getWorkflows,
@@ -34,9 +38,10 @@ import {
   registerProject,
   removeProject,
   sendMessage,
+  putAgentConfigFile,
 } from './client'
 import { queryScope } from './project-scope'
-import type { CheckoutProjectInput, MessageInput, PatchRunInput } from './types'
+import type { CheckoutProjectInput, MessageInput, PatchRunInput, SetAgentConfigInput } from './types'
 
 /**
  * Query keys, in one place and exported, because they are a contract rather than an
@@ -83,6 +88,9 @@ export const queryKeys = {
   get skills() {
     return [queryScope(), 'skills'] as const
   },
+  get skillsReady() {
+    return [queryScope(), 'skills', 'ready'] as const
+  },
   get launchKey() {
     return [queryScope(), 'launch-key'] as const
   },
@@ -102,6 +110,10 @@ export const queryKeys = {
   get config() {
     return [queryScope(), 'config'] as const
   },
+  get agentConfig() {
+    return [queryScope(), 'agent-config'] as const
+  },
+  agentConfigFile: (id: string) => [queryScope(), 'agent-config', 'file', id] as const,
   /** The worktree management panel (`GET /api/worktrees`, #483). */
   get worktrees() {
     return [queryScope(), 'worktrees'] as const
@@ -395,11 +407,29 @@ export function useWorkflows() {
  *  composer's `/` autocomplete fetches on first trigger, never on every thread visit. (The
  *  palette gets the same laziness structurally: its content mounts only while open.) */
 export function useSkills(enabled = true) {
-  return useQuery({
-    queryKey: queryKeys.skills,
+  const queryClient = useQueryClient()
+  const skillsKey = queryKeys.skills
+  const skillsScope = skillsKey[0]
+  const skills = useQuery({
+    queryKey: skillsKey,
     queryFn: ({ signal }) => getSkills({ signal }),
     enabled,
   })
+  const ready = useQuery({
+    queryKey: queryKeys.skillsReady,
+    queryFn: ({ signal }) => getSkillsWhenReady({ signal }),
+    enabled: enabled && skills.isSuccess,
+    staleTime: Infinity,
+    retry: false,
+  })
+
+  useEffect(() => {
+    // Treat the follow-up as best-effort. The fast catalog remains authoritative
+    // if an older server/proxy answers this additive request unexpectedly.
+    if (Array.isArray(ready.data)) queryClient.setQueryData([skillsScope, 'skills'], ready.data)
+  }, [queryClient, ready.data, skillsScope])
+
+  return skills
 }
 
 /** The bookmarklet auto-start secret (spec 011). Mounted ONLY by the Settings → Skills
@@ -464,6 +494,38 @@ export function useUiState() {
   return useQuery({
     queryKey: queryKeys.uiState,
     queryFn: ({ signal }) => getUiState({ signal }),
+  })
+}
+
+/** The selected project's agent-owned config files and precedence metadata. */
+export function useAgentConfig() {
+  return useQuery({
+    queryKey: queryKeys.agentConfig,
+    queryFn: ({ signal }) => getAgentConfig({ signal }),
+  })
+}
+
+export function useAgentConfigFile(id: string | null) {
+  return useQuery({
+    queryKey: queryKeys.agentConfigFile(id ?? ''),
+    queryFn: ({ signal }) => getAgentConfigFile(id as string, { signal }),
+    enabled: id !== null,
+  })
+}
+
+export function usePutAgentConfigFile(id: string) {
+  const queryClient = useQueryClient()
+  // Capture the scope at hook render time. A save may finish after the user has
+  // switched projects; recomputing these getters in onSuccess would otherwise
+  // write the previous project's response into the newly active cache.
+  const listingKey = queryKeys.agentConfig
+  const fileKey = queryKeys.agentConfigFile(id)
+  return useMutation({
+    mutationFn: (body: SetAgentConfigInput) => putAgentConfigFile(id, body),
+    onSuccess: (result) => {
+      queryClient.setQueryData(fileKey, result)
+      void queryClient.invalidateQueries({ queryKey: listingKey })
+    },
   })
 }
 

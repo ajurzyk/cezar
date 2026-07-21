@@ -2,17 +2,18 @@ import {
   BellIcon,
   BookmarkIcon,
   BotIcon,
+  FileCogIcon,
   FolderGit2Icon,
   FoldersIcon,
   GaugeIcon,
   KeyboardIcon,
   NotebookPenIcon,
   PaletteIcon,
-  PlugIcon,
 } from 'lucide-react'
 import type { ComponentType, SVGProps } from 'react'
 
 import { CenteredState } from '@/components/centered-state'
+import { AgentConfigSection } from './agent-config-section'
 import { AgentsSection } from './agents-section'
 import { AppearanceSection } from './appearance'
 import { BookmarkletsSection } from './bookmarklets-section'
@@ -34,19 +35,18 @@ import { WorktreesSection } from './worktrees-section'
  * bookmarklets, prompt templates) or the person/machine (appearance, notifications, host
  * resources, the project registry)?
  *
- * `hidden` sections are declared but not routed and not listed: they exist so the plan is
- * visible in code (`mcp`, `keyboard` — later phases; `notifications` unhid in Step 1.7)
- * and so unhiding is a one-word diff.
+ * `hidden` sections are declared but not routed and not listed: keyboard remains a later
+ * phase; MCP now lives inside Agent config as a per-agent subsection.
  */
 
 export type SettingsSectionId =
   | 'bookmarklets'
   | 'appearance'
   | 'agents'
+  | 'agent-config'
   | 'resources'
   | 'worktrees'
   | 'projects'
-  | 'mcp'
   | 'notifications'
   | 'prompt-templates'
   | 'keyboard'
@@ -93,6 +93,14 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
     scope: 'project',
   },
   {
+    id: 'agent-config',
+    title: 'Agent config',
+    description: 'Edit the coding agents’ own config files, per scope.',
+    icon: FileCogIcon,
+    component: AgentConfigSection,
+    scope: 'project',
+  },
+  {
     id: 'worktrees',
     title: 'Worktrees',
     description: 'How many finished task worktrees this project keeps on disk.',
@@ -116,16 +124,6 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
     component: PromptTemplatesSection,
     scope: 'project',
   },
-  {
-    id: 'mcp',
-    title: 'MCP',
-    description: 'Model Context Protocol servers.',
-    icon: PlugIcon,
-    component: comingSoon('MCP', PlugIcon),
-    scope: 'project',
-    hidden: true,
-  },
-
   // ---- global scope (`/settings/global/…`) — the user and the machine, in mockup order -----
   {
     id: 'appearance',

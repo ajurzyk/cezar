@@ -26,7 +26,7 @@ import {
 } from '../workflows/types.js';
 import { planChain, slugify } from '../planner.js';
 import { discoverSkills } from '../skills.js';
-import { refreshTeamSkills } from '../skills-remote.js';
+import { refreshTeamSkills, waitForTeamSkills } from '../skills-remote.js';
 import { appendHandoffHeartbeat, handoffProgressExcerpt, readHandoff } from '../handoff.js';
 import { markStarted, onTodosChanged, readTodos, removeTodo, todoTaskText, type TodoItem } from '../todos.js';
 import type { RunEvent, RunRecord, RunStatus, RunStore } from '../runs/store.js';
@@ -47,6 +47,9 @@ import {
   readWorktreePath,
 } from './git-changes.js';
 import { loadConfig, resolveWorktreeRetention, type CezConfig } from '../config.js';
+import { findConfigFile } from '../agent-config/catalog.js';
+import { readConfigFile, writeConfigFile } from '../agent-config/files.js';
+import { listAgentConfig } from '../agent-config/service.js';
 import {
   PROJECT_ID_RE,
   defaultWorkspaceConfig,
@@ -1269,7 +1272,14 @@ export function createApp(deps: ServerDeps): Hono {
   // `/new?auto=1` is honored only with it (spec 011). Same-origin only.
   api.get('/launch-key', (c) => c.json({ key: c.get('project').launchKey }));
 
-  api.get('/skills', async (c) => c.json(await discoverSkills(c.get('project').root)));
+  api.get('/skills', async (c) => {
+    const repoRoot = c.get('project').root;
+    // The default read stays fast and starts the team load in the background.
+    // The cockpit follows it with `wait=1`, off the render path, so a cold
+    // cache converges without polling or a manual reload (spec 005 / #555).
+    if (c.req.query('wait') === '1') await waitForTeamSkills(repoRoot);
+    return c.json(await discoverSkills(repoRoot));
+  });
 
   // ---- GUI prefs (ui-state.json) --------------------------------------------
   // The read path is shared with the CLI (`src/ui-state.ts`) so `cezar serve` can honour a
@@ -2542,6 +2552,58 @@ export function createApp(deps: ServerDeps): Hono {
     }
     // Pre-R6 answer shape ({baseBranch, defaultRunner}) + additive R6 fields.
     return c.json(configAnswer(await loadConfig(repoRoot)));
+  });
+
+  // Agent config is project-scoped (spec #404, adapted to the multi-project
+  // route seam from #521): handlers resolve the selected repo through the
+  // same ProjectContext as every other mirrored route.
+  api.get('/agent-config', async (c) => {
+    const editable = capabilities().localHandoff;
+    return c.json(await listAgentConfig(c.get('project').root, process.env, editable));
+  });
+
+  api.get('/agent-config/:id', async (c) => {
+    const id = c.req.param('id');
+    const def = findConfigFile(id);
+    if (!def) return c.json({ error: 'unknown config file' }, 404);
+    if (def.tracked === 'outside-repo' && !capabilities().localHandoff) {
+      return c.json(
+        { error: 'this file lives in your home directory and is not served in hosted mode (CEZ_REMOTE)' },
+        409,
+      );
+    }
+    const read = await readConfigFile(id, c.get('project').root);
+    if (read === null) return c.json({ error: 'unknown config file' }, 404);
+    if ('error' in read) return c.json({ error: read.error }, 500);
+    return c.json(read);
+  });
+
+  const setAgentConfigSchema = z.object({
+    content: z.string().max(2_000_000),
+    version: z.string().nullable(),
+  });
+  api.put('/agent-config/:id', async (c) => {
+    // Config files may define hooks and MCP commands, so writes remain a
+    // local-machine capability and are re-gated on every request.
+    if (!capabilities().localHandoff) {
+      return c.json(
+        { error: 'editing agent config is disabled in hosted mode (CEZ_REMOTE) — edit it from the machine that owns the checkout' },
+        409,
+      );
+    }
+    const parsed = setAgentConfigSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      return c.json({ error: parsed.error.issues.map((issue) => issue.message).join('; ') }, 400);
+    }
+    const out = await writeConfigFile(
+      c.req.param('id'),
+      parsed.data.content,
+      parsed.data.version,
+      c.get('project').root,
+    );
+    if (out === null) return c.json({ error: 'unknown config file' }, 404);
+    if (!out.ok) return c.json({ error: out.error }, out.status);
+    return c.json(out.read);
   });
 
   api.get('/repo/diff', async (c) => {

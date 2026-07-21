@@ -1033,9 +1033,10 @@ describe('the hand-to-agent pickers (#385)', () => {
 
     // Server order was global-first; the menu reorders project skills first, emphasized.
     const options = [...document.querySelectorAll<HTMLElement>('[data-slot="gh-skill-option"]')]
-    expect(options.map((option) => option.dataset.skill)).toEqual(['om-fix', 'g-review', 'team-x'])
+    expect(options.map((option) => option.dataset.skill)).toEqual(['om-fix', 'team-x', 'g-review'])
     expect(options[0]?.querySelector('.font-semibold')).not.toBeNull()
-    expect(options[1]?.querySelector('.font-semibold')).toBeNull()
+    expect(options[1]?.querySelector('.font-semibold')).not.toBeNull()
+    expect(options[2]?.querySelector('.font-semibold')).toBeNull()
 
     // Multi-select: toggling keeps the menu open; the chip row mirrors the selection.
     fireEvent.click(options[0]!)
@@ -1229,7 +1230,7 @@ describe('the skills dropdown frequency sort (#408 item 1, re-tiered by #519)', 
       expect(document.querySelectorAll('[data-slot="gh-skill-option"]')).toHaveLength(3),
     )
     const options = [...document.querySelectorAll<HTMLElement>('[data-slot="gh-skill-option"]')]
-    expect(options.map((option) => option.dataset.skill)).toEqual(['om-fix', 'g-review', 'team-x'])
+    expect(options.map((option) => option.dataset.skill)).toEqual(['om-fix', 'team-x', 'g-review'])
   })
 
   it('a successful hand-off run bumps skillUsage for every selected skill', async () => {
