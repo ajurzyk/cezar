@@ -47,7 +47,11 @@ Related implementation: PR #569.
 
 ## Progress
 
+PR: #572
+
 > Convention: `- [ ]` pending, `- [x]` done. Append ` — <commit sha>` when a step lands. Do not rename step titles.
+
+Review fix-forward: merged the latest `main` and resolved the browse-root conflicts — 36656d1.
 
 ### Phase 1: Workspace root contracts
 
