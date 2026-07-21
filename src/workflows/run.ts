@@ -219,7 +219,9 @@ const VARIANT_HINTS: Record<string, string | undefined> = {
  * cancel. Runs queue behind `maxParallel` slots and each run executes in its
  * own git worktree on a `cez/<id8>` branch (spec 006), autosave-committed at
  * turn end and before a draft PR — plus every 90 s when opted in via
- * CEZ_AUTOSAVE=1 (#471). The user's working tree is never touched.
+ * CEZ_AUTOSAVE=1 (#471). Each autosave records its trigger in the commit
+ * subject, so the always-on flushes are not mistaken for the opt-in timer.
+ * The user's working tree is never touched.
  */
 export class RunManager {
   private readonly active = new Map<string, ActiveRun>();
