@@ -43,8 +43,11 @@ export interface CodexRunnerOptions {
  * `thread/resume` to reopen a stored thread for "Continue".
  *
  * Auth = the host's logged-in ChatGPT/Codex session (or CODEX_API_KEY). The
- * agent runs autonomously via `sandbox: workspace-write` + `approvalPolicy:
- * never` — Codex has no per-tool allowlist, so `spec.allowedTools` is ignored.
+ * agent runs autonomously via `sandbox: danger-full-access` +
+ * `approvalPolicy: never`, matching cezar's default auto permission mode
+ * (spec 2026-07-17-permission-modes). Codex has no per-tool allowlist, so
+ * `spec.allowedTools` is ignored. `CEZ_CODEX_NETWORK=0` retains the previous
+ * network-blocked `workspace-write` sandbox as an explicit restriction.
  */
 export class CodexAppServerRunner implements AgentRunner {
   readonly backend = 'codex' as const;
@@ -117,16 +120,7 @@ class CodexSession implements AgentSession {
     private readonly opts: SessionOptions,
   ) {
     try {
-      // Give the workspace-write sandbox network access so agent tools that need the network
-      // (gh, npm, git over https) work — otherwise `gh` fails with "error connecting to
-      // api.github.com" under codex while the same tool works under claude (#codex-network).
-      // `-c` is codex's documented config override (dotted key, TOML value); opt out with
-      // CEZ_CODEX_NETWORK=0.
-      const args = ['app-server'];
-      if (process.env.CEZ_CODEX_NETWORK !== '0') {
-        args.push('-c', 'sandbox_workspace_write.network_access=true');
-      }
-      this.child = nodeSpawn(bin, args, {
+      this.child = nodeSpawn(bin, ['app-server'], {
         cwd: spec.cwd,
         env: buildChildEnv({ backend: 'codex', extraEnv: spec.env }),
       });
@@ -301,7 +295,10 @@ class CodexSession implements AgentSession {
     const overrides = {
       model: this.spec.model,
       cwd: this.spec.cwd,
-      sandbox: 'workspace-write',
+      // Full access is the `auto` preset shared by all backends. Besides avoiding prompts, this
+      // keeps container installs working when bubblewrap cannot create a UID map (#563).
+      // CEZ_CODEX_NETWORK=0 remains the backwards-compatible explicit sandbox opt-out.
+      sandbox: process.env.CEZ_CODEX_NETWORK === '0' ? 'workspace-write' : 'danger-full-access',
       approvalPolicy: 'never',
     };
     if (this.spec.resume && this.spec.sessionId) {

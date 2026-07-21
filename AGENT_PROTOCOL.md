@@ -96,7 +96,10 @@ Notable fields (full doc-comments in the source):
 - `allowedTools?` / `bashAllowlist?` / `additionalDirectories?` — tool access.
   **Caveat (#430):** the zero-config default (`DEFAULT_ALLOWED_TOOLS`) includes
   unrestricted `Bash`, and Codex/OpenCode do not honor `allowedTools` at all.
-  Treat the default as full shell access in `cwd`, not a sandbox.
+  Treat the default `auto` permission mode as full shell access, not a
+  sandbox: Codex uses `danger-full-access` with `approvalPolicy: never`, and
+  OpenCode auto-approves every permission. Configurable restrictive modes are
+  specified by `2026-07-17-permission-modes` (#475).
 - `sessionId?` / `resume?` — stable session id for interactive takeover and for
   `--resume` ("Continue" after a run ends).
 
