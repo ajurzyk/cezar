@@ -166,9 +166,28 @@ function mapTurnEnd(
 ): CodexUiMapping {
   let turnSeq = state.turnSeq;
   const turnId = turnIdOf(params) ?? state.currentTurnId ?? `turn_${++turnSeq}`;
+  // A review span still open when the turn ends never gets its `exitedReviewMode` — an
+  // interrupted, cancelled or failed turn simply stops. Close it here, or the item stays
+  // `running` forever and the Agents dock reads a finished run as a live fan-out (#474).
+  // The status follows the turn: a turn that failed did not complete its review.
+  const events: UiEvent[] = [];
+  if (state.reviewItemId !== null) {
+    events.push({
+      type: 'item.completed',
+      item: {
+        kind: 'tool',
+        id: state.reviewItemId,
+        name: 'enteredReviewMode',
+        toolKind: 'task',
+        title: 'Review',
+        status: failed ? 'failed' : 'completed',
+      },
+    });
+  }
+  events.push({ type: 'turn.completed', turnId, stopReason: turnStopReason(params, failed) });
   return {
-    events: [{ type: 'turn.completed', turnId, stopReason: turnStopReason(params, failed) }],
-    state: { ...state, turnSeq, currentTurnId: null },
+    events,
+    state: { ...state, turnSeq, currentTurnId: null, reviewItemId: null },
   };
 }
 
@@ -339,10 +358,22 @@ function mapReviewMode(
 
   if (type === 'enteredReviewMode') {
     const status = toolStatus(raw, eventType);
-    const item = reviewItem(id, type, status);
-    // A wire-completed entered frame closes the span immediately — nothing left to pair.
-    const reviewItemId = eventType === 'item.completed' ? null : id;
-    return { events: [{ type: eventType, item }], state: { ...state, reviewItemId } };
+    const events: UiEvent[] = [];
+    // A second entered frame with no intervening exit displaces the open span. Settle the
+    // displaced item rather than leaking a permanently `running` row — the same rule the
+    // opencode mapper's subtask slot follows.
+    if (state.reviewItemId !== null && state.reviewItemId !== id) {
+      events.push({
+        type: 'item.completed',
+        item: reviewItem(state.reviewItemId, 'enteredReviewMode', 'completed'),
+      });
+    }
+    events.push({ type: eventType, item: reviewItem(id, type, status) });
+    // Latch on the RESOLVED status, not the event phase: an entered frame that already
+    // carries a terminal wire status closes the span whichever lifecycle phase it arrived in,
+    // and one that is still in progress stays open even on an `item/completed` frame.
+    const settled = status !== 'running' && status !== 'pending';
+    return { events, state: { ...state, reviewItemId: settled ? null : id } };
   }
 
   const openId = state.reviewItemId;

@@ -80,11 +80,17 @@ function SubagentStream({ entries, scope }: { entries: ThreadEntry[]; scope: str
   const ref = useRef<HTMLDivElement>(null)
   const stuck = useRef(true)
 
+  // Keyed on CONTENT, not entry count: `item.delta` grows the existing last entry in place,
+  // so a length-only dep would never fire during the streaming this affordance exists for.
+  const signature = entries.reduce(
+    (sum, entry) => sum + (entry.kind === 'message' || entry.kind === 'reasoning' ? entry.text.length : 1),
+    entries.length,
+  )
   useEffect(() => {
     const node = ref.current
     if (node === null || !stuck.current) return
     node.scrollTop = node.scrollHeight
-  }, [entries.length])
+  }, [signature])
 
   if (entries.length === 0) {
     return (

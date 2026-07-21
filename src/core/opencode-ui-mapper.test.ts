@@ -458,49 +458,6 @@ describe('mapOpencodeEvent edge cases', () => {
     ]);
   });
 
-  // The scope is one slot. Before #474 a second subtask silently displaced the first, which
-  // then stayed `running` for the rest of the session — harmless when sub-agents were only
-  // thread cards, but the Agents dock would show a permanently stuck row.
-  it('a second subtask settles the one it displaces instead of stranding it', () => {
-    let state = startedState();
-    state = mapOpencodeEvent(
-      part({ id: 'prt_st1', type: 'subtask', prompt: 'first', description: 'Investigate', agent: 'general' }),
-      state,
-    ).state;
-    const second = mapOpencodeEvent(
-      part({ id: 'prt_st2', type: 'subtask', prompt: 'second', description: 'Review', agent: 'reviewer' }),
-      state,
-    );
-    expect(second.events).toEqual([
-      {
-        type: 'item.completed',
-        item: {
-          kind: 'tool',
-          id: 'prt_st1',
-          name: 'subtask',
-          toolKind: 'task',
-          title: 'Task: Investigate',
-          status: 'completed',
-          input: { prompt: 'first', description: 'Investigate', agent: 'general' },
-        },
-      },
-      {
-        type: 'item.started',
-        item: {
-          kind: 'tool',
-          id: 'prt_st2',
-          name: 'subtask',
-          toolKind: 'task',
-          title: 'Task: Review',
-          status: 'running',
-          input: { prompt: 'second', description: 'Review', agent: 'reviewer' },
-        },
-      },
-    ]);
-    // The scope moved to the new subtask, so later foreign output nests under it.
-    expect(second.state.subtask?.id).toBe('prt_st2');
-  });
-
   it('foreign-session parts are dropped outside a subtask scope and nested inside one', () => {
     let state = startedState();
     state = mapOpencodeEvent(

@@ -19,7 +19,8 @@
 | 2 | 2.1 | SubagentSheet drill-down + dock row buttons | done | a094ea4 |
 | 2 | 2.2 | Finished-run parity from replayed state | done | 87ac53a |
 | 3 | 3.1 | e2e smoke, opencode mapper hardening, mockup sync | done | 06436c3 |
-| 3 | 3.2-review-fix | Sheet outlives the dock's Q6 visibility rule | done | pending |
+| 3 | 3.2-review-fix | Sheet outlives the dock's Q6 visibility rule | done | bd35f32 |
+| 3 | 3.3-review-fix | Codex latch leaks; anchor drops live agents; plan children; follow-tail | done | pending |
 
 ## Goal
 
@@ -62,9 +63,13 @@ Explicitly out of scope, per the spec's Research section and Q4/Q5:
   must gather children across the anchor turn *and every later turn*, or counts/activity go stale.
 - **Codex fixture churn.** Step 1.2 changes a golden fixture expectation; the unpaired-exit
   fallback must keep working so old codex runs still map.
-- **Known limitation (not fixed here beyond optional hardening):** the opencode mapper holds a
-  single active-subtask slot, so overlapping subtasks can leave the first stuck `running`. The
-  dock makes this pre-existing limitation visible; Step 3.1 optionally hardens it.
+- **Known limitation (deliberately NOT "fixed" here):** the opencode mapper holds a single
+  active-subtask slot, so overlapping subtasks can leave the first stuck `running`. Step 3.1
+  originally settled the displaced subtask as `completed`; adversarial review showed that
+  fabricates a success that never happened while leaving the real defect (foreign parts are
+  scoped to whatever occupies the slot, so A's output is misattributed to B) untouched. The
+  change was REVERTED — a visibly stuck row is honest; a false `completed` is not. The real
+  fix is a session-id-keyed scope map, which is out of scope for this PR.
 - **Post-reload activity lines.** `item.delta` frames are live-only and never persisted, so the
   activity line after a reload falls back to the last persisted child snapshot. Accepted and
   documented in the spec.

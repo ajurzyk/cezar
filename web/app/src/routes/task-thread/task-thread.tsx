@@ -140,6 +140,13 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
   // The drill-down's whole state: which agent is open. Ephemeral by design (spec Q2/Q5) —
   // sub-agents have no stable identity outside their run, so there is nothing to persist.
   const [openAgentId, setOpenAgentId] = useState<string | undefined>(undefined)
+  // Item ids repeat across runs (codex mints `item_1`, `item_rv_1` per session), so a
+  // selection carried across a route change could pop the sheet open on an unrelated item.
+  const [selectionRunId, setSelectionRunId] = useState(run.id)
+  if (selectionRunId !== run.id) {
+    setSelectionRunId(run.id)
+    setOpenAgentId(undefined)
+  }
   // Resolved from the turns, NOT from `agents`: the dock can yield to the transcript (Q6)
   // while a sheet is open, and that must not slam the panel shut mid-read.
   const openAgent = useMemo(
@@ -221,12 +228,16 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
       <AcceptCelebration status={run.status} />
 
       {/* The drill-down for whichever Agents-dock row was clicked. Rendered outside the dock
-          so the sheet's portal is not affected by the dock's collapse state. */}
-      <SubagentSheet
-        agent={openAgent}
-        entries={openAgentChildren}
-        onClose={() => setOpenAgentId(undefined)}
-      />
+          so the sheet's portal is not affected by the dock's collapse state — but inside its
+          own card cache (module-level and run-keyed, so this is the SAME store the thread
+          uses), or tool cards expanded in the sheet would forget that on reopen. */}
+      <ThreadCardCache runId={run.id}>
+        <SubagentSheet
+          agent={openAgent}
+          entries={openAgentChildren}
+          onClose={() => setOpenAgentId(undefined)}
+        />
+      </ThreadCardCache>
 
       {/* The dock region (mockup `.dock`): plan dock, paused hint, then the composer.
           `bottom: var(--kb)` is the iOS keyboard lift — 0 until the visualViewport watcher

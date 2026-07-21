@@ -409,6 +409,87 @@ describe('mapCodexNotification edge cases', () => {
       expect(exited.events[0]).toMatchObject({ type: 'item.completed', item: { id: 'item_rv_2' } });
     });
 
+    // Without this, an interrupted review leaves a `running` task item forever — and the
+    // Agents dock reads a FINISHED run as a live fan-out (`Agents · 0/1 — starting…`).
+    it('closes an open span when the turn ends, so nothing is left running', () => {
+      const entered = mapCodexNotification(
+        { method: 'item/started', params: { item: { type: 'enteredReviewMode', id: 'item_rv_1' } } },
+        state,
+      );
+      const ended = mapCodexNotification(
+        { method: 'turn/completed', params: { turn: { id: 'turn_1', status: 'completed' } } },
+        entered.state,
+      );
+      expect(ended.events[0]).toEqual({
+        type: 'item.completed',
+        item: { kind: 'tool', id: 'item_rv_1', name: 'enteredReviewMode', toolKind: 'task', title: 'Review', status: 'completed' },
+      });
+      expect(ended.events[1]).toMatchObject({ type: 'turn.completed' });
+      expect(ended.state.reviewItemId).toBeNull();
+    });
+
+    it('marks the span failed when the turn itself failed', () => {
+      const entered = mapCodexNotification(
+        { method: 'item/started', params: { item: { type: 'enteredReviewMode', id: 'item_rv_1' } } },
+        state,
+      );
+      const ended = mapCodexNotification(
+        { method: 'turn/failed', params: { turn: { id: 'turn_1' }, error: { message: 'boom' } } },
+        entered.state,
+      );
+      expect(ended.events[0]).toMatchObject({ type: 'item.completed', item: { id: 'item_rv_1', status: 'failed' } });
+    });
+
+    it('emits no review completion for a turn that had no open span', () => {
+      const ended = mapCodexNotification(
+        { method: 'turn/completed', params: { turn: { id: 'turn_1', status: 'completed' } } },
+        state,
+      );
+      expect(ended.events).toEqual([{ type: 'turn.completed', turnId: 'turn_1', stopReason: 'end_turn' }]);
+    });
+
+    // The same displacement rule the opencode subtask slot would need: never leak a row.
+    it('settles the previous span when a second entered frame displaces it', () => {
+      const first = mapCodexNotification(
+        { method: 'item/started', params: { item: { type: 'enteredReviewMode', id: 'rv_1' } } },
+        state,
+      );
+      const second = mapCodexNotification(
+        { method: 'item/started', params: { item: { type: 'enteredReviewMode', id: 'rv_2' } } },
+        first.state,
+      );
+      expect(second.events).toEqual([
+        {
+          type: 'item.completed',
+          item: { kind: 'tool', id: 'rv_1', name: 'enteredReviewMode', toolKind: 'task', title: 'Review', status: 'completed' },
+        },
+        {
+          type: 'item.started',
+          item: { kind: 'tool', id: 'rv_2', name: 'enteredReviewMode', toolKind: 'task', title: 'Review', status: 'running' },
+        },
+      ]);
+      expect(second.state.reviewItemId).toBe('rv_2');
+    });
+
+    // The latch must follow the RESOLVED status, not the lifecycle phase the frame arrived in.
+    it('keeps the span open for an item/completed frame that is still in progress', () => {
+      const mapped = mapCodexNotification(
+        { method: 'item/completed', params: { item: { type: 'enteredReviewMode', id: 'rv_1', status: 'inProgress' } } },
+        state,
+      );
+      expect(mapped.events[0]).toMatchObject({ item: { status: 'running' } });
+      expect(mapped.state.reviewItemId).toBe('rv_1');
+    });
+
+    it('closes the span for an item/started frame that already carries a terminal status', () => {
+      const mapped = mapCodexNotification(
+        { method: 'item/started', params: { item: { type: 'enteredReviewMode', id: 'rv_1', status: 'completed' } } },
+        state,
+      );
+      expect(mapped.events[0]).toMatchObject({ item: { status: 'completed' } });
+      expect(mapped.state.reviewItemId).toBeNull();
+    });
+
     it('re-arms across consecutive review spans in one session', () => {
       let next = mapCodexNotification(
         { method: 'item/started', params: { item: { type: 'enteredReviewMode', id: 'rv_a' } } },

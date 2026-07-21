@@ -1,4 +1,4 @@
-import type { ToolStatus, UiToolItem } from '@/protocol/ui-events'
+import type { ToolStatus, UiItem, UiToolItem } from '@/protocol/ui-events'
 
 import { splitToolTitle } from './thread-groups'
 import type { ThreadEntry, ThreadTurn } from './thread-state'
@@ -44,6 +44,24 @@ const isTaskItem = (entry: ThreadEntry): entry is UiToolItem =>
 /** Dock rows are the parent-less task items only — a nested spawn belongs to its parent's sheet. */
 const isRootTaskItem = (entry: ThreadEntry): entry is UiToolItem =>
   isTaskItem(entry) && entry.parentItemId === undefined
+
+/**
+ * What can be an agent's child. Mirrors `groupThreadItems` Pass 0: plan-kind tools are the
+ * plan dock's, never the thread's (#382) — so a sub-agent's `TodoWrite` must not inflate the
+ * row's tool count above what its Task card shows, become the activity line, or render as a
+ * raw-JSON card in the sheet.
+ */
+const isChildCandidate = (entry: ThreadEntry): entry is UiItem =>
+  (entry.kind === 'message' || entry.kind === 'reasoning' || entry.kind === 'tool') &&
+  !(entry.kind === 'tool' && entry.toolKind === 'plan')
+
+/** The first turn holding any of the given roots — where child scanning must begin. */
+function indexOfFirstRoot(turns: ThreadTurn[], rootIds: ReadonlySet<string>): number {
+  for (let i = 0; i < turns.length; i += 1) {
+    if (turns[i]!.items.some((entry) => isRootTaskItem(entry) && rootIds.has(entry.id))) return i
+  }
+  return 0
+}
 
 /**
  * The agent's declared type, from whichever key the backend used. Read defensively: `input` is
@@ -95,20 +113,32 @@ export function collectSubagents(turns: ThreadTurn[]): SubagentSummary[] {
   const anchorIndex = findLastIndex(turns, (turn) => turn.items.some(isRootTaskItem))
   if (anchorIndex === -1) return []
 
-  const anchor = turns[anchorIndex]!
-  const roots = anchor.items.filter(isRootTaskItem)
+  // The anchor turn's agents, PLUS any agent from an earlier turn that is still working.
+  // Anchoring on the newest turn alone would drop a live fan-out the moment the main agent
+  // spawned one more `Task` in a later turn — the dock would read `0/1` while three agents
+  // were still running, which is precisely what Q6 exists to prevent.
+  const earlierUnsettled: UiToolItem[] = []
+  for (let i = 0; i < anchorIndex; i += 1) {
+    for (const entry of turns[i]!.items) {
+      if (isRootTaskItem(entry) && !isSettled(entry.status)) earlierUnsettled.push(entry)
+    }
+  }
+  const roots = [...earlierUnsettled, ...turns[anchorIndex]!.items.filter(isRootTaskItem)]
   const isLatestTurn = anchorIndex === turns.length - 1
   if (!isLatestTurn && roots.every((item) => isSettled(item.status))) return []
 
-  // Children by parent id, across the anchor and everything after it. An id that names no root
-  // is ignored — exactly as `groupThreadItems` renders such an orphan at top level.
+  // Children by parent id. Scanned from the FIRST turn that contributes a row (not the
+  // anchor): an agent carried over from an earlier turn owns children recorded back there
+  // too. An id that names no root is ignored — exactly as `groupThreadItems` renders such an
+  // orphan at top level.
   const rootIds = new Set(roots.map((item) => item.id))
+  const firstIndex = earlierUnsettled.length > 0 ? indexOfFirstRoot(turns, rootIds) : anchorIndex
   const childrenOf = new Map<string, ThreadEntry[]>()
-  for (let i = anchorIndex; i < turns.length; i += 1) {
+  for (let i = firstIndex; i < turns.length; i += 1) {
     for (const entry of turns[i]!.items) {
-      if (entry.kind !== 'message' && entry.kind !== 'reasoning' && entry.kind !== 'tool') continue
+      if (!isChildCandidate(entry)) continue
       const parentId = entry.parentItemId
-      if (parentId === undefined || parentId === entry.id || !rootIds.has(parentId)) continue
+      if (parentId === undefined || !rootIds.has(parentId)) continue
       const siblings = childrenOf.get(parentId)
       if (siblings) siblings.push(entry)
       else childrenOf.set(parentId, [entry])
@@ -194,12 +224,14 @@ export function findSubagent(turns: ThreadTurn[], id: string): SubagentSummary |
  * exposed so the drill-down and the row count can never drift apart.
  */
 export function subagentChildren(turns: ThreadTurn[], parentId: string): ThreadEntry[] {
-  const anchorIndex = findLastIndex(turns, (turn) => turn.items.some((entry) => entry.id === parentId && isRootTaskItem(entry)))
+  const anchorIndex = turns.findIndex((turn) =>
+    turn.items.some((entry) => entry.id === parentId && isRootTaskItem(entry)),
+  )
   if (anchorIndex === -1) return []
   const children: ThreadEntry[] = []
   for (let i = anchorIndex; i < turns.length; i += 1) {
     for (const entry of turns[i]!.items) {
-      if (entry.kind !== 'message' && entry.kind !== 'reasoning' && entry.kind !== 'tool') continue
+      if (!isChildCandidate(entry)) continue
       if (entry.parentItemId === parentId && entry.id !== parentId) children.push(entry)
     }
   }

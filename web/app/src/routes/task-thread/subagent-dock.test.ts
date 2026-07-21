@@ -101,6 +101,33 @@ describe('collectSubagents — Q6 visibility', () => {
     expect(agents.map((agent) => agent.id)).toEqual(['a', 'b'])
   })
 
+  // The bug this pins: anchoring on the newest turn ALONE dropped still-running agents the
+  // moment the main agent spawned one more Task in a later turn.
+  it('keeps still-running agents from an earlier turn when a later turn spawns another', () => {
+    const agents = collectSubagents([
+      turn('turn-1', [task('a', 'running'), task('b', 'running')]),
+      turn('turn-2', [task('c', 'running')]),
+    ])
+    expect(agents.map((agent) => agent.id)).toEqual(['a', 'b', 'c'])
+    expect(subagentCounts(agents)).toEqual({ done: 0, total: 3 })
+  })
+
+  it('drops SETTLED earlier agents once a later turn owns the fan-out', () => {
+    const agents = collectSubagents([
+      turn('turn-1', [task('a', 'completed')]),
+      turn('turn-2', [task('c', 'running')]),
+    ])
+    expect(agents.map((agent) => agent.id)).toEqual(['c'])
+  })
+
+  it('still counts a carried-over agent’s children recorded in its ORIGINAL turn', () => {
+    const agents = collectSubagents([
+      turn('turn-1', [task('a', 'running'), childTool('c1', 'a', 'Ran npm test')]),
+      turn('turn-2', [task('b', 'running')]),
+    ])
+    expect(agents.find((agent) => agent.id === 'a')!.toolCalls).toBe(1)
+  })
+
   it('shows a fully settled fan-out while it is still the latest turn', () => {
     const agents = collectSubagents([turn('turn-1', [task('a', 'completed')])])
     expect(agents).toHaveLength(1)
@@ -125,9 +152,36 @@ describe('collectSubagents — children', () => {
     expect(agents[0]!.activity).toBeUndefined()
   })
 
-  it('never counts a self-referential parentItemId as its own child', () => {
-    const agents = collectSubagents([turn('turn-1', [task('a', 'running', { parentItemId: undefined })])])
-    expect(agents[0]!.toolCalls).toBe(0)
+  it('never treats a self-referential parentItemId as its own child', () => {
+    // A malformed item naming itself as parent must not become its own child in the sheet.
+    const selfRef: UiToolItem = {
+      kind: 'tool',
+      id: 'a',
+      name: 'Task',
+      toolKind: 'task',
+      title: 'Task: review a',
+      status: 'running',
+    }
+    const turns = [turn('turn-1', [selfRef, { ...selfRef, id: 'a', parentItemId: 'a' } as UiToolItem])]
+    expect(subagentChildren(turns, 'a')).toEqual([])
+  })
+
+  it('excludes a sub-agent’s plan (TodoWrite) tool, matching what its Task card shows', () => {
+    const plan: UiToolItem = {
+      kind: 'tool',
+      id: 'p1',
+      name: 'TodoWrite',
+      toolKind: 'plan',
+      title: 'Task list',
+      status: 'completed',
+      parentItemId: 'a',
+    }
+    const turns = [turn('turn-1', [task('a', 'running'), childTool('c1', 'a', 'Ran npm test'), plan])]
+    // groupThreadItems drops plan-kind tools from the thread AND from children lists (#382),
+    // so counting one here would make the row disagree with its own card.
+    expect(collectSubagents(turns)[0]!.toolCalls).toBe(1)
+    expect(collectSubagents(turns)[0]!.activity).toBe('Ran npm test')
+    expect(subagentChildren(turns, 'a').map((c) => c.id)).toEqual(['c1'])
   })
 
   it('leaves activity undefined when the agent has no children yet', () => {
