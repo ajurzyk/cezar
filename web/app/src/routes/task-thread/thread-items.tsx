@@ -103,6 +103,9 @@ export function NoteLine({ note }: { note: ThreadNote }) {
  * Streams live — the reducer grows `text` in place, so the summary line grows with it.
  */
 export function ReasoningItem({ text }: { text: string }) {
+  // A mapper regression that mints an empty reasoning item should degrade
+  // quietly rather than render a bare, un-expandable "Thinking —" row (#528).
+  if (text.trim() === '') return null
   const firstLine = text.split('\n', 1)[0] ?? ''
   const truncated = firstLine.length < text.length
   return (

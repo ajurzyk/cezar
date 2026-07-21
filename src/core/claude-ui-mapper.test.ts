@@ -607,3 +607,34 @@ describe('ClaudeCliRunner v2 wiring (against the bundled mock CLI)', () => {
     }
   }, 30_000);
 });
+
+/**
+ * #528 — a blank `thinking` block carries no information; minting an item for
+ * it only produces a dead "Thinking —" row in the session view.
+ */
+describe('claude blank thinking blocks (#528)', () => {
+  function reasoningItems(msg: unknown): UiEvent[] {
+    const mapped = mapClaudeMessage(msg, createClaudeUiState());
+    return mapped.events.filter((e) => 'item' in e && e.item.kind === 'reasoning');
+  }
+
+  function assistant(thinking: string): unknown {
+    return {
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'thinking', thinking }] },
+    };
+  }
+
+  it.each([['', 'empty'], ['   ', 'spaces'], ['\n\t ', 'whitespace']])(
+    'mints no reasoning item for a %s thinking block (%s)',
+    (thinking) => {
+      expect(reasoningItems(assistant(thinking))).toEqual([]);
+    },
+  );
+
+  it('still mints an item for real thinking text', () => {
+    const events = reasoningItems(assistant('Checking the auth path.'));
+    expect(events).toHaveLength(2); // started + completed
+    expect(events.every((e) => 'item' in e && e.item.kind === 'reasoning' && e.item.text === 'Checking the auth path.')).toBe(true);
+  });
+});
