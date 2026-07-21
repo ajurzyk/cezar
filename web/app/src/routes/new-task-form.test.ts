@@ -7,6 +7,7 @@ import {
   buildCreateRunBody,
   MODELS_BY_RUNNER,
   modelsForRunner,
+  modelCatalogStatus,
   pushRecentSource,
   resolveModel,
   resolveRunner,
@@ -70,6 +71,12 @@ describe('model option resolution', () => {
     const catalog = { runner: 'codex' as const, models: [{ id: 'gpt-future', label: 'Future', description: 'New' }], source: 'live' as const, stale: false }
     expect(modelsForRunner('codex', catalog, ['legacy-id']).map((m) => m.id)).toEqual(['', 'gpt-future', 'legacy-id'])
     expect(modelsForRunner('codex', catalog, ['legacy-id']).at(-1)?.desc).toBe('Custom or legacy model')
+  })
+
+  it('reports stale and unavailable Codex catalogs without exposing reasons', () => {
+    expect(modelCatalogStatus('codex', { runner: 'codex', models: [], source: 'cache', stale: true, reason: 'raw' })).toBe('Using cached Codex model list')
+    expect(modelCatalogStatus('codex', { runner: 'codex', models: [], source: 'unavailable', stale: false, reason: 'raw' })).toBe('Latest Codex models unavailable')
+    expect(modelCatalogStatus('claude', undefined, true)).toBeUndefined()
   })
 
   it('opencode: provider/model ids, newest Anthropic + OpenAI', () => {
