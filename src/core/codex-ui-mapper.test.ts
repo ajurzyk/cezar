@@ -348,7 +348,7 @@ describe('mapCodexNotification edge cases', () => {
     ).events;
     expect(review).toEqual({
       type: 'item.started',
-      item: { kind: 'tool', id: 'item_rv', name: 'enteredReviewMode', toolKind: 'task', title: 'Entered review mode', status: 'running' },
+      item: { kind: 'tool', id: 'item_rv', name: 'enteredReviewMode', toolKind: 'task', title: 'Review', status: 'running' },
     });
 
     const [unknown] = mapCodexNotification(
@@ -358,6 +358,77 @@ describe('mapCodexNotification edge cases', () => {
     expect(unknown).toMatchObject({
       type: 'item.completed',
       item: { kind: 'tool', id: 'item_cc', name: 'contextCompaction', toolKind: 'other', status: 'completed' },
+    });
+  });
+
+  // The pair is ONE span of work: mapped literally it would be two childless task
+  // items, which the Agents dock reads as two sub-agents that each did nothing (#474).
+  describe('review mode folds into one task item', () => {
+    it('completes the ENTERED item when the exit frame arrives, not a second item', () => {
+      const entered = mapCodexNotification(
+        { method: 'item/started', params: { item: { type: 'enteredReviewMode', id: 'item_rv_1' } } },
+        state,
+      );
+      const exited = mapCodexNotification(
+        { method: 'item/completed', params: { item: { type: 'exitedReviewMode', id: 'item_rv_2', status: 'completed' } } },
+        entered.state,
+      );
+      expect(exited.events).toEqual([
+        {
+          type: 'item.completed',
+          item: { kind: 'tool', id: 'item_rv_1', name: 'enteredReviewMode', toolKind: 'task', title: 'Review', status: 'completed' },
+        },
+      ]);
+      expect(exited.state.reviewItemId).toBeNull();
+    });
+
+    it('falls back to its own item for an unpaired exit (a stream that starts mid-review)', () => {
+      const mapped = mapCodexNotification(
+        { method: 'item/completed', params: { item: { type: 'exitedReviewMode', id: 'item_rv_2', status: 'completed' } } },
+        state,
+      );
+      expect(mapped.events).toEqual([
+        {
+          type: 'item.completed',
+          item: { kind: 'tool', id: 'item_rv_2', name: 'exitedReviewMode', toolKind: 'task', title: 'Review', status: 'completed' },
+        },
+      ]);
+    });
+
+    it('closes the span when the entered frame itself arrives already completed', () => {
+      const mapped = mapCodexNotification(
+        { method: 'item/completed', params: { item: { type: 'enteredReviewMode', id: 'item_rv_1', status: 'completed' } } },
+        state,
+      );
+      expect(mapped.state.reviewItemId).toBeNull()
+      // The next exit has nothing to pair with, so it maps under its own id.
+      const exited = mapCodexNotification(
+        { method: 'item/completed', params: { item: { type: 'exitedReviewMode', id: 'item_rv_2' } } },
+        mapped.state,
+      );
+      expect(exited.events[0]).toMatchObject({ type: 'item.completed', item: { id: 'item_rv_2' } });
+    });
+
+    it('re-arms across consecutive review spans in one session', () => {
+      let next = mapCodexNotification(
+        { method: 'item/started', params: { item: { type: 'enteredReviewMode', id: 'rv_a' } } },
+        state,
+      ).state;
+      next = mapCodexNotification(
+        { method: 'item/completed', params: { item: { type: 'exitedReviewMode', id: 'rv_a_end' } } },
+        next,
+      ).state;
+      const second = mapCodexNotification(
+        { method: 'item/started', params: { item: { type: 'enteredReviewMode', id: 'rv_b' } } },
+        next,
+      );
+      expect(second.state.reviewItemId).toBe('rv_b');
+      expect(
+        mapCodexNotification(
+          { method: 'item/completed', params: { item: { type: 'exitedReviewMode', id: 'rv_b_end' } } },
+          second.state,
+        ).events[0],
+      ).toMatchObject({ item: { id: 'rv_b' } });
     });
   });
 
