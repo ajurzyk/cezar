@@ -21,7 +21,7 @@ your phone, working your backlog while you're away.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](#license)
 ![Node 20+](https://img.shields.io/badge/Node-20%2B-339933)
-![TypeScript 5.x](https://img.shields.io/badge/TypeScript-5.x-3178c6)
+![TypeScript 7.x](https://img.shields.io/badge/TypeScript-7.x-3178c6)
 ![Zero config](https://img.shields.io/badge/config-zero-success)
 ![No database](https://img.shields.io/badge/database-none-success)
 
