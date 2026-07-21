@@ -16,7 +16,7 @@
 | 1 | 1.2 | `persistImage` without a session | done | (backfilled at checkpoint) |
 | 1 | 1.3 | `RunManager` stack mutators | done | (backfilled at checkpoint) |
 | 1 | 1.4 | `hydrateQueuedInput` + `pump()` wiring | done | (backfilled at checkpoint) |
-| 1 | 1.5 | Routes | todo | — |
+| 1 | 1.5 | Routes | done | (backfilled at checkpoint) |
 | 1 | 1.6 | Client types + hooks | todo | — |
 | 2 | 2.1 | Composer queued branch | todo | — |
 | 2 | 2.2 | Stacked bubbles | todo | — |
