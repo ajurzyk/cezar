@@ -70,3 +70,18 @@
 
 ## 2026-07-21T11:16:00Z — adversarial review round 3 dispatched
 - Verifying the round-2 carry-over rewrite before flipping the pipeline label.
+
+## 2026-07-21T11:25:00Z — run complete
+- Round 3 confirmed both round-2 majors genuinely fixed, and found one more that mattered:
+  `runIsTerminal` enumerated done/failed/cancelled and MISSED `review` — the status this
+  pipeline's runs normally end on — so the "pulses forever" symptom was still live on the most
+  common path. Now derived from `sessionOpen` rather than enumerated. Fixed in `27d446b`.
+- Also from round 3: the collapsed head and the row rendered a stalled agent differently; both
+  now share `subagentActivityText`. And the `activeSubagent` stalled-skip I added was dead code
+  (on a terminal run every agent is settled-or-stalled) — removed rather than left as noise.
+- Final state: 3020 tests green, build + package green, new e2e 3/3, design-guardian green.
+- PR #550: `Status: complete`, label back to `review`, `in-progress` released, summary posted.
+- Follow-up: #551 (opencode single-slot subtask attribution).
+- Lesson worth carrying: three of four review passes found defects in the PREVIOUS fix batch.
+  Re-reviewing after every batch was what caught them; shipping after round 1 would have landed
+  an odometer that counts down and a dock that pulses forever on review-gated runs.
