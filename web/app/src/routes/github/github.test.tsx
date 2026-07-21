@@ -4,7 +4,16 @@ import { MemoryRouter, Route, Routes } from 'react-router'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
-import type { GithubComment, GithubCommentsData, GithubData, GithubItem, Skill, WorkflowsResponse } from '@/api/types'
+import type {
+  GithubComment,
+  GithubCommentsData,
+  GithubData,
+  GithubItem,
+  HealthResponse,
+  Runner,
+  Skill,
+  WorkflowsResponse,
+} from '@/api/types'
 import { Toaster, resetToasts } from '@/components/ui/toaster'
 import { githubTaskRef } from '@/lib/github-task'
 
@@ -559,6 +568,111 @@ async function openDetail(entry = '/github/issues/142') {
   await waitFor(() => expect(document.querySelector('[data-slot="gh-hand"]')).not.toBeNull())
 }
 
+/** A typed health fixture — `HealthResponse`, so tsc catches the drift an `unknown` body hides
+ *  (the pre-#471 shape silently rotted here until the merge fixed the inbox's copy). */
+const health = (backends: readonly Runner[]): HealthResponse => ({
+  version: '0.0.0-test',
+  repoRoot: '/repo',
+  repo: { root: '/repo', branch: 'main' },
+  checks: backends.map((name) => ({ name, available: true })),
+  defaultRunner: backends[0] ?? 'claude',
+  forge: null,
+  capabilities: { localHandoff: true, followups: true },
+})
+
+/** More than one installed backend — the only state that shows the runner pill. */
+const MULTI_BACKEND = () => jsonResponse(health(['claude', 'codex']))
+/** Exactly one installed backend — a real single-backend host, not merely absent health. */
+const SINGLE_BACKEND = () => jsonResponse(health(['claude']))
+
+/** Open a pill's dropdown and choose an option by label (Radix opens on pointerDown). */
+async function pickPill(slot: string, label: string) {
+  fireEvent.pointerDown(document.querySelector(`[data-slot="${slot}"]`)!)
+  const options = await screen.findAllByRole('menuitemradio')
+  fireEvent.click(options.find((o) => o.textContent?.includes(label)) as HTMLElement)
+}
+
+const postedRun = (sent: readonly SentRequest[]) =>
+  sent.find((request) => request.method === 'POST' && request.path === '/api/runs')?.body
+
+describe('the hand-to-agent backend pills (#401)', () => {
+  it('a single-backend host hides the runner pill but still offers the model', async () => {
+    // A real one-check health response — the default stub 404s /api/health, which exercises
+    // the no-data fallback instead and would pass for the wrong reason.
+    stubFetch({ 'GET /api/health': SINGLE_BACKEND })
+    await openDetail()
+
+    await waitFor(() => expect(document.querySelector('[data-slot="model-pill"]')).not.toBeNull())
+    expect(document.querySelector('[data-slot="runner-pill"]')).toBeNull()
+  })
+
+  it('an untouched panel posts no runner/model — the pre-#401 body, unchanged', async () => {
+    const sent = stubFetch()
+    await openDetail()
+
+    fireEvent.click(screen.getByRole('button', { name: /Run agent on this issue/ }))
+
+    await waitFor(() => expect(postedRun(sent)).toBeDefined())
+    expect(postedRun(sent)).toMatchObject({ workflow: 'quick-task' })
+    expect((postedRun(sent) as { runner?: string }).runner).toBeUndefined()
+    expect((postedRun(sent) as { model?: string }).model).toBeUndefined()
+  })
+
+  it('a runner + model pick rides the POST alongside the workflow routing', async () => {
+    const sent = stubFetch({ 'GET /api/health': MULTI_BACKEND })
+    await openDetail()
+
+    await waitFor(() => expect(document.querySelector('[data-slot="runner-pill"]')).not.toBeNull())
+    await pickPill('runner-pill', 'codex')
+    await pickPill('model-pill', 'gpt-5.1-codex')
+
+    fireEvent.click(screen.getByRole('button', { name: /Run agent on this issue/ }))
+
+    await waitFor(() => expect(postedRun(sent)).toBeDefined())
+    expect(postedRun(sent)).toMatchObject({
+      workflow: 'quick-task',
+      runner: 'codex',
+      model: 'gpt-5.1-codex',
+    })
+  })
+
+  it('switching backend resets the model pick — the presets are per runner', async () => {
+    const sent = stubFetch({ 'GET /api/health': MULTI_BACKEND })
+    await openDetail()
+
+    await waitFor(() => expect(document.querySelector('[data-slot="runner-pill"]')).not.toBeNull())
+    // Pin a claude model, then move to codex: the claude id must not survive onto codex.
+    await pickPill('model-pill', 'opus')
+    await pickPill('runner-pill', 'codex')
+
+    fireEvent.click(screen.getByRole('button', { name: /Run agent on this issue/ }))
+
+    await waitFor(() => expect(postedRun(sent)).toBeDefined())
+    expect(postedRun(sent)).toMatchObject({ runner: 'codex' })
+    // Back to auto for the new runner, so no model at all.
+    expect((postedRun(sent) as { model?: string }).model).toBeUndefined()
+  })
+
+  it('the pick survives switching to another issue (it is a way of working, not a property of one item)', async () => {
+    const sent = stubFetch({ 'GET /api/health': MULTI_BACKEND })
+    await openDetail()
+
+    await waitFor(() => expect(document.querySelector('[data-slot="runner-pill"]')).not.toBeNull())
+    await pickPill('runner-pill', 'codex')
+
+    // Hop to the other issue — HandToAgent remounts (key={item.url}), the pick must not.
+    fireEvent.click(rows().find((row) => row.dataset.number === '139')!)
+    await waitFor(() =>
+      expect(document.querySelector('[data-slot="gh-hand"]')).not.toBeNull(),
+    )
+    expect(document.querySelector('[data-slot="runner-pill"]')?.textContent).toContain('codex')
+
+    fireEvent.click(screen.getByRole('button', { name: /Run agent on this issue/ }))
+    await waitFor(() => expect(postedRun(sent)).toBeDefined())
+    expect(postedRun(sent)).toMatchObject({ runner: 'codex' })
+  })
+})
+
 /**
  * Toggle a skill ON through its picker, robustly. cmdk re-renders the option list while the
  * popover opens, so an option `waitFor` just saw can be detached a tick later — clicking a node
@@ -792,8 +906,8 @@ describe('the hand-to-agent run (legacy three-way body)', () => {
 
 // ---- #408: frequency sort ----------------------------------------------------------------------
 
-describe('the skills dropdown frequency sort (#408 item 1, shared with project-first #2)', () => {
-  it('orders skills by usage count within each locality group', async () => {
+describe('the skills dropdown frequency sort (#408 item 1, re-tiered by #519)', () => {
+  it('promotes used skills into "Most used" ahead of locality, frequency descending', async () => {
     stubFetch({
       'GET /api/ui-state': () => jsonResponse({ skillUsage: { 'team-x': 9, 'g-review': 1 } }),
     })
@@ -804,9 +918,9 @@ describe('the skills dropdown frequency sort (#408 item 1, shared with project-f
       expect(document.querySelectorAll('[data-slot="gh-skill-option"]')).toHaveLength(3),
     )
     const options = [...document.querySelectorAll<HTMLElement>('[data-slot="gh-skill-option"]')]
-    // Project skill still leads (locality wins, #2) — frequency only reorders WITHIN "Global":
-    // team-x (9 picks) now leads g-review (1 pick), reversing the fixture's server order.
-    expect(options.map((option) => option.dataset.skill)).toEqual(['om-fix', 'team-x', 'g-review'])
+    // Most used leads (#519): team-x (9 picks) then g-review (1 pick), BOTH above the unused
+    // project skill om-fix — usage now outranks locality instead of only reordering within it.
+    expect(options.map((option) => option.dataset.skill)).toEqual(['team-x', 'g-review', 'om-fix'])
   })
 
   it('no usage stats at all falls back to the plain project-first order (#2)', async () => {
@@ -1139,25 +1253,36 @@ describe('the follow-up prompt template menu (#413)', () => {
     document.querySelector<HTMLElement>(`[data-slot="prompt-template-option"][data-template="${id}"]`)
 
   /**
-   * Open the menu and pick a specific template. A single click on a *just-mounted*
-   * cmdk item can land before cmdk has wired its `onSelect`, so it silently no-ops —
-   * the race that made this suite flake in CI (#413). Rather than capture a node that
-   * may go stale, re-query and click on each poll until the insertion actually lands
-   * (the custom prompt's value grows). This can't double-insert: `fireEvent.click`
-   * flushes React synchronously, so the very next poll sees the changed value and stops
-   * before a second click can fire.
+   * Click a mounted template option until the select provably lands. A re-render (the
+   * ui-state query resolving, a queries invalidation) can replace the option node between
+   * querying it and clicking it — a click on the detached node is a silent no-op, the race
+   * that made this suite flake (#413). Selecting closes the menu (`onSelect` →
+   * `setOpen(false)`), so re-query a FRESH node each retry and stop only once the options
+   * unmount: the insert has provably happened.
+   */
+  async function selectOption(id: string): Promise<void> {
+    await waitFor(() => {
+      const node = option(id)
+      if (!node) return // menu closed — the select landed
+      fireEvent.click(node)
+      throw new Error(`template option "${id}" still mounted — select has not landed yet`)
+    })
+  }
+
+  /**
+   * Open the menu and click a specific template. Waits for *that* option to
+   * mount before clicking it, so a stale option from the previous (closing)
+   * popover can never satisfy the wait while the wanted one is still absent —
+   * the race that made this suite flake in CI (#413).
    */
   async function chooseTemplate(id: string): Promise<void> {
     const textarea = () => screen.getByLabelText('Custom prompt') as HTMLTextAreaElement
     const before = textarea().value
     fireEvent.click(document.querySelector('[data-slot="prompt-template-trigger"]')!)
     await waitFor(() => {
-      if (textarea().value !== before) return // the click already landed
-      const node = option(id)
-      if (!node) throw new Error(`template option "${id}" not mounted yet`)
-      fireEvent.click(node)
-      throw new Error(`template "${id}" not inserted yet`)
+      if (!option(id)) throw new Error(`template option "${id}" not mounted yet`)
     })
+    await selectOption(id)
   }
 
   it('an untouched ui-state shows the built-in templates, and inserting one fills the custom prompt', async () => {
@@ -1168,7 +1293,7 @@ describe('the follow-up prompt template menu (#413)', () => {
     expect(document.querySelectorAll('[data-slot="prompt-template-option"]').length).toBeGreaterThan(1)
     expect(option('add-tests')).not.toBeNull()
 
-    fireEvent.click(option('add-tests')!)
+    await selectOption('add-tests')
     await waitFor(() =>
       expect(screen.getByLabelText('Custom prompt')).toHaveProperty(
         'value',
@@ -1188,7 +1313,7 @@ describe('the follow-up prompt template menu (#413)', () => {
     expect(document.querySelectorAll('[data-slot="prompt-template-option"]')).toHaveLength(1)
     expect(option('custom-1')?.textContent).toContain('My snippet')
 
-    fireEvent.click(option('custom-1')!)
+    await selectOption('custom-1')
     await waitFor(() =>
       expect(screen.getByLabelText('Custom prompt')).toHaveProperty(
         'value',

@@ -11,6 +11,7 @@ import {
   multiWordFilter,
   orderSkills,
   orderSkillsByUsage,
+  partitionSkillsForDisplay,
   queryScore,
   searchSkills,
   searchWorkflows,
@@ -44,7 +45,7 @@ describe('isProjectSkill / orderSkills (#377)', () => {
   })
 })
 
-describe('orderSkillsByUsage (#408: frequency sort, shared by both composers)', () => {
+describe('partitionSkillsForDisplay / orderSkillsByUsage (#519: most-used → project → global)', () => {
   const skills = [
     skill({ name: 'g1', source: 'global' }),
     skill({ name: 'p1', source: 'agents' }),
@@ -52,24 +53,41 @@ describe('orderSkillsByUsage (#408: frequency sort, shared by both composers)', 
     skill({ name: 'p2', source: 'ai' }),
   ]
 
-  it('#1: sorts most-selected first within each locality half', () => {
+  it('promotes USED skills above locality — a used global outranks an unused project skill', () => {
     const ordered = orderSkillsByUsage(skills, { g2: 5, p2: 9, p1: 1 })
-    // Locality first (project before global), frequency descending within each half.
-    expect(ordered.map((s) => s.name)).toEqual(['p2', 'p1', 'g2', 'g1'])
+    // Most used first (frequency descending, regardless of locality), then the unused
+    // remainder project-first — the #519 contract, replacing the #408 locality-first inversion.
+    expect(ordered.map((s) => s.name)).toEqual(['p2', 'g2', 'p1', 'g1'])
   })
 
-  it('#2: with no usage data, keeps the plain project-first fallback (stable ties)', () => {
-    expect(orderSkillsByUsage(skills, undefined).map((s) => s.name)).toEqual(['p1', 'p2', 'g1', 'g2'])
-    expect(orderSkillsByUsage(skills, {}).map((s) => s.name)).toEqual(['p1', 'p2', 'g1', 'g2'])
+  it('splits into the three tiers without repeating a promoted skill in its locality group', () => {
+    const tiers = partitionSkillsForDisplay(skills, { g2: 5, p1: 1 })
+    expect(tiers.mostUsed.map((s) => s.name)).toEqual(['g2', 'p1'])
+    expect(tiers.project.map((s) => s.name)).toEqual(['p2'])
+    expect(tiers.global.map((s) => s.name)).toEqual(['g1'])
   })
 
-  it('#2: ties (equal counts) also keep locality-then-server order, never flattened', () => {
+  it('caps Most used at the limit; overflow falls back into its locality group', () => {
+    const usage = { g1: 9, p1: 8, g2: 7, p2: 6 }
+    const tiers = partitionSkillsForDisplay(skills, usage, { mostUsedLimit: 2 })
+    expect(tiers.mostUsed.map((s) => s.name)).toEqual(['g1', 'p1'])
+    // The overflow (g2, p2) is NOT dropped — it rejoins its locality tier in server order.
+    expect(tiers.project.map((s) => s.name)).toEqual(['p2'])
+    expect(tiers.global.map((s) => s.name)).toEqual(['g2'])
+  })
+
+  it('zero usage everywhere → empty mostUsed and the plain #377 project-first split', () => {
+    for (const usage of [undefined, {}]) {
+      const tiers = partitionSkillsForDisplay(skills, usage)
+      expect(tiers.mostUsed).toEqual([])
+      expect(tiers.project.map((s) => s.name)).toEqual(['p1', 'p2'])
+      expect(tiers.global.map((s) => s.name)).toEqual(['g1', 'g2'])
+      expect(orderSkillsByUsage(skills, usage).map((s) => s.name)).toEqual(['p1', 'p2', 'g1', 'g2'])
+    }
+  })
+
+  it('equal counts inside Most used break locality-first, then server order', () => {
     const ordered = orderSkillsByUsage(skills, { g1: 3, p1: 3, g2: 3, p2: 3 })
-    expect(ordered.map((s) => s.name)).toEqual(['p1', 'p2', 'g1', 'g2'])
-  })
-
-  it('an unselected skill sorts below any selected one in its half', () => {
-    const ordered = orderSkillsByUsage(skills, { g1: 2 })
     expect(ordered.map((s) => s.name)).toEqual(['p1', 'p2', 'g1', 'g2'])
   })
 
@@ -78,7 +96,7 @@ describe('orderSkillsByUsage (#408: frequency sort, shared by both composers)', 
     // `usage[name]` lookup returns the INHERITED function for these names, `??` does not catch a
     // non-nullish function, and the comparator goes NaN — which silently corrupts the order.
     const usage = JSON.parse('{"p1": 5}') as Record<string, number>
-    const ordered = orderSkillsByUsage(
+    const tiers = partitionSkillsForDisplay(
       [
         skill({ name: 'constructor', source: 'ai' }),
         skill({ name: 'toString', source: 'ai' }),
@@ -86,7 +104,8 @@ describe('orderSkillsByUsage (#408: frequency sort, shared by both composers)', 
       ],
       usage,
     )
-    expect(ordered.map((s) => s.name)).toEqual(['p1', 'constructor', 'toString'])
+    expect(tiers.mostUsed.map((s) => s.name)).toEqual(['p1'])
+    expect(tiers.project.map((s) => s.name)).toEqual(['constructor', 'toString'])
   })
 })
 
@@ -327,5 +346,45 @@ describe('skillUsedBy (the detail pane’s "Used by" breadcrumbs)', () => {
 
   it('an unreferenced skill answers an empty list', () => {
     expect(skillUsedBy(workflows, 'om-unused')).toEqual([])
+  })
+})
+
+describe('#519: usage folds into query ranking and the / autocomplete order', () => {
+  const skills = [
+    skill({ name: 'project-deploy', source: 'ai' }),
+    skill({ name: 'global-deploy', source: 'global', description: 'Deploy from anywhere' }),
+  ]
+
+  it('empty query orders the / autocomplete most-used first, across localities', () => {
+    expect(filterSkills(skills, '', { 'global-deploy': 3 }).map((s) => s.name)).toEqual([
+      'global-deploy',
+      'project-deploy',
+    ])
+    // Without usage, the pre-#519 project-first behavior is unchanged.
+    expect(filterSkills(skills, '').map((s) => s.name)).toEqual(['project-deploy', 'global-deploy'])
+  })
+
+  it('a typed query lets usage break ties between comparably-scoring matches', () => {
+    // Both names hit 'deploy' on a word boundary → equal base score; the usage count decides
+    // (defect 4 of #519: before, a typed query discarded frequency entirely).
+    expect(filterSkills(skills, 'deploy', { 'global-deploy': 3 }).map((s) => s.name)).toEqual([
+      'global-deploy',
+      'project-deploy',
+    ])
+    expect(searchSkills(skills, 'deploy', { 'project-deploy': 2 }).map((s) => s.name)).toEqual([
+      'project-deploy',
+      'global-deploy',
+    ])
+  })
+
+  it('the usage bonus is bounded — heavy usage never outranks a clearly better name match', () => {
+    const s2 = [
+      skill({ name: 'om-fix', source: 'ai' }),
+      skill({ name: 'om-auto-fix-issue', source: 'ai', description: 'runs om-fix internally' }),
+    ]
+    expect(searchSkills(s2, 'om-fix', { 'om-auto-fix-issue': 999 }).map((s) => s.name)).toEqual([
+      'om-fix',
+      'om-auto-fix-issue',
+    ])
   })
 })

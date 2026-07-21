@@ -53,10 +53,13 @@ function skillsHint(skillNames: readonly string[]): string {
  * expected to reach for one (#524).
  */
 export function applyItemTokens(text: string, item: GithubItem): string {
+  // Replacer FUNCTIONS, not replacement strings: a `$` sequence in a replacement string is
+  // special (`$&`, `` $` ``, `$'`, `$$`, `$1`), and an issue title is arbitrary user text — a
+  // title like "Cost $$ doubled" would otherwise substitute as "Cost $ doubled".
   return text
-    .replace(/\{\{\s*number\s*\}\}/gi, `#${item.number}`)
-    .replace(/\{\{\s*title\s*\}\}/gi, item.title)
-    .replace(/\{\{\s*url\s*\}\}/gi, item.url)
+    .replace(/\{\{\s*number\s*\}\}/gi, () => `#${item.number}`)
+    .replace(/\{\{\s*title\s*\}\}/gi, () => item.title)
+    .replace(/\{\{\s*url\s*\}\}/gi, () => item.url)
 }
 
 /**
@@ -111,18 +114,29 @@ export function skillChainSteps(names: readonly string[]): WorkflowStepDef[] {
  *  - a workflow selected → that workflow (skills ride along as a prompt hint);
  *  - no workflow but skills toggled → the skills ARE the chain (spec 008);
  *  - nothing selected → quick-task.
+ *
+ * `backend` (#401) is the already-resolved runner/model pair — `engineBody(useResolvedEngine(…))`
+ * from components/engine-pills. It arrives pre-shaped rather than raw on purpose: the omit rules
+ * are subtle enough to be worth having in exactly one place, and this stays a pure body builder.
+ * Omit it and the body is the pre-#401 one.
  */
 export function githubRunBody(
   item: GithubItem,
   workflow: string | null,
   skills: readonly string[],
   customPrompt?: string,
+  backend: Pick<CreateRunInput, 'model' | 'runner'> = {},
 ): CreateRunInput {
   // A custom prompt EXTENDS the item context rather than replacing it (#524) — see
-  // `composeGithubTask`. The workflow/skill routing below is unchanged; only the task text is.
-  if (workflow) return { workflow, task: composeGithubTask(item, skills, customPrompt) }
+  // `composeGithubTask`. The workflow/skill routing and the #401 `backend` spread are unchanged;
+  // only the task text is.
+  if (workflow) return { ...backend, workflow, task: composeGithubTask(item, skills, customPrompt) }
   if (skills.length) {
-    return { steps: skillChainSteps(skills), task: composeGithubTask(item, [], customPrompt) }
+    return {
+      ...backend,
+      steps: skillChainSteps(skills),
+      task: composeGithubTask(item, [], customPrompt),
+    }
   }
-  return { workflow: 'quick-task', task: composeGithubTask(item, [], customPrompt) }
+  return { ...backend, workflow: 'quick-task', task: composeGithubTask(item, [], customPrompt) }
 }

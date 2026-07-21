@@ -1,13 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import {
-  CheckIcon,
-  ChevronDownIcon,
-  EyeIcon,
-  SparklesIcon,
-  SquareIcon,
-  WorkflowIcon,
-} from 'lucide-react'
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { CheckIcon, EyeIcon, SparklesIcon, SquareIcon, WorkflowIcon } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router'
 
 import { createRun, getLaunchKey, postPlan, putConfig, putUiState } from '@/api/client'
@@ -15,6 +8,7 @@ import { queryKeys, useConfig, useHealth, useRepo, useSkills, useUiState, useWor
 import type { ImageInput, RepoResponse, Runner, Skill, WorkflowDef } from '@/api/types'
 import { TwinkleBackdrop } from '@/components/centered-state'
 import { Composer, type ComposerHandle } from '@/components/composer/composer'
+import { PickerPill, RunnerPill, chevron, chipClass } from '@/components/picker-pill'
 import { PromptTemplateMenu } from '@/components/prompt-template-menu'
 import { SkillPreviewDialog } from '@/components/skill-detail'
 import {
@@ -25,13 +19,6 @@ import {
   CommandItem,
   CommandList,
 } from '@/components/ui/command'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { toast } from '@/components/ui/toaster'
 import {
@@ -43,6 +30,7 @@ import {
   bumpSkillUsage,
   isProjectSkill,
   orderSkillsByUsage,
+  partitionSkillsForDisplay,
   searchSkills,
   searchWorkflows,
   skillKeywords,
@@ -66,7 +54,6 @@ import {
   resolveRunner,
   resolveSource,
   startedRunPath,
-  RUNNERS,
   type TaskSource,
 } from './new-task-form'
 import { parseNewTaskParams } from './new-task-params'
@@ -429,6 +416,7 @@ export function NewTaskRoute() {
                 source={source}
                 ready={sourcesReady}
                 skills={skillList}
+                skillUsage={skillUsage}
                 workflows={workflowList}
                 onPick={(next) => update({ source: next })}
               />
@@ -613,27 +601,23 @@ function GenerateFollowupsToggle({
   )
 }
 
-/** The mockup's `.chip`: a quiet bordered pill that darkens on hover. */
-const chipClass =
-  'inline-flex h-[26px] items-center gap-1.5 rounded-full border border-border bg-card px-2.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-55'
-
-const chevron = <ChevronDownIcon aria-hidden="true" className="size-2.5 shrink-0 text-soft-foreground" />
-
 /**
- * The workflow/skill picker (#385's searchable cmdk dropdown, #377's project-first ordering):
- * ONE pill for both kinds of source. Groups follow the mockup — Project skills (bold), Global,
- * then Workflows.
+ * The workflow/skill picker (#385's searchable cmdk dropdown, #519's tier ordering): ONE pill
+ * for both kinds of source. Groups render Most used (skills picked before, frequency
+ * descending), Project skills (bold), Workflows, then Global.
  */
 function SourcePill({
   source,
   ready,
   skills,
+  skillUsage,
   workflows,
   onPick,
 }: {
   source: TaskSource
   ready: boolean
   skills: readonly Skill[]
+  skillUsage: Readonly<Record<string, number>> | undefined
   workflows: readonly WorkflowDef[]
   onPick: (source: TaskSource) => void
 }) {
@@ -642,12 +626,12 @@ function SourcePill({
   const [preview, setPreview] = useState<Skill | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
   // #484: rank in JS (cmdk's own score-sort does not re-order reliably here), then split the
-  // ranked matches into the Project/Global groups so each group stays match-ordered.
-  const matched = searchSkills(skills, search)
-  const project = matched.filter(isProjectSkill)
-  const global = matched.filter((skill) => !isProjectSkill(skill))
+  // ranked matches into the #519 display tiers so each group stays match-ordered.
+  const matched = searchSkills(skills, search, skillUsage)
+  const { mostUsed, project, global } = partitionSkillsForDisplay(matched, skillUsage)
   const matchedWorkflows = searchWorkflows(workflows, search)
-  const nothingMatches = project.length === 0 && global.length === 0 && matchedWorkflows.length === 0
+  const nothingMatches =
+    mostUsed.length === 0 && project.length === 0 && global.length === 0 && matchedWorkflows.length === 0
   const pick = (next: TaskSource) => {
     onPick(next)
     setOpen(false)
@@ -742,8 +726,13 @@ function SourcePill({
               className="max-h-[min(18rem,calc(var(--radix-popover-content-available-height)-3rem))]"
             >
               {nothingMatches ? <CommandEmpty>Nothing matches.</CommandEmpty> : null}
-              {/* Project skills lead, Global trails everything — the closer a skill lives
-                  to the repo, the more likely it's the one being picked. */}
+              {/* Most used leads (#519), then Project skills before Global — the closer a
+                  skill lives to the repo, the more likely it's the one being picked. */}
+              {mostUsed.length > 0 ? (
+                <CommandGroup heading="Most used">
+                  {mostUsed.map((skill) => skillItem(skill, isProjectSkill(skill)))}
+                </CommandGroup>
+              ) : null}
               {project.length > 0 ? (
                 <CommandGroup heading="Project skills">
                   {project.map((skill) => skillItem(skill, true))}
@@ -785,98 +774,6 @@ function SourcePill({
         </PopoverContent>
       </Popover>
     </>
-  )
-}
-
-/** Runner choice — rendered only when the host offers more than one backend, so a claude-only
- *  machine keeps the simple form (legacy rule). */
-function RunnerPill({
-  runners,
-  value,
-  onPick,
-}: {
-  runners: readonly Runner[]
-  value: Runner
-  onPick: (runner: Runner) => void
-}) {
-  const options = RUNNERS.filter((r) => runners.includes(r.id))
-  return (
-    <PickerPill
-      slot="runner-pill"
-      ariaLabel="Runner"
-      label={value}
-      value={value}
-      onPick={(next) => onPick(next as Runner)}
-      options={options.map((r) => ({ value: r.id, label: r.label, desc: r.desc }))}
-    />
-  )
-}
-
-/** A generic single-choice pill (runner / model / variants): DropdownMenu radio semantics,
- *  two-line items (label + quiet description), disabled state carries its reason as `title`. */
-function PickerPill({
-  slot,
-  ariaLabel,
-  label,
-  value,
-  options,
-  onPick,
-  disabled = false,
-  hint,
-  disabledHint,
-}: {
-  slot: string
-  ariaLabel: string
-  label: ReactNode
-  value: string
-  options: ReadonlyArray<{ value: string; label: string; desc?: string }>
-  onPick: (value: string) => void
-  disabled?: boolean
-  /** Hover explanation for the enabled pill — what the setting does (e.g. the ×1 variants pill). */
-  hint?: string
-  disabledHint?: string
-}) {
-  const trigger = (
-    <button
-      type="button"
-      data-slot={slot}
-      aria-label={ariaLabel}
-      disabled={disabled}
-      title={disabled ? disabledHint : hint}
-      className={chipClass}
-    >
-      {label}
-      {chevron}
-    </button>
-  )
-  // Radix never opens a disabled trigger, but `disabled:pointer-events-none` would also kill
-  // the explanatory title tooltip — so the disabled pill renders bare, in a plain span wrapper
-  // that still receives hover.
-  if (disabled) {
-    return (
-      <span title={disabledHint} className="inline-flex">
-        {trigger}
-      </span>
-    )
-  }
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>{trigger}</DropdownMenuTrigger>
-      <DropdownMenuContent align="start" data-testid={`${slot}-menu`}>
-        <DropdownMenuRadioGroup value={value} onValueChange={onPick}>
-          {options.map((option) => (
-            <DropdownMenuRadioItem key={option.value} value={option.value} className="gap-2.5">
-              <span className="flex min-w-0 flex-col">
-                <span className="text-[12.5px] font-medium">{option.label}</span>
-                {option.desc ? (
-                  <span className="text-[11.5px] text-muted-foreground">{option.desc}</span>
-                ) : null}
-              </span>
-            </DropdownMenuRadioItem>
-          ))}
-        </DropdownMenuRadioGroup>
-      </DropdownMenuContent>
-    </DropdownMenu>
   )
 }
 

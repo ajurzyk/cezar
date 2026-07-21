@@ -66,7 +66,23 @@ const STARTED_RUN: RunRecord = {
 interface SentRequest {
   path: string
   method: string
+  /** Parsed request body, or undefined for a bodyless request — a plain Run must stay bodyless. */
+  body?: unknown
 }
+
+/** Health fixture: `backends` names the runners the host reports as installed (#401). A
+ *  single-backend host is the default, which is what the pre-#401 tests assume. `followups`
+ *  is on throughout — an inbox-less server (#471) renders the "inbox is off" state and has
+ *  no cards at all, which is that feature's own test, not this file's. */
+const health = (backends: readonly string[] = ['claude']) => ({
+  version: '0.0.0-test',
+  repoRoot: '/repo',
+  repo: { root: '/repo', branch: 'main' },
+  forge: null,
+  capabilities: { localHandoff: true, followups: true },
+  defaultRunner: backends[0] ?? 'claude',
+  checks: backends.map((name) => ({ name, available: true })),
+})
 
 const jsonResponse = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
@@ -77,6 +93,8 @@ const jsonResponse = (body: unknown, status = 200) =>
 function stubFetch(
   overrides: Record<string, () => Response> = {},
   todos: TodoItem[] = TODOS,
+  backends: readonly string[] = ['claude'],
+  defaultModels: Record<string, string> = {},
 ): SentRequest[] {
   const sent: SentRequest[] = []
   let inbox = [...todos]
@@ -85,22 +103,28 @@ function stubFetch(
     vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
       const path = String(input)
       const method = init.method ?? 'GET'
-      sent.push({ path, method })
+      sent.push({
+        path,
+        method,
+        body: init.body === undefined ? undefined : JSON.parse(String(init.body)),
+      })
       const override = overrides[`${method} ${path}`]
       if (override) return override()
       if (method === 'GET' && path === '/api/todos') return jsonResponse(inbox)
       if (method === 'GET' && path === '/api/runs') return jsonResponse([RUN_1])
-      if (method === 'DELETE' && path === '/api/todos/t1') {
-        inbox = inbox.filter((item) => item.id !== 't1')
+      // The runner/model pills (#401) read the host's backends and the per-runner defaults.
+      if (method === 'GET' && path === '/api/health') return jsonResponse(health(backends))
+      if (method === 'GET' && path === '/api/config') return jsonResponse({ defaultModels })
+      if (method === 'DELETE' && path.startsWith('/api/todos/')) {
+        const id = path.slice('/api/todos/'.length)
+        inbox = inbox.filter((item) => item.id !== id)
         return jsonResponse({ removed: true })
       }
-      if (method === 'DELETE' && path === '/api/todos/t2') {
-        inbox = inbox.filter((item) => item.id !== 't2')
-        return jsonResponse({ removed: true })
-      }
-      if (method === 'POST' && path === '/api/todos/t1/start') {
+      if (method === 'POST' && path.endsWith('/start')) {
+        const id = path.slice('/api/todos/'.length, -'/start'.length)
+        if (!inbox.some((item) => item.id === id)) return jsonResponse({ error: 'not found' }, 404)
         inbox = inbox.map((item) =>
-          item.id === 't1' ? { ...item, startedTaskId: STARTED_RUN.id } : item,
+          item.id === id ? { ...item, startedTaskId: STARTED_RUN.id } : item,
         )
         return jsonResponse({ run: STARTED_RUN }, 201)
       }
@@ -108,6 +132,19 @@ function stubFetch(
     }),
   )
   return sent
+}
+
+/** The Run POST the card actually sent — the assertion the #401 tests below turn on. */
+const startBody = (sent: readonly SentRequest[], id: string): unknown =>
+  sent.find((r) => r.method === 'POST' && r.path === `/api/todos/${id}/start`)?.body
+
+/** Open a pill's dropdown and choose an option by its visible label (the house pattern:
+ *  Radix opens on pointerDown, and the menu renders in a portal outside the card). Scoped by
+ *  card, because every runnable card carries its own pair. */
+async function pick(card: HTMLElement, slot: string, label: string) {
+  fireEvent.pointerDown(card.querySelector(`[data-slot="${slot}"]`)!)
+  const options = await screen.findAllByRole('menuitemradio')
+  fireEvent.click(options.find((o) => o.textContent?.includes(label)) as HTMLElement)
 }
 
 function renderInbox() {
@@ -230,6 +267,105 @@ describe('Run', () => {
     expect(await screen.findByText('already started')).not.toBeNull()
     expect(document.querySelector('[data-slot="thread-probe"]')).toBeNull()
     expect(cards()).toHaveLength(2)
+  })
+})
+
+// ---- Run: the runner/model pills (#401) -------------------------------------------------------
+
+describe('Run — backend selection (#401)', () => {
+  it('an untouched card starts on the host default: no pills touched, no body sent', async () => {
+    const sent = stubFetch()
+    renderInbox()
+
+    await waitFor(() => expect(cards()).toHaveLength(2))
+    fireEvent.click(cards()[0]!.querySelector('[data-action="todo-run"]')!)
+
+    await waitFor(() => expect(startBody(sent, 't1')).toBeUndefined())
+  })
+
+  it('an untouched card honors Settings → Agents defaultModels — the one real behavior change', async () => {
+    // Pre-#401 the Inbox ignored `defaultModels` (it is a client-side preference the server
+    // never reads), so a Run always went out bare. Now the card resolves it like the composer
+    // does: an untouched card on a host with a configured default sends that model. This is
+    // the intended consequence of "cannot drift from the composer" — pinned so it stays a
+    // decision rather than an accident.
+    const sent = stubFetch({}, TODOS, ['claude'], { claude: 'opus' })
+    renderInbox()
+
+    await waitFor(() => expect(cards()).toHaveLength(2))
+    const card = cards()[0]!
+    await waitFor(() => expect(card.querySelector('[data-slot="model-pill"]')?.textContent).toContain('opus'))
+    fireEvent.click(card.querySelector('[data-action="todo-run"]')!)
+
+    await waitFor(() => expect(startBody(sent, 't1')).toEqual({ model: 'opus' }))
+  })
+
+  it('a single-backend host hides the runner pill but still offers the model (composer rule)', async () => {
+    stubFetch()
+    renderInbox()
+
+    await waitFor(() => expect(cards()).toHaveLength(2))
+    const card = cards()[0]!
+    await waitFor(() => expect(card.querySelector('[data-slot="model-pill"]')).not.toBeNull())
+    expect(card.querySelector('[data-slot="runner-pill"]')).toBeNull()
+  })
+
+  it('a multi-backend host offers the runner pill, and the pick reaches the POST', async () => {
+    const sent = stubFetch({}, TODOS, ['claude', 'codex'])
+    renderInbox()
+
+    await waitFor(() => expect(cards()).toHaveLength(2))
+    const card = cards()[0]!
+    await waitFor(() => expect(card.querySelector('[data-slot="runner-pill"]')).not.toBeNull())
+
+    await pick(card, 'runner-pill', 'codex')
+    fireEvent.click(card.querySelector('[data-action="todo-run"]')!)
+
+    await waitFor(() => expect(startBody(sent, 't1')).toEqual({ runner: 'codex' }))
+  })
+
+  it('a model pick rides along with the runner', async () => {
+    const sent = stubFetch({}, TODOS, ['claude', 'codex'])
+    renderInbox()
+
+    await waitFor(() => expect(cards()).toHaveLength(2))
+    const card = cards()[0]!
+    await waitFor(() => expect(card.querySelector('[data-slot="runner-pill"]')).not.toBeNull())
+
+    await pick(card, 'runner-pill', 'codex')
+    await pick(card, 'model-pill', 'gpt-5.1-codex')
+    fireEvent.click(card.querySelector('[data-action="todo-run"]')!)
+
+    await waitFor(() =>
+      expect(startBody(sent, 't1')).toEqual({ runner: 'codex', model: 'gpt-5.1-codex' }),
+    )
+  })
+
+  it('the pick is per card — aiming one entry never re-aims the next', async () => {
+    const second: TodoItem = { ...TODO_FULL, id: 't9', summary: 'A second runnable follow-up' }
+    const sent = stubFetch({}, [TODO_FULL, second], ['claude', 'codex'])
+    renderInbox()
+
+    await waitFor(() => expect(cards()).toHaveLength(2))
+    const [first, next] = cards() as [HTMLElement, HTMLElement]
+    await waitFor(() => expect(first.querySelector('[data-slot="runner-pill"]')).not.toBeNull())
+
+    await pick(first, 'runner-pill', 'codex')
+    // The untouched card still shows the host default, and starts on it.
+    expect(next.querySelector('[data-slot="runner-pill"]')?.textContent).toContain('claude')
+
+    fireEvent.click(next.querySelector('[data-action="todo-run"]')!)
+    await waitFor(() => expect(startBody(sent, 't9')).toBeUndefined())
+  })
+
+  it('a non-runnable note gets no pills — there is no run to aim', async () => {
+    stubFetch()
+    renderInbox()
+
+    await waitFor(() => expect(cards()).toHaveLength(2))
+    const note = cards()[1]!
+    expect(note.querySelector('[data-slot="todo-engine"]')).toBeNull()
+    expect(note.querySelector('[data-slot="model-pill"]')).toBeNull()
   })
 })
 
