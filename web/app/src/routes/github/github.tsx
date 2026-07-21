@@ -122,6 +122,11 @@ export function GithubRoute({ view }: { view: GithubView }) {
       queryClient.setQueryData(queryKeys.github({}), data)
       // The refresh busted the server cache; the full batch must re-run against it.
       void queryClient.invalidateQueries({ queryKey: queryKeys.github({ limit: FULL_LIMIT }) })
+      // …and so must any open thread (#525). Previously only the list keys were invalidated, so
+      // a manual refresh left the open detail thread stale for up to the 60 s TTL. Pre-existing,
+      // but it now hides commits and CI state too, not just late comments. The `['github',
+      // 'comments']` prefix covers every open thread without enumerating them.
+      void queryClient.invalidateQueries({ queryKey: ['github', 'comments'] })
     },
     onError: (error) => toast(error.message, { tone: 'danger' }),
   })

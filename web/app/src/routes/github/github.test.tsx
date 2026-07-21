@@ -709,6 +709,27 @@ describe('the comment thread', () => {
     expect(document.querySelector('[data-slot="gh-commit-group"]')).toBeNull()
   })
 
+  it('refetches the OPEN THREAD too when the tab is manually refreshed', async () => {
+    // Pre-existing gap (#525 step 3.1): the refresh mutation invalidated only the list keys, so a
+    // manual refresh left the open thread stale for up to the 60 s TTL. Harmless-looking when the
+    // thread was comments-only; it now hides commits and CI state as well.
+    let threadHits = 0
+    stubFetch({
+      'GET /api/github/comments/issue/142': () => {
+        threadHits += 1
+        return jsonResponse({ available: true, comments: [COMMENT_TEXT], events: [] })
+      },
+      'GET /api/github?refresh=1': () => jsonResponse(GITHUB),
+    })
+    renderAt('/github/issues/142')
+
+    await waitFor(() => expect(threadHits).toBe(1))
+
+    fireEvent.click(document.querySelector<HTMLElement>('[data-slot="gh-refresh"]')!)
+
+    await waitFor(() => expect(threadHits).toBeGreaterThan(1))
+  })
+
   it('shows a truncation row linking to GitHub when the thread was trimmed', async () => {
     stubFetch(thread('issue', 142, { available: true, comments: [COMMENT_TEXT], truncated: true }))
     renderAt('/github/issues/142')

@@ -23,7 +23,7 @@
 | 2 | 2.3 | Attach `checks` per SHA to `committed` events; degrade to absent on failure | done | |
 | 2 | 2.4 | Render CI glyph on commit rows reusing `CHECKS_GLYPH`/`CHECKS_TONE` | done | |
 | 2 | 2.5 | Client-side collapse of consecutive same-author commit runs + `aria-expanded` expander | done | |
-| 3 | 3.1 | Refresh mutation also invalidates open `queryKeys.githubComments` keys | todo | |
+| 3 | 3.1 | Refresh mutation also invalidates open `queryKeys.githubComments` keys | done | |
 | 3 | 3.2 | Extend `mockGithubComments` with fixture events (full 40-char SHAs) | todo | |
 | 3 | 3.3 | Pin `GithubTimelineEvent` / `GithubCommentsData` type-exact in `api-types.test.ts` | todo | |
 | 3 | 3.4 | Extend `github-comments-api.test.ts` dry-run route assertions for `events[]` | todo | |
