@@ -486,6 +486,109 @@ export function normalizeReviews(raw: unknown): ForgeComment[] {
     }));
 }
 
+/**
+ * `gh api …/issues/{n}/timeline` JSON → `ForgeTimelineEvent[]`, plus whether the cap fired.
+ *
+ * Returns `truncated` rather than just the array because the caller has no other way to learn it:
+ * `events.length === TIMELINE_EVENT_CAP` is ambiguous on a thread with exactly that many.
+ *
+ * Three details here are load-bearing and were verified against a real timeline, not assumed:
+ *
+ * 1. **`committed` rows return `created_at: null`** — the real timestamp is at `author.date`.
+ *    Mapping `created_at` naively yields `createdAt: null` on every commit, which string-sorts to
+ *    the top and silently reorders the entire thread.
+ * 2. **`committed` carries a git author, not a GitHub actor** — a name, no login, no avatar.
+ * 3. **The cap keeps the NEWEST events — `slice(-cap)`**, the opposite of the neighbouring
+ *    `mergeThread`, which head-slices. The timeline arrives oldest-first, so `slice(0, cap)` would
+ *    retain 200 stale day-one `labeled` rows and discard the merge and the recent commits — the
+ *    exact rows #525 asks for.
+ *
+ * Exported for unit tests.
+ */
+export function normalizeEvents(
+  raw: unknown,
+  cap = TIMELINE_EVENT_CAP,
+): { events: ForgeTimelineEvent[]; truncated: boolean } {
+  const rows = z.array(ghTimelineEventSchema).parse(raw);
+  const mapped: ForgeTimelineEvent[] = [];
+
+  rows.forEach((row, index) => {
+    const kind = row.event as ForgeTimelineEventKind;
+    if (!TIMELINE_EVENT_KINDS.has(kind)) return; // unknown//noise → dropped, never rendered
+
+    // Per-kind timestamp resolution — see (1) above.
+    const rawAt = kind === 'committed' ? row.author?.date : row.created_at;
+    if (!rawAt) return; // no resolvable timestamp → drop, rather than merge at an arbitrary spot
+    // `author.date` arrives with a numeric offset (`+02:00`); normalize so the string compare the
+    // thread sorts by stays correct across zones.
+    const parsedAt = new Date(rawAt);
+    if (Number.isNaN(parsedAt.getTime())) return;
+    const createdAt = parsedAt.toISOString();
+
+    // Per-kind actor resolution — see (2) above.
+    const actor = (kind === 'committed' ? row.author?.name : row.actor?.login) ?? '?';
+
+    // Identity: `sha` sits ahead of `node_id` deliberately. `committed` rows carry both, and a
+    // node_id-first order would key commits by an opaque `C_kwDO…` blob instead of the SHA, which
+    // is the natural, debuggable identifier and is already the rollup key. The bare-index fallback
+    // reaches only `cross-referenced`, the one kind with no identity at all — as a general scheme
+    // it would be wrong, since the id becomes the React key and an index over the post-sort array
+    // shifts for every row below an insertion, remounting them on each 60 s refetch.
+    const identity = row.id ?? row.sha ?? row.node_id ?? index;
+
+    const event: ForgeTimelineEvent = {
+      id: `evt-${identity}`,
+      kind,
+      actor,
+      createdAt,
+    };
+    // A git author has no avatar, so `committed` deliberately carries none.
+    if (kind !== 'committed' && row.actor?.avatar_url) event.avatarUrl = row.actor.avatar_url;
+
+    switch (kind) {
+      case 'committed': {
+        if (row.sha) event.sha = row.sha;
+        if (row.message) event.message = row.message.split('\n')[0].slice(0, COMMIT_MESSAGE_CAP);
+        if (row.html_url) event.url = row.html_url;
+        break;
+      }
+      case 'labeled':
+      case 'unlabeled': {
+        if (row.label) {
+          event.label = { name: row.label.name };
+          if (row.label.color) event.label.color = row.label.color;
+        }
+        break;
+      }
+      case 'assigned':
+      case 'unassigned': {
+        if (row.assignee?.login) event.subject = row.assignee.login;
+        break;
+      }
+      case 'renamed': {
+        if (row.rename?.to) event.subject = row.rename.to;
+        break;
+      }
+      case 'cross-referenced': {
+        const issue = row.source?.issue;
+        if (issue?.number != null) event.refNumber = issue.number;
+        if (issue?.title) event.refTitle = issue.title;
+        if (issue) event.refIsPr = Boolean(issue.pull_request);
+        if (issue?.html_url) event.url = issue.html_url;
+        break;
+      }
+      default:
+        break;
+    }
+
+    mapped.push(event);
+  });
+
+  const truncated = mapped.length > cap;
+  // slice(-cap), NOT slice(0, cap) — see (3) above.
+  return { events: truncated ? mapped.slice(-cap) : mapped, truncated };
+}
+
 /** Merge comment/review lists chronologically (oldest first) and apply the entry cap. Exported
  *  for unit tests. */
 export function mergeThread(

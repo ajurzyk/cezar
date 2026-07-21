@@ -20,6 +20,7 @@ import {
   ghTimelineEventSchema,
   mergeThread,
   normalizeComments,
+  normalizeEvents,
   normalizeReviews,
   parseCountsPage,
   parseOwnerName,
@@ -459,5 +460,182 @@ describe('timeline fetch bounds (#525)', () => {
     // volume shorten comments[], which is a §2-protected response field.
     expect(TIMELINE_EVENT_CAP).toBe(200);
     expect(THREAD_ENTRY_CAP).toBe(200);
+  });
+});
+
+describe('normalizeEvents (#525)', () => {
+  const SHA = 'a'.repeat(40);
+  const commitRow = (over: Record<string, unknown> = {}) => ({
+    event: 'committed',
+    // Verified against a real timeline: `committed` omits `id` and returns `created_at: null`.
+    created_at: null,
+    sha: SHA,
+    message: 'fix(forge): bound the timeline page loop',
+    author: { name: 'Ada Lovelace', email: 'ada@example.com', date: '2026-01-02T03:04:05Z' },
+    html_url: `https://github.com/o/r/commit/${SHA}`,
+    ...over,
+  });
+
+  it('resolves a committed timestamp from author.date, never leaving it null', () => {
+    // THE trap this whole function exists to avoid: `created_at` is null on commits, and mapping
+    // it naively yields createdAt: null, which string-sorts to the top and reorders the thread.
+    const { events } = normalizeEvents([commitRow()]);
+    expect(events).toHaveLength(1);
+    expect(events[0].createdAt).toBe('2026-01-02T03:04:05.000Z');
+    expect(events[0].createdAt).not.toBeNull();
+  });
+
+  it('normalizes a non-UTC author.date to UTC so the string sort stays correct', () => {
+    // author.date arrives with a numeric offset. Left alone, '2026-01-02T09:00:00+09:00' sorts
+    // AFTER '2026-01-02T03:00:00Z' by string compare, when it is actually a minute earlier.
+    const { events } = normalizeEvents([
+      commitRow({ author: { name: 'Ada', date: '2026-01-02T09:00:00+09:00' } }),
+    ]);
+    expect(events[0].createdAt).toBe('2026-01-02T00:00:00.000Z');
+    expect(events[0].createdAt.endsWith('Z')).toBe(true);
+  });
+
+  it('uses the git author name for commits and the actor login for everything else', () => {
+    // A `committed` row carries a git author (name/email), not a GitHub actor — no login, no
+    // avatar, and the email must never reach the wire type.
+    const { events } = normalizeEvents([
+      commitRow(),
+      {
+        event: 'labeled',
+        id: 7,
+        created_at: '2026-01-03T00:00:00Z',
+        actor: { login: 'octocat', avatar_url: 'https://avatars/1' },
+        label: { name: 'bug', color: 'd73a4a' },
+      },
+    ]);
+    expect(events[0].actor).toBe('Ada Lovelace');
+    expect(events[0].avatarUrl).toBeUndefined();
+    expect(JSON.stringify(events[0])).not.toContain('ada@example.com');
+    expect(events[1].actor).toBe('octocat');
+    expect(events[1].avatarUrl).toBe('https://avatars/1');
+  });
+
+  it('drops unknown event types rather than throwing', () => {
+    const { events } = normalizeEvents([
+      { event: 'subscribed', id: 1, created_at: '2026-01-01T00:00:00Z' },
+      { event: 'mentioned', id: 2, created_at: '2026-01-01T00:00:00Z' },
+      { event: 'review_requested', id: 3, created_at: '2026-01-01T00:00:00Z' },
+      { event: 'some_future_event', id: 4, created_at: '2026-01-01T00:00:00Z' },
+      { event: 'closed', id: 5, created_at: '2026-01-01T00:00:00Z', actor: { login: 'a' } },
+    ]);
+    expect(events.map((e) => e.kind)).toEqual(['closed']);
+  });
+
+  it('drops `reviewed` so reviews are not rendered twice', () => {
+    const { events } = normalizeEvents([
+      { event: 'reviewed', id: 9, submitted_at: '2026-01-01T00:00:00Z', body: 'LGTM' },
+    ]);
+    expect(events).toEqual([]);
+  });
+
+  it('drops an event with no resolvable timestamp instead of sorting it arbitrarily', () => {
+    const { events } = normalizeEvents([
+      { event: 'closed', id: 1, created_at: null, actor: { login: 'a' } },
+      commitRow({ author: { name: 'Ada', date: null } }),
+      { event: 'labeled', id: 2, created_at: 'not-a-date', label: { name: 'x' } },
+    ]);
+    expect(events).toEqual([]);
+  });
+
+  it('maps each kind onto its own fields', () => {
+    const { events } = normalizeEvents([
+      { event: 'labeled', id: 1, created_at: '2026-01-01T00:00:00Z', actor: { login: 'a' }, label: { name: 'bug', color: 'd73a4a' } },
+      { event: 'unlabeled', id: 2, created_at: '2026-01-01T00:00:01Z', actor: { login: 'a' }, label: { name: 'wip' } },
+      { event: 'assigned', id: 3, created_at: '2026-01-01T00:00:02Z', actor: { login: 'a' }, assignee: { login: 'bob' } },
+      { event: 'unassigned', id: 4, created_at: '2026-01-01T00:00:03Z', actor: { login: 'a' }, assignee: { login: 'bob' } },
+      { event: 'renamed', id: 5, created_at: '2026-01-01T00:00:04Z', actor: { login: 'a' }, rename: { from: 'old', to: 'new title' } },
+      { event: 'merged', id: 6, created_at: '2026-01-01T00:00:05Z', actor: { login: 'a' } },
+      { event: 'closed', id: 7, created_at: '2026-01-01T00:00:06Z', actor: { login: 'a' } },
+      { event: 'reopened', id: 8, created_at: '2026-01-01T00:00:07Z', actor: { login: 'a' } },
+      { event: 'head_ref_force_pushed', id: 10, created_at: '2026-01-01T00:00:08Z', actor: { login: 'a' } },
+      {
+        event: 'cross-referenced',
+        id: null,
+        node_id: null,
+        created_at: '2026-01-01T00:00:09Z',
+        actor: { login: 'a' },
+        source: { issue: { number: 520, title: 'Sibling work', html_url: 'https://github.com/o/r/pull/520', pull_request: {} } },
+      },
+      commitRow({ author: { name: 'Ada', date: '2026-01-01T00:00:10Z' } }),
+    ]);
+
+    expect(events.map((e) => e.kind)).toEqual([
+      'labeled', 'unlabeled', 'assigned', 'unassigned', 'renamed',
+      'merged', 'closed', 'reopened', 'head_ref_force_pushed', 'cross-referenced', 'committed',
+    ]);
+    expect(events[0].label).toEqual({ name: 'bug', color: 'd73a4a' });
+    expect(events[1].label).toEqual({ name: 'wip' }); // color omitted, not null
+    expect(events[2].subject).toBe('bob');
+    expect(events[4].subject).toBe('new title');
+    expect(events[9]).toMatchObject({ refNumber: 520, refTitle: 'Sibling work', refIsPr: true });
+    expect(events[10]).toMatchObject({ sha: SHA, message: 'fix(forge): bound the timeline page loop' });
+  });
+
+  it('caps the commit message at its first line and 120 chars', () => {
+    const { events } = normalizeEvents([
+      commitRow({ message: `${'x'.repeat(200)}\n\nA long body paragraph that must not appear.` }),
+    ]);
+    expect(events[0].message).toBe('x'.repeat(120));
+    expect(events[0].message).not.toContain('body paragraph');
+  });
+
+  it('resolves ids through id → sha → node_id → index, sha ahead of node_id', () => {
+    const { events } = normalizeEvents([
+      { event: 'labeled', id: 42, node_id: 'LA_x', created_at: '2026-01-01T00:00:00Z', label: { name: 'a' } },
+      commitRow({ node_id: 'C_kwDOopaque' }), // carries BOTH sha and node_id → sha wins
+      { event: 'cross-referenced', id: null, node_id: null, created_at: '2026-01-01T00:00:02Z', source: { issue: { number: 1 } } },
+    ]);
+    expect(events.map((e) => e.id)).toEqual([`evt-42`, `evt-${SHA}`, 'evt-2']);
+    expect(events[1].id).not.toContain('C_kwDOopaque');
+  });
+
+  it('keeps ids stable across a refetch that prepends an event', () => {
+    // The reason a bare index is not acceptable as the general scheme: the id becomes the React
+    // key, so an index over the post-sort array shifts for every row below an insertion, and each
+    // 60 s refetch would remount them — collapsing any commit group the user had expanded.
+    const rows = [
+      { event: 'labeled', id: 42, created_at: '2026-01-02T00:00:00Z', label: { name: 'a' } },
+      commitRow(),
+    ];
+    const before = normalizeEvents(rows).events.map((e) => e.id);
+    const after = normalizeEvents([
+      { event: 'closed', id: 7, created_at: '2026-01-01T00:00:00Z', actor: { login: 'a' } },
+      ...rows,
+    ]).events.map((e) => e.id);
+    expect(after.slice(1)).toEqual(before);
+    expect(new Set(after).size).toBe(after.length);
+  });
+
+  it('keeps the NEWEST window when the cap fires — the opposite of mergeThread', () => {
+    // The timeline arrives oldest-first. slice(0, cap) would retain 200 stale day-one `labeled`
+    // rows and discard the merge and the recent commits — the exact rows #525 asks for.
+    const rows = Array.from({ length: 250 }, (_, i) => ({
+      event: 'labeled',
+      id: i,
+      created_at: new Date(Date.UTC(2026, 0, 1) + i * 60_000).toISOString(),
+      actor: { login: 'a' },
+      label: { name: `l${i}` },
+    }));
+    const { events, truncated } = normalizeEvents(rows, 200);
+
+    expect(truncated).toBe(true);
+    expect(events).toHaveLength(200);
+    expect(events[events.length - 1].id).toBe('evt-249'); // newest retained
+    expect(events[0].id).toBe('evt-50'); // oldest 50 dropped
+    expect(events.map((e) => e.createdAt)).toEqual([...events.map((e) => e.createdAt)].sort());
+  });
+
+  it('reports truncated=false at exactly the cap — the ambiguity the return shape exists for', () => {
+    const rows = Array.from({ length: 200 }, (_, i) => ({
+      event: 'closed', id: i, created_at: new Date(Date.UTC(2026, 0, 1) + i * 1000).toISOString(), actor: { login: 'a' },
+    }));
+    const { events, truncated } = normalizeEvents(rows, 200);
+    expect(events).toHaveLength(200);
+    expect(truncated).toBe(false);
   });
 });
