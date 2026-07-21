@@ -51,6 +51,9 @@ function expectedEvents(fixture: string): unknown {
 
 const GOLDEN_FIXTURES = [
   'text-turn',
+  // Reasoning streamed as textDelta and closed with a summary-only
+  // `item/completed` — the wire shape #528 was reported against.
+  'reasoning-stream',
   'command-lifecycle',
   'file-change-and-mcp',
   // NOT app-server wire truth: codex has no `todoList` item and no `item/updated`
@@ -565,6 +568,7 @@ describe('CodexAppServerRunner v2 wiring (against the bundled mock app-server)',
 describe('codex reasoning text survives replay (#528)', () => {
   const THREAD = 'th_1';
   const TURN = 'turn_1';
+  const ID = 'item_rsn_1';
 
   function fold(frames: unknown[]): UiEvent[] {
     let state = createCodexUiState();
@@ -577,76 +581,144 @@ describe('codex reasoning text survives replay (#528)', () => {
     return events;
   }
 
-  function completedReasoning(events: UiEvent[], id: string): UiItem | undefined {
+  function reasoningAt(events: UiEvent[], type: 'item.started' | 'item.completed', id = ID): UiItem | undefined {
     return events.find(
-      (e): e is Extract<UiEvent, { type: 'item.completed' }> =>
-        e.type === 'item.completed' && e.item.kind === 'reasoning' && e.item.id === id,
+      (e): e is Extract<UiEvent, { type: 'item.started' | 'item.completed' }> =>
+        e.type === type && 'item' in e && e.item.kind === 'reasoning' && e.item.id === id,
     )?.item;
   }
 
-  const started = {
+  /** The last reasoning text a reload would reconstruct: snapshots only. */
+  function replayedText(events: UiEvent[], id = ID): string | undefined {
+    let text: string | undefined;
+    for (const e of events) {
+      if ((e.type === 'item.started' || e.type === 'item.updated' || e.type === 'item.completed') &&
+          e.item.kind === 'reasoning' && e.item.id === id) {
+        text = e.item.text;
+      }
+    }
+    return text;
+  }
+
+  const turnStarted = { method: 'turn/started', params: { turn: { id: TURN, status: 'inProgress', items: [] } } };
+  const started = (item: Record<string, unknown> = { summary: 'Tracing it' }) => ({
     method: 'item/started',
-    params: { threadId: THREAD, turnId: TURN, item: { type: 'reasoning', id: 'item_rsn_1', summary: 'Tracing it' } },
-  };
-  const textDelta = (delta: string) => ({
-    method: 'item/reasoning/textDelta',
-    params: { threadId: THREAD, turnId: TURN, itemId: 'item_rsn_1', delta },
+    params: { threadId: THREAD, turnId: TURN, item: { type: 'reasoning', id: ID, ...item } },
   });
+  const completed = (item: Record<string, unknown> = {}) => ({
+    method: 'item/completed',
+    params: { threadId: THREAD, turnId: TURN, item: { type: 'reasoning', id: ID, ...item } },
+  });
+  const delta = (method: string, d: string, itemId = ID) => ({
+    method: `item/reasoning/${method}`,
+    params: { threadId: THREAD, turnId: TURN, itemId, delta: d },
+  });
+  const textDelta = (d: string) => delta('textDelta', d);
 
   it('falls back to the accumulated deltas when item/completed carries no content', () => {
     const events = fold([
-      started,
+      started(),
       textDelta('The session cookie '),
       textDelta('is dropped on refresh.'),
       // The real app-server may close a reasoning item with the summary only.
-      {
-        method: 'item/completed',
-        params: { threadId: THREAD, turnId: TURN, item: { type: 'reasoning', id: 'item_rsn_1', summary: 'Tracing it' } },
-      },
+      completed({ summary: 'Tracing it' }),
     ]);
-    expect(completedReasoning(events, 'item_rsn_1')).toEqual({
+    expect(reasoningAt(events, 'item.completed')).toEqual({
       kind: 'reasoning',
-      id: 'item_rsn_1',
+      id: ID,
       text: 'The session cookie is dropped on refresh.',
     });
   });
 
-  it('accumulates summaryDelta and summaryTextDelta on the same item', () => {
-    const events = fold([
-      started,
-      { method: 'item/reasoning/summaryDelta', params: { threadId: THREAD, turnId: TURN, itemId: 'item_rsn_1', delta: 'a' } },
-      { method: 'item/reasoning/summaryTextDelta', params: { threadId: THREAD, turnId: TURN, itemId: 'item_rsn_1', delta: 'b' } },
-      {
-        method: 'item/completed',
-        params: { threadId: THREAD, turnId: TURN, item: { type: 'reasoning', id: 'item_rsn_1' } },
-      },
-    ]);
-    expect(completedReasoning(events, 'item_rsn_1')).toMatchObject({ text: 'ab' });
-  });
-
   it('wire content still wins over the accumulator', () => {
-    const events = fold([
-      started,
-      textDelta('streamed'),
-      {
-        method: 'item/completed',
-        params: { threadId: THREAD, turnId: TURN, item: { type: 'reasoning', id: 'item_rsn_1', content: 'authoritative' } },
-      },
-    ]);
-    expect(completedReasoning(events, 'item_rsn_1')).toMatchObject({ text: 'authoritative' });
+    const events = fold([started(), textDelta('streamed'), completed({ content: 'authoritative' })]);
+    expect(reasoningAt(events, 'item.completed')).toMatchObject({ text: 'authoritative' });
   });
 
-  it('does not leak one item’s reasoning into the next', () => {
+  it('accumulates both summary delta methods into the summary channel', () => {
     const events = fold([
-      started,
+      started({}),
+      delta('summaryDelta', 'Checking '),
+      delta('summaryTextDelta', 'the auth path.'),
+      completed(),
+    ]);
+    expect(reasoningAt(events, 'item.completed')).toMatchObject({ text: 'Checking the auth path.' });
+  });
+
+  // The two channels are distinct streams — codex emits both when raw reasoning
+  // is on. One shared bucket would persist "<raw CoT><summary>" over the summary.
+  it('never concatenates the raw-thought channel with the summary channel', () => {
+    const events = fold([
+      started({ summary: 'Short summary.' }),
+      textDelta('RAW CHAIN OF THOUGHT.'),
+      delta('summaryDelta', 'Short summary.'),
+      completed({ summary: 'Short summary.' }),
+    ]);
+    // The raw stream is the fuller text and wins outright; the summary is not appended to it.
+    expect(reasoningAt(events, 'item.completed')).toMatchObject({ text: 'RAW CHAIN OF THOUGHT.' });
+  });
+
+  // A dropped frame or a mapper attached mid-turn leaves a partial accumulator.
+  it('a partial streamed summary never overwrites a complete wire summary', () => {
+    const events = fold([
+      started({ summary: 'Full summary of the reasoning' }),
+      delta('summaryDelta', 'Full sum'), // only part of the stream was seen
+      completed({ summary: 'Full summary of the reasoning' }),
+    ]);
+    expect(reasoningAt(events, 'item.completed')).toMatchObject({ text: 'Full summary of the reasoning' });
+  });
+
+  it('the streamed summary wins when it is the fuller of the two', () => {
+    const events = fold([
+      started({ summary: 'Full' }),
+      delta('summaryDelta', 'Full summary of the reasoning'),
+      completed({ summary: 'Full' }),
+    ]);
+    expect(reasoningAt(events, 'item.completed')).toMatchObject({ text: 'Full summary of the reasoning' });
+  });
+
+  // A delta can outrun its item/started; the real started must not blank the row.
+  it('a delta arriving before item/started is not wiped by it', () => {
+    const events = fold([turnStarted, textDelta('streamed first'), started({})]);
+    // The synthesized started is empty by design — the delta appends to it live.
+    // The REAL item/started that follows must not blank what the stream filled.
+    const starts = events.filter((e) => e.type === 'item.started');
+    expect(starts).toHaveLength(2);
+    expect(replayedText(events)).toBe('streamed first');
+  });
+
+  // The leak this guards is id REUSE after an item that never completed.
+  it('an interrupted item’s reasoning does not leak into the next turn that reuses its id', () => {
+    const events = fold([
+      turnStarted,
+      started({}),
+      textDelta('TURN-1 SECRET REASONING'),
+      // turn ends without item/completed — the item was interrupted.
+      { method: 'turn/started', params: { turn: { id: 'turn_2', status: 'inProgress', items: [] } } },
+      started({}),
+      completed(),
+    ]);
+    const second = [...events].reverse().find(
+      (e): e is Extract<UiEvent, { type: 'item.completed' }> =>
+        e.type === 'item.completed' && e.item.kind === 'reasoning',
+    );
+    expect(second?.item.kind === 'reasoning' && second.item.text).toBe('');
+  });
+
+  it('does not leak one item’s reasoning into a different id in the same turn', () => {
+    const events = fold([
+      started(),
       textDelta('first'),
-      { method: 'item/completed', params: { threadId: THREAD, turnId: TURN, item: { type: 'reasoning', id: 'item_rsn_1' } } },
+      completed(),
       {
         method: 'item/started',
         params: { threadId: THREAD, turnId: TURN, item: { type: 'reasoning', id: 'item_rsn_2', summary: 'Next' } },
       },
-      { method: 'item/completed', params: { threadId: THREAD, turnId: TURN, item: { type: 'reasoning', id: 'item_rsn_2', summary: 'Next' } } },
+      {
+        method: 'item/completed',
+        params: { threadId: THREAD, turnId: TURN, item: { type: 'reasoning', id: 'item_rsn_2', summary: 'Next' } },
+      },
     ]);
-    expect(completedReasoning(events, 'item_rsn_2')).toMatchObject({ text: 'Next' });
+    expect(reasoningAt(events, 'item.completed', 'item_rsn_2')).toMatchObject({ text: 'Next' });
   });
 });

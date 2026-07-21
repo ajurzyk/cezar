@@ -38,6 +38,15 @@ import type {
 } from './ui-events.js';
 import { toolDisplay } from './tool-display.js';
 
+/** The two reasoning delta channels, accumulated separately — see
+ *  `CodexUiMapperState.reasonings`. */
+export interface ReasoningAccumulator {
+  /** `item/reasoning/textDelta` — the raw chain of thought. */
+  readonly text: string;
+  /** `item/reasoning/summaryDelta` + `summaryTextDelta` — the condensed summary. */
+  readonly summary: string;
+}
+
 export interface CodexUiMapperState {
   /** True once `session.started` was emitted (thread/started notification or
    *  the runner's `codexSessionStarted` after the thread/start result —
@@ -52,11 +61,21 @@ export interface CodexUiMapperState {
   /** Accumulated `outputDelta` text per commandExecution item, attached to
    *  the final snapshot when the wire `item/completed` carries no output. */
   readonly outputs: ReadonlyMap<string, string>;
-  /** Accumulated reasoning delta text per reasoning item, attached to the
-   *  final snapshot when the wire `item/completed` carries no `content`.
-   *  Deltas are live-only (never persisted), so without this the reasoning
-   *  text is unrecoverable on replay and the row reads back empty (#528). */
-  readonly reasonings: ReadonlyMap<string, string>;
+  /** Accumulated reasoning deltas per reasoning item, attached to the final
+   *  snapshot when the wire `item/completed` carries no `content`. Deltas are
+   *  live-only (never persisted), so without this the reasoning text is
+   *  unrecoverable on replay and the row reads back empty (#528).
+   *
+   *  Kept PER CHANNEL: `item/reasoning/textDelta` streams the raw chain of
+   *  thought while `summaryDelta`/`summaryTextDelta` stream the condensed
+   *  summary, and codex emits both when raw reasoning is enabled. One shared
+   *  bucket would concatenate the two into `"<raw CoT><summary>"` and persist
+   *  that garble over the clean wire `summary`.
+   *
+   *  Turn-scoped, and reset by `turn/started`: an interrupted item is never
+   *  completed, so without the reset its text would both leak into a later
+   *  turn that reuses the id and pin whole chains of thought in memory. */
+  readonly reasonings: ReadonlyMap<string, ReasoningAccumulator>;
   /** True once `turn/plan/updated` has spoken IN THE CURRENT TURN. Both that
    *  notification and the `plan`/`todoList` item arm write `plan.updated`, so
    *  without a precedence rule the last frame wins and a prose plan item would
@@ -127,9 +146,10 @@ export function mapCodexNotification(frame: unknown, state: CodexUiMapperState):
     case 'item/agentMessage/delta':
       return mapDelta(params, state, 'text');
     case 'item/reasoning/textDelta':
+      return mapDelta(params, state, 'reasoning', 'text');
     case 'item/reasoning/summaryDelta':
     case 'item/reasoning/summaryTextDelta':
-      return mapDelta(params, state, 'reasoning');
+      return mapDelta(params, state, 'reasoning', 'summary');
     case 'item/commandExecution/outputDelta':
       return mapDelta(params, state, 'output');
     case 'thread/tokenUsage/updated':
@@ -148,7 +168,10 @@ function mapTurnStarted(params: Record<string, unknown>, state: CodexUiMapperSta
   return {
     events: [{ type: 'turn.started', turnId }],
     // planFromNotification is turn-scoped — a new turn re-opens the item arm.
-    state: { ...state, turnSeq, currentTurnId: turnId, planFromNotification: false },
+    // So are the reasoning accumulators: an interrupted item never completes,
+    // so its text would otherwise leak into a later turn that reuses the id
+    // and pin whole chains of thought in memory for the session (#528).
+    state: { ...state, turnSeq, currentTurnId: turnId, planFromNotification: false, reasonings: new Map() },
   };
 }
 
@@ -279,7 +302,7 @@ function mapItemLifecycle(
     type === 'agentMessage'
       ? messageItem(raw, id)
       : type === 'reasoning'
-        ? reasoningItem(raw, id, eventType, state)
+        ? reasoningItem(raw, id, state)
         : toolItem(raw, id, type, eventType, state);
   const events: UiEvent[] = [{ type: eventType, item }];
 
@@ -313,19 +336,35 @@ function messageItem(raw: Record<string, unknown>, id: string): UiMessageItem {
   return item;
 }
 
-/** `reasoning` → reasoning item — full `content` when present, else what
- *  `reasoning/*Delta` streamed, else the summary. The accumulator matters on
- *  `item.completed`: deltas never reach disk, so a completed snapshot without
- *  `content` would otherwise persist the short summary (or nothing) and the
- *  row would read back empty after a reload (#528). */
+/** `reasoning` → reasoning item. Precedence, most authoritative first:
+ *  wire `content` → streamed raw chain of thought → the fuller of the wire
+ *  `summary` and the streamed summary.
+ *
+ *  The accumulators matter on `item.completed`: deltas never reach disk, so a
+ *  completed snapshot without `content` would otherwise persist the short
+ *  summary (or nothing) and the row would read back empty after a reload
+ *  (#528). They are consulted on `item.started` too — a delta can outrun its
+ *  `item/started`, and re-emitting an empty snapshot would blank the row the
+ *  synthesized item already filled.
+ *
+ *  Summary picks the LONGER of the two sources rather than preferring the
+ *  stream: a mapper attached mid-turn, or any dropped frame, leaves a partial
+ *  accumulator that must not overwrite a complete `summary` from the wire. */
 function reasoningItem(
   raw: Record<string, unknown>,
   id: string,
-  eventType: ItemEventType,
   state: CodexUiMapperState,
 ): UiReasoningItem {
-  const streamed = eventType === 'item.started' ? undefined : str(state.reasonings.get(id));
-  return { kind: 'reasoning', id, text: str(raw.content) ?? streamed ?? str(raw.summary) ?? '' };
+  const streamed = state.reasonings.get(id);
+  const summary = longer(str(raw.summary), str(streamed?.summary));
+  return { kind: 'reasoning', id, text: str(raw.content) ?? str(streamed?.text) ?? summary ?? '' };
+}
+
+/** The longer of two optional strings — neither present yields undefined. */
+function longer(a: string | undefined, b: string | undefined): string | undefined {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  return b.length > a.length ? b : a;
 }
 
 /** The §7.1 status map — the wire word wins; an item without one derives its
@@ -486,6 +525,8 @@ function mapDelta(
   params: Record<string, unknown>,
   state: CodexUiMapperState,
   field: 'text' | 'reasoning' | 'output',
+  /** Which reasoning stream fed this delta — see `ReasoningAccumulator`. */
+  reasoningChannel: 'text' | 'summary' = 'text',
 ): CodexUiMapping {
   const itemId = str(params.itemId);
   const delta = typeof params.delta === 'string' ? params.delta : '';
@@ -505,10 +546,16 @@ function mapDelta(
     next.set(itemId, (next.get(itemId) ?? '') + delta);
     outputs = next;
   }
-  let reasonings: ReadonlyMap<string, string> = state.reasonings;
+  let reasonings: ReadonlyMap<string, ReasoningAccumulator> = state.reasonings;
   if (field === 'reasoning') {
     const next = new Map(state.reasonings);
-    next.set(itemId, (next.get(itemId) ?? '') + delta);
+    const prev = next.get(itemId) ?? { text: '', summary: '' };
+    next.set(
+      itemId,
+      reasoningChannel === 'text'
+        ? { ...prev, text: prev.text + delta }
+        : { ...prev, summary: prev.summary + delta },
+    );
     reasonings = next;
   }
   return { events, state: { ...state, knownItems, outputs, reasonings } };
