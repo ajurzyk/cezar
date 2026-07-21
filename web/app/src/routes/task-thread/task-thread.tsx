@@ -134,6 +134,12 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
   // The legacy session-open rule (web/app.js `updateDetail`): the composer can deliver while
   // the engine owns a live session — running queues the message, waiting answers it.
   const sessionOpen = run.status === 'running' || run.status === 'waiting'
+  // …and the third state (#472): a queued run has not started, so its prompt is still
+  // authorable. "Session closed — Continue to reopen." was wrong on its own terms here —
+  // the session is not closed, it was never opened, and Continue means nothing for a run
+  // that has not run. Deliberately `queued` only: review/done/failed/cancelled keep the
+  // existing copy and their Continue action.
+  const queued = run.status === 'queued'
   const sendMessage = useSendMessage(run.id)
 
   const rows = useMemo(() => buildThreadRows(run, thread), [run, thread])
@@ -230,15 +236,27 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
             </div>
           ) : null}
 
+          {queued ? (
+            <div
+              data-slot="queued-hint"
+              className="flex items-center gap-2 px-1 text-xs text-muted-foreground"
+            >
+              <StatusDot tone="pending" />
+              Messages you add now are folded into the prompt before the run starts.
+            </div>
+          ) : null}
+
           <Composer
             onSubmit={(text, images) => sendMessage.mutateAsync({ text, images })}
-            disabled={!sessionOpen}
+            disabled={!sessionOpen && !queued}
             disabledReason="Session closed — Continue to reopen."
+            // Continue is meaningless for a run that has not run, so the queued branch
+            // renders no disabled action at all (it is not disabled in the first place).
             disabledAction={<ContinueAction run={run} />}
             placeholder={
-              run.status === 'waiting'
-                ? 'Reply — / for skills, @ for files…'
-                : 'Message the agent — / for skills, @ for files…'
+              queued ? 'Add to the prompt — sent when the run starts…'
+              : run.status === 'waiting' ? 'Reply — / for skills, @ for files…'
+              : 'Message the agent — / for skills, @ for files…'
             }
             autocompleteSkills
             quickReplies

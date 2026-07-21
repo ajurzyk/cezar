@@ -158,6 +158,31 @@ describe('ThreadView', () => {
     ).toContain('Continue')
   })
 
+  /** #472 — a queued run has not started, so its prompt is still authorable. */
+  it('queued → the composer is ENABLED with its own placeholder and hint, and no Continue', () => {
+    renderView(<ThreadView run={run('queued')} thread={reduceThread(EVENTS)} />)
+    const textarea = screen.getByLabelText('Reply to the agent') as HTMLTextAreaElement
+    expect(textarea.disabled).toBe(false)
+    expect(textarea.placeholder).toBe('Add to the prompt — sent when the run starts…')
+    expect(document.querySelector('[data-slot="queued-hint"]')?.textContent).toContain(
+      'folded into the prompt before the run starts',
+    )
+    // Continue is meaningless for a run that has not run.
+    expect(document.querySelector('[data-slot="composer-disabled-action"]')).toBeNull()
+  })
+
+  /**
+   * The scope boundary: the queued branch is `queued` ONLY. Every other closed
+   * status keeps the legacy copy — including the string `composer.e2e.ts` asserts.
+   */
+  it('done keeps the legacy disabled copy and shows no queued hint', () => {
+    renderView(<ThreadView run={run('done')} thread={reduceThread(EVENTS)} />)
+    const textarea = screen.getByLabelText('Reply to the agent') as HTMLTextAreaElement
+    expect(textarea.disabled).toBe(true)
+    expect(textarea.placeholder).toBe('Session closed — Continue to reopen.')
+    expect(document.querySelector('[data-slot="queued-hint"]')).toBeNull()
+  })
+
   it('closed with no resumable session → disabled composer, and no Continue button invented', () => {
     renderView(<ThreadView run={run('done')} thread={reduceThread(EVENTS)} />)
     expect((screen.getByLabelText('Reply to the agent') as HTMLTextAreaElement).disabled).toBe(true)
