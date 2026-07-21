@@ -15,6 +15,8 @@ vi.mock('node:child_process', async (importOriginal) => {
 
 import {
   __clearCommentsCacheForTests,
+  __clearRepoHandleCacheForTests,
+  resolveRepoHandle,
   detectGithubCached,
   fetchGithubComments,
   fetchTimelinePages,
@@ -936,5 +938,54 @@ describe('mergeThread is unaffected by events (#525)', () => {
     );
     expect(mergeThread([comments])).toEqual(before);
     expect(before.truncated).toBe(false);
+  });
+});
+
+describe('resolveRepoHandle (#525 Phase 2)', () => {
+  const repoRoot = '/tmp/repo';
+
+  beforeEach(() => {
+    execFileMock.mockReset();
+    __clearRepoHandleCacheForTests();
+  });
+
+  const ghReturns = (slug: string) =>
+    execFileMock.mockImplementation((...args: unknown[]) => {
+      const cb = args[args.length - 1] as (e: unknown, r: unknown) => void;
+      cb(null, { stdout: slug, stderr: '' });
+    });
+
+  it('parses the handle and serves the second call from the memo', async () => {
+    ghReturns('open-mercato/cezar');
+    expect(await resolveRepoHandle(repoRoot)).toEqual({ owner: 'open-mercato', name: 'cezar' });
+    expect(await resolveRepoHandle(repoRoot)).toEqual({ owner: 'open-mercato', name: 'cezar' });
+    expect(execFileMock).toHaveBeenCalledTimes(1); // no second subprocess
+  });
+
+  it('memoizes a malformed slug as a permanent negative and does not retry it', async () => {
+    ghReturns('not-a-clean-handle/with/too/many/parts');
+    expect(await resolveRepoHandle(repoRoot)).toBeNull();
+    expect(await resolveRepoHandle(repoRoot)).toBeNull();
+    expect(execFileMock).toHaveBeenCalledTimes(1); // retrying cannot help
+  });
+
+  it('does NOT cache a thrown gh failure — one blip must not disable glyphs until restart', async () => {
+    execFileMock.mockImplementationOnce((...args: unknown[]) => {
+      const cb = args[args.length - 1] as (e: unknown, r: unknown) => void;
+      cb(new Error('network is unreachable'), null);
+    });
+    expect(await resolveRepoHandle(repoRoot)).toBeNull();
+
+    ghReturns('open-mercato/cezar'); // the blip passes
+    expect(await resolveRepoHandle(repoRoot)).toEqual({ owner: 'open-mercato', name: 'cezar' });
+    expect(execFileMock).toHaveBeenCalledTimes(2); // it DID retry
+  });
+
+  it('keys the memo per repoRoot', async () => {
+    ghReturns('o/one');
+    expect(await resolveRepoHandle('/tmp/a')).toEqual({ owner: 'o', name: 'one' });
+    ghReturns('o/two');
+    expect(await resolveRepoHandle('/tmp/b')).toEqual({ owner: 'o', name: 'two' });
+    expect(execFileMock).toHaveBeenCalledTimes(2);
   });
 });

@@ -622,6 +622,38 @@ export function __clearCommentsCacheForTests(): void {
 
 const TIMELINE_PER_PAGE = 100;
 
+// The repo handle for the per-commit checks query (#525 Phase 2). Memoized per repoRoot — stable
+// in practice, and keyed per root rather than globally for multi-project forward-compatibility.
+// `null` is a cached PERMANENT negative (the slug isn't a clean two-part name, so retrying cannot
+// help). A *thrown* gh failure is transient and deliberately NOT cached: caching it would disable
+// glyphs until process restart on one network blip.
+const repoHandleCache = new Map<string, { owner: string; name: string } | null>();
+
+/** Test-only: drop the memoized repo handles. */
+export function __clearRepoHandleCacheForTests(): void {
+  repoHandleCache.clear();
+}
+
+/** The `owner/name` for `repoRoot`, memoized. Returns null when the handle isn't a clean two-part
+ *  slug or `gh` failed — the caller then skips checks entirely and commits render unglyphed. */
+export async function resolveRepoHandle(
+  repoRoot: string,
+): Promise<{ owner: string; name: string } | null> {
+  const memo = repoHandleCache.get(repoRoot);
+  if (memo !== undefined) return memo;
+  let handle: { owner: string; name: string } | null;
+  try {
+    handle = parseOwnerName(
+      await gh(repoRoot, ['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner']),
+    );
+  } catch {
+    // Transient — do NOT memoize, so the next thread retries.
+    return null;
+  }
+  repoHandleCache.set(repoRoot, handle); // includes the permanent negative
+  return handle;
+}
+
 /** What the bounded timeline page loop returns. `stoppedShort` means "the timeline may have more
  *  rows than we fetched" and has exactly three causes — the page cap, the budget floor, and a
  *  failure on page ≥ 2. All three shorten the `commented` stream the same way, so all three feed
