@@ -492,11 +492,16 @@ export function useAgentConfigFile(id: string | null) {
 
 export function usePutAgentConfigFile(id: string) {
   const queryClient = useQueryClient()
+  // Capture the scope at hook render time. A save may finish after the user has
+  // switched projects; recomputing these getters in onSuccess would otherwise
+  // write the previous project's response into the newly active cache.
+  const listingKey = queryKeys.agentConfig
+  const fileKey = queryKeys.agentConfigFile(id)
   return useMutation({
     mutationFn: (body: SetAgentConfigInput) => putAgentConfigFile(id, body),
     onSuccess: (result) => {
-      queryClient.setQueryData(queryKeys.agentConfigFile(id), result)
-      void queryClient.invalidateQueries({ queryKey: queryKeys.agentConfig })
+      queryClient.setQueryData(fileKey, result)
+      void queryClient.invalidateQueries({ queryKey: listingKey })
     },
   })
 }

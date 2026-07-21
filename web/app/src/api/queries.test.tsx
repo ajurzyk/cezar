@@ -6,7 +6,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from './client'
 import { createQueryClient } from './query-client'
 import { setApiScope } from './project-scope'
-import { queryKeys, useHealth, usePatchRun, useRun, useRunChanges, useRuns } from './queries'
+import {
+  queryKeys,
+  useHealth,
+  usePatchRun,
+  usePutAgentConfigFile,
+  useRun,
+  useRunChanges,
+  useRuns,
+} from './queries'
 
 const fetchMock = vi.fn<typeof fetch>()
 
@@ -137,6 +145,42 @@ describe('useHealth', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('usePutAgentConfigFile', () => {
+  it('updates the project cache where the save started when the active project changes in flight', async () => {
+    let resolveFetch!: (response: Response) => void
+    fetchMock.mockImplementation(
+      () => new Promise<Response>((resolve) => {
+        resolveFetch = resolve
+      }),
+    )
+    const client = createQueryClient()
+    const scopedWrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    )
+    const file = {
+      id: 'claude.project.settings',
+      path: '/repo-a/.claude/settings.json',
+      exists: true,
+      content: '{"project":"a"}',
+      version: 'next',
+    }
+
+    setApiScope('proj-a')
+    const { result } = renderHook(() => usePutAgentConfigFile(file.id), { wrapper: scopedWrapper })
+    act(() => result.current.mutate({ content: file.content, version: 'previous' }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/p/proj-a/agent-config/claude.project.settings')
+
+    setApiScope('proj-b')
+    resolveFetch(json(file))
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(client.getQueryData(['proj-a', 'agent-config', 'file', file.id])).toEqual(file)
+    expect(client.getQueryData(['proj-b', 'agent-config', 'file', file.id])).toBeUndefined()
+    setApiScope(null)
   })
 })
 
