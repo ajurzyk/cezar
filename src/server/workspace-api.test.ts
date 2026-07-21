@@ -7,6 +7,7 @@ import { workspaceConfigPath, workspaceUiStatePath } from '../paths.js';
 import { WorkspaceSemaphore } from '../workspace/semaphore.js';
 import { RunStore } from '../runs/store.js';
 import type { RunManager } from '../workflows/run.js';
+import { apiRequest } from './loopback-request.testkit.js';
 import { createApp, type WorkspaceConfigResponse } from './server.js';
 
 /**
@@ -51,12 +52,11 @@ describe('the workspace settings API (step 2.7)', () => {
     for (const dir of [home, repoRoot]) rmSync(dir, { recursive: true, force: true });
   });
 
-  const rawConfig = () =>
-    JSON.parse(readFileSync(workspaceConfigPath(), 'utf8')) as Record<string, unknown>;
+  const rawConfig = () => JSON.parse(readFileSync(workspaceConfigPath(), 'utf8')) as Record<string, unknown>;
 
-  const getConfig = () => app.request('/api/workspace/config');
+  const getConfig = () => apiRequest(app, '/api/workspace/config');
   const putConfig = (body: unknown) =>
-    app.request('/api/workspace/config', {
+    apiRequest(app, '/api/workspace/config', {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
@@ -70,7 +70,11 @@ describe('the workspace settings API (step 2.7)', () => {
     const body = (await res.json()) as WorkspaceConfigResponse & Record<string, unknown>;
     expect(body).toEqual({
       projectsDir: '~/cezar/projects',
-      resources: { maxParallel: 2, memoryLimitMb: null, worktreeRetentionDefault: 10 },
+      resources: {
+        maxParallel: 2,
+        memoryLimitMb: null,
+        worktreeRetentionDefault: 10,
+      },
     });
     // Absolute project roots belong on /api/projects; schemaVersion is a
     // migration cursor, not a setting.
@@ -80,11 +84,17 @@ describe('the workspace settings API (step 2.7)', () => {
 
   it('PUT resources round-trips, persists to disk, and refreshes the semaphore cache', async () => {
     expect(semaphore.maxParallel()).toBe(2); // the pre-PUT snapshot
-    const res = await putConfig({ resources: { maxParallel: 5, memoryLimitMb: 2048 } });
+    const res = await putConfig({
+      resources: { maxParallel: 5, memoryLimitMb: 2048 },
+    });
     expect(res.status).toBe(200);
     expect((await res.json()) as WorkspaceConfigResponse).toEqual({
       projectsDir: '~/cezar/projects',
-      resources: { maxParallel: 5, memoryLimitMb: 2048, worktreeRetentionDefault: 10 },
+      resources: {
+        maxParallel: 5,
+        memoryLimitMb: 2048,
+        worktreeRetentionDefault: 10,
+      },
     });
     // Round-trip through GET and the raw file.
     expect(((await (await getConfig()).json()) as WorkspaceConfigResponse).resources.maxParallel).toBe(5);
@@ -162,22 +172,24 @@ describe('the workspace settings API (step 2.7)', () => {
   });
 
   it('a malformed body answers 400 {error}', async () => {
-    const res = await app.request('/api/workspace/config', { method: 'PUT', body: 'nonsense' });
+    const res = await apiRequest(app, '/api/workspace/config', {
+      method: 'PUT',
+      body: 'nonsense',
+    });
     expect(res.status).toBe(400);
     expect((await res.json()) as { error: string }).toHaveProperty('error');
   });
 
   // ---- GET/PUT /api/workspace/ui-state -------------------------------------
 
-  const getUiState = () => app.request('/api/workspace/ui-state');
+  const getUiState = () => apiRequest(app, '/api/workspace/ui-state');
   const putUiState = (body: unknown) =>
-    app.request('/api/workspace/ui-state', {
+    apiRequest(app, '/api/workspace/ui-state', {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
     });
-  const rawUiState = () =>
-    JSON.parse(readFileSync(workspaceUiStatePath(), 'utf8')) as Record<string, unknown>;
+  const rawUiState = () => JSON.parse(readFileSync(workspaceUiStatePath(), 'utf8')) as Record<string, unknown>;
 
   it('GET answers {} when no file exists yet', async () => {
     const res = await getUiState();
@@ -198,13 +210,16 @@ describe('the workspace settings API (step 2.7)', () => {
       sidebar: { collapsed: { cezar: true } },
     });
     // The workspace file, not the boot repo's — the per-repo twin stays empty.
-    expect(await (await app.request('/api/ui-state')).json()).toEqual({});
+    expect(await (await apiRequest(app, '/api/ui-state')).json()).toEqual({});
   });
 
   it('unknown keys pass through and survive later PUTs (additive, like the per-repo route)', async () => {
     await putUiState({ futurePref: { nested: 1 } });
     await putUiState({ notifications: { enabled: true } });
-    expect(rawUiState()).toEqual({ futurePref: { nested: 1 }, notifications: { enabled: true } });
+    expect(rawUiState()).toEqual({
+      futurePref: { nested: 1 },
+      notifications: { enabled: true },
+    });
   });
 
   it('rejects a malformed known key instead of writing garbage', async () => {
@@ -215,8 +230,7 @@ describe('the workspace settings API (step 2.7)', () => {
   });
 
   it('caps the top-level key count at 200, same as the per-repo route', async () => {
-    const keysOf = (n: number) =>
-      Object.fromEntries(Array.from({ length: n }, (_, i) => [`pref-${i}`, true]));
+    const keysOf = (n: number) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`pref-${i}`, true]));
     expect((await putUiState(keysOf(200))).status).toBe(200);
     const over = await putUiState(keysOf(201));
     expect(over.status).toBe(400);

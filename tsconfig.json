@@ -17,8 +17,9 @@
     "outDir": "dist",
     "rootDir": "src"
   },
-  // Build config: tests are excluded so they never reach `dist` (and the published tarball).
+  // Build config: tests and their `*.testkit.ts` helpers are excluded so they never reach
+  // `dist` (and the published tarball).
   // They are still typechecked — tsconfig.test.json adds them back, and `npm run typecheck` runs both.
   "include": ["src/**/*.ts"],
-  "exclude": ["src/**/*.test.ts"]
+  "exclude": ["src/**/*.test.ts", "src/**/*.testkit.ts"]
 }

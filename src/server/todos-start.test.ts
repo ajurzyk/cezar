@@ -8,6 +8,7 @@ import type { RunManager, StartRunInput } from '../workflows/run.js';
 import type { WorkflowDef } from '../workflows/types.js';
 import type { TodoItem } from '../todos.js';
 import { createApp } from './server.js';
+import { apiRequest } from './loopback-request.testkit.js';
 
 /**
  * `POST /api/todos/:id/start` (spec 007, extended by #401 + #413): the "▶ Run" flow that turns
@@ -61,7 +62,7 @@ describe('POST /api/todos/:id/start', () => {
   });
 
   const start = (id: string, body?: unknown) =>
-    app.request(`/api/todos/${encodeURIComponent(id)}/start`, {
+    apiRequest(app, `/api/todos/${encodeURIComponent(id)}/start`, {
       method: 'POST',
       ...(body === undefined
         ? {}
@@ -163,7 +164,7 @@ describe('POST /api/todos/:id/start', () => {
 
   it('rejects a malformed JSON body with a 400 — it must not pass as "no body"', async () => {
     writeTodos([{ id: 't1', summary: 'Ship it' }]);
-    const res = await app.request('/api/todos/t1/start', {
+    const res = await apiRequest(app, '/api/todos/t1/start', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: '{"prompt": "unterminated',
@@ -175,7 +176,7 @@ describe('POST /api/todos/:id/start', () => {
 
   it('a zero-length body is still the body-less case, not a 400', async () => {
     writeTodos([{ id: 't1', summary: 'Ship it' }]);
-    const res = await app.request('/api/todos/t1/start', {
+    const res = await apiRequest(app, '/api/todos/t1/start', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: '',

@@ -8,6 +8,7 @@ import { RunStore } from '../runs/store.js';
 import type { RunManager } from '../workflows/run.js';
 import { clearProjectProbeCache, listProjects, registerProject } from '../workspace/projects.js';
 import { ProjectContexts } from './project-context.js';
+import { apiRequest } from './loopback-request.testkit.js';
 import { createApp } from './server.js';
 
 /**
@@ -44,7 +45,12 @@ describe('usage SSE fan-out is scoped per project', () => {
     }
     clearProjectProbeCache();
     store = RunStore.open(join(repoRoot, '.ai/cezar'), { keepLive: true });
-    bootRunId = store.createRun({ title: 'boot', workflow: 'quick-task', task: 'boot', steps: [] }).id;
+    bootRunId = store.createRun({
+      title: 'boot',
+      workflow: 'quick-task',
+      task: 'boot',
+      steps: [],
+    }).id;
     contexts = new ProjectContexts({ listProjects });
     await registerProject(repoRoot);
     app = createApp({
@@ -70,10 +76,8 @@ describe('usage SSE fan-out is scoped per project', () => {
   });
 
   /** Open one SSE stream and return an incremental until-reader. */
-  const openStream = async (
-    url: string,
-  ): Promise<{ readUntil: (marker: string) => Promise<string> }> => {
-    const res = await app.request(url);
+  const openStream = async (url: string): Promise<{ readUntil: (marker: string) => Promise<string> }> => {
+    const res = await apiRequest(app, url);
     expect(res.status, url).toBe(200);
     expect(res.body, url).not.toBeNull();
     const reader = (res.body as ReadableStream<Uint8Array>).getReader();
@@ -107,7 +111,7 @@ describe('usage SSE fan-out is scoped per project', () => {
     // Build the second project's context lazily (first API touch), then give
     // its store a run of its own.
     const other = await registerProject(otherRoot);
-    expect((await app.request(`/api/p/${other.id}/runs`)).status).toBe(200);
+    expect((await apiRequest(app, `/api/p/${other.id}/runs`)).status).toBe(200);
     const otherStore = contexts.peek(other.id)?.store;
     expect(otherStore).toBeDefined();
     const otherRunId = (otherStore as RunStore).createRun({
@@ -124,8 +128,16 @@ describe('usage SSE fan-out is scoped per project', () => {
     await bootStream.readUntil('event: ping');
     await otherStream.readUntil('event: ping');
 
-    const bootSample: ProcessUsage = { cpuPct: 12.5, rssBytes: 111 * 1024, procCount: 2 };
-    const otherSample: ProcessUsage = { cpuPct: 99.9, rssBytes: 222 * 1024, procCount: 5 };
+    const bootSample: ProcessUsage = {
+      cpuPct: 12.5,
+      rssBytes: 111 * 1024,
+      procCount: 2,
+    };
+    const otherSample: ProcessUsage = {
+      cpuPct: 99.9,
+      rssBytes: 222 * 1024,
+      procCount: 5,
+    };
     emitUsageForTest({ [bootRunId]: bootSample, [otherRunId]: otherSample });
 
     const bootBody = await bootStream.readUntil('event: usage');
@@ -139,13 +151,15 @@ describe('usage SSE fan-out is scoped per project', () => {
 
   it('a snapshot owned entirely by another project arrives as an empty record (stale samples clear)', async () => {
     const other = await registerProject(otherRoot);
-    expect((await app.request(`/api/p/${other.id}/runs`)).status).toBe(200);
+    expect((await apiRequest(app, `/api/p/${other.id}/runs`)).status).toBe(200);
 
     const otherStream = await openStream(`/api/p/${other.id}/events`);
     await otherStream.readUntil('event: ping');
 
     // Every run in the snapshot belongs to the boot project.
-    emitUsageForTest({ [bootRunId]: { cpuPct: 1, rssBytes: 1024, procCount: 1 } });
+    emitUsageForTest({
+      [bootRunId]: { cpuPct: 1, rssBytes: 1024, procCount: 1 },
+    });
 
     const body = await otherStream.readUntil('event: usage');
     // Same tick cadence as before scoping, but no foreign rows — the client
