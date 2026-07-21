@@ -1,4 +1,4 @@
-import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import type {
   AgentEvent,
   AgentRunResult,
@@ -13,13 +13,19 @@ import { prependSystemPrompt } from './agent-runner.js';
 import {
   AUTO_END_DELAY_MS,
   DEFAULT_RUN_TIMEOUT_MS,
-  EOF_KILL_GRACE_MS,
-  EOF_TERM_GRACE_MS,
   KILL_GRACE_MS,
 } from './claude-cli-runner.js';
-import { buildChildEnv } from './agent-env.js';
 import { parseAskRequest, type AskQuestion } from './ask.js';
 import { readNdjson } from './ndjson.js';
+import {
+  CodexAppServerRpc,
+  codexSpawnError,
+  endCodexAppServer,
+  resolveCodexExecutable,
+  spawnCodexAppServer,
+  type CodexAppServerMessage,
+  waitForCodexAppServerExit,
+} from './codex-app-server-transport.js';
 import {
   codexSessionStarted,
   createCodexUiState,
@@ -58,7 +64,7 @@ export class CodexAppServerRunner implements AgentRunner {
   private lastSession: CodexSession | null = null;
 
   constructor(opts: CodexRunnerOptions = {}) {
-    this.bin = opts.bin ?? process.env.CEZ_CODEX_BIN ?? 'codex';
+    this.bin = resolveCodexExecutable(opts.bin);
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS;
   }
 
@@ -81,11 +87,6 @@ export class CodexAppServerRunner implements AgentRunner {
   }
 }
 
-interface Pending {
-  resolve: (result: Record<string, unknown>) => void;
-  reject: (err: Error) => void;
-}
-
 interface PendingUserInput {
   readonly rpcId: number | string;
   readonly questions: AskQuestion[];
@@ -96,11 +97,10 @@ class CodexSession implements AgentSession {
   readonly result: Promise<AgentRunResult>;
 
   private readonly child!: ChildProcessWithoutNullStreams;
+  private readonly rpc!: CodexAppServerRpc;
   private stdinOpen = true;
   private threadId: string | undefined;
   private activeTurnId: string | undefined;
-  private nextId = 1;
-  private readonly pending = new Map<number, Pending>();
   private pendingUserInput: PendingUserInput | undefined;
   private readonly toolCalls: AgentToolCallRecord[] = [];
   private readonly textChunks: string[] = [];
@@ -127,16 +127,14 @@ class CodexSession implements AgentSession {
     private readonly opts: SessionOptions,
   ) {
     try {
-      this.child = nodeSpawn(bin, ['app-server'], {
-        cwd: spec.cwd,
-        env: buildChildEnv({ backend: 'codex', extraEnv: spec.env }),
-      });
+      this.child = spawnCodexAppServer(bin, spec.cwd, spec.env);
+      this.rpc = new CodexAppServerRpc(this.child);
     } catch (err) {
-      throw wrapSpawnError(err, bin);
+      throw codexSpawnError(err, bin);
     }
 
     this.child.on('error', (err: NodeJS.ErrnoException) => {
-      this.spawnFailed = wrapSpawnError(err, bin);
+      this.spawnFailed = codexSpawnError(err, bin);
     });
     const stderrChunks: string[] = [];
     this.child.stderr.setEncoding('utf8');
@@ -169,9 +167,9 @@ class CodexSession implements AgentSession {
         const readLoop = async () => {
           for await (const line of readNdjson(this.child.stdout)) {
             if (this.timedOut) break;
-            let msg: JsonRpcMessage;
+            let msg: CodexAppServerMessage;
             try {
-              msg = JSON.parse(line) as JsonRpcMessage;
+              msg = JSON.parse(line) as CodexAppServerMessage;
             } catch {
               continue; // not JSON-RPC — skip
             }
@@ -198,11 +196,10 @@ class CodexSession implements AgentSession {
         this.stdinOpen = false;
       }
 
-      const exitCode = await waitForExit(this.child);
+      const exitCode = await waitForCodexAppServerExit(this.child);
       if (this.eofTermTimer) clearTimeout(this.eofTermTimer);
       if (this.eofKillTimer) clearTimeout(this.eofKillTimer);
-      for (const p of this.pending.values()) p.reject(new Error('codex app-server exited'));
-      this.pending.clear();
+      this.rpc.rejectPending();
 
       if (this.spawnFailed) throw this.spawnFailed;
       if (sessionError) throw sessionError;
@@ -254,7 +251,7 @@ class CodexSession implements AgentSession {
     if (this.pendingUserInput) {
       const pending = this.pendingUserInput;
       this.pendingUserInput = undefined;
-      this.write({ id: pending.rpcId, result: { answers: userInputAnswers(pending.questions, text) } });
+      this.rpc.respond({ id: pending.rpcId, result: { answers: userInputAnswers(pending.questions, text) } });
       return true;
     }
     // Wait for the thread to exist, then steer the live turn or start a new one.
@@ -272,18 +269,13 @@ class CodexSession implements AgentSession {
     this.rejectPendingUserInput('session ended');
     this.stdinOpen = false;
     try {
-      this.child.stdin.end();
+      endCodexAppServer(this.child, (term, kill) => {
+        this.eofTermTimer = term;
+        this.eofKillTimer = kill;
+      });
     } catch {
       // already gone
     }
-    this.eofTermTimer = setTimeout(() => {
-      if (this.child.exitCode == null && !this.child.killed) this.child.kill('SIGTERM');
-      this.eofKillTimer = setTimeout(() => {
-        if (this.child.exitCode == null && !this.child.killed) this.child.kill('SIGKILL');
-      }, EOF_KILL_GRACE_MS);
-      this.eofKillTimer.unref?.();
-    }, EOF_TERM_GRACE_MS);
-    this.eofTermTimer.unref?.();
   }
 
   interrupt(): void {
@@ -291,7 +283,7 @@ class CodexSession implements AgentSession {
     this.rejectPendingUserInput('turn interrupted');
     // Best-effort graceful cancel of the in-flight turn, then hard stop.
     if (this.threadId && this.activeTurnId) {
-      void this.request('turn/interrupt', { threadId: this.threadId, turnId: this.activeTurnId }).catch(
+      void this.rpc.request('turn/interrupt', { threadId: this.threadId, turnId: this.activeTurnId }).catch(
         () => undefined,
       );
     }
@@ -301,11 +293,7 @@ class CodexSession implements AgentSession {
   // ---- protocol -----------------------------------------------------------
 
   private async bootstrap(): Promise<void> {
-    await this.request('initialize', {
-      clientInfo: { name: 'cezar', title: 'cezar', version: '0.1.0' },
-      capabilities: { experimentalApi: true },
-    });
-    this.notify('initialized', {});
+    await this.rpc.initialize();
 
     const overrides = {
       model: this.spec.model,
@@ -317,10 +305,10 @@ class CodexSession implements AgentSession {
       approvalPolicy: 'never',
     };
     if (this.spec.resume && this.spec.sessionId) {
-      await this.request('thread/resume', { threadId: this.spec.sessionId, ...clean(overrides) });
+      await this.rpc.request('thread/resume', { threadId: this.spec.sessionId, ...clean(overrides) });
       this.threadId = this.spec.sessionId;
     } else {
-      const res = await this.request('thread/start', clean(overrides));
+      const res = await this.rpc.request('thread/start', clean(overrides));
       this.threadId = threadIdOf(res) ?? this.spec.sessionId;
     }
     if (this.threadId) {
@@ -342,48 +330,19 @@ class CodexSession implements AgentSession {
     if (!this.threadId) return;
     const input = [{ type: 'text', text, text_elements: [] }];
     if (this.activeTurnId) {
-      await this.request('turn/steer', {
+      await this.rpc.request('turn/steer', {
         threadId: this.threadId,
         input,
         expectedTurnId: this.activeTurnId,
       });
       return;
     }
-    const res = await this.request('turn/start', { threadId: this.threadId, input });
+    const res = await this.rpc.request('turn/start', { threadId: this.threadId, input });
     this.activeTurnId = turnIdOf(res) ?? this.activeTurnId;
   }
 
-  private request(method: string, params: unknown): Promise<Record<string, unknown>> {
-    const id = this.nextId++;
-    const promise = new Promise<Record<string, unknown>>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-    });
-    this.write({ id, method, params });
-    return promise;
-  }
-
-  private notify(method: string, params: unknown): void {
-    this.write({ method, params });
-  }
-
-  private write(obj: unknown): void {
-    if (this.child.stdin.destroyed) return;
-    try {
-      this.child.stdin.write(`${JSON.stringify(obj)}\n`);
-    } catch {
-      // stdin gone — the read loop will settle the session
-    }
-  }
-
-  private dispatch(msg: JsonRpcMessage): void {
-    if (typeof msg.id === 'number' && (msg.result !== undefined || msg.error !== undefined)) {
-      const p = this.pending.get(msg.id);
-      if (!p) return;
-      this.pending.delete(msg.id);
-      if (msg.error) p.reject(new Error(errorText(msg.error)));
-      else p.resolve((msg.result as Record<string, unknown>) ?? {});
-      return;
-    }
+  private dispatch(msg: CodexAppServerMessage): void {
+    if (this.rpc.dispatchResponse(msg)) return;
     if (msg.method === 'item/tool/requestUserInput' && (typeof msg.id === 'number' || typeof msg.id === 'string')) {
       this.handleUserInputRequest(msg.id, msg.params ?? {});
       return;
@@ -394,7 +353,7 @@ class CodexSession implements AgentSession {
   private handleUserInputRequest(rpcId: number | string, params: Record<string, unknown>): void {
     const questions = codexAskQuestions(params.questions);
     if (!questions) {
-      this.write({ id: rpcId, error: { code: -32602, message: 'unsupported or malformed requestUserInput payload' } });
+      this.rpc.respond({ id: rpcId, error: { code: -32602, message: 'unsupported or malformed requestUserInput payload' } });
       return;
     }
     if (this.pendingUserInput) this.rejectPendingUserInput('superseded by a newer requestUserInput');
@@ -406,7 +365,7 @@ class CodexSession implements AgentSession {
     const pending = this.pendingUserInput;
     if (!pending) return;
     this.pendingUserInput = undefined;
-    this.write({ id: pending.rpcId, error: { code: -32000, message } });
+    this.rpc.respond({ id: pending.rpcId, error: { code: -32000, message } });
   }
 
   private handleNotification(method: string, params: Record<string, unknown>): void {
@@ -430,7 +389,7 @@ class CodexSession implements AgentSession {
         const type = stringField(item, 'type');
         // Only tool-like items become tool events; message/reasoning stream as text.
         if (type && !NON_TOOL_ITEMS.has(type)) {
-          const id = stringField(item, 'id') ?? `item-${this.nextId++}`;
+          const id = stringField(item, 'id') ?? `item-${this.rpc.allocateId()}`;
           this.toolCalls.push({ id, name: type, input: item });
           this.emit({ type: 'tool-call', id, tool: type, input: item });
         }
@@ -503,14 +462,6 @@ class CodexSession implements AgentSession {
 }
 
 // ---- helpers --------------------------------------------------------------
-
-interface JsonRpcMessage {
-  id?: number | string;
-  method?: string;
-  params?: Record<string, unknown>;
-  result?: unknown;
-  error?: unknown;
-}
 
 function codexAskQuestions(value: unknown): AskQuestion[] | null {
   if (!Array.isArray(value) || value.length < 1 || value.length > 4) return null;
@@ -593,48 +544,10 @@ function tokenTotal(params: Record<string, unknown>): number {
   return typeof total === 'number' ? total : 0;
 }
 
-function errorText(error: unknown): string {
-  if (error && typeof error === 'object' && 'message' in error) {
-    return String((error as { message: unknown }).message);
-  }
-  return typeof error === 'string' ? error : JSON.stringify(error);
-}
-
 function safeStringify(value: unknown): string {
   try {
     return JSON.stringify(value);
   } catch {
     return String(value);
   }
-}
-
-function waitForExit(child: ChildProcessWithoutNullStreams): Promise<number | null> {
-  if (child.exitCode != null) return Promise.resolve(child.exitCode);
-  return new Promise((resolve) => {
-    let done = false;
-    const fin = (code: number | null) => {
-      if (done) return;
-      done = true;
-      clearTimeout(safety);
-      resolve(code);
-    };
-    child.once('close', (code) => fin(code));
-    child.once('exit', (code) => fin(code));
-    child.once('error', () => fin(child.exitCode ?? null));
-    const safety = setTimeout(
-      () => fin(child.exitCode ?? null),
-      EOF_TERM_GRACE_MS + EOF_KILL_GRACE_MS + KILL_GRACE_MS + 5_000,
-    );
-    safety.unref?.();
-  });
-}
-
-function wrapSpawnError(err: unknown, bin: string): Error {
-  const code = (err as NodeJS.ErrnoException | undefined)?.code;
-  if (code === 'ENOENT') {
-    return new Error(
-      `\`${bin}\` not found on PATH — install the Codex CLI (npm i -g @openai/codex) and run \`codex\` once to log in`,
-    );
-  }
-  return err instanceof Error ? err : new Error(String(err));
 }

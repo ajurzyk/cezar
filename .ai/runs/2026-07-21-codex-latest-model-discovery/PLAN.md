@@ -9,7 +9,7 @@ Source spec: .ai/specs/2026-07-21-codex-latest-model-discovery.md
 
 | Phase | Step | Title | Status | Commit |
 |-------|------|-------|--------|--------|
-| 1 | 1.1 | Share Codex app-server transport primitives | todo | — |
+| 1 | 1.1 | Share Codex app-server transport primitives | done | 5feef31 |
 | 1 | 1.2 | Discover and validate paginated Codex models | todo | — |
 | 1 | 1.3 | Cache runner model catalogs in memory | todo | — |
 | 1 | 1.4 | Expose the workspace model-catalog API | todo | — |
@@ -96,4 +96,3 @@ Keep cezar's Codex model picker synchronized with the visible models exposed by 
 - Remove dated hard-coded Codex model claims and update affected documentation/comments.
 - Add end-to-end coverage proving a newly invented Codex model appears everywhere without a source edit.
 - Run the full validation gate and browser smoke, capturing screenshot evidence for the PR.
-
