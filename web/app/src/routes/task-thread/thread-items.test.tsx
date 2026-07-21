@@ -185,7 +185,7 @@ describe('ReasoningItem', () => {
   it('a single-line reasoning (the golden fixture text) shows whole with no ellipsis', () => {
     render(<ReasoningItem text={text} />)
     expect(screen.getByRole('button', { name: `Thinking — ${text}` })).toBeTruthy()
-    expect(document.querySelector('[data-slot="reasoning"]')?.textContent).toContain(`Thinking —${text}`)
+    expect(document.querySelector('[data-slot="reasoning"]')?.textContent).toContain(`Thinking — ${text}`)
   })
 
   it('renders Markdown in the compact preview and expanded reasoning without nested controls', () => {

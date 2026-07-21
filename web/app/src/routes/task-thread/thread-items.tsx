@@ -258,7 +258,7 @@ export function ReasoningItem({ text }: { text: string }) {
           aria-hidden
           className="size-3.5 shrink-0 transition-transform group-data-[state=open]/reasoning:rotate-90"
         />
-        <span className="shrink-0">Thinking —</span>
+        <span className="shrink-0">Thinking — </span>
         <div className="min-w-0 truncate text-muted-foreground">
           <Markdown inline>{firstLine}</Markdown>
         </div>
