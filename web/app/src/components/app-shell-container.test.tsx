@@ -185,11 +185,15 @@ describe('sidebar wiring', () => {
     expect(screen.getByText('route content')).toBeTruthy()
   })
 
-  // The upgrade path: one registered project must look exactly like the cockpit did before the
-  // workspace existed — flat nav, one quick-list, repo chip, no group headers.
-  it('keeps the single-project sidebar when the registry holds one project', async () => {
+  // CEZ_SINGLE_PROJECT pins this response to the boot row even when the saved registry has more.
+  // The shell must collapse from that ordinary one-row response, not grow a second capability
+  // branch for navigation: flat nav, one quick-list, repo chip, no group headers.
+  it('keeps the sidebar flat when single-project mode pins the registry to the boot project', async () => {
     serve({
-      '/api/health': HEALTH,
+      '/api/health': {
+        ...HEALTH,
+        capabilities: { ...HEALTH.capabilities, singleProject: true },
+      },
       '/api/todos': [],
       '/api/projects': { projects: [PROJECT], bootProject: 'cezar', projectsDir: '/home/me/cezar/projects' },
       '/api/runs': [],
@@ -200,6 +204,7 @@ describe('sidebar wiring', () => {
     expect(document.querySelector('[data-slot="project-groups"]')).toBeNull()
     expect(screen.getByRole('navigation', { name: 'Main' })).toBeTruthy()
     expect(document.querySelector('[data-slot="task-quick-list"]')).not.toBeNull()
+    expect(repoChip()?.textContent).toBe('cezar / feat/cockpit')
   })
 
   it('hides add-project chrome when health reports single-project mode', async () => {
