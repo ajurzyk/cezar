@@ -226,3 +226,28 @@ Numbered steps; each is testable and leaves the app working. Steps map onto `om-
 ### Phase 3 — macosx-ngrok
 
 11. **`platforms/macosx-ngrok.ts`** — preflight (macOS), deps, `ngrok config add-authtoken` + reserved domain + `--basic-auth`, launchd autostart, identity verify; ephemeral-URL fallback recorded in state. Full `undo` per step (reuses the Phase-1 `runUninstall`). *Test:* dry-run walks every step, produces `server.json` with `platform:"macosx-ngrok"`, and `server-uninstall` reverses it; registry now lists both platforms.
+
+---
+
+## Addendum (2026-07-18) — domain-keyed multi-instance (`ubuntu-vps`)
+
+The original design was **install-once per host** (one `~/.cezar/server.json`,
+one port, one lock). Follow-up: one `ubuntu-vps` box can now host **several
+independent cockpits, keyed by domain**, so a second `server-install` for a new
+domain no longer resumes/reinstalls the first.
+
+- **Identity** — `--domain <host>` selects/creates an instance; its slug
+  (`instanceSlug()`) keys everything. No `--domain` = the legacy `default`
+  instance, byte-for-byte unchanged (backward compatible).
+- **State** — `default` keeps `~/.cezar/server.json`; a named instance lives at
+  `~/.cezar/server-instances/<slug>.json` with a per-instance lock. `state.ts`
+  gains `listServerInstances()`, `nextFreeInstancePort()`, `deleteServerState()`.
+- **Artifacts** — the `ubuntu-vps` strategy suffixes per instance: nginx site
+  `cezar-<slug>`, `htpasswd-<slug>`, unit `cezar-<slug>.service`; nginx routes by
+  `Host` header (each instance stamps its domain into `server_name` up front),
+  and the identity probe sends the instance's `Host` so it verifies the right
+  vhost. `/etc/cezar` is shared; `rmdir` on uninstall only removes it when empty.
+- **Port** — a new named instance auto-picks the next free loopback port from
+  4321; `--port` overrides.
+- **Scope** — `ubuntu-vps` only (shared nginx front). `macosx-ngrok` stays
+  single-instance.

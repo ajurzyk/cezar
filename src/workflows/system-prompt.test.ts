@@ -47,6 +47,16 @@ describe('composeSystemPrompt', () => {
   });
 });
 
+describe('handoff contract markers', () => {
+  it('teaches the CEZ:ASK structured-question marker with its schema (#473)', () => {
+    expect(HANDOFF_ONLY_INSTRUCTIONS).toContain('CEZ:ASK');
+    expect(HANDOFF_ONLY_INSTRUCTIONS).toContain('"questions"');
+    expect(HANDOFF_ONLY_INSTRUCTIONS).toContain('"multiSelect"');
+    // It rides in the combined contract every agent step receives.
+    expect(HANDOFF_INSTRUCTIONS).toContain('CEZ:ASK');
+  });
+});
+
 describe('skill-aware task naming (#432)', () => {
   const skillWorkflow: WorkflowDef = {
     name: '(planned)',
@@ -407,7 +417,9 @@ describe('systemPrompt end-to-end (dry run)', () => {
       'mock: implemented the change',
     );
 
-    expect(manager.continueRun(id, 'continue without generating follow-ups')).toEqual({ ok: true });
+    expect(manager.continueRun(id, { text: 'continue without generating follow-ups' })).toEqual({
+      ok: true,
+    });
     const deadline = Date.now() + 20_000;
     while (readFileSync(argsFile, 'utf8').trim().split('\n').length < 2) {
       if (Date.now() > deadline) throw new Error('continuation did not start in time');

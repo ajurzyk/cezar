@@ -43,17 +43,24 @@ export function skillChainSteps(names: readonly string[]): WorkflowStepDef[] {
  *  - a workflow selected → that workflow (skills ride along as a prompt hint);
  *  - no workflow but skills toggled → the skills ARE the chain (spec 008);
  *  - nothing selected → quick-task.
+ *
+ * `backend` (#401) is the already-resolved runner/model pair — `engineBody(useResolvedEngine(…))`
+ * from components/engine-pills. It arrives pre-shaped rather than raw on purpose: the omit rules
+ * are subtle enough to be worth having in exactly one place, and this stays a pure body builder.
+ * Omit it and the body is the pre-#401 one.
  */
 export function githubRunBody(
   item: GithubItem,
   workflow: string | null,
   skills: readonly string[],
   customPrompt?: string,
+  backend: Pick<CreateRunInput, 'model' | 'runner'> = {},
 ): CreateRunInput {
   // A non-empty custom prompt REPLACES the auto-generated task text (the user's words win); the
   // workflow/skill routing is unchanged. Empty → the default "Fix GitHub issue #N …" prompt.
   const custom = customPrompt?.trim()
-  if (workflow) return { workflow, task: custom || githubTaskPrompt(item, skills) }
-  if (skills.length) return { steps: skillChainSteps(skills), task: custom || githubTaskPrompt(item) }
-  return { workflow: 'quick-task', task: custom || githubTaskPrompt(item) }
+  if (workflow) return { ...backend, workflow, task: custom || githubTaskPrompt(item, skills) }
+  if (skills.length)
+    return { ...backend, steps: skillChainSteps(skills), task: custom || githubTaskPrompt(item) }
+  return { ...backend, workflow: 'quick-task', task: custom || githubTaskPrompt(item) }
 }

@@ -1,17 +1,15 @@
-import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { MessageSquareTextIcon, PlayIcon, SearchXIcon } from 'lucide-react'
+import { MessageSquareTextIcon, SearchXIcon } from 'lucide-react'
 import { useMemo } from 'react'
 import { Link, useLocation, useParams } from 'react-router'
 
-import { ApiError, continueRun } from '@/api/client'
-import { queryKeys, useRun, useRuns, useSendMessage } from '@/api/queries'
+import { ApiError } from '@/api/client'
+import { useRun, useRuns, useSendMessage } from '@/api/queries'
 import { useRunEvents } from '@/api/run-events'
 import type { ApiRun } from '@/api/types'
 import { CenteredState } from '@/components/centered-state'
 import { Composer } from '@/components/composer/composer'
 import { StatusDot } from '@/components/status-dot'
 import { Button } from '@/components/ui/button'
-import { toast } from '@/components/ui/toaster'
 import { useKeyboardInsetVar } from '@/lib/keyboard-inset'
 import { taskPrUrl } from '@/lib/tasks-table'
 import { cn, isHttpUrl } from '@/lib/utils'
@@ -26,10 +24,12 @@ import {
   ToolStreak,
   UserBubble,
 } from './thread-items'
+import { ContinueAction } from './follow-up-engine'
 import { PlanDock, planCounts } from './plan-dock'
 import { AcceptCelebration, ReviewPanel } from './review-panel'
-import { queuePosition, runActionFlags } from './run-actions'
+import { queuePosition } from './run-actions'
 import { RunHeader } from './run-header'
+import { AskCard } from './ask-card'
 import { groupThreadItems, type ThreadBlock } from './thread-groups'
 import { ThreadLoading } from './thread-loading'
 import { ThreadCardCache } from './thread-open-cards'
@@ -114,7 +114,10 @@ export function buildThreadRows(run: ApiRun, thread: ThreadState): ThreadRow[] {
       })
     }
     for (const block of groupThreadItems(turn.items)) {
-      rows.push({ key: `${turn.id}:${block.id}`, node: <ThreadBlockView block={block} scope={turn.id} /> })
+      rows.push({
+        key: `${turn.id}:${block.id}`,
+        node: <ThreadBlockView block={block} scope={turn.id} runId={run.id} />,
+      })
     }
   }
   return rows
@@ -247,31 +250,6 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
   )
 }
 
-/** The closed composer's way out (legacy "Session closed — Continue to reopen."): reopens the
- *  last agent session, exactly like the header's Continue — hidden when the run has no session
- *  to resume (the flags rule in run-actions.ts). */
-function ContinueAction({ run }: { run: ApiRun }) {
-  const queryClient = useQueryClient()
-  const mutation = useMutation({
-    mutationFn: () => continueRun(run.id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.runs.all }),
-    onError: (error: Error) => toast(error.message, { tone: 'danger' }),
-  })
-  if (!runActionFlags(run).continueRun) return null
-  return (
-    <Button
-      type="button"
-      variant="outline"
-      size="sm"
-      disabled={mutation.isPending}
-      onClick={() => mutation.mutate()}
-    >
-      <PlayIcon aria-hidden="true" className="size-3.5" />
-      Continue
-    </Button>
-  )
-}
-
 /** The queued run's honest empty state (legacy #351): a queued run has emitted nothing, so
  *  instead of a blank thread the placeholder names the parked state and its live position in
  *  the FIFO queue (from the runs list — the same feed the sidebar uses). */
@@ -294,10 +272,10 @@ function QueuedPlaceholder({ run }: { run: ApiRun }) {
 /** One grouped block → its surface. Grouping (context groups, streaks, sub-agent nesting) is
  *  `groupThreadItems`'s — this only maps block kinds to components. `scope` (the turn's render
  *  key) namespaces the open-card cache keys, because item ids repeat across sessions. */
-function ThreadBlockView({ block, scope }: { block: ThreadBlock; scope: string }) {
+function ThreadBlockView({ block, scope, runId }: { block: ThreadBlock; scope: string; runId: string }) {
   switch (block.kind) {
     case 'entry':
-      return <ThreadEntryView entry={block.entry} scope={scope} />
+      return <ThreadEntryView entry={block.entry} scope={scope} runId={runId} />
     case 'tool-card':
       return <ToolCard item={block.item} nested={block.children} cacheKey={`${scope}:${block.id}`} />
     case 'context-group':
@@ -306,7 +284,7 @@ function ThreadBlockView({ block, scope }: { block: ThreadBlock; scope: string }
       return (
         <ToolStreak count={block.count}>
           {block.blocks.map((inner) => (
-            <ThreadBlockView key={inner.id} block={inner} scope={scope} />
+            <ThreadBlockView key={inner.id} block={inner} scope={scope} runId={runId} />
           ))}
         </ToolStreak>
       )
@@ -314,7 +292,7 @@ function ThreadBlockView({ block, scope }: { block: ThreadBlock; scope: string }
 }
 
 /** One reducer entry → its block (non-tool entries; tools always arrive as tool-card blocks). */
-function ThreadEntryView({ entry, scope }: { entry: ThreadEntry; scope: string }) {
+function ThreadEntryView({ entry, scope, runId }: { entry: ThreadEntry; scope: string; runId: string }) {
   switch (entry.kind) {
     case 'message':
       // Agent-side user echoes (some backends emit them) read as user bubbles too.
@@ -331,5 +309,7 @@ function ThreadEntryView({ entry, scope }: { entry: ThreadEntry; scope: string }
       return <NoteLine note={entry} />
     case 'image':
       return <ImageItem image={entry} />
+    case 'ask':
+      return <AskCard ask={entry} runId={runId} />
   }
 }

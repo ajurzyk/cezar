@@ -601,6 +601,43 @@ describe('drafts and prefill', () => {
     expect(requests.some((r) => r.method === 'POST' && r.url === '/api/runs')).toBe(false)
   })
 
+  // #374: the composer is the middle of the inbox round trip — the Run link carries `todo=`,
+  // and the started run must carry it back so the entry is marked started and leaves the inbox.
+  it('?todo= prefill: the entry id rides along to POST /api/runs so the inbox entry is marked', async () => {
+    serve()
+    renderNewTask('/new?skill=deploy&ref=ship%20it&todo=t1')
+    await pillReady('deploy')
+    await startTask()
+
+    expect((postedBody() as Record<string, unknown>).todoId).toBe('t1')
+  })
+
+  it('a plain launch (no ?todo=) sends no todoId — the inbox is left alone', async () => {
+    serve()
+    renderNewTask()
+    await pillReady()
+    fireEvent.change(textarea(), { target: { value: 'unrelated task' } })
+    await startTask()
+
+    expect((postedBody() as Record<string, unknown>).todoId).toBeUndefined()
+  })
+
+  // The two are orthogonal concerns (#374 vs #444): turning follow-up generation OFF for the
+  // NEW task must never stop the entry it was launched FROM being marked started.
+  it('carries todoId even when follow-up generation is switched off', async () => {
+    serve()
+    renderNewTask('/new?skill=deploy&ref=ship%20it&todo=t1')
+    await pillReady('deploy')
+    fireEvent.click(
+      document.querySelector('[data-slot="generate-followups-toggle"]') as HTMLElement,
+    )
+    await startTask()
+
+    const body = postedBody() as Record<string, unknown>
+    expect(body.todoId).toBe('t1')
+    expect(body.generateFollowups).toBe(false)
+  })
+
   it('submit spends the draft text', async () => {
     serve()
     renderNewTask()

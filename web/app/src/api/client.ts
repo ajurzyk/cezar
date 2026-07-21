@@ -34,6 +34,7 @@ import type {
   RepoCommitPayload,
   RunCommitsResponse,
   RepoResponse,
+  Runner,
   RunRecord,
   WorktreeEntry,
   SaveWorkflowInput,
@@ -334,9 +335,23 @@ export function finishRun(id: string): Promise<FinishResponse> {
   return mutate<FinishResponse>('POST', runPath(id, '/finish'))
 }
 
-/** Reopen a finished run's session. 409 (with the reason) when it cannot be resumed. */
-export function continueRun(id: string, text?: string): Promise<ContinueResponse> {
-  return mutate<ContinueResponse>('POST', runPath(id, '/continue'), text === undefined ? {} : { text })
+/** The follow-up composer's optional overrides for a Continue (#401): pick which backend and
+ *  model handle the reopened session. Omitted fields keep the run's current backend/model. */
+export interface ContinueOptions {
+  text?: string
+  runner?: Runner
+  model?: string
+}
+
+/** Reopen a finished run's session. 409 (with the reason) when it cannot be resumed. An optional
+ *  runner/model override lets the follow-up choose the engine; omitted keeps the run's current
+ *  backend (backward compat). */
+export function continueRun(id: string, opts: ContinueOptions = {}): Promise<ContinueResponse> {
+  const body: Record<string, unknown> = {}
+  if (opts.text !== undefined) body.text = opts.text
+  if (opts.runner !== undefined) body.runner = opts.runner
+  if (opts.model !== undefined) body.model = opts.model
+  return mutate<ContinueResponse>('POST', runPath(id, '/continue'), body)
 }
 
 /** Draft PR from the review gate (spec 009): push the branch, `gh pr create --draft`; the run
@@ -361,16 +376,32 @@ export function removeTodo(id: string): Promise<RemoveTodoResponse> {
   return mutate<RemoveTodoResponse>('DELETE', `/api/todos/${encodeURIComponent(id)}`)
 }
 
+/** The Inbox card's optional backend choice + extra instructions for a Run. Unlike
+ *  `ContinueOptions` these start a NEW run, so an omitted `runner`/`model` means the host's
+ *  `defaultRunner`, not "keep the run's". `prompt` (#413) is extra instructions appended to the
+ *  suggested/summary task text — e.g. a template inserted in the Inbox composer. */
+export interface StartTodoOptions {
+  runner?: Runner
+  model?: string
+  prompt?: string
+}
+
 /** Inbox "Run" (spec 007): the server turns the entry into a task — a one-off single-step
  *  workflow around the suggested skill when it exists, plain quick-task otherwise — and
- *  answers 201 with the new run. 409 when the entry was already started. `prompt` (#413) is
- *  extra instructions appended to the suggested/summary task text — e.g. a template inserted in
- *  the Inbox composer; omitted (the pre-#413 call shape) sends no body at all. */
-export function startTodo(id: string, prompt?: string): Promise<StartTodoResponse> {
+ *  answers 201 with the new run. 409 when the entry was already started. An optional
+ *  runner/model (#401) picks the engine and an optional `prompt` (#413) appends instructions;
+ *  with neither, sends no body at all — the pre-#401/#413 bodyless POST, kept for compat. */
+export function startTodo(id: string, opts: StartTodoOptions = {}): Promise<StartTodoResponse> {
+  const body: Record<string, unknown> = {}
+  if (opts.runner !== undefined) body.runner = opts.runner
+  if (opts.model !== undefined) body.model = opts.model
+  if (opts.prompt !== undefined) body.prompt = opts.prompt
+  // No override → no body at all, exactly the bodyless POST this endpoint has always sent
+  // (`continueRun` posts `{}` because it always carried one). The server tolerates either.
   return mutate<StartTodoResponse>(
     'POST',
     `/api/todos/${encodeURIComponent(id)}/start`,
-    prompt ? { prompt } : undefined,
+    Object.keys(body).length > 0 ? body : undefined,
   )
 }
 

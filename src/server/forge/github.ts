@@ -531,7 +531,20 @@ export async function createDraftPr(input: DraftPrInput): Promise<DraftPrOutcome
   }
 
   // Final autosave: the branch must hold everything before it leaves the box.
-  await autosaveCommit(worktree);
+  // This is the LAST flush — unlike the turn-end and run-finalize ones there is
+  // no later autosave to pick the work up, so a refusal (conflicted tree) or a
+  // failed commit has to stop the publish instead of silently opening a PR from
+  // a branch that is missing the run's final state.
+  const saved = await autosaveCommit(worktree, 'pre-PR');
+  if (saved === 'refused') {
+    return {
+      ok: false,
+      error: 'worktree has unresolved merge conflicts — resolve them, then publish again',
+    };
+  }
+  if (saved === 'failed') {
+    return { ok: false, error: 'could not commit the final changes — check git status in the worktree' };
+  }
 
   // DRY-RUN (CEZ_DRY_RUN=1): no push, no gh — simulate success with a fake PR
   // URL so the whole review → PR flow is testable without GitHub.
@@ -663,19 +676,27 @@ async function detectGithub(repoRoot: string): Promise<ForgeAvailability> {
 }
 
 /**
- * Non-blocking availability for `GET /api/health` (#major-health-latency): returns the cached
- * probe immediately, or `null` while kicking off a background probe to warm it. It NEVER shells
- * out to `gh` on the request that reads it, so health stays under the bookmarklet's 800 ms port
- * budget (a `gh repo view` round-trip is ~500–650 ms on its own). `null` is contract-safe — the
- * whole `forge` field is additive, so "unknown until warm" is a valid answer.
+ * Non-blocking availability for `GET /api/health` (#major-health-latency): serves the last-known
+ * probe immediately (stale-while-revalidate) and only returns `null` on a cold start, before the
+ * first probe has ever warmed the cache. It NEVER shells out to `gh` on the request that reads it,
+ * so health stays under the bookmarklet's 800 ms port budget (a `gh repo view` round-trip is
+ * ~500–650 ms on its own). `null` is contract-safe — the whole `forge` field is additive, so
+ * "unknown until warm" is a valid answer.
+ *
+ * Serving the stale value while revalidating is what keeps the GitHub nav item from flickering:
+ * without it, every time the 60 s cache expired this returned `null` for one 5 s health poll,
+ * dropping `forge.available` and blinking the sidebar item out until the background probe warmed.
  */
 export function detectGithubCached(repoRoot: string): ForgeAvailability | null {
   if (process.env.CEZ_DRY_RUN === '1') return { available: true };
-  if (detectCache && detectCache.repoRoot === repoRoot && Date.now() - detectCache.at < CACHE_MS) {
-    return detectCache.result;
+  const cached =
+    detectCache && detectCache.repoRoot === repoRoot ? detectCache.result : null;
+  const fresh =
+    detectCache && detectCache.repoRoot === repoRoot && Date.now() - detectCache.at < CACHE_MS;
+  if (!fresh) {
+    void detectGithub(repoRoot).catch(() => {}); // revalidate off the request path
   }
-  void detectGithub(repoRoot).catch(() => {}); // warm the cache off the request path
-  return null;
+  return cached; // last-known value while revalidating; null only until the first probe warms
 }
 
 /** owner/repo parsed out of the origin remote — feeds `viewUrl`. */

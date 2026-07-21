@@ -18,6 +18,7 @@ import { getGithub, putUiState } from '@/api/client'
 import { queryKeys, useGithub, useGithubComments, useSkills, useUiState, useWorkflows } from '@/api/queries'
 import type { GithubComment, GithubItem, UiState } from '@/api/types'
 import { CenteredState } from '@/components/centered-state'
+import type { EnginePick } from '@/components/engine-pills'
 import { GithubIcon } from '@/components/icons'
 import { TabLink } from '@/components/tab-link'
 import { Button } from '@/components/ui/button'
@@ -130,6 +131,9 @@ export function GithubRoute({ view }: { view: GithubView }) {
   const [selectedSkills, setSelectedSkills] = useState<readonly string[]>(
     () => readFollowupSelection().skills,
   )
+  // The backend choice (#401) is a way of working too, so it lives here beside the pickers —
+  // and it must, because HandToAgent is keyed by item and would otherwise reset on every hop.
+  const [engine, setEngine] = useState<EnginePick>({ runner: null, model: null })
   useEffect(() => {
     writeFollowupSelection({ workflow, skills: [...selectedSkills] })
   }, [workflow, selectedSkills])
@@ -329,6 +333,8 @@ export function GithubRoute({ view }: { view: GithubView }) {
               onWorkflowChange={setWorkflow}
               selectedSkills={selectedSkills}
               onSkillsChange={setSelectedSkills}
+              engine={engine}
+              onEngineChange={setEngine}
               queuedRunId={queued.get(selected.url) ?? null}
               onQueued={(url, runId) => setQueued((current) => new Map(current).set(url, runId))}
             />

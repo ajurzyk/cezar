@@ -169,6 +169,23 @@ CLIs you are already logged into, `claude` by default.
 > instead of the real CLI — the whole cockpit works with no `claude` login, so
 > you can explore runs, diffs, variants and the review gate offline.
 
+### Preview builds
+
+Every green CI run publishes an installable npm snapshot
+([how it works](docs/publishing.md)), so you can try unreleased code without
+cloning anything:
+
+```bash
+npx cezar-cli@develop      # current develop head
+npx cezar-cli@main         # current main head (ahead of the latest stable release)
+```
+
+Every pull request gets its own preview too — the CI bot posts a sticky comment
+on the PR with the exact pinned version to copy-paste
+(`npx cezar-cli@<version>-pr<N>.<run>`). Previews are prerelease versions under
+their own dist-tags; a plain `npx cezar-cli` always resolves to the latest
+stable release.
+
 ---
 
 ## How it works
@@ -345,7 +362,7 @@ Useful environment variables:
 | `CEZ_DRY_RUN=1` | Use the bundled mock instead of the real `claude` CLI — the entire cockpit works offline, for demos and development. |
 | `CEZ_APPROVAL_GATE=1` | Opt into Claude's interactive approval UI; by default, unapproved tools are denied without interrupting the run. |
 | `CEZ_FOLLOWUPS=1` | Turn on the global follow-up **Inbox**: agents are asked to leave follow-ups in `todos.json` when they finish, and the Inbox view appears. Off by default — each task's own **Notes** handoff journal runs either way. |
-| `CEZ_AUTOSAVE=1` | Re-enable the periodic (90 s) `cezar autosave` commit in task worktrees. Off by default (#471) — turn-end and pre-PR flushes always run, so branches still end complete. |
+| `CEZ_AUTOSAVE=1` | Re-enable the periodic (90 s) autosave commit in task worktrees. Off by default (#471) — turn-end and pre-PR flushes always run, so branches still end complete. Every autosave names its trigger in the commit subject (`cezar autosave (periodic)` vs `(turn end)` / `(run finalize)` / `(pre-PR)`), so the flushes you keep are distinguishable from the timer you disabled. |
 | `CEZ_CLAUDE_BIN=/path/to/claude` | Override which `claude` binary is used. |
 | `CEZ_CODEX_BIN=/path/to/codex` | Override which `codex` binary is used. |
 | `CEZ_OPENCODE_BIN=/path/to/opencode` | Override which `opencode` binary is used. |
@@ -422,7 +439,14 @@ and verified, and it ends with a real authenticated end-to-end check.
 npx cezar-cli server-install   --platform ubuntu-vps   # stand it up
 npx cezar-cli server-deploy    --platform ubuntu-vps   # roll out a new version (reload the service)
 npx cezar-cli server-uninstall --platform ubuntu-vps   # reverse it
+
+# host a SECOND cockpit for another domain on the same box (ubuntu-vps):
+npx cezar-cli server-install   --platform ubuntu-vps --domain shop.example.com
 ```
+
+On `ubuntu-vps` a single host can run several independent cockpits — add
+`--domain <host>` and each gets its own port, nginx site, login and service; a
+new domain never resumes or clobbers the first install.
 
 | Provider | `--platform` | Public front | Guide |
 |----------|--------------|--------------|-------|

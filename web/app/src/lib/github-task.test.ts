@@ -96,4 +96,46 @@ describe('githubRunBody', () => {
     // Empty/whitespace custom prompt → the default text.
     expect(githubRunBody(item(), null, [], '   ').task).toContain('Fix GitHub issue')
   })
+
+  // #401 — the backend pair arrives pre-shaped from engineBody (components/engine-pills),
+  // which owns the omit rules; this builder's only job is to spread it onto every route.
+  describe('backend (#401)', () => {
+    it('omitted → no runner/model at all (the pre-#401 body)', () => {
+      const body = githubRunBody(item(), null, [])
+      expect(body.runner).toBeUndefined()
+      expect(body.model).toBeUndefined()
+    })
+
+    it('rides the workflow route', () => {
+      const body = githubRunBody(item(), 'ship-it', [], undefined, {
+        runner: 'codex',
+        model: 'gpt-5.1-codex',
+      })
+      expect(body).toMatchObject({ workflow: 'ship-it', runner: 'codex', model: 'gpt-5.1-codex' })
+    })
+
+    it('rides the skills-as-chain route without disturbing the steps', () => {
+      const body = githubRunBody(item(), null, ['om-fix', 'om-review'], undefined, {
+        runner: 'opencode',
+        model: 'anthropic/claude-sonnet-5',
+      })
+      expect(body.steps?.map((step) => step.skill)).toEqual(['om-fix', 'om-review'])
+      expect(body).toMatchObject({ runner: 'opencode', model: 'anthropic/claude-sonnet-5' })
+    })
+
+    it('rides the quick-task route, and an all-undefined pair leaves the body clean', () => {
+      expect(githubRunBody(item(), null, [], undefined, { runner: 'codex' })).toMatchObject({
+        workflow: 'quick-task',
+        runner: 'codex',
+      })
+      // engineBody returns explicit undefineds for "send nothing" — they must not become keys
+      // with values, and JSON.stringify drops them on the wire.
+      const clean = githubRunBody(item(), null, [], undefined, {
+        runner: undefined,
+        model: undefined,
+      })
+      expect(JSON.parse(JSON.stringify(clean))).not.toHaveProperty('runner')
+      expect(JSON.parse(JSON.stringify(clean))).not.toHaveProperty('model')
+    })
+  })
 })

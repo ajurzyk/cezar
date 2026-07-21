@@ -26,7 +26,7 @@ import { planChain, slugify } from '../planner.js';
 import { discoverSkills } from '../skills.js';
 import { refreshTeamSkills } from '../skills-remote.js';
 import { appendHandoffHeartbeat, handoffProgressExcerpt, readHandoff } from '../handoff.js';
-import { markStarted, onTodosChanged, readTodos, removeTodo, startTodosWatch, type TodoItem } from '../todos.js';
+import { markStarted, onTodosChanged, readTodos, removeTodo, startTodosWatch, todoTaskText, type TodoItem } from '../todos.js';
 import type { RunEvent, RunRecord, RunStatus, RunStore } from '../runs/store.js';
 import { isV2WireEventType } from '../runs/ui-event-sink.js';
 import type { RunManager } from '../workflows/run.js';
@@ -164,6 +164,12 @@ const startRunSchema = z
       )
       .max(4)
       .optional(),
+    // Inbox follow-up (#374): the todo the composer was prefilled from
+    // (`/new?skill=&ref=&todo=t1`). On a successful start the entry is marked
+    // started — the same bookkeeping POST /api/todos/:id/start does, so the
+    // audit trail survives the composer detour. Bounded like every other
+    // string here; a todo id is a short generated key.
+    todoId: z.string().min(1).max(200, 'todoId must be at most 200 characters').optional(),
   })
   .refine((b) => Boolean(b.workflow) !== Boolean(b.steps), {
     message: 'provide either "workflow" or "steps", not both',
@@ -283,21 +289,6 @@ const patchRunSchema = z.object({
   title: z.string().trim().min(1).max(300).optional(),
 });
 
-// Inbox "▶ Run" body (#413): optional extra instructions — e.g. a prompt template inserted in
-// the Inbox composer — appended to the entry's suggested/summary task text. Old clients that
-// POST with no body at all keep the pre-#413 behavior exactly (see the route: a body-less
-// request parses to `undefined`, and an absent `prompt` never touches `task`).
-const startTodoBodySchema = z
-  .object({
-    prompt: z
-      .string()
-      .trim()
-      .max(20_000, 'prompt must be at most 20000 characters')
-      .optional()
-      .transform((s) => (s ? s : undefined)),
-  })
-  .optional();
-
 // Session commit (redesign R5 — §"Git/session API additions").
 const gitCommitSchema = z.object({
   message: z.string().trim().min(1, 'commit message must not be empty').max(5_000),
@@ -331,11 +322,35 @@ const messageSchema = z
     message: 'message needs text or at least one image',
   });
 
-// Resume-turn text for `POST /api/runs/:id/continue` (#429). Bounded like the
-// live-session message `text`; optional — an empty body re-runs the last turn.
+// "Continue"/"Send back" body (spec 003 / #401): every field optional, so an empty POST reopens
+// the last session on the run's current backend (backward compat). A runner/model override lets
+// the follow-up composer choose which engine handles the continuation. `text` stays bounded like
+// the live-session message `text` (#429).
 const continueSchema = z.object({
   text: z.string().max(100_000, 'text must be at most 100000 characters').optional(),
+  runner: z.enum(['claude', 'codex', 'opencode']).optional(),
+  model: z.string().max(200).optional(),
 });
+
+// Inbox "▶ Run" body (spec 007 / #401 / #413): every field optional, and the whole body is
+// optional too, so an empty POST — every client before the pills and the composer — starts on
+// the host's `defaultRunner` with no extra instructions, exactly as before. This is a START
+// path, not a continue: there is no prior backend to preserve, so an omitted `runner`/`model`
+// means "host default" rather than "keep what the run had". `prompt` (#413) is extra
+// instructions appended to the entry's suggested/summary task text; whitespace-only degrades to
+// absent so it never touches `task`.
+const startTodoSchema = z
+  .object({
+    runner: z.enum(['claude', 'codex', 'opencode']).optional(),
+    model: z.string().max(200).optional(),
+    prompt: z
+      .string()
+      .trim()
+      .max(20_000, 'prompt must be at most 20000 characters')
+      .optional()
+      .transform((s) => (s ? s : undefined)),
+  })
+  .optional();
 
 // `POST /api/runs/:id/archive` (#429) — no body archives; `{archived:false}`
 // un-archives. A tiny schema so the route follows the safeParse convention.
@@ -612,6 +627,26 @@ export function createApp(deps: ServerDeps): Hono {
     return usage ? { ...run, usage } : run;
   };
 
+  // The inbox half of a composer launch (#374). Since the cockpit's "▶ Run"
+  // prefills `/new` instead of calling POST /api/todos/:id/start (never launch
+  // blind — #355), the todo id rides along on the composer's POST /api/runs and
+  // lands here: `markStarted` writes `startedTaskId`, so the entry leaves the
+  // inbox (`visibleTodos()`) and stays in todos.json as the audit trail, and a
+  // second launch of the same entry no longer double-starts it.
+  //
+  // Deliberately best-effort: bookkeeping must never cost the user their task,
+  // so an unknown, stale or already-started id (markStarted → false) and any I/O
+  // failure only log. The run has already been created by the time we get here.
+  const noteTodoStarted = async (todoId: string, taskId: string): Promise<void> => {
+    try {
+      if (!(await markStarted(dataDir, todoId, taskId))) {
+        console.warn(`[cezar] inbox entry ${todoId} not marked started (unknown or already started)`);
+      }
+    } catch (err) {
+      console.warn(`[cezar] could not mark inbox entry ${todoId} started: ${String(err)}`);
+    }
+  };
+
   app.get('/api/runs', (c) => c.json(store.listRuns().map(withUsage)));
 
   // Registered before the `/:id/...` routes so "archive-finished" never
@@ -679,9 +714,14 @@ export function createApp(deps: ServerDeps): Hono {
           400,
         );
       }
-      return c.json({ runs: manager.startVariants(workflow, input, variants) }, 201);
+      const runs = manager.startVariants(workflow, input, variants);
+      // The entry points at the first variant — the thread the composer navigates to.
+      const first = runs[0];
+      if (parsed.data.todoId && first) await noteTodoStarted(parsed.data.todoId, first.id);
+      return c.json({ runs }, 201);
     }
     const run = manager.startRun(workflow, input);
+    if (parsed.data.todoId) await noteTodoStarted(parsed.data.todoId, run.id);
     return c.json(run, 201);
   });
 
@@ -844,12 +884,17 @@ export function createApp(deps: ServerDeps): Hono {
   app.post('/api/runs/:id/continue', async (c) => {
     const id = c.req.param('id');
     if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
-    // Bounded resume text (#429); an empty/absent body still just re-runs.
+    // Bounded resume text (#429); an empty/absent body still just re-runs on the
+    // run's current backend, and a runner/model override reopens on that engine (#401).
     const parsed = continueSchema.safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) {
       return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
     }
-    const result = manager.continueRun(id, parsed.data.text);
+    const result = manager.continueRun(id, {
+      text: parsed.data.text,
+      runner: parsed.data.runner,
+      model: parsed.data.model,
+    });
     if (!result.ok) return c.json({ error: result.error }, 409);
     return c.json({ continued: true });
   });
@@ -1240,13 +1285,12 @@ export function createApp(deps: ServerDeps): Hono {
     const id = c.req.param('id');
     const todo = (await readTodos(dataDir)).find((t) => t.id === id);
     if (!todo) return c.json({ error: 'not found' }, 404);
-    if (todo.startedTaskId) return c.json({ error: 'already started' }, 409);
 
-    // Body is optional — a request with none at all (the pre-#413 client) stays `undefined`
-    // here, same as an empty `{}`. A body that IS present but is not valid JSON becomes `null`,
-    // which the schema rejects → 400 (the `.catch(() => null)` pattern every other mutating
-    // route uses); mapping it to `undefined` too would let a broken payload pass as "no body"
-    // and silently 201.
+    // Body is optional and read exactly once (runner/model #401 + prompt #413 share it). A
+    // request with none at all (the pre-pills/pre-composer client) stays `undefined`, same as an
+    // empty `{}`. A body that IS present but is not valid JSON becomes `null`, which the schema
+    // rejects → 400 (the `.catch(() => null)` pattern every other mutating route uses); mapping
+    // it to `undefined` too would let a broken payload pass as "no body" and silently 201.
     const rawBody = await c.req.text().catch(() => '');
     let body: unknown;
     if (rawBody.trim().length > 0) {
@@ -1256,14 +1300,14 @@ export function createApp(deps: ServerDeps): Hono {
         body = null;
       }
     }
-    const parsedBody = startTodoBodySchema.safeParse(body);
-    if (!parsedBody.success) {
-      return c.json({ error: parsedBody.error.issues.map((i) => i.message).join('; ') }, 400);
+    const parsed = startTodoSchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
     }
+    if (todo.startedTaskId) return c.json({ error: 'already started' }, 409);
 
-    let task = (todo.suggestedPrompt ?? todo.summary).trim() || todo.summary;
-    if (todo.suggestedArgs) task += `\n\nArguments: ${todo.suggestedArgs}`;
-    if (parsedBody.data?.prompt) task += `\n\n${parsedBody.data.prompt}`;
+    let task = todoTaskText(todo);
+    if (parsed.data?.prompt) task += `\n\n${parsed.data.prompt}`;
 
     let workflow: WorkflowDef | undefined;
     if (todo.suggestedSkill) {
@@ -1282,7 +1326,11 @@ export function createApp(deps: ServerDeps): Hono {
       workflow = workflows.find((w) => w.name === 'quick-task') ?? QUICK_TASK_WORKFLOW;
     }
 
-    const run = manager.startRun(workflow, { task });
+    const run = manager.startRun(workflow, {
+      task,
+      runner: parsed.data?.runner,
+      model: parsed.data?.model,
+    });
     await markStarted(dataDir, id, run.id);
     return c.json({ run }, 201);
   });

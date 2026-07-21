@@ -157,9 +157,13 @@ describe('the catalog list', () => {
     serve({ skills: [] })
     renderAt('/skills')
 
-    await waitFor(() =>
-      expect(document.querySelector('[data-slot="skill-rows"]')?.textContent).toContain('.ai/skills/'),
-    )
+    // #374: the hint must mention every project discovery dir, not just `.ai/skills/`.
+    await waitFor(() => {
+      const text = document.querySelector('[data-slot="skill-rows"]')?.textContent ?? ''
+      expect(text).toContain('.ai/skills/')
+      expect(text).toContain('.ai/cezar/skills/')
+      expect(text).toContain('.agents/skills/')
+    })
     // No skills → the bookmarklet panel is the default detail (legacy fallback rule).
     await waitFor(() => expect(document.querySelector('[data-slot="bookmarklet-panel"]')).not.toBeNull())
   })

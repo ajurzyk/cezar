@@ -1,5 +1,20 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// `vi.hoisted` so `execFileMock` exists before the (hoisted) vi.mock factory runs. `gh()` builds
+// its subprocess runner from `promisify(execFile)` at module load, so the availability-probe tests
+// below drive `gh repo view` entirely through this mock — no real `gh` on the box. Everything else
+// in this file is pure and never touches child_process, so the default passthrough is harmless.
+const execFileMock = vi.hoisted(() => vi.fn());
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  execFileMock.mockImplementation((...args: unknown[]) =>
+    (actual.execFile as (...a: unknown[]) => unknown)(...args),
+  );
+  return { ...actual, execFile: (...args: unknown[]) => execFileMock(...args) };
+});
+
 import {
+  detectGithubCached,
   fetchCommentCounts,
   ghCheckRunSchema,
   mergeThread,
@@ -300,5 +315,54 @@ describe('mergeThread', () => {
     const { comments, truncated } = mergeThread([many], THREAD_ENTRY_CAP);
     expect(comments).toHaveLength(THREAD_ENTRY_CAP);
     expect(truncated).toBe(true);
+  });
+});
+
+/** `detectGithubCached` backs `GET /api/health`'s `forge.available`, which gates the GitHub nav
+ *  item. The sidebar flicker bug was this returning `null` (→ item hidden) for one 5 s health poll
+ *  every time the 60 s probe cache expired; the fix is stale-while-revalidate — keep serving the
+ *  last-known answer while a background probe refreshes it, so the item never blinks out. */
+describe('detectGithubCached', () => {
+  const CACHE_MS = 60_000; // mirrors the constant in github.ts
+  const repoRoot = '/repo/detect-swr'; // distinct root so the module-level cache is isolated
+
+  /** Resolve `gh repo view` as if it succeeded — promisify(execFile) resolves with our value. */
+  const ghOk = () =>
+    execFileMock.mockImplementation((...args: unknown[]) => {
+      const cb = args[args.length - 1] as (e: unknown, r: unknown) => void;
+      cb(null, { stdout: '{"nameWithOwner":"o/r"}', stderr: '' });
+    });
+
+  beforeEach(() => {
+    vi.stubEnv('CEZ_DRY_RUN', ''); // dry-run would short-circuit the cache path we're testing
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    execFileMock.mockReset();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+  });
+
+  it('serves the last-known availability instead of null once the cache goes stale', async () => {
+    ghOk();
+
+    // Cold start: nothing cached yet → null (contract-safe "unknown"), and it fires one probe.
+    expect(detectGithubCached(repoRoot)).toBeNull();
+    await vi.advanceTimersByTimeAsync(0); // let the fire-and-forget probe settle
+    expect(execFileMock).toHaveBeenCalledTimes(1);
+
+    // Warm: within the 60 s window the cached result is served with no new probe.
+    expect(detectGithubCached(repoRoot)).toEqual({ available: true });
+    expect(execFileMock).toHaveBeenCalledTimes(1);
+
+    // Cache expires. The bug returned null here (item vanishes); the fix returns the stale value.
+    vi.setSystemTime(CACHE_MS + 1);
+    expect(detectGithubCached(repoRoot)).toEqual({ available: true });
+
+    // …and a background revalidate was kicked off exactly once for the stale read.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(execFileMock).toHaveBeenCalledTimes(2);
   });
 });
