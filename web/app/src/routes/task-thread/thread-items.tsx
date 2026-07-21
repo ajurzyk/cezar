@@ -62,24 +62,51 @@ export function UserBubble({
   text: string
   imageCount?: number
   images?: readonly string[]
-  onEdit?: (text: string) => void
-  onRemove?: () => void
+  onEdit?: (text: string) => Promise<void>
+  onRemove?: () => Promise<void>
   editLabel?: string
   removeLabel?: string
 }) {
   const missing = imageCount - images.length
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(text)
+  const [busy, setBusy] = useState(false)
+  const [actionError, setActionError] = useState<string>()
 
   const startEditing = () => {
     setDraft(text)
+    setActionError(undefined)
     setEditing(true)
   }
-  const save = () => {
+  const save = async () => {
     const next = draft.trim()
     // An empty edit is a no-op rather than a delete: removing is its own, explicit action.
-    if (next && next !== text) onEdit?.(next)
-    setEditing(false)
+    if (!next || next === text) {
+      setEditing(false)
+      return
+    }
+    setBusy(true)
+    setActionError(undefined)
+    try {
+      await onEdit?.(next)
+      setEditing(false)
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not save the message')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const remove = async () => {
+    setBusy(true)
+    setActionError(undefined)
+    try {
+      await onRemove?.()
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not remove the message')
+    } finally {
+      setBusy(false)
+    }
   }
 
   if (editing) {
@@ -102,7 +129,7 @@ export function UserBubble({
               setEditing(false)
             } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
               e.preventDefault()
-              save()
+              void save()
             }
           }}
           className="block max-h-[220px] min-h-[60px] w-full resize-none rounded-md bg-background px-2 py-1.5 text-[13.5px] outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
@@ -111,18 +138,21 @@ export function UserBubble({
           <button
             type="button"
             onClick={() => setEditing(false)}
+            disabled={busy}
             className="rounded-sm px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-background hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
           >
             Cancel
           </button>
           <button
             type="button"
-            onClick={save}
+            onClick={() => void save()}
+            disabled={busy}
             className="rounded-sm bg-primary px-2 py-1 text-xs font-semibold text-primary-foreground hover:brightness-[0.96] focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
           >
-            Save
+            {busy ? <LoaderCircleIcon className="size-3.5 animate-spin" /> : 'Save'}
           </button>
         </span>
+        {actionError ? <p role="alert" className="mt-1.5 text-xs text-danger">{actionError}</p> : null}
       </div>
     )
   }
@@ -142,6 +172,7 @@ export function UserBubble({
               type="button"
               aria-label={editLabel}
               onClick={startEditing}
+              disabled={busy}
               className="rounded-sm p-1 text-soft-foreground hover:bg-background hover:text-foreground focus-visible:opacity-100 focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
             >
               <SquarePenIcon className="size-3.5" />
@@ -151,7 +182,8 @@ export function UserBubble({
             <button
               type="button"
               aria-label={removeLabel}
-              onClick={onRemove}
+              onClick={() => void remove()}
+              disabled={busy}
               className="rounded-sm p-1 text-soft-foreground hover:bg-background hover:text-danger focus-visible:opacity-100 focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
             >
               <Trash2Icon className="size-3.5" />
@@ -159,6 +191,7 @@ export function UserBubble({
           ) : null}
         </span>
       ) : null}
+      {actionError ? <p role="alert" className="mb-1 text-xs text-danger">{actionError}</p> : null}
       <Markdown breaks>{text}</Markdown>
       {images.length > 0 ? (
         <span data-slot="user-images" className="mt-2 flex flex-wrap justify-end gap-1.5">

@@ -45,13 +45,17 @@ describe('queued prompt stack routes (#472)', () => {
         store.updateRun(id, { queuedMessages: [...(store.getRun(id)?.queuedMessages ?? []), message] });
         return message;
       },
-      editQueuedMessage: (id: string, msgId: string, content: Array<{ type: string; text?: string }>) => {
+      editQueuedMessage: (id: string, msgId: string, edit: { text?: string; images?: Array<{ type: string }> }) => {
         if (rung !== 'queued') return null;
         const stack = store.getRun(id)?.queuedMessages ?? [];
         const at = stack.findIndex((m) => m.id === msgId);
         if (at < 0) return null;
         const next = [...stack];
-        next[at] = { ...stack[at]!, text: content.filter((b) => b.type === 'text').map((b) => b.text ?? '').join('\n') };
+        next[at] = {
+          ...stack[at]!,
+          ...(edit.text !== undefined ? { text: edit.text } : {}),
+          ...(edit.images !== undefined ? { images: [] } : {}),
+        };
         store.updateRun(id, { queuedMessages: next });
         return next[at]!;
       },
@@ -234,6 +238,25 @@ describe('queued prompt stack routes (#472)', () => {
     expect(res.status).toBe(200);
     expect(((await res.json()) as { message: QueuedMessage }).message.text).toBe('fixed now');
     expect(store.getRun(record.id)?.queuedMessages?.[0]?.text).toBe('fixed now');
+  });
+
+  it('preserves attached images when a PATCH only supplies text', async () => {
+    store.updateRun(record.id, {
+      queuedMessages: [{
+        id: 'msg-1',
+        text: 'typo',
+        images: [`/api/runs/${record.id}/images/pasted-1.png`],
+        createdAt: '2026-07-21T10:00:00.000Z',
+      }],
+    });
+
+    const res = await patchMsg('msg-1', { text: 'fixed' });
+
+    expect(res.status).toBe(200);
+    expect(store.getRun(record.id)?.queuedMessages?.[0]).toMatchObject({
+      text: 'fixed',
+      images: [`/api/runs/${record.id}/images/pasted-1.png`],
+    });
   });
 
   it('removes a stacked message', async () => {

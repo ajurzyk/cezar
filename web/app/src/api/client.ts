@@ -580,10 +580,11 @@ export function editQueuedMessage(
   msgId: string,
   message: MessageInput,
 ): Promise<EditQueuedMessageResponse> {
-  return mutate<EditQueuedMessageResponse>('PATCH', runPath(id, `/queued-messages/${encodeURIComponent(msgId)}`), {
-    text: message.text ?? '',
-    images: message.images ?? [],
-  })
+  return mutate<EditQueuedMessageResponse>(
+    'PATCH',
+    runPath(id, `/queued-messages/${encodeURIComponent(msgId)}`),
+    message,
+  )
 }
 
 /** Drop a stacked message from a still-queued run (#472). */

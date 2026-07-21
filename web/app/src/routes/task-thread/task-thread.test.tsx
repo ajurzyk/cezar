@@ -350,6 +350,33 @@ describe('ThreadView', () => {
     expect(patch.body).toMatchObject({ text: 'fixed now' })
   })
 
+  it('keeps a failed edit open and surfaces the server error', async () => {
+    renderView(
+      <ThreadView
+        run={run('queued', {
+          queuedMessages: [{ id: 'm1', text: 'typo here', createdAt: '2026-07-21T10:00:00.000Z' }],
+        })}
+        thread={reduceThread([])}
+      />,
+    )
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(
+        new Response(JSON.stringify({ error: 'run already started' }), {
+          status: 409,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )),
+    )
+
+    fireEvent.click(screen.getAllByLabelText('Edit message')[0]!)
+    fireEvent.change(screen.getByLabelText('Edit the message'), { target: { value: 'fixed now' } })
+    fireEvent.click(screen.getByText('Save'))
+
+    expect((await screen.findByRole('alert')).textContent).toContain('run already started')
+    expect((screen.getByLabelText('Edit the message') as HTMLTextAreaElement).value).toBe('fixed now')
+  })
+
   it('DELETEs a removed message', async () => {
     const calls: string[] = []
 

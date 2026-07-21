@@ -866,15 +866,28 @@ export class RunManager {
     return message;
   }
 
-  /** Edit a stacked message in place. Null when the run started or the id is unknown. */
-  editQueuedMessage(runId: string, msgId: string, content: ContentBlock[]): QueuedMessage | null {
+  /** Edit a stacked message in place. Omitted fields retain their current value. */
+  editQueuedMessage(
+    runId: string,
+    msgId: string,
+    edit: { text?: string; images?: ContentBlock[] },
+  ): QueuedMessage | null {
     if (!this.isQueued(runId)) return null;
     const run = this.store.getRun(runId);
     const stack = run?.queuedMessages;
     if (!stack) return null;
     const at = stack.findIndex((m) => m.id === msgId);
     if (at < 0) return null;
-    const replacement = { ...this.toQueuedMessage(runId, content), id: msgId, createdAt: stack[at]!.createdAt };
+    const current = stack[at]!;
+    const replacementImages = edit.images === undefined
+      ? current.images
+      : this.toQueuedMessage(runId, edit.images).images;
+    const replacement: QueuedMessage = {
+      id: msgId,
+      text: edit.text ?? current.text,
+      ...(replacementImages?.length ? { images: replacementImages } : {}),
+      createdAt: current.createdAt,
+    };
     const next = [...stack];
     next[at] = replacement;
     this.store.updateRun(runId, { queuedMessages: next });

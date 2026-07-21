@@ -112,9 +112,9 @@ export function buildThreadRows(
   /** Queued-run affordances (#472). Omitted (the default) renders every bubble read-only,
    *  which is what every caller outside the live thread view wants. */
   edit?: {
-    onEditTask: (text: string) => void
-    onEditMessage: (msgId: string, text: string) => void
-    onRemoveMessage: (msgId: string) => void
+    onEditTask: (text: string) => Promise<void>
+    onEditMessage: (msgId: string, text: string) => Promise<void>
+    onRemoveMessage: (msgId: string) => Promise<void>
   },
 ): ThreadRow[] {
   const rows: ThreadRow[] = []
@@ -226,8 +226,8 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
   const sendMessage = useSendMessage(run.id)
 
   // The queued-run affordances (#472), passed only while the run is queued — so the bubbles
-  // go read-only on the next `run` SSE frame once it starts. Errors surface through the
-  // mutations' own state; a 409 means the run started, and the affordances vanish anyway.
+  // go read-only on the next `run` SSE frame once it starts. The bubbles await these promises
+  // so a failed write keeps its editor/draft open and shows the server's error.
   // Depend on the `mutateAsync` functions, NOT the mutation result objects: TanStack returns a
   // fresh result object every render, so memoizing on those would rebuild `edit` — and with it
   // every thread row — on each render, defeating the memo that exists because these threads get
@@ -239,10 +239,10 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
     () =>
       queued ?
         {
-          onEditTask: (text: string) => void patchRunAsync({ task: text }).catch(() => {}),
+          onEditTask: async (text: string) => { await patchRunAsync({ task: text }) },
           onEditMessage: (msgId: string, text: string) =>
-            void editQueuedAsync({ msgId, message: { text } }).catch(() => {}),
-          onRemoveMessage: (msgId: string) => void removeQueuedAsync(msgId).catch(() => {}),
+            editQueuedAsync({ msgId, message: { text } }).then(() => undefined),
+          onRemoveMessage: (msgId: string) => removeQueuedAsync(msgId).then(() => undefined),
         }
       : undefined,
     [queued, patchRunAsync, editQueuedAsync, removeQueuedAsync],

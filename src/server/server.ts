@@ -519,22 +519,30 @@ const openInSchema = z.object({
   path: z.string().max(1_000).optional(),
 });
 
+const imageInputSchema = z.object({
+  mediaType: z.string().regex(/^image\//),
+  // ~5 MB per image once base64-decoded.
+  data: z.string().min(1).max(7_000_000),
+});
+
 const messageSchema = z
   .object({
     text: z.string().max(100_000).default(''),
-    images: z
-      .array(
-        z.object({
-          mediaType: z.string().regex(/^image\//),
-          // ~5 MB per image once base64-decoded.
-          data: z.string().min(1).max(7_000_000),
-        }),
-      )
-      .max(4)
-      .default([]),
+    images: z.array(imageInputSchema).max(4).default([]),
   })
   .refine((m) => m.text.trim().length > 0 || m.images.length > 0, {
     message: 'message needs text or at least one image',
+  });
+
+// PATCH semantics are load-bearing here: an omitted field keeps its current value.
+// In particular, the cockpit edits text without re-uploading existing attachments.
+const queuedMessagePatchSchema = z
+  .object({
+    text: z.string().max(100_000).optional(),
+    images: z.array(imageInputSchema).max(4).optional(),
+  })
+  .refine((m) => m.text !== undefined || m.images !== undefined, {
+    message: 'message edit needs text or images',
   });
 
 // Queued prompt stack bounds (#472). The per-message bounds mirror `messageSchema`
@@ -1749,7 +1757,7 @@ export function createApp(deps: ServerDeps): Hono {
     const id = c.req.param('id');
     const run = store.getRun(id);
     if (!run) return c.json({ error: 'not found' }, 404);
-    const parsed = messageSchema.safeParse(await c.req.json().catch(() => null));
+    const parsed = queuedMessagePatchSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
       return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
     }
@@ -1758,12 +1766,18 @@ export function createApp(deps: ServerDeps): Hono {
     const existing = stack.find((m) => m.id === msgId);
     if (!existing) return c.json({ error: 'not found' }, 404);
 
+    const effectiveText = parsed.data.text ?? existing.text;
+    const effectiveImageCount = parsed.data.images?.length ?? existing.images?.length ?? 0;
+    if (!effectiveText.trim() && effectiveImageCount === 0) {
+      return c.json({ error: 'message needs text or at least one image' }, 400);
+    }
+
     const others = stack.filter((m) => m.id !== msgId);
     const stackedImages = others.reduce((n, m) => n + (m.images?.length ?? 0), 0);
-    if (stackedImages + parsed.data.images.length > MAX_QUEUED_IMAGES) {
+    if (stackedImages + effectiveImageCount > MAX_QUEUED_IMAGES) {
       return c.json({ error: `too many queued images — ${MAX_QUEUED_IMAGES} image limit across the stack` }, 400);
     }
-    const prospective = foldedLength(run.task, [...others, { text: parsed.data.text }]);
+    const prospective = foldedLength(run.task, [...others, { text: effectiveText }]);
     if (prospective > MAX_FOLDED_TASK_CHARS) {
       return c.json(
         {
@@ -1773,16 +1787,16 @@ export function createApp(deps: ServerDeps): Hono {
       );
     }
 
-    const content: ContentBlock[] = [
-      ...parsed.data.images.map(
+    const images: ContentBlock[] | undefined = parsed.data.images?.map(
         (img): ContentBlock => ({
           type: 'image',
           source: { type: 'base64', media_type: img.mediaType, data: img.data },
         }),
-      ),
-      ...(parsed.data.text.trim() ? [{ type: 'text', text: parsed.data.text } satisfies ContentBlock] : []),
-    ];
-    const message = manager.editQueuedMessage(id, msgId, content);
+      );
+    const message = manager.editQueuedMessage(id, msgId, {
+      ...(parsed.data.text !== undefined ? { text: parsed.data.text } : {}),
+      ...(images !== undefined ? { images } : {}),
+    });
     if (!message) return c.json({ error: 'run already started' }, 409);
     return c.json({ message });
   });

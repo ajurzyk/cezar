@@ -891,7 +891,7 @@ describe('RunManager queued-stack mutators (#472)', () => {
     dequeue(r.id);
 
     expect(manager.enqueueMessage(r.id, text('too late'))).toBeNull();
-    expect(manager.editQueuedMessage(r.id, msg.id, text('too late'))).toBeNull();
+    expect(manager.editQueuedMessage(r.id, msg.id, { text: 'too late' })).toBeNull();
     expect(manager.removeQueuedMessage(r.id, msg.id)).toBe(false);
     expect(manager.editTask(r.id, 'too late')).toBe(false);
     // …and the stack is untouched by the refused calls.
@@ -901,15 +901,26 @@ describe('RunManager queued-stack mutators (#472)', () => {
   it('edits a message in place, keeping its id and createdAt', () => {
     const r = seedQueued();
     const msg = manager.enqueueMessage(r.id, text('typo here'))!;
-    const edited = manager.editQueuedMessage(r.id, msg.id, text('fixed now'))!;
+    const edited = manager.editQueuedMessage(r.id, msg.id, { text: 'fixed now' })!;
     expect(edited.id).toBe(msg.id);
     expect(edited.createdAt).toBe(msg.createdAt);
     expect(store.getRun(r.id)?.queuedMessages).toEqual([edited]);
   });
 
+  it('keeps existing attachments when an edit only changes the text', () => {
+    const r = seedQueued();
+    const msg = manager.enqueueMessage(r.id, [image(), { type: 'text', text: 'typo' }])!;
+    const file = join(imagesDir(r.id), 'pasted-1.png');
+
+    const edited = manager.editQueuedMessage(r.id, msg.id, { text: 'fixed' })!;
+
+    expect(edited.images).toEqual(msg.images);
+    expect(existsSync(file)).toBe(true);
+  });
+
   it('returns null when the message id is unknown', () => {
     const r = seedQueued();
-    expect(manager.editQueuedMessage(r.id, 'nope', text('x'))).toBeNull();
+    expect(manager.editQueuedMessage(r.id, 'nope', { text: 'x' })).toBeNull();
     expect(manager.removeQueuedMessage(r.id, 'nope')).toBe(false);
   });
 
@@ -1194,7 +1205,7 @@ describe('queued stacking reaches the backend (#472)', () => {
     expect(typo).not.toBeNull();
     manager.enqueueMessage(second.id, [{ type: 'text', text: 'STACKEDTWO' }]);
     // …and fix the first one before it starts.
-    manager.editQueuedMessage(second.id, typo!.id, [{ type: 'text', text: 'STACKEDONE corrected' }]);
+    manager.editQueuedMessage(second.id, typo!.id, { text: 'STACKEDONE corrected' });
 
     const terminal = new Set(['done', 'review', 'failed', 'cancelled']);
     const deadline = Date.now() + 40_000;
