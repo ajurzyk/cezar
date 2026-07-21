@@ -8,9 +8,12 @@ anywhere in the server. So changing one variable means spending a full agent
 turn — slow, expensive, and absurd for a one-character edit (#515). This spec
 adds an **additive `PUT /api/runs/:id/files`** (plus a small `GET
 …/edits/:hash` to read a snapshot back) that writes a single text file
-back into the run's worktree, reusing `readWorktreePath()` for traversal safety,
-an atomic tmp+rename write, and a **stale-base guard** so a manual edit cannot
-be written on top of content the user never saw. Every saved edit is recorded
+back into the run's worktree, reusing `readWorktreePath()` for containment —
+with a small additive change to it, plus a **write-only deny rule** for `.git`
+and `node_modules` at any depth, since its own `.git` check is root-only
+and writing those paths is code execution rather than editing — an atomic
+tmp+rename write, and a **stale-base guard** so a manual edit cannot be written
+on top of content the user never saw. Every saved edit is recorded
 twice — a metadata `file-edited` run event for visibility, and a bounded
 byte-exact snapshot for recovery — so a human mutation of a live agent worktree
 is both auditable and restorable. Writing is a **local-machine capability**: every write refuses under
@@ -28,7 +31,7 @@ commenting on #530.
 | Q1 | Depend on PR #418's `CodeEditor`, or vendor a copy? | **Depend on #418.** If #418 has not merged when this spec's implementation reaches the UI step, vendor `code-editor.tsx` at that commit and open a follow-up to de-duplicate. | Two overlay editors is the outcome nobody wants — but an unmerged PR must not be able to kill the only phase with user value. The fallback is stated so a stalled #418 triggers a decision instead of a silent block. |
 | Q2 | Version token: content hash, or `mtime`+`size`? | **Content hash** (sha-256 of the bytes). | `mtime` granularity loses sub-second edits and is not portable across filesystems; a hash cannot produce a false "unchanged". |
 | Q3 | Allow editing while the run is `running`? | **Yes**, with the stale-base guard plus the divergence watch and the edit event below. | Blocking breaks the main use case — watching an agent work and correcting one value. |
-| Q4 | Auto-commit a manual edit? | **No.** But the saved bytes are kept as an edit snapshot (§Audit & recovery), which is what actually makes it recoverable. | Auto-committing surprises users and pollutes the branch. Recoverability is achieved without taking over git. |
+| Q4 | Auto-commit a manual edit? | **No.** But the saved bytes are kept as an edit snapshot (§Audit & recovery), which is what actually makes it recoverable. | Auto-committing surprises users and pollutes the branch — **but see §Alternative considered: reuse `autosaveCommit()`, which weakens that reasoning substantially.** This is the answer most worth a human overriding, because taking it the other way deletes the largest subsystem in Phase 1. |
 | Q5 | Gate behind a new `CEZ_*` flag? | **No new flag to enable it; one to disable it.** `CEZ_NO_FILE_EDIT=1` refuses all writes. | AGENTS.md § Zero config forbids knobs users must set to get working behavior — it does not forbid an operator kill switch for a write primitive. Off-by-default would be the knob; on-with-an-off-switch is not. |
 | Q6 | Reuse the `localHandoff` capability, or add one? | **Add `fileEdit`**, sharing the same predicate. | Conflating two capabilities means a change to one silently changes the other. |
 | Q7 | Extend to the repo-level `/api/repo/*` surfaces? | **No — out of scope.** | The repo checkout is the user's real working tree, with no worktree isolation to fall back on. Separate capability, separate spec. |
@@ -41,7 +44,7 @@ A run's Files tab (`web/app/src/routes/task-git/task-files.tsx`, route
 read-only preview (`file-preview.tsx`) with Shiki highlighting, image inlining,
 and binary / too-large states. It is backed by exactly one route:
 
-- `GET /api/runs/:id/files?path=[&raw=1]` — `src/server/server.ts:1107-1139`,
+- `GET /api/runs/:id/files?path=[&raw=1]` — `src/server/server.ts:1107-1140`,
   delegating to `readWorktreePath()` (`src/server/git-changes.ts:504`).
 
 There is **no** `POST`/`PUT`/`PATCH` for file content anywhere. The only
@@ -59,21 +62,49 @@ has open at the right line.
 
 | Piece | Location | Status |
 |---|---|---|
-| Directory listing + file read | `readWorktreePath()`, `src/server/git-changes.ts:504` | Traversal-safe, reusable as-is |
+| Directory listing + file read | `readWorktreePath()`, `src/server/git-changes.ts:504` | Traversal-safe and reused — but needs a small additive change (§Changes to `readWorktreePath()`), and its `.git` rule is root-only (below) |
 | Read route | `src/server/server.ts:1107` | Read-only |
 | API client | `getRunFile()`, `web/app/src/api/client.ts:294-296`; `useRunFile()`, `api/queries.ts:155` | Read-only |
 | Tree + preview UI | `task-files.tsx`, `files-tree.tsx`, `file-preview.tsx`, `worktree-files.ts` | View-only |
 | Language for highlighting | `langForPath()`, `web/app/src/lib/highlighter.ts:150` | Exists — no new mapping needed |
 | Highlighted **editable** control | `CodeEditor`, `web/app/src/components/code-editor.tsx` | **Only on PR #418's branch** |
 | Hosted-mode predicate | `resolveCapabilities()`, `src/server/capabilities.ts:42` (predicate at `:44`) | Exists (`localHandoff`) |
-| Atomic write precedent | `src/runs/store.ts` (tmp+rename) | Exists |
-| Autosave commit | `autosaveCommit()`, called at turn end (`src/workflows/run.ts:943`) and at finish (`:1166`) | Exists — see §Audit & recovery |
+| Atomic write precedent | `src/runs/store.ts:689-692` (tmp+rename) | Pattern exists — but fixed tmp name, no mode preservation |
+| Autosave commit | `autosaveCommit()` (`git-worktree.ts:234-254`), called at turn end (`src/workflows/run.ts:943`), finish (`:1166`), `:1653`, and pre-PR (`forge/github.ts:534`) | Exists — see §Audit & recovery |
 
 `readWorktreePath()` is the load-bearing asset: it rejects NUL bytes,
-dot-segment escapes and absolute paths, refuses `.git` internals, refuses
-symlinks **and symlinked intermediate directories** (a full `realpath`
+dot-segment escapes and absolute paths, refuses the worktree-root `.git`,
+refuses symlinks **and symlinked intermediate directories** (a full `realpath`
 re-containment check), applies a content cap, and sniffs binary by NUL byte in
 the first 8 KB. **The write must go through it, not around it.**
+
+**But its `.git` rule is narrower than it reads, and that gap is load-bearing
+for a write.** `git-changes.ts:515-517` computes `gitDir = join(rootAbs,
+'.git')` and rejects only `target === gitDir || target.startsWith(gitDir +
+sep)`. A **nested** `.git` is not covered — verified by running the resolver:
+
+```
+.git/config                 => invalid   (.git internals are not browsable)
+sub/.git/config             => file
+sub/.git/hooks/pre-commit   => file
+node_modules/pkg/index.js   => file
+```
+
+The existing tests (`git-changes.test.ts:325-326`) assert only the root case, so
+"already covered" is true of the test file and false of the property. For the
+read route this is a disclosure of files the user already owns. For a **write**
+route it is arbitrary code execution: any worktree containing a submodule, a
+vendored fixture repo, or a test fixture with its own `.git` lets a `PUT` land
+in `sub/.git/hooks/pre-commit` or set `core.sshCommand` / `core.fsmonitor` in
+`sub/.git/config`, executed the next time git runs in that subdirectory. The
+same argument applies to `node_modules/**`, which the validation gate executes
+on every `npm run`.
+
+This spec cannot wave that off with "the user already has a shell" (§Risks):
+§Security 5 explicitly admits a *browser-reachable* attacker via CSRF / DNS
+rebinding, and admits the mitigation is not yet in the tree. So the write path
+gets its own containment rule — see §Write-path containment. It is **new work
+with its own tests**, not an inherited property.
 
 It does, however, need a **small additive change** to serve this feature — see
 §Changes to `readWorktreePath()`. The earlier framing of "second caller, zero
@@ -99,8 +130,16 @@ One additive write route, one small read route, one shared resolver, one reused 
   §Concurrency for what this does and does **not** guarantee — the honest
   scope of the guard matters more than the mechanism.
 - **Atomic write.** tmp file in the target's directory + `rename`, preserving
-  mode — the `src/runs/store.ts` precedent. A crashed write cannot truncate a
-  source file.
+  mode. A crashed write cannot truncate a source file. `src/runs/store.ts` is
+  the precedent for the *pattern* only — `store.ts:689-692` uses a **fixed**
+  tmp name and does **not** preserve mode, so both the randomized
+  `.<file>.cez-tmp-<rand>` name and the mode preservation are **new work with
+  their own tests**, not inherited behavior.
+- **Overwrite only — no file creation.** A nonexistent path resolves to
+  `missing` and is refused (`409`), and `baseHash` is required from day one, so
+  the route cannot create a file. Creating files is a different interaction
+  (a name to choose, a directory to pick, a tree to refresh) and is out of
+  scope for this spec; the Files tab has no "new file" affordance either.
 - **Every saved edit is recorded twice**: a metadata-only `file-edited` run
   event (the audit trail) and a byte-exact snapshot file (the recovery path).
   They are split deliberately — §Audit & recovery explains why one record
@@ -145,7 +184,13 @@ return { kind: 'file', path: display, size, binary: false, tooLarge: false, cont
 
 **The change:** `readWorktreePath()` reads the file as a `Buffer`, attempts a
 strict (`fatal: true`) UTF-8 decode, and returns two additional fields on the
-`kind: 'file'` variant — `utf8: boolean` and `abs: string`. `abs` is the
+`kind: 'file'` variant — `utf8: boolean` and `abs: string`. **When the strict
+decode throws, `content` is still populated with the existing lossy
+(U+FFFD-substituting) decode and `utf8` is set `false`** — the strict decode
+decides *editability*, it does not gate the field. Dropping `content` for
+invalid-UTF-8 files would remove a response field
+(`BACKWARD_COMPATIBILITY.md:34`, breaking) and blank the preview for files the
+UI renders as text today (`previewKind()`, `worktree-files.ts:27-32`). `abs` is the
 `resolve()`d `target` (`git-changes.ts:511`), **not** the `realpath`'d
 `realTarget` (`:537`): the write must operate on the path the user named, with
 containment already proven, and the race-3 analysis below assumes exactly that. `content` keeps its
@@ -159,6 +204,41 @@ because `display` is sliced from the already-validated `target`, and the
 `abs` is a convenience, not a new guarantee. Either way the write **re-derives
 or re-uses a path validated at an earlier instant**, which is the source of
 residual race 3 below.
+
+## Write-path containment
+
+`readWorktreePath()` proves the target is *inside the worktree*. That is
+necessary and not sufficient for a write, because some paths inside the
+worktree are executed by git or by the toolchain (§Current state). The write
+therefore applies one additional rule, in `writeWorktreeFile()`, over the
+sanitized **relative** path the resolver returns:
+
+```ts
+// reject `.git` at ANY depth, not just the worktree root
+const segments = result.path.split('/');
+if (segments.includes('.git')) return refuse('git internals are not editable');
+if (segments.includes('node_modules')) return refuse('installed dependencies are not editable');
+```
+
+- **`.git` at any depth** — refused. Closes the nested-repo hook/config
+  execution path. Deliberately a **write-only** rule: the `GET` keeps its
+  current behavior, so no existing reader or test changes. Widening the read
+  route's rule is a separate, breaking change (it would remove content the
+  preview serves today) and is out of scope here.
+- **`node_modules` at any depth** — refused, for the same reason as `.git` and
+  scoped the same way. Root-only would be wrong here: this repo already has a
+  real nested install at `web/app/node_modules`, and workspace/pnpm layouts
+  make nested installs the norm rather than the exception — so a top-level rule
+  would leave exactly the executed-by-every-gate-command files it exists to
+  protect writable. No legitimate edit target lives under a `node_modules`
+  segment, so the broad rule costs nothing.
+- Both refusals return `409` with the `{ error }` shape, like every other
+  target refusal in the status table.
+
+The check runs on the resolver's `result.path` — already sanitized, already
+containment-proven — so it cannot be bypassed by encoding tricks that
+`readWorktreePath()` has by then normalized away. It is a *deny* list layered on
+a proven-contained path, not a substitute for containment.
 
 ## Concurrency — what the guard does and does not promise
 
@@ -255,7 +335,7 @@ stored at `runs/<id>-edits/<hex>` where `<hex>` is the `hash` field's digest.
 The event already carries its own pointer. This avoids naming snapshots by
 `seq` — which is unknowable at write time, since `nextSeq()` is a private
 `RunStore` method called from `appendEvent` (`src/runs/store.ts:450-460`,
-`:618-624`) and the
+`:620-624`) and the
 snapshot must exist before the event that references it — and it makes repeated
 saves of identical content deduplicate for free.
 
@@ -265,7 +345,7 @@ No `content`. Two independent reasons, either of which is sufficient:
   type, on by default (`store.ts:457`, opt-out `CEZ_REDACT_SECRETS=0` at
   `:555`), replacing any host env value ≥ 12 chars
   whose name matches `SECRET_NAME_RE` plus token-shaped literals
-  (`src/core/secret-redaction.ts:55`, `:80-82`). Editing a `.env.example`, a fixture, or
+  (`src/core/secret-redaction.ts:55`; `TOKEN_PATTERNS` at `:57-70`). Editing a `.env.example`, a fixture, or
   any file containing a 12-character substring equal to a host secret would
   yield a "recovery" copy that silently differs from what the user saved.
   Restoring from it would write a redaction marker into a source file. A lossy
@@ -294,6 +374,18 @@ existing artifact is a flat sibling (`runs/<id>.ndjson`,
   in the same worktree, readable by the same local user. Redaction (#427)
   exists because *agent tool output* is persisted and served back over the API;
   these bytes are user-authored and never reach the event stream.
+- **The `#427` rationale is two conjuncts, and this design re-creates both.**
+  `store.ts:454-456` states it as tool output being "persisted verbatim **and
+  served back over the API**". An unredacted store plus `GET
+  /api/runs/:id/edits/:hash` is exactly that pair. The "user-authored" half of
+  the argument above answers *why the bytes are not redacted*; it does not
+  answer *who may read them back*. Therefore **the snapshot read route is gated
+  on the same `fileEdit` predicate as the write** — `409` under `CEZ_REMOTE=1`,
+  a non-loopback bind, or the kill switch. Without this, flipping a cockpit to
+  hosted mode leaves every snapshot written before the flip network-readable,
+  and §Audit itself concedes snapshots can outlive the worktree they came from.
+  Gating the read costs nothing: recovery is a local-machine act, the same as
+  the edit that produced it.
 - **One case where that argument does not hold, stated rather than glossed:**
   when the worktree is reclaimed under retention (#483, §Edge Cases), the
   snapshot **outlives its source** and becomes the only persistent unredacted
@@ -335,13 +427,64 @@ untouched — `file-edited` is a run event, not an `AgentEvent`/`UiEvent`, so
 backend parity does not apply.
 
 **Interaction with autosave.** `autosaveCommit()` runs at turn end
-(`run.ts:943`) and at finish (`:1166`), so during a running task a manual edit
+(`run.ts:943`), at finish (`:1166`), at `run.ts:1653`, and pre-PR
+(`forge/github.ts:534`), so during a running task a manual edit
 usually reaches the branch as a commit within one turn — genuinely recoverable
 via git. But it is *not* a guarantee: the periodic timer is opt-in, a finished
 run has no further turn ends, and an agent write landing before the next
 autosave leaves no git object of the user's version. The edit snapshot is what
 makes recovery possible within its retention bound; autosave is a helpful
 overlap, not the mechanism.
+
+### Alternative considered: reuse `autosaveCommit()` instead of a snapshot store
+
+This is the strongest argument against everything above, and an earlier draft
+did not make it. Stating it properly, because it nearly wins.
+
+`autosaveCommit()` (`src/workflows/run.ts` callers → `git-worktree.ts:234-254`)
+is `status --porcelain` → `add -A` → `commit --no-verify -m "cezar autosave"`.
+A single `await autosaveCommit(worktree)` after a successful `PUT` would give
+recovery via a real git object and delete, in one line:
+
+- the `runs/<id>-edits/` directory and its content-addressing,
+- the 20-file / 5 MB eviction policy and the mtime-touch trick it needs,
+- `GET /api/runs/:id/edits/:hash` and its client,
+- the `deleteRun()` / `pruneOldRuns()` changes,
+- the unredacted-store-under-`.ai/cezar/` exposure argued below,
+- and the "snapshot expired" UI state.
+
+That is roughly half of Phase 1. `add -A` also covers untracked and ignored
+files, which is exactly the case §Risks calls out as having *no* git recovery
+path — so it is strictly better there, not merely equivalent.
+
+Q4's stated objection ("pollutes the branch") does **not** survive contact with
+the code: on a running task — Q3's primary use case — the branch is already
+being auto-committed wholesale at every turn end, so one more `cezar autosave`
+commit changes nothing a user would notice.
+
+**Why the snapshot store is kept anyway**, narrowed to the case that actually
+justifies it:
+
+1. **Finished runs.** After a run ends there are no further turn ends and no
+   pre-PR hook. An explicit commit-on-save is the only thing that would record
+   an edit — and on a finished run, a surprise commit on a branch the user may
+   already have pushed or opened a PR from is a genuinely different act from
+   the in-flight autosave they opted into by running an agent.
+2. **`--no-verify` on a user action.** Autosave bypasses hooks by design for
+   machine commits. Making a *user's* save silently bypass their own pre-commit
+   hooks is a different contract.
+3. **Non-git worktrees.** `readWorktreePath()` does not require a git repo;
+   `autosaveCommit()` does.
+
+**This trade is explicitly flagged for a human.** If the reviewer judges (1)–(3)
+as not worth ~half of Phase 1 — a defensible read — the resolution is: drop
+steps 6 and 8's recovery half, call `autosaveCommit()` after a successful
+write, and keep only the metadata-only `file-edited` event for audit. The
+audit/recovery split above stands either way; only the *mechanism* of the
+recovery half changes. Note the coupling: dropping the snapshot store also
+retires §Security 5's fourth scoping bullet and step 5's extra middleware test,
+since `GET …/edits/:hash` would no longer exist. That is a further argument for
+the descope, not against it.
 
 ## Security model
 
@@ -355,7 +498,11 @@ executes. That deserves stating plainly.
    `src/server/capabilities.ts:44`). Rationale, inherited from PR #418: a
    network-reachable write primitive into a checkout the agent then executes is
    an RCE, not a convenience. Reads stay open; writes do not.
-3. **The path boundary is `readWorktreePath()`**, not a new check.
+3. **The containment boundary is `readWorktreePath()`** — reused, not
+   reimplemented. But containment is *not* the whole boundary for a write:
+   `readWorktreePath()` refuses only the worktree-root `.git`, so the write adds
+   its own deny rule for `.git` and `node_modules` at any depth
+   (§Write-path containment). That part **is** a new check, with its own tests.
 4. **Text files only, within the content cap**, and **valid UTF-8 both ways**
    (§Encoding). Binary and over-cap targets are refused.
 5. **CSRF and DNS rebinding — #467 is a hard blocker for this route.** #426 /
@@ -376,6 +523,60 @@ executes. That deserves stating plainly.
    reconcile — the drift this spec avoids everywhere else. Shape it so #467 can
    absorb or replace it wholesale; if #467 lands first, delete this and assert
    the route is covered by it.
+
+   **"Server-wide" needs four decisions spelled out, because taken literally
+   it is a documented breaking change.** `BACKWARD_COMPATIBILITY.md:34` lists
+   *"narrowing `/api/health` CORS"* explicitly under **Breaking**. So:
+
+   - **`/api/health` is exempt.** `server.ts:431-440` sets
+     `access-control-allow-origin: *` on it deliberately, so a saved bookmarklet
+     on `github.com` can probe for a running cockpit — i.e. it is *supposed* to
+     accept a foreign `Origin`. The middleware applies to **mutating methods
+     only** (`POST`/`PUT`/`PATCH`/`DELETE`); `GET /api/health` is untouched.
+     This also keeps the middleware off the entire read surface, so no existing
+     consumer of any `GET` can regress.
+   - **A missing `Origin` is allowed.** `BACKWARD_COMPATIBILITY.md:19` names
+     "anyone scripting `localhost:4321`" as a supported consumer, and curl,
+     `fetch` from Node, and every CLI send no `Origin` header at all. Browsers
+     always send one on cross-origin requests, which is the threat being
+     addressed; rejecting absent-`Origin` would break scripted clients while
+     stopping no browser attack. **Reject only a present-and-foreign `Origin`.**
+   - **`Host` is checked only when hosted mode is off.** A `Host` allowlist
+     pinned to loopback is incoherent under `CEZ_REMOTE=1`, where a non-loopback
+     `Host` is the entire point (`capabilities.ts:28-33`). Gate the `Host` half
+     on the same `isLoopbackHost(bindHost)` predicate the capabilities already
+     compute — no new configuration surface, so AGENTS.md § Zero config holds.
+     Under hosted mode the `Origin` half still applies and this route is refused
+     outright anyway.
+   - **One `GET` is in scope anyway: `GET /api/runs/:id/edits/:hash`.** The
+     "mutating methods only" scoping above is what keeps the middleware off the
+     read surface — but the snapshot read is not an ordinary read. It serves a
+     **deliberately unredacted** store (§Audit & recovery), so a rebinding
+     attacker on a local cockpit — where `fileEdit` is `true` by definition —
+     could `fetch()` it cross-origin and exfiltrate saved file contents. The
+     `nosniff` + no-script CSP stops it becoming a document; it does not stop a
+     `fetch`. The `fileEdit` capability gate does not help here either: the
+     attack presumes a *local* machine, where that predicate passes.
+     So the middleware's method scoping is "mutating methods **plus
+     `GET …/edits/:hash`**". This is the one read whose exposure is created by
+     this spec rather than inherited, so it is this spec's to close.
+
+     **Which half does the work matters, so do not implement only the
+     `Origin` check.** A rebound page is same-origin by construction, so its
+     request carries **no `Origin` header at all** — and the second decision
+     above deliberately allows absent-`Origin`. Rebinding is therefore stopped
+     by the **`Host`** half, which is exactly why that half is gated on
+     "hosted mode off" (the local case is the only one rebinding applies to).
+     The `Origin` half covers ordinary cross-origin CSRF. An implementer who
+     ships only the `Origin` check has built the control that §Security 5's
+     opening paragraph explicitly rejects.
+
+   **Scope warning, stated rather than buried:** this is an entire open PR's
+   security work (#467) folded into one step of a file-editing feature. If the
+   four decisions above are not accepted as sufficient design, the correct
+   resolution is to make **#467 a hard sequencing blocker** — Phase 1 waits —
+   rather than to ship a thinner control. Both paths are acceptable; shipping
+   "server-wide middleware" with the above left unstated is not.
 6. **Kill switch.** `CEZ_NO_FILE_EDIT=1` refuses all writes with `409`, so an
    operator can disable the primitive without a release (Q5). Update
    `.env.example` in the same commit — AGENTS.md makes an undocumented `CEZ_*`
@@ -412,6 +613,12 @@ Unchanged behavior; the `type: 'file'` response gains:
   "editableReason": null    // NEW — why not, when editable is false
 }
 ```
+
+`?meta=1` is also added: same `type: 'file'` envelope with `content` omitted,
+for the Phase 2 divergence watch, which needs the `hash` many times per second
+and must not pull up to 512 000 bytes with it (step 11). Additive — absent the
+param, behavior is exactly as today. Document it in
+`BACKWARD_COMPATIBILITY.md` §2 alongside the new fields.
 
 The existing field is `tooLarge`, not `truncated` — server (`server.ts:1137`),
 `FilesResult` (`git-changes.ts:428`), client type
@@ -460,6 +667,22 @@ stripped**, validated `^[0-9a-f]{64}$` before it touches the filesystem; the pat
 | `200` | the snapshot bytes, `content-type: text/plain; charset=utf-8`, `nosniff` | Found. Snapshots are UTF-8 by construction — the `PUT` refuses anything else. |
 | `400` | `{ error }` | `:hash` is not 64 hex chars. |
 | `404` | `{ error: 'not found' }` | No such run, or the snapshot was evicted by retention. |
+| `409` | `{ error: 'file editing is disabled — this cockpit runs in hosted mode (CEZ_REMOTE)' }` | Hosted mode, non-loopback bind, or kill switch. |
+
+**This route is gated on the same `fileEdit` predicate as the `PUT`**, not left
+open like the rest of the read surface. The store it serves is deliberately
+unredacted (§Audit & recovery), and #427's rationale for redaction is precisely
+"persisted verbatim *and served back over the API*" — so the read is the half
+that turns an unredacted store into an exposure. Reads of *worktree* files stay
+open; reads of the snapshot store do not.
+
+The capability gate alone is **not sufficient** for this route, because the
+attack that matters presumes a local machine, where `fileEdit` passes. This
+route is therefore also the one `GET` covered by §Security 5's `Origin`/`Host`
+middleware, which is otherwise scoped to mutating methods. Both controls, for
+two different attackers: the capability gate stops a *hosted* deployment
+serving the store to the network; the middleware stops a *rebinding* page
+reading it off a local one.
 
 Served with the same no-script CSP as the `raw=1` branch, so a snapshot can
 never become a same-origin document. Unlike the images route
@@ -471,6 +694,16 @@ admits exactly one filename shape.
 `Capabilities` gains `fileEdit: boolean`, derived from the same predicate as
 `localHandoff` (and false under the kill switch). Single-sourced in
 `resolveCapabilities()` so the two cannot disagree about what "local" means.
+
+One consequence worth naming rather than leaving implicit: `/api/health` is the
+**one** route serving `access-control-allow-origin: *` (`server.ts:427-440`), so
+`fileEdit: true` advertises "this localhost port has a write-to-disk primitive
+enabled" to any page that probes it — in a spec whose §Security 5 puts
+cross-origin attackers in scope. The marginal disclosure over the existing
+`localHandoff` flag is small (both mean "local cockpit"), and hiding the
+capability would only break the UI's ability to hide the Edit button, so it
+ships as-is. But it is a reason the §Security 5 control is a **prerequisite**,
+not a nice-to-have: the capability tells an attacker the primitive is there.
 
 ## Architecture
 
@@ -539,7 +772,10 @@ Only what is unique; the tree and preview chrome already exist.
 | Agent rewrites the file while the editor is open | `baseHash` mismatch → `409` → conflict banner; the user's text is preserved. |
 | Agent rewrites the file **after** the user saves | Not preventable (§Concurrency race 2). Divergence banner warns; the edit snapshot holds the user's bytes. |
 | Agent **deletes** the file while the editor is open | `readWorktreePath` → `missing` → `409`. Banner offers "Copy my version"; no accidental resurrection. |
-| Symlink, symlinked parent, `.git`, path escape | `readWorktreePath` → `invalid` → `409`. Inherited, already tested. |
+| Symlink, symlinked parent, root `.git`, path escape | `readWorktreePath` → `invalid` → `409`. Inherited, already tested. |
+| **Nested `.git`** (`sub/.git/config`, `sub/.git/hooks/pre-commit`) | `readWorktreePath` **allows** these — root-only rule. Refused by the write's own deny rule (§Write-path containment) → `409`. **New check, new tests.** |
+| `node_modules/**` at any depth | Refused by the same deny rule → `409`. Executed by every gate command; never the "one variable" use case. Nested installs (`web/app/node_modules`, workspaces) are the common case, so the rule is not root-scoped. |
+| Path that does not exist yet | `readWorktreePath` → `missing` → `409`. **File creation is out of scope** — see §Proposed Solution. |
 | Non-UTF-8 bytes that pass the NUL sniff | `editable: false`; `PUT` refuses. §Encoding. |
 | Worktree reclaimed mid-edit (retention, #483) | `worktreeOf(run)` empty → `409 NO_WORKTREE`. |
 | Content grows past the cap in the editor | Refused (`409`); the editor warns as the cap is approached, not only on save. |
@@ -558,8 +794,12 @@ Only what is unique; the tree and preview chrome already exist.
 server module, three additive response fields, one additive capability, one new
 NDJSON event type, one bounded per-run snapshot directory, a `src/runs/store.ts`
 change so `deleteRun()` and `pruneOldRuns()` drop that directory with the run,
-server-wide Origin/Host middleware (§Security 5), one client type change, and
-one changed component.
+server-wide Origin/Host middleware for mutating methods plus `GET
+…/edits/:hash` (§Security 5 — the
+largest single piece of blast radius here, and the one most likely to be
+descoped to #467), a write-path deny rule for `.git` / `node_modules`
+at any depth (§Write-path containment), one client type change, and one
+changed component.
 
 `readWorktreePath()` gains a **third** caller — `server.ts:1112` (the `GET`) and
 `server.ts:951` (the `open-in` default-app path, itself a security-relevant
@@ -577,7 +817,21 @@ it carries its own tests.
   additive. §2 flags `/api/health` as the most externally-depended-on JSON in
   the app — adding a field is safe; existing fields are untouched.
 - §3 — the `file-edited` NDJSON event is a new `type` on an append-only log
-  whose readers skip unknown lines: additive.
+  whose readers tolerate unknown types: additive. Verified across every reader,
+  not assumed — `store.readEvents` (`store.ts:571-586`) skips only JSON-parse
+  failures, `nextSeq`/`rehydrateSeq` touch only `seq`, the SSE writer routes by
+  `isV2WireEventType` with non-dotted types riding `run-event`
+  (`server.ts:1338-1341`), the thread reducer's `default: break`
+  (`thread-state.ts:481-486`) renders unknown types as nothing deliberately,
+  and the `cezar run` console switch (`src/index.ts:259-282`) has no default
+  branch.
+- **§Security 5's middleware is the one non-additive piece** and is scoped to
+  avoid the documented break: mutating methods (plus the new `GET
+  …/edits/:hash`, which breaks no existing consumer because it is new),
+  `GET /api/health` exempt, absent `Origin` allowed. Those three exemptions are what keep it out of
+  `BACKWARD_COMPATIBILITY.md:34`'s "narrowing `/api/health` CORS" and `:19`'s
+  scripted-client guarantee. If the implementation cannot hold all three,
+  it is a breaking change and #467 sequencing applies instead.
 - §7 — untouched. `file-edited` is a run event, not an `AgentEvent`/`UiEvent`,
   so the backend-parity requirement does not apply.
 - Document the route and the fields in `BACKWARD_COMPATIBILITY.md` §2, the
@@ -597,10 +851,17 @@ is true only for tracked, committed state.
 has *already* resolved to the fallback, not one still waiting. PR #418 is also
 still open, so plan on the Q1 vendoring fallback for the editor.
 
-**Residual risk.** A user with local cockpit access can write any non-`.git`,
-non-symlinked, UTF-8 file in a worktree. That user already has a shell on the
-machine and an agent with unrestricted `Bash` (#430), so the route widens no
-real boundary locally. Hosted mode is where it would, and hosted mode refuses.
+**Residual risk.** A user with local cockpit access can write any existing,
+non-symlinked, UTF-8 file in a worktree that is not under a `.git` or
+`node_modules` directory at any depth (§Write-path containment). That
+user already has a shell on the machine and an agent with unrestricted `Bash`
+(#430), so the route widens no real boundary locally. Two places where that
+"already has a shell" argument does **not** carry the weight it looks like it
+does, stated rather than relied on: §Security 5 admits a *browser-reachable*
+attacker whose mitigation is not yet in the tree — that attacker has no shell —
+and the excluded paths above are excluded precisely because writing them is
+code execution rather than editing. Hosted mode is where the boundary would
+genuinely widen, and hosted mode refuses both the write and the snapshot read.
 
 ## Phasing
 
@@ -609,6 +870,14 @@ the entire risk of a browser-reachable write primitive on `main` while
 delivering zero user value — nobody curls a `PUT` to fix one variable — for
 however long the UI takes. Phase 1 is therefore the smallest end-to-end slice
 that a user can actually use.
+
+**Phase 1 is nonetheless large, and two of its parts are separable** — worth
+saying plainly rather than letting "smallest slice" imply "small". Step 5b (the
+server-wide `Origin`/`Host` middleware) is #467's work; steps 6 and 8's recovery
+half is the snapshot store, which §Alternative considered shows could collapse
+into a single `autosaveCommit()` call. If Phase 1 needs to shrink, those are the
+two cuts — in that order — and neither removes the "edit and save" user value
+the vertical split exists to protect.
 
 - **Phase 1 — edit and save, end to end.** Both routes + `worktree-write.ts` +
   hash/editable on the `GET` + `fileEdit` + kill switch + the `file-edited`
@@ -647,11 +916,18 @@ phase completion.
    `readWorktreePath()`; reject directory / binary / non-UTF-8 / over-cap /
    missing; compare `baseHash`; re-hash from the open descriptor
    immediately before the rename (narrows race 1; race 3 is accepted — see
-   §Concurrency); atomic tmp+rename preserving mode; return `{ path,
-   size, hash }`. *Tests (temp dir, no server):* success; traversal; `.git`;
+   §Concurrency); atomic tmp+rename with a randomized `.<file>.cez-tmp-<rand>` name and
+   explicit mode preservation (neither is inherited from the `store.ts`
+   precedent — see §Proposed Solution); return `{ path, size, hash }`. *Tests (temp dir, no server):* success; traversal; `.git`;
    symlink; symlinked parent; directory target; binary; non-UTF-8; over-cap;
    hash mismatch; empty content; mode preserved; original intact when the write
-   throws. Plus one test on the rename helper directly (not through
+   throws. **Plus the write-path deny rule (§Write-path containment), which is
+   new behavior and must fail loudly if dropped:** `sub/.git/config` and
+   `sub/.git/hooks/pre-commit` are refused (they are *allowed* by
+   `readWorktreePath` — assert that too, so the test documents why the rule
+   exists); `node_modules/x/index.js` **and** the nested
+   `web/app/node_modules/x/index.js` both refused; and a nonexistent path
+   refused rather than created. Plus one test on the rename helper directly (not through
    `writeWorktreeFile`, which refuses symlinks at resolution): **renaming onto
    a symlink replaces it rather than following it** — the tmp+rename property
    race 3 relies on, asserted so a future switch to a plain `writeFile` fails
@@ -665,7 +941,19 @@ phase completion.
    **server-wide middleware** (§Security 5), tested against a rebinding-shaped
    request (a valid `Origin` with a foreign `Host`) and asserted to cover a
    second mutating route besides this one, unless #467 has landed and supplies
-   it — in which case assert this route is covered by it.
+   it — in which case assert this route is covered by it. The three scoping
+   decisions from §Security 5 each need their own test, because each is a
+   documented-contract boundary: **`GET /api/health` still answers a foreign
+   `Origin` with `access-control-allow-origin: *`** (`BACKWARD_COMPATIBILITY.md:34`
+   lists narrowing it as breaking); **a request with no `Origin` header is
+   allowed** (scripted `localhost:4321` clients, `:19`); and **the `Host` half
+   is skipped under `CEZ_REMOTE=1`**. If any of the three is judged wrong,
+   §Security 5's fallback applies: make #467 a hard sequencing blocker instead
+   of shipping a thinner control. One more test: **`GET …/edits/:hash` is
+   covered by the middleware** despite being a `GET` (§Security 5) — assert a
+   foreign-`Origin` `fetch` of a valid snapshot hash is refused, so a future
+   refactor that "simplifies" the middleware to mutating-methods-only fails
+   loudly instead of silently re-opening the store.
 6. **The `file-edited` event and the snapshot.** Write the snapshot to
    `runs/<id>-edits/<hex>` (atomic, unredacted, `<hex>` = the content digest), enforce the 20-file
    / 5 MB oldest-first eviction, then append the metadata-only event with `{
@@ -673,7 +961,11 @@ phase completion.
    route and extend `deleteRun()` (`src/runs/store.ts:590-605`) and
    `pruneOldRuns()` (`:659-675`) — each currently `rmSync`s exactly three paths
    (`eventsPath`, `handoffPath`, `imagesDir`) — to drop the edits directory too.
-   *Tests:* event carries no `content`; snapshot bytes are byte-identical to
+   **Gate the read route on the same `fileEdit` predicate as the `PUT`**
+   (§Audit & recovery, §API Contracts) — the store is unredacted by design, and
+   serving it back over the network is the half that makes that a problem.
+   *Tests:* the read route `409`s under `CEZ_REMOTE=1` and the kill switch;
+   event carries no `content`; snapshot bytes are byte-identical to
    the request body **including when the content contains a host-secret-shaped
    string**; identical re-saves reuse one snapshot; eviction drops the oldest
    past either bound; the read route serves the bytes and 404s after eviction;
@@ -698,7 +990,7 @@ phase completion.
    restore fetches the snapshot; an evicted snapshot renders the expired
    state.
 9. **Docs.** `BACKWARD_COMPATIBILITY.md` §2 (both routes + the response
-   fields — §2 is where the route listing lives, `:21-32`) and §3 (the
+   fields + the `?meta=1` query param — §2 is where the route listing lives, `:21-32`) and §3 (the
    `file-edited` event and the `runs/<id>-edits/` snapshot directory);
    `.env.example` and the README env table (`README.md:360-376`) for
    `CEZ_NO_FILE_EDIT` (AGENTS.md `:18` makes an undocumented `CEZ_*` var a bug).
@@ -708,7 +1000,13 @@ phase completion.
 ### Phase 2 — divergence awareness
 
 11. **Open-file hash watch.** Refetch the hash on the per-run SSE stream and on
-    window focus while a file is open. Note the Files tab does **not** subscribe
+    window focus while a file is open. **This needs a hash-only response
+    shape** — the only route returning `hash` today returns it alongside up to
+    `FILE_CONTENT_CAP` (512 000) bytes of `content`, and the SSE stream fires
+    many events per second on a busy run. Add `?meta=1` to the `GET` (returns
+    the `type: 'file'` envelope with `content` omitted) and debounce the
+    stream-triggered refetch; polling the full-content route per event is not
+    an acceptable implementation of this step. Note the Files tab does **not** subscribe
     today — `useRunFile` is a plain query with no stream invalidation
     (`queries.ts:155-163`), so this step wires `useRunEvents` into the tab
     rather than reusing an existing subscription. *Test:* banner appears when
