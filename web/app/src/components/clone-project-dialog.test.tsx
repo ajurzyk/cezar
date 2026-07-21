@@ -95,6 +95,7 @@ const slot = (name: string) => document.querySelector(`[data-slot="${name}"]`) a
 const urlInput = () => slot('clone-url') as HTMLInputElement
 const nameInput = () => slot('clone-name') as HTMLInputElement
 const cloneButton = () => slot('clone-confirm') as HTMLButtonElement
+const rootSettingsControl = () => slot('clone-root-settings') as HTMLAnchorElement | HTMLButtonElement
 
 describe('CloneProjectDialog', () => {
   it('previews <projectsDir>/<repo> from the typed url and posts the trimmed reference', async () => {
@@ -105,6 +106,10 @@ describe('CloneProjectDialog', () => {
     fireEvent.change(urlInput(), { target: { value: 'https://github.com/open-mercato/cezar.git' } })
     // The name defaults to the repo half — the same rule the server applies.
     await waitFor(() => expect(slot('clone-target')?.textContent).toBe('~/cezar/projects/cezar'))
+    expect(rootSettingsControl().tagName).toBe('A')
+    expect(rootSettingsControl().getAttribute('href')).toBe('/settings/global/projects')
+    expect(rootSettingsControl().getAttribute('aria-label')).toBe('Edit checkout root')
+    expect(rootSettingsControl().getAttribute('title')).toBe('Edit checkout root')
 
     fireEvent.click(cloneButton())
     await waitFor(() => expect(posted).toHaveLength(1))
@@ -138,6 +143,13 @@ describe('CloneProjectDialog', () => {
     await waitFor(() => expect(slot('clone-progress')).toBeTruthy())
     // Pending, before any event: an honest placeholder rather than a blank line.
     expect(slot('clone-progress')?.textContent).toBe('Starting the clone…')
+    // A clone cannot be dismissed while pending; the settings affordance follows the same rule
+    // and becomes a disabled button rather than an active global navigation link (#561).
+    expect(rootSettingsControl().tagName).toBe('BUTTON')
+    expect((rootSettingsControl() as HTMLButtonElement).disabled).toBe(true)
+    expect(rootSettingsControl().getAttribute('aria-label')).toBe('Edit checkout root')
+    fireEvent.click(rootSettingsControl())
+    expect(document.querySelector('[data-testid="location"]')?.textContent).toBe('/p/cezar/')
 
     const checkoutId = String(posted[0]?.checkoutId)
     emitWorkspaceEvent?.('checkout-progress', {
