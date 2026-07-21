@@ -56,6 +56,18 @@ describe('Markdown', () => {
     expect(document.querySelectorAll('[data-streamdown="list-item"]')).toHaveLength(2)
   })
 
+  it('inline mode keeps formatting but unwraps links and block structure for compact previews', () => {
+    const { container } = render(
+      <Markdown inline>{'**bold** with `code` and [docs](https://example.com)\n\n- detail'}</Markdown>,
+    )
+    expect(container.querySelector('[data-streamdown="strong"]')?.textContent).toBe('bold')
+    expect(container.querySelector('[data-streamdown="inline-code"]')?.textContent).toBe('code')
+    expect(container.querySelector('a')).toBeNull()
+    expect(container.querySelector('p, ul, li')).toBeNull()
+    expect(container.textContent).toContain('docs')
+    expect(container.textContent).toContain('detail')
+  })
+
   it('repairs an unterminated fence while streaming instead of leaking backticks', () => {
     render(<Markdown>{'Look:\n\n```ts\nconst part = "still stre'}</Markdown>)
     // The half-open fence renders as a code block (Streamdown's unterminated-block repair);
