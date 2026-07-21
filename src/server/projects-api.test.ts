@@ -18,6 +18,7 @@ import { allocateProjectSlug, clearProjectProbeCache, listProjects, registerProj
 import { ProjectContexts } from './project-context.js';
 import { apiRequest } from './loopback-request.testkit.js';
 import { loadWorkspaceConfig, mergeWriteWorkspaceConfig } from '../workspace/config.js';
+import type { CloneRunner } from './checkout.js';
 import {
   WorkspaceEventBus,
   createApp,
@@ -170,6 +171,43 @@ describe('workspace projects API', () => {
     });
   });
 
+  describe('single-project management guards', () => {
+    it('refuses checkout before clone or registry side effects', async () => {
+      let cloneCalls = 0;
+      const cloneRunner: CloneRunner = async () => {
+        cloneCalls += 1;
+        return { ok: false, error: 'must not run' };
+      };
+      process.env.CEZ_SINGLE_PROJECT = '1';
+
+      const res = await apiRequest(makeApp({ cloneRunner }), '/api/projects/checkout', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ url: 'open-mercato/cezar' }),
+      });
+
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({
+        error: 'single-project mode is enabled; adding projects is disabled',
+      });
+      expect(cloneCalls).toBe(0);
+      expect((await loadWorkspaceConfig()).projects).toEqual([]);
+    });
+
+    it('refuses filesystem browsing with the stable error', async () => {
+      process.env.CEZ_SINGLE_PROJECT = '1';
+      const res = await apiRequest(
+        makeApp(),
+        `/api/fs/browse?path=${encodeURIComponent(otherRoot)}`,
+      );
+
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({
+        error: 'single-project mode is enabled; folder browsing is disabled',
+      });
+    });
+  });
+
   describe('POST /api/projects — the folder-browser dialog (step 4.2)', () => {
     const post = async (body: unknown, over: Partial<ServerDeps> = {}) => {
       const res = await apiRequest(makeApp(over), '/api/projects', {
@@ -184,6 +222,25 @@ describe('workspace projects API', () => {
         },
       };
     };
+
+    it('refuses registration in single-project mode before registry or event side effects', async () => {
+      const existing = await registerProject(repoRoot);
+      const bus = new WorkspaceEventBus();
+      const seen: string[] = [];
+      bus.on((event) => seen.push(event));
+      process.env.CEZ_SINGLE_PROJECT = '1';
+
+      const { status, body } = await post({ root: otherRoot }, { workspaceEvents: bus });
+
+      expect(status).toBe(409);
+      expect(body).toEqual({
+        error: 'single-project mode is enabled; adding projects is disabled',
+      });
+      expect((await loadWorkspaceConfig()).projects.map((project) => project.id)).toEqual([
+        existing.id,
+      ]);
+      expect(seen).toEqual([]);
+    });
 
     it('registers a NON-GIT folder and answers the entry — the spec\'s "any folder works"', async () => {
       // A plain temp dir with no `.git`: selectable in the dialog, registerable
@@ -346,6 +403,24 @@ describe('workspace projects API', () => {
       walk(dir, '');
       return out;
     };
+
+    it('refuses removal in single-project mode before registry or context side effects', async () => {
+      const other = await registerProject(otherRoot);
+      const contexts = new ProjectContexts({ listProjects });
+      process.env.CEZ_SINGLE_PROJECT = '1';
+
+      const { status, body } = await del(other.id, { contexts });
+
+      expect(status).toBe(409);
+      expect(body).toEqual({
+        error: 'single-project mode is enabled; removing projects is disabled',
+      });
+      expect((await loadWorkspaceConfig()).projects.map((project) => project.id)).toEqual([
+        other.id,
+      ]);
+      expect(contexts.peek(other.id)).toBeUndefined();
+      contexts.disposeAll();
+    });
 
     const del = async (id: string, over: Partial<ServerDeps> = {}) => {
       const res = await apiRequest(makeApp(over), `/api/projects/${id}`, {
