@@ -21,6 +21,7 @@ import {
   useHealth,
   useProjects,
   useRepo,
+  useRunnerModels,
   useSkills,
   useUiState,
   useWorkflows,
@@ -76,6 +77,7 @@ import {
   availableRunners,
   buildCreateRunBody,
   modelsForRunner,
+  modelCatalogStatus,
   pushRecentSource,
   resolveModel,
   resolveRunner,
@@ -192,8 +194,9 @@ export function NewTaskRoute() {
 
   const runners = availableRunners(health.data?.checks ?? [])
   const runner = resolveRunner(draft.runner, runners, health.data?.defaultRunner ?? 'claude')
-  const models = modelsForRunner(runner)
-  const model = resolveModel(draft.model, runner, config.data?.defaultModels)
+  const catalog = useRunnerModels()
+  const models = modelsForRunner(runner, catalog.data, [draft.model, config.data?.defaultModels?.[runner]])
+  const model = resolveModel(draft.model, runner, config.data?.defaultModels, catalog.data)
 
   // Parallel variants need a worktree per variant, hence git (the server 409s without it).
   const hasGit = health.data === undefined || health.data.repo !== null
@@ -494,6 +497,7 @@ export function NewTaskRoute() {
                 value={model}
                 onPick={(next) => update({ model: next })}
                 options={models.map((m) => ({ value: m.id, label: m.label, desc: m.desc }))}
+                status={modelCatalogStatus(runner, catalog.data, catalog.isError)}
               />
               <PickerPill
                 slot="variants-pill"

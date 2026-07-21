@@ -3,7 +3,7 @@ import { PlayIcon } from 'lucide-react'
 import { useState } from 'react'
 
 import { continueRun } from '@/api/client'
-import { queryKeys, useConfig, useHealth } from '@/api/queries'
+import { queryKeys, useConfig, useHealth, useRunnerModels } from '@/api/queries'
 import type { ApiRun, Runner } from '@/api/types'
 import { PickerPill, RunnerPill } from '@/components/picker-pill'
 import { Button } from '@/components/ui/button'
@@ -11,6 +11,7 @@ import { toast } from '@/components/ui/toaster'
 import {
   availableRunners,
   modelsForRunner,
+  modelCatalogStatus,
   resolveModel,
   resolveRunner,
 } from '@/routes/new-task-form'
@@ -28,6 +29,7 @@ export function ContinueAction({ run }: { run: ApiRun }) {
   const queryClient = useQueryClient()
   const health = useHealth()
   const config = useConfig()
+  const catalog = useRunnerModels()
   // null = "not touched": the pills fall back to the run's current backend/model, so an
   // untouched Continue behaves exactly as before this feature existed.
   const [pickedRunner, setPickedRunner] = useState<Runner | null>(null)
@@ -39,7 +41,6 @@ export function ContinueAction({ run }: { run: ApiRun }) {
   // host's defaultRunner, which only applies to brand-new tasks.
   const currentRunner = (run.runner ?? 'claude') as Runner
   const runner = resolveRunner(pickedRunner, runners, currentRunner)
-  const models = modelsForRunner(runner)
   // While the runner is unchanged, the model pill starts on the run's own pin; switching the
   // runner invalidates that pin and falls back to the new backend's configured default / auto.
   const runnerChanged = runner !== currentRunner
@@ -47,7 +48,8 @@ export function ContinueAction({ run }: { run: ApiRun }) {
     !runnerChanged && run.model
       ? { ...config.data?.defaultModels, [runner]: run.model }
       : config.data?.defaultModels
-  const model = resolveModel(pickedModel, runner, modelDefaults)
+  const models = modelsForRunner(runner, catalog.data, [pickedModel, modelDefaults?.[runner]])
+  const model = resolveModel(pickedModel, runner, modelDefaults, catalog.data)
 
   const mutation = useMutation({
     mutationFn: () =>
@@ -82,6 +84,7 @@ export function ContinueAction({ run }: { run: ApiRun }) {
         value={model}
         onPick={(next) => setPickedModel(next)}
         options={models.map((m) => ({ value: m.id, label: m.label, desc: m.desc }))}
+        status={modelCatalogStatus(runner, catalog.data, catalog.isError)}
       />
       <Button
         type="button"

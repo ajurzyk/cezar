@@ -67,6 +67,7 @@ function serve(health: HealthResponse = HEALTH_MULTI, defaultModels: Record<stri
       const body = init.body ? (JSON.parse(String(init.body)) as unknown) : undefined
       requests.push({ method, url, body })
       if (url === '/api/health') return json(health)
+      if (url === '/api/models?runner=codex') return json({ runner: 'codex', models: [{ id: 'gpt-future', label: 'gpt-future', description: 'Newest' }], source: 'live', stale: false })
       if (url === '/api/config' && method === 'GET')
         return json({
           baseBranch: null,
@@ -140,11 +141,11 @@ describe('follow-up ContinueAction runner/model selection (#401)', () => {
     // The model pill now lists codex presets; pin one.
     fireEvent.pointerDown(screen.getByRole('button', { name: 'Model' }))
     options = await screen.findAllByRole('menuitemradio')
-    fireEvent.click(options.find((o) => o.textContent?.includes('gpt-5.1-codex')) as HTMLElement)
+    fireEvent.click(options.find((o) => o.textContent?.includes('gpt-future')) as HTMLElement)
 
     fireEvent.click(screen.getByRole('button', { name: /continue/i }))
     await waitFor(() => expect(continueBody()).toBeDefined())
-    expect(continueBody()).toEqual({ runner: 'codex', model: 'gpt-5.1-codex' })
+    expect(continueBody()).toEqual({ runner: 'codex', model: 'gpt-future' })
   })
 
   it('a legacy run (no persisted runner) shows claude — the server continues it on claude, not defaultRunner', async () => {
