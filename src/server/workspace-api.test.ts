@@ -1,21 +1,14 @@
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import type { Hono } from "hono";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { workspaceConfigPath, workspaceUiStatePath } from "../paths.js";
-import { WorkspaceSemaphore } from "../workspace/semaphore.js";
-import { RunStore } from "../runs/store.js";
-import type { RunManager } from "../workflows/run.js";
-import { apiRequest } from "./loopback-request.testkit.js";
-import { createApp, type WorkspaceConfigResponse } from "./server.js";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { Hono } from 'hono';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { workspaceConfigPath, workspaceUiStatePath } from '../paths.js';
+import { WorkspaceSemaphore } from '../workspace/semaphore.js';
+import { RunStore } from '../runs/store.js';
+import type { RunManager } from '../workflows/run.js';
+import { apiRequest } from './loopback-request.testkit.js';
+import { createApp, type WorkspaceConfigResponse } from './server.js';
 
 /**
  * The workspace settings API (multi-project spec, step 2.7):
@@ -25,7 +18,7 @@ import { createApp, type WorkspaceConfigResponse } from "./server.js";
  * merge/key-cap semantics as the per-repo ui-state route. All workspace-level:
  * single-mount, never under `/api/p/`.
  */
-describe("the workspace settings API (step 2.7)", () => {
+describe('the workspace settings API (step 2.7)', () => {
   const savedHome = process.env.CEZ_HOME;
   let home: string;
   let repoRoot: string;
@@ -34,11 +27,11 @@ describe("the workspace settings API (step 2.7)", () => {
   let app: Hono;
 
   beforeEach(() => {
-    home = mkdtempSync(join(tmpdir(), "cez-workspace-api-"));
+    home = mkdtempSync(join(tmpdir(), 'cez-workspace-api-'));
     process.env.CEZ_HOME = home; // paths.ts sends all workspace paths here
-    repoRoot = mkdtempSync(join(tmpdir(), "cez-workspace-api-repo-"));
-    mkdirSync(join(repoRoot, ".ai/cezar"), { recursive: true });
-    store = RunStore.open(join(repoRoot, ".ai/cezar"));
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-workspace-api-repo-'));
+    mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
     // The REAL semaphore with its production loader (which reads the CEZ_HOME
     // config), so the PUT → refresh() → cached-limits chain is observed end to
     // end. The routes never touch the manager — an empty stub is honest.
@@ -47,7 +40,7 @@ describe("the workspace settings API (step 2.7)", () => {
       repoRoot,
       store,
       manager: {} as RunManager,
-      version: "0.0.0-test",
+      version: '0.0.0-test',
       semaphore,
     });
   });
@@ -56,33 +49,27 @@ describe("the workspace settings API (step 2.7)", () => {
     store.flush();
     if (savedHome === undefined) delete process.env.CEZ_HOME;
     else process.env.CEZ_HOME = savedHome;
-    for (const dir of [home, repoRoot])
-      rmSync(dir, { recursive: true, force: true });
+    for (const dir of [home, repoRoot]) rmSync(dir, { recursive: true, force: true });
   });
 
-  const rawConfig = () =>
-    JSON.parse(readFileSync(workspaceConfigPath(), "utf8")) as Record<
-      string,
-      unknown
-    >;
+  const rawConfig = () => JSON.parse(readFileSync(workspaceConfigPath(), 'utf8')) as Record<string, unknown>;
 
-  const getConfig = () => apiRequest(app, "/api/workspace/config");
+  const getConfig = () => apiRequest(app, '/api/workspace/config');
   const putConfig = (body: unknown) =>
-    apiRequest(app, "/api/workspace/config", {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
+    apiRequest(app, '/api/workspace/config', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
     });
 
   // ---- GET/PUT /api/workspace/config ---------------------------------------
 
-  it("GET answers the zero-config defaults when no file exists — and never the registry", async () => {
+  it('GET answers the zero-config defaults when no file exists — and never the registry', async () => {
     const res = await getConfig();
     expect(res.status).toBe(200);
-    const body = (await res.json()) as WorkspaceConfigResponse &
-      Record<string, unknown>;
+    const body = (await res.json()) as WorkspaceConfigResponse & Record<string, unknown>;
     expect(body).toEqual({
-      projectsDir: "~/cezar/projects",
+      projectsDir: '~/cezar/projects',
       resources: {
         maxParallel: 2,
         memoryLimitMb: null,
@@ -95,14 +82,14 @@ describe("the workspace settings API (step 2.7)", () => {
     expect(body.schemaVersion).toBeUndefined();
   });
 
-  it("PUT resources round-trips, persists to disk, and refreshes the semaphore cache", async () => {
+  it('PUT resources round-trips, persists to disk, and refreshes the semaphore cache', async () => {
     expect(semaphore.maxParallel()).toBe(2); // the pre-PUT snapshot
     const res = await putConfig({
       resources: { maxParallel: 5, memoryLimitMb: 2048 },
     });
     expect(res.status).toBe(200);
     expect((await res.json()) as WorkspaceConfigResponse).toEqual({
-      projectsDir: "~/cezar/projects",
+      projectsDir: '~/cezar/projects',
       resources: {
         maxParallel: 5,
         memoryLimitMb: 2048,
@@ -110,146 +97,123 @@ describe("the workspace settings API (step 2.7)", () => {
       },
     });
     // Round-trip through GET and the raw file.
-    expect(
-      ((await (await getConfig()).json()) as WorkspaceConfigResponse).resources
-        .maxParallel,
-    ).toBe(5);
-    expect((rawConfig().resources as Record<string, unknown>).maxParallel).toBe(
-      5,
-    );
+    expect(((await (await getConfig()).json()) as WorkspaceConfigResponse).resources.maxParallel).toBe(5);
+    expect((rawConfig().resources as Record<string, unknown>).maxParallel).toBe(5);
     // The step-2.5 hook fired: the new cap applies WITHOUT a restart.
     expect(semaphore.maxParallel()).toBe(5);
     expect(semaphore.memoryLimitMb()).toBe(2048);
   });
 
-  it("partial updates leave the other keys untouched", async () => {
+  it('partial updates leave the other keys untouched', async () => {
     await putConfig({ resources: { maxParallel: 5 } });
     await putConfig({ resources: { worktreeRetentionDefault: 3 } });
-    expect(
-      ((await (await getConfig()).json()) as WorkspaceConfigResponse).resources,
-    ).toEqual({
+    expect(((await (await getConfig()).json()) as WorkspaceConfigResponse).resources).toEqual({
       maxParallel: 5,
       memoryLimitMb: null,
       worktreeRetentionDefault: 3,
     });
   });
 
-  it("rejects out-of-bounds resources with 400 and writes nothing", async () => {
-    for (const resources of [
-      { maxParallel: 0 },
-      { maxParallel: 17 },
-      { memoryLimitMb: -1 },
-    ]) {
+  it('rejects out-of-bounds resources with 400 and writes nothing', async () => {
+    for (const resources of [{ maxParallel: 0 }, { maxParallel: 17 }, { memoryLimitMb: -1 }]) {
       const res = await putConfig({ resources });
       expect(res.status, JSON.stringify(resources)).toBe(400);
-      expect((await res.json()) as { error: string }).toHaveProperty("error");
+      expect((await res.json()) as { error: string }).toHaveProperty('error');
     }
-    expect(() => readFileSync(workspaceConfigPath(), "utf8")).toThrow(); // never created
+    expect(() => readFileSync(workspaceConfigPath(), 'utf8')).toThrow(); // never created
     expect(semaphore.maxParallel()).toBe(2);
   });
 
-  it("a merge-written PUT never clobbers the registry or unknown keys (passthrough)", async () => {
+  it('a merge-written PUT never clobbers the registry or unknown keys (passthrough)', async () => {
     writeFileSync(
       workspaceConfigPath(),
       JSON.stringify({
-        projects: [{ id: "cezar", root: "/tmp/projects/cezar" }],
+        projects: [{ id: 'cezar', root: '/tmp/projects/cezar' }],
         futureKey: true,
       }),
-      "utf8",
+      'utf8',
     );
     await putConfig({ resources: { maxParallel: 4 } });
     const raw = rawConfig();
     // The merge-write materializes the entry's schema defaults (name, dates…) —
     // what matters is the registration itself survives a settings PUT.
-    expect(raw.projects).toMatchObject([
-      { id: "cezar", root: "/tmp/projects/cezar" },
-    ]);
+    expect(raw.projects).toMatchObject([{ id: 'cezar', root: '/tmp/projects/cezar' }]);
     expect(raw.futureKey).toBe(true);
     expect((raw.resources as Record<string, unknown>).maxParallel).toBe(4);
   });
 
-  it("PUT projectsDir creates the directory, probes it, and stores the path as written", async () => {
-    const dir = join(home, "checkouts");
+  it('PUT projectsDir creates the directory, probes it, and stores the path as written', async () => {
+    const dir = join(home, 'checkouts');
     const res = await putConfig({ projectsDir: dir });
     expect(res.status).toBe(200);
-    expect(((await res.json()) as WorkspaceConfigResponse).projectsDir).toBe(
-      dir,
-    );
+    expect(((await res.json()) as WorkspaceConfigResponse).projectsDir).toBe(dir);
     expect(rawConfig().projectsDir).toBe(dir);
     // mkdir -p happened; the probe file was cleaned up.
     expect(readdirSync(dir)).toEqual([]);
   });
 
   it('an unwritable projectsDir answers 400 "not writable: …" and persists NO change', async () => {
-    await putConfig({ projectsDir: join(home, "checkouts") }); // a known-good value first
+    await putConfig({ projectsDir: join(home, 'checkouts') }); // a known-good value first
     // A path under a regular file can never be created — fails on every
     // platform and uid (unlike a chmod 0500 dir, which root would ignore).
-    writeFileSync(join(home, "blocker"), "not a directory", "utf8");
-    const res = await putConfig({ projectsDir: join(home, "blocker", "sub") });
+    writeFileSync(join(home, 'blocker'), 'not a directory', 'utf8');
+    const res = await putConfig({ projectsDir: join(home, 'blocker', 'sub') });
     expect(res.status).toBe(400);
     const { error } = (await res.json()) as { error: string };
     expect(error).toMatch(/^not writable: /);
     // The config on disk still holds the previous value.
-    expect(rawConfig().projectsDir).toBe(join(home, "checkouts"));
+    expect(rawConfig().projectsDir).toBe(join(home, 'checkouts'));
   });
 
-  it("a relative projectsDir is refused before any probe touches the filesystem", async () => {
-    const res = await putConfig({ projectsDir: "relative/path" });
+  it('a relative projectsDir is refused before any probe touches the filesystem', async () => {
+    const res = await putConfig({ projectsDir: 'relative/path' });
     expect(res.status).toBe(400);
-    expect(((await res.json()) as { error: string }).error).toMatch(
-      /^not writable: /,
-    );
+    expect(((await res.json()) as { error: string }).error).toMatch(/^not writable: /);
   });
 
-  it("a malformed body answers 400 {error}", async () => {
-    const res = await apiRequest(app, "/api/workspace/config", {
-      method: "PUT",
-      body: "nonsense",
+  it('a malformed body answers 400 {error}', async () => {
+    const res = await apiRequest(app, '/api/workspace/config', {
+      method: 'PUT',
+      body: 'nonsense',
     });
     expect(res.status).toBe(400);
-    expect((await res.json()) as { error: string }).toHaveProperty("error");
+    expect((await res.json()) as { error: string }).toHaveProperty('error');
   });
 
   // ---- GET/PUT /api/workspace/ui-state -------------------------------------
 
-  const getUiState = () => apiRequest(app, "/api/workspace/ui-state");
+  const getUiState = () => apiRequest(app, '/api/workspace/ui-state');
   const putUiState = (body: unknown) =>
-    apiRequest(app, "/api/workspace/ui-state", {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
+    apiRequest(app, '/api/workspace/ui-state', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
     });
-  const rawUiState = () =>
-    JSON.parse(readFileSync(workspaceUiStatePath(), "utf8")) as Record<
-      string,
-      unknown
-    >;
+  const rawUiState = () => JSON.parse(readFileSync(workspaceUiStatePath(), 'utf8')) as Record<string, unknown>;
 
-  it("GET answers {} when no file exists yet", async () => {
+  it('GET answers {} when no file exists yet', async () => {
     const res = await getUiState();
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({});
   });
 
-  it("PUT merges shallowly into ~/.cezar/ui-state.json — later keys never drop earlier ones", async () => {
-    expect(
-      (await putUiState({ appearance: { accent: "violet" } })).status,
-    ).toBe(200);
+  it('PUT merges shallowly into ~/.cezar/ui-state.json — later keys never drop earlier ones', async () => {
+    expect((await putUiState({ appearance: { accent: 'violet' } })).status).toBe(200);
     const res = await putUiState({ sidebar: { collapsed: { cezar: true } } });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
-      appearance: { accent: "violet" },
+      appearance: { accent: 'violet' },
       sidebar: { collapsed: { cezar: true } },
     });
     expect(rawUiState()).toEqual({
-      appearance: { accent: "violet" },
+      appearance: { accent: 'violet' },
       sidebar: { collapsed: { cezar: true } },
     });
     // The workspace file, not the boot repo's — the per-repo twin stays empty.
-    expect(await (await apiRequest(app, "/api/ui-state")).json()).toEqual({});
+    expect(await (await apiRequest(app, '/api/ui-state')).json()).toEqual({});
   });
 
-  it("unknown keys pass through and survive later PUTs (additive, like the per-repo route)", async () => {
+  it('unknown keys pass through and survive later PUTs (additive, like the per-repo route)', async () => {
     await putUiState({ futurePref: { nested: 1 } });
     await putUiState({ notifications: { enabled: true } });
     expect(rawUiState()).toEqual({
@@ -258,24 +222,19 @@ describe("the workspace settings API (step 2.7)", () => {
     });
   });
 
-  it("rejects a malformed known key instead of writing garbage", async () => {
-    const res = await putUiState({ sidebar: { collapsed: { cezar: "yes" } } });
+  it('rejects a malformed known key instead of writing garbage', async () => {
+    const res = await putUiState({ sidebar: { collapsed: { cezar: 'yes' } } });
     expect(res.status).toBe(400);
-    expect((await res.json()) as { error: string }).toHaveProperty("error");
-    expect(() => readFileSync(workspaceUiStatePath(), "utf8")).toThrow(); // nothing written
+    expect((await res.json()) as { error: string }).toHaveProperty('error');
+    expect(() => readFileSync(workspaceUiStatePath(), 'utf8')).toThrow(); // nothing written
   });
 
-  it("caps the top-level key count at 200, same as the per-repo route", async () => {
-    const keysOf = (n: number) =>
-      Object.fromEntries(
-        Array.from({ length: n }, (_, i) => [`pref-${i}`, true]),
-      );
+  it('caps the top-level key count at 200, same as the per-repo route', async () => {
+    const keysOf = (n: number) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`pref-${i}`, true]));
     expect((await putUiState(keysOf(200))).status).toBe(200);
     const over = await putUiState(keysOf(201));
     expect(over.status).toBe(400);
-    expect(((await over.json()) as { error: string }).error).toContain(
-      "too many keys",
-    );
+    expect(((await over.json()) as { error: string }).error).toContain('too many keys');
     // The at-cap state from the previous PUT still stands.
     expect(Object.keys(rawUiState())).toHaveLength(200);
   });

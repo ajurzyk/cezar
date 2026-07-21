@@ -1,28 +1,19 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
-import {
-  access,
-  constants as fsConstants,
-  mkdir,
-  readFile,
-  realpath,
-  stat,
-  unlink,
-  writeFile,
-} from "node:fs/promises";
-import { homedir } from "node:os";
-import { basename, dirname, join, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
-import { Hono, type Context } from "hono";
-import type { Next } from "hono";
-import { serve, type ServerType } from "@hono/node-server";
-import { bodyLimit } from "hono/body-limit";
-import { streamSSE } from "hono/streaming";
-import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { z } from "zod";
-import { detectEnvironment } from "../core/backend-detect.js";
-import type { ContentBlock } from "../core/agent-runner.js";
-import { currentUsage, onUsage } from "../core/process-usage.js";
-import { WORKFLOWS_DIR, loadWorkflows } from "../workflows/load.js";
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { access, constants as fsConstants, mkdir, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { basename, dirname, join, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { Hono, type Context } from 'hono';
+import type { Next } from 'hono';
+import { serve, type ServerType } from '@hono/node-server';
+import { bodyLimit } from 'hono/body-limit';
+import { streamSSE } from 'hono/streaming';
+import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import { z } from 'zod';
+import { detectEnvironment } from '../core/backend-detect.js';
+import type { ContentBlock } from '../core/agent-runner.js';
+import { currentUsage, onUsage } from '../core/process-usage.js';
+import { WORKFLOWS_DIR, loadWorkflows } from '../workflows/load.js';
 import {
   QUICK_TASK_WORKFLOW,
   normalizeWorkflowDoc,
@@ -32,46 +23,18 @@ import {
   workflowFileSchema,
   workflowStepSchema,
   type WorkflowDef,
-} from "../workflows/types.js";
-import { planChain, slugify } from "../planner.js";
-import { discoverSkills } from "../skills.js";
-import { refreshTeamSkills, waitForTeamSkills } from "../skills-remote.js";
-import {
-  appendHandoffHeartbeat,
-  handoffProgressExcerpt,
-  readHandoff,
-} from "../handoff.js";
-import {
-  markStarted,
-  onTodosChanged,
-  readTodos,
-  removeTodo,
-  todoTaskText,
-  type TodoItem,
-} from "../todos.js";
-import type {
-  RunEvent,
-  RunRecord,
-  RunStatus,
-  RunStore,
-} from "../runs/store.js";
-import { isV2WireEventType } from "../runs/ui-event-sink.js";
-import type { RunManager } from "../workflows/run.js";
-import {
-  removeWorktree,
-  worktreeDiff,
-  worktreeDiffStat,
-  worktreeSizeBytes,
-} from "../git-worktree.js";
-import { isReclaimable, reclaimWorktrees } from "../runs/retention.js";
-import {
-  getBranches,
-  getCommit,
-  getDiff,
-  getLog,
-  getRepoInfo,
-  getStatus,
-} from "./git.js";
+} from '../workflows/types.js';
+import { planChain, slugify } from '../planner.js';
+import { discoverSkills } from '../skills.js';
+import { refreshTeamSkills, waitForTeamSkills } from '../skills-remote.js';
+import { appendHandoffHeartbeat, handoffProgressExcerpt, readHandoff } from '../handoff.js';
+import { markStarted, onTodosChanged, readTodos, removeTodo, todoTaskText, type TodoItem } from '../todos.js';
+import type { RunEvent, RunRecord, RunStatus, RunStore } from '../runs/store.js';
+import { isV2WireEventType } from '../runs/ui-event-sink.js';
+import type { RunManager } from '../workflows/run.js';
+import { removeWorktree, worktreeDiff, worktreeDiffStat, worktreeSizeBytes } from '../git-worktree.js';
+import { isReclaimable, reclaimWorktrees } from '../runs/retention.js';
+import { getBranches, getCommit, getDiff, getLog, getRepoInfo, getStatus } from './git.js';
 import {
   collectChanges,
   collectCommitChanges,
@@ -82,15 +45,11 @@ import {
   isOsOpenableImage,
   pushCurrentBranch,
   readWorktreePath,
-} from "./git-changes.js";
-import {
-  loadConfig,
-  resolveWorktreeRetention,
-  type CezConfig,
-} from "../config.js";
-import { findConfigFile } from "../agent-config/catalog.js";
-import { readConfigFile, writeConfigFile } from "../agent-config/files.js";
-import { listAgentConfig } from "../agent-config/service.js";
+} from './git-changes.js';
+import { loadConfig, resolveWorktreeRetention, type CezConfig } from '../config.js';
+import { findConfigFile } from '../agent-config/catalog.js';
+import { readConfigFile, writeConfigFile } from '../agent-config/files.js';
+import { listAgentConfig } from '../agent-config/service.js';
 import {
   PROJECT_ID_RE,
   defaultWorkspaceConfig,
@@ -98,7 +57,7 @@ import {
   mergeWriteWorkspaceConfig,
   type WorkspaceConfig,
   type WorkspaceProject,
-} from "../workspace/config.js";
+} from '../workspace/config.js';
 import {
   allocateProjectSlug,
   listProjects,
@@ -107,50 +66,29 @@ import {
   removeProject,
   shouldRegisterProject,
   type ProjectListEntry,
-} from "../workspace/projects.js";
-import { WorkspaceSemaphore } from "../workspace/semaphore.js";
-import {
-  mergeWriteWorkspaceUiState,
-  readWorkspaceUiState,
-} from "../workspace/ui-state.js";
-import { checkoutRepo, type CloneRunner } from "./checkout.js";
-import {
-  ProjectContextError,
-  ProjectContexts,
-  type ProjectContext,
-} from "./project-context.js";
-import { reviewGateEnabled } from "../runs/review-gate.js";
-import { readUiState, uiStatePath } from "../ui-state.js";
-import { expandTilde } from "../paths.js";
-import {
-  isLoopbackHostHeader,
-  normalizeHostname,
-  resolveCapabilities,
-} from "./capabilities.js";
-import {
-  browseDirectory,
-  isInsideBrowseRoot,
-  isLexicallyInsideBrowseRoot,
-  resolveBrowseRoot,
-} from "./fs-browse.js";
-import { resolveForge } from "./forge/index.js";
-import { fetchGithub, fetchGithubComments } from "./github.js";
-import { ensureLaunchKey } from "./launch-key.js";
-import { openInTerminal } from "./open-in-terminal.js";
-import {
-  agentCliRunner,
-  detectOpenTargets,
-  openFileInDefaultApp,
-  openInApp,
-} from "./open-in-app.js";
-import { createDraftPr } from "./pr.js";
+} from '../workspace/projects.js';
+import { WorkspaceSemaphore } from '../workspace/semaphore.js';
+import { mergeWriteWorkspaceUiState, readWorkspaceUiState } from '../workspace/ui-state.js';
+import { checkoutRepo, type CloneRunner } from './checkout.js';
+import { ProjectContextError, ProjectContexts, type ProjectContext } from './project-context.js';
+import { reviewGateEnabled } from '../runs/review-gate.js';
+import { readUiState, uiStatePath } from '../ui-state.js';
+import { expandTilde } from '../paths.js';
+import { isLoopbackHostHeader, normalizeHostname, resolveCapabilities } from './capabilities.js';
+import { browseDirectory, isInsideBrowseRoot, isLexicallyInsideBrowseRoot, resolveBrowseRoot } from './fs-browse.js';
+import { resolveForge } from './forge/index.js';
+import { fetchGithub, fetchGithubComments } from './github.js';
+import { ensureLaunchKey } from './launch-key.js';
+import { openInTerminal } from './open-in-terminal.js';
+import { agentCliRunner, detectOpenTargets, openFileInDefaultApp, openInApp } from './open-in-app.js';
+import { createDraftPr } from './pr.js';
 import {
   ASSET_CACHE_CONTROL,
   BUILD_HINT_HTML,
   assetContentType,
   isSafeAssetFilename,
   resolveGetRequest,
-} from "./static-ui.js";
+} from './static-ui.js';
 
 export interface ServerDeps {
   repoRoot: string;
@@ -204,10 +142,7 @@ type ProjectApiEnv = { Variables: { project: ProjectContext } };
  *  shape or the reserved `default` alias — validated BEFORE touching any map
  *  or path. (`default` matches the slug regex too; the literal keeps the
  *  contract explicit.) */
-const projectIdSchema = z.union([
-  z.literal("default"),
-  z.string().regex(PROJECT_ID_RE),
-]);
+const projectIdSchema = z.union([z.literal('default'), z.string().regex(PROJECT_ID_RE)]);
 
 /** One row of the mirrored project-route table. */
 export interface ProjectRouteInfo {
@@ -216,7 +151,7 @@ export interface ProjectRouteInfo {
   path: string;
 }
 
-const SCOPED_PREFIX = "/api/p/:projectId";
+const SCOPED_PREFIX = '/api/p/:projectId';
 
 /**
  * The project-scoped route table of a `createApp()` app, derived from its
@@ -230,8 +165,7 @@ export function projectRouteManifest(app: Hono): ProjectRouteInfo[] {
   const seen = new Set<string>();
   const manifest: ProjectRouteInfo[] = [];
   for (const route of app.routes) {
-    if (route.method === "ALL" || !route.path.startsWith(`${SCOPED_PREFIX}/`))
-      continue;
+    if (route.method === 'ALL' || !route.path.startsWith(`${SCOPED_PREFIX}/`)) continue;
     const path = route.path.slice(SCOPED_PREFIX.length);
     const key = `${route.method} ${path}`;
     if (seen.has(key)) continue;
@@ -242,8 +176,7 @@ export function projectRouteManifest(app: Hono): ProjectRouteInfo[] {
 }
 
 /** 409 body for the inbox mutators while the follow-up inbox is off (#471). */
-const FOLLOWUPS_OFF =
-  "the follow-up inbox is disabled — set CEZ_FOLLOWUPS=1 to enable it";
+const FOLLOWUPS_OFF = 'the follow-up inbox is disabled — set CEZ_FOLLOWUPS=1 to enable it';
 
 // ---- variant-compare response shapes (spec 010) ----------------------------
 // Named and exported so `api-types.test.ts` can drift-guard the cockpit's
@@ -320,8 +253,7 @@ export interface WorkspaceConfigResponse {
 /** Workspace-level event names carried ONLY on `GET /api/workspace/events`
  *  (never on the per-project streams): registry mutations plus the GUI-clone
  *  progress feed (step 4.3). */
-export type WorkspaceEventName =
-  "project-added" | "project-removed" | "checkout-progress";
+export type WorkspaceEventName = 'project-added' | 'project-removed' | 'checkout-progress';
 
 /**
  * The in-process bus for workspace-level SSE events. The registry-mutating
@@ -333,9 +265,7 @@ export type WorkspaceEventName =
  * so tests (and any out-of-createApp emitter) can drive the stream.
  */
 export class WorkspaceEventBus {
-  private readonly listeners = new Set<
-    (event: WorkspaceEventName, data: unknown) => void
-  >();
+  private readonly listeners = new Set<(event: WorkspaceEventName, data: unknown) => void>();
 
   emit(event: WorkspaceEventName, data: unknown): void {
     for (const listener of [...this.listeners]) listener(event, data);
@@ -356,8 +286,8 @@ export class WorkspaceEventBus {
  *  `Cache-Control` set via `c.header()` before it. */
 const streamSSENoBuffer: typeof streamSSE = (c, cb, onError) => {
   const res = streamSSE(c, cb, onError);
-  res.headers.set("Cache-Control", "no-cache, no-transform");
-  res.headers.set("X-Accel-Buffering", "no");
+  res.headers.set('Cache-Control', 'no-cache, no-transform');
+  res.headers.set('X-Accel-Buffering', 'no');
   return res;
 };
 
@@ -371,13 +301,10 @@ const startRunSchema = z
     // other prompt fields (`systemPrompt` 20k, message `text` 100k) so an
     // unbounded body can't be piped into a spawned process (#429). 100k chars
     // (~25k tokens) is well past any hand-written task.
-    task: z
-      .string()
-      .min(1)
-      .max(100_000, "task must be at most 100000 characters"),
+    task: z.string().min(1).max(100_000, 'task must be at most 100000 characters'),
     model: z.string().optional(),
     // Agent backend for this task (falls back to config `defaultRunner`).
-    runner: z.enum(["claude", "codex", "opencode"]).optional(),
+    runner: z.enum(['claude', 'codex', 'opencode']).optional(),
     // Parallel variants (spec 010): ×2/×3 runs the task as 2–3 competing
     // agents in separate worktrees; the user compares diffs and picks one.
     variants: z.number().int().min(1).max(3).optional(),
@@ -399,7 +326,7 @@ const startRunSchema = z
     systemPrompt: z
       .string()
       .trim()
-      .max(20_000, "systemPrompt must be at most 20000 characters")
+      .max(20_000, 'systemPrompt must be at most 20000 characters')
       .optional()
       .transform((s) => (s ? s : undefined)),
     // Screenshots pasted into the new-task form — same shape and limits as a
@@ -419,11 +346,7 @@ const startRunSchema = z
     // started — the same bookkeeping POST /api/todos/:id/start does, so the
     // audit trail survives the composer detour. Bounded like every other
     // string here; a todo id is a short generated key.
-    todoId: z
-      .string()
-      .min(1)
-      .max(200, "todoId must be at most 200 characters")
-      .optional(),
+    todoId: z.string().min(1).max(200, 'todoId must be at most 200 characters').optional(),
   })
   .refine((b) => Boolean(b.workflow) !== Boolean(b.steps), {
     message: 'provide either "workflow" or "steps", not both',
@@ -435,11 +358,7 @@ const pickSchema = z.object({
 
 const planSchema = z.object({
   // Same bound as `startRunSchema.task` — this flows into `planChain` (#429).
-  task: z
-    .string()
-    .trim()
-    .min(1)
-    .max(100_000, "task must be at most 100000 characters"),
+  task: z.string().trim().min(1).max(100_000, 'task must be at most 100000 characters'),
 });
 
 // A saved workflow carries full `steps` OR the builder's `skills` stack
@@ -450,10 +369,7 @@ const saveWorkflowSchema = z
     name: z.string().trim().min(1).max(80),
     // Written into a YAML file on disk (#429) — a workflow description is a
     // short blurb, so a 2k cap is generous without allowing a file-bloat write.
-    description: z
-      .string()
-      .max(2_000, "description must be at most 2000 characters")
-      .optional(),
+    description: z.string().max(2_000, 'description must be at most 2000 characters').optional(),
     steps: z.array(workflowStepSchema).min(1).max(8).optional(),
     skills: z.array(z.string().trim().min(1)).min(1).max(8).optional(),
     overwrite: z.boolean().optional(),
@@ -486,8 +402,8 @@ const UI_STATE_MAX_KEYS = 200;
  *  same repo still honours it) and workspace (`~/.cezar/ui-state.json`, its
  *  post-migration home — multi-project spec, Data Model). */
 const appearanceSchema = z.object({
-  accent: z.enum(["lime", "violet"]).optional(),
-  density: z.enum(["comfortable", "compact", "ultra"]).optional(),
+  accent: z.enum(['lime', 'violet']).optional(),
+  density: z.enum(['comfortable', 'compact', 'ultra']).optional(),
 });
 
 /** Global GUI state (`~/.cezar/ui-state.json`, step 2.7) — the workspace twin
@@ -498,10 +414,7 @@ const appearanceSchema = z.object({
 const workspaceUiStateSchema = z
   .object({
     appearance: appearanceSchema.optional(),
-    notifications: z
-      .object({ enabled: z.boolean().optional() })
-      .passthrough()
-      .optional(),
+    notifications: z.object({ enabled: z.boolean().optional() }).passthrough().optional(),
     // Sidebar per-project collapse map, keyed by project id (slug ≤ 64 chars).
     // Entry-capped like `skillUsage`: the map is written straight to a file the
     // cockpit GETs on every load, so it must stay bounded on every axis.
@@ -523,7 +436,7 @@ const uiStateSchema = z
   .object({
     lastTask: z
       .object({
-        source: z.enum(["workflow", "skill"]),
+        source: z.enum(['workflow', 'skill']),
         ref: z.string().min(1).max(200),
       })
       .optional(),
@@ -532,7 +445,7 @@ const uiStateSchema = z
     recentSources: z
       .array(
         z.object({
-          source: z.enum(["workflow", "skill"]),
+          source: z.enum(['workflow', 'skill']),
           ref: z.string().min(1).max(200),
         }),
       )
@@ -554,20 +467,17 @@ const uiStateSchema = z
     // names (`.min(1).max(200)`, matching `lastTask.ref`); SKILL_USAGE_MAX_ENTRIES sits far above
     // any real catalog while capping the file at a few tens of KB.
     skillUsage: z
-      .record(
-        z.string().min(1).max(200),
-        z.number().int().min(0).max(1_000_000),
-      )
+      .record(z.string().min(1).max(200), z.number().int().min(0).max(1_000_000))
       .refine((usage) => Object.keys(usage).length <= SKILL_USAGE_MAX_ENTRIES, {
         message: `skillUsage must have at most ${SKILL_USAGE_MAX_ENTRIES} entries`,
       })
       .optional(),
     // Runs area presentation (#348): the sidebar-list + detail pane, or the
     // full-width table ("task manager") view.
-    runsView: z.enum(["list", "table"]).optional(),
+    runsView: z.enum(['list', 'table']).optional(),
     // The GitHub tab's last-selected sub-tab (#417): issues or PRs. ADDITIVE — an old
     // ui-state.json without the key behaves as the default (issues).
-    githubView: z.enum(["issues", "prs"]).optional(),
+    githubView: z.enum(['issues', 'prs']).optional(),
     // Settings → Appearance (redesign R6): accent + density. ADDITIVE — the theme itself
     // stays in the browser (`cez-theme` localStorage, pre-paint). The cockpit always PUTs
     // the whole object because the top-level merge below is shallow.
@@ -602,11 +512,7 @@ const patchRunSchema = z.object({
 
 // Session commit (redesign R5 — §"Git/session API additions").
 const gitCommitSchema = z.object({
-  message: z
-    .string()
-    .trim()
-    .min(1, "commit message must not be empty")
-    .max(5_000),
+  message: z.string().trim().min(1, 'commit message must not be empty').max(5_000),
 });
 
 // "Open in…" (#open-in / #365): `target` selects the app; `path` (optional, worktree-relative)
@@ -615,13 +521,13 @@ const gitCommitSchema = z.object({
 // `readWorktreePath`; this schema only shapes the request.
 const openInSchema = z.object({
   // A short bound (#429): matched against a downstream allowlist, so an editor id is never long.
-  target: z.string().trim().min(1, "target required").max(200),
+  target: z.string().trim().min(1, 'target required').max(200),
   path: z.string().max(1_000).optional(),
 });
 
 const messageSchema = z
   .object({
-    text: z.string().max(100_000).default(""),
+    text: z.string().max(100_000).default(''),
     images: z
       .array(
         z.object({
@@ -634,7 +540,7 @@ const messageSchema = z
       .default([]),
   })
   .refine((m) => m.text.trim().length > 0 || m.images.length > 0, {
-    message: "message needs text or at least one image",
+    message: 'message needs text or at least one image',
   });
 
 // "Continue"/"Send back" body (spec 003 / #401): every field optional, so an empty POST reopens
@@ -642,11 +548,8 @@ const messageSchema = z
 // the follow-up composer choose which engine handles the continuation. `text` stays bounded like
 // the live-session message `text` (#429).
 const continueSchema = z.object({
-  text: z
-    .string()
-    .max(100_000, "text must be at most 100000 characters")
-    .optional(),
-  runner: z.enum(["claude", "codex", "opencode"]).optional(),
+  text: z.string().max(100_000, 'text must be at most 100000 characters').optional(),
+  runner: z.enum(['claude', 'codex', 'opencode']).optional(),
   model: z.string().max(200).optional(),
 });
 
@@ -659,12 +562,12 @@ const continueSchema = z.object({
 // absent so it never touches `task`.
 const startTodoSchema = z
   .object({
-    runner: z.enum(["claude", "codex", "opencode"]).optional(),
+    runner: z.enum(['claude', 'codex', 'opencode']).optional(),
     model: z.string().max(200).optional(),
     prompt: z
       .string()
       .trim()
-      .max(20_000, "prompt must be at most 20000 characters")
+      .max(20_000, 'prompt must be at most 20000 characters')
       .optional()
       .transform((s) => (s ? s : undefined)),
   })
@@ -690,7 +593,7 @@ const UI_STATE_BODY_LIMIT = 128 * 1024; // 128 KiB
 function stripHostPort(host: string): string {
   const bracketed = /^(\[[^\]]+\])(?::\d+)?$/.exec(host);
   if (bracketed?.[1]) return bracketed[1];
-  return host.replace(/:\d+$/, "");
+  return host.replace(/:\d+$/, '');
 }
 
 /** The shared write-side half of BOTH ui-state routes (per-repo `/api/ui-state`
@@ -699,17 +602,10 @@ function stripHostPort(host: string): string {
  *  schema, then cap the top-level key count so a `.passthrough()` schema can't
  *  accumulate an unbounded key set (#429). The merge-on-write stays with each
  *  route (they write different files) but is shallow in both. */
-function parseUiStateBody<S extends z.ZodTypeAny>(
-  schema: S,
-  body: unknown,
-): { data: z.infer<S> } | { error: string } {
+function parseUiStateBody<S extends z.ZodTypeAny>(schema: S, body: unknown): { data: z.infer<S> } | { error: string } {
   const parsed = schema.safeParse(body);
-  if (!parsed.success)
-    return { error: parsed.error.issues.map((i) => i.message).join("; ") };
-  if (
-    Object.keys(parsed.data as Record<string, unknown>).length >
-    UI_STATE_MAX_KEYS
-  ) {
+  if (!parsed.success) return { error: parsed.error.issues.map((i) => i.message).join('; ') };
+  if (Object.keys(parsed.data as Record<string, unknown>).length > UI_STATE_MAX_KEYS) {
     return { error: `ui-state has too many keys (max ${UI_STATE_MAX_KEYS})` };
   }
   return { data: parsed.data as z.infer<S> };
@@ -720,14 +616,11 @@ function parseUiStateBody<S extends z.ZodTypeAny>(
  *  can lie (e.g. a read-only mount still reports writable permission bits).
  *  Returns the failure message, or null when the directory is usable. */
 async function probeWritableDir(dir: string): Promise<string | null> {
-  const probe = join(
-    dir,
-    `.cez-write-probe-${process.pid}-${Date.now().toString(36)}`,
-  );
+  const probe = join(dir, `.cez-write-probe-${process.pid}-${Date.now().toString(36)}`);
   try {
     await mkdir(dir, { recursive: true });
     await access(dir, fsConstants.W_OK);
-    await writeFile(probe, "", "utf8");
+    await writeFile(probe, '', 'utf8');
     await unlink(probe);
     return null;
   } catch (err) {
@@ -744,7 +637,7 @@ export function createApp(deps: ServerDeps): Hono {
   // handler body would silently pin it to the boot project, which the rename
   // turns into a compile error instead.
   const bootRoot = deps.repoRoot;
-  const bootDataDir = join(bootRoot, ".ai/cezar");
+  const bootDataDir = join(bootRoot, '.ai/cezar');
 
   // ---- workspace boot-project identity (multi-project spec) ----------------
   // The boot flow (`initWorkspace` in src/index.ts) registers the boot repo
@@ -756,16 +649,12 @@ export function createApp(deps: ServerDeps): Hono {
   // server was started in. Strictly non-fatal, zero-config: every failure path
   // degrades to the slug fallback, never an error.
   let bootProjectCache = bootProjectId;
-  const resolveBootProject = async (
-    projects?: readonly WorkspaceProject[],
-  ): Promise<string> => {
+  const resolveBootProject = async (projects?: readonly WorkspaceProject[]): Promise<string> => {
     if (bootProjectCache) return bootProjectCache;
     try {
       const registry = projects ?? (await loadWorkspaceConfig()).projects;
       const real = await realpath(bootRoot).catch(() => bootRoot);
-      const match = registry.find(
-        (p) => p.root === real || p.root === bootRoot,
-      );
+      const match = registry.find((p) => p.root === real || p.root === bootRoot);
       if (match) bootProjectCache = match.id;
     } catch {
       // unreadable workspace — fall through to the slug fallback below
@@ -809,7 +698,7 @@ export function createApp(deps: ServerDeps): Hono {
   // the reserved alias when registration was suppressed — handlers never read
   // it; API payloads name the boot project via `resolveBootProject` instead.
   const bootContext: ProjectContext = {
-    id: bootProjectId ?? "default",
+    id: bootProjectId ?? 'default',
     root: bootRoot,
     dataDir: bootDataDir,
     store: deps.store,
@@ -818,9 +707,7 @@ export function createApp(deps: ServerDeps): Hono {
   };
   // Non-boot projects build lazily on first scoped request; their managers
   // count against the same workspace semaphore as the boot manager (step 2.5).
-  const contexts =
-    deps.contexts ??
-    new ProjectContexts({ listProjects, semaphore: deps.semaphore });
+  const contexts = deps.contexts ?? new ProjectContexts({ listProjects, semaphore: deps.semaphore });
   // Workspace-level SSE bus (step 2.8) — the registry mutators and the
   // checkout flow (Phase 4) emit here; /api/workspace/events relays.
   const workspaceEvents = deps.workspaceEvents ?? new WorkspaceEventBus();
@@ -829,7 +716,7 @@ export function createApp(deps: ServerDeps): Hono {
 
   // Reject oversized request bodies before they reach any handler (#429). GETs
   // and SSE carry no body, so this only ever gates the mutating routes.
-  app.use("*", bodyLimit({ maxSize: GLOBAL_BODY_LIMIT }));
+  app.use('*', bodyLimit({ maxSize: GLOBAL_BODY_LIMIT }));
 
   // ---- request-origin guard (#426) -----------------------------------------
   // This server executes agents with shell access — "start a task" ≈ run code
@@ -863,19 +750,17 @@ export function createApp(deps: ServerDeps): Hono {
   // response body (we send CORS headers on /api/health alone), and no GET
   // handler mutates state. Rebinding, which WOULD make those reads legible, is
   // what check 1 stops.
-  const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
-  const isHostedMode = () =>
-    !resolveCapabilities(process.env, bindHost).localHandoff;
-  app.use("/api/*", async (c, next) => {
-    const hostName = hostnameOfHost(c.req.header("host"));
+  const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+  const isHostedMode = () => !resolveCapabilities(process.env, bindHost).localHandoff;
+  app.use('/api/*', async (c, next) => {
+    const hostName = hostnameOfHost(c.req.header('host'));
     // Strict twin of `isLoopbackHost`: a *missing* Host is untrusted here (an
     // absent header is not the "we defaulted to the loopback bind" case), and
     // the loopback match is anchored so `127.0.0.1.evil.com` does not pass.
     if (!isHostedMode() && !isLoopbackHostHeader(hostName)) {
       return c.json(
         {
-          error:
-            "forbidden: unexpected Host header — this request did not originate from this machine (see #426)",
+          error: 'forbidden: unexpected Host header — this request did not originate from this machine (see #426)',
         },
         403,
       );
@@ -883,10 +768,10 @@ export function createApp(deps: ServerDeps): Hono {
 
     // /api/health stays CORS-open for bookmarklet discovery, but its Host is
     // still checked above: cross-origin is legitimate, DNS rebinding is not.
-    if (c.req.path === "/api/health") return next();
+    if (c.req.path === '/api/health') return next();
 
     if (MUTATING_METHODS.has(c.req.method)) {
-      const origin = c.req.header("origin");
+      const origin = c.req.header('origin');
       if (origin !== undefined) {
         const originHost = hostnameOfOrigin(origin);
         // Compare the whole authority, not just the hostname: a different PORT
@@ -895,9 +780,7 @@ export function createApp(deps: ServerDeps): Hono {
         // alone would let any page served from another loopback port (a local
         // dev server rendering attacker content, an XSS in a local app) start a
         // shell-capable agent here.
-        const sameOrigin =
-          !!originHost &&
-          authorityOfOrigin(origin) === authorityOfHost(c.req.header("host"));
+        const sameOrigin = !!originHost && authorityOfOrigin(origin) === authorityOfHost(c.req.header('host'));
         // The one legitimate cross-port case is the `npm run dev` Vite proxy:
         // the browser fetches same-origin from `localhost:5173`, Vite's
         // `changeOrigin` rewrites Host to `127.0.0.1:<api port>` but forwards
@@ -909,14 +792,13 @@ export function createApp(deps: ServerDeps): Hono {
         // the attack. Browsers too old to send Sec-Fetch metadata simply fail
         // closed here — they still work against a non-proxied cockpit.
         const isDevProxy =
-          c.req.header("sec-fetch-site") === "same-origin" &&
+          c.req.header('sec-fetch-site') === 'same-origin' &&
           isLoopbackHostHeader(originHost) &&
           isLoopbackHostHeader(hostName);
         if (!sameOrigin && !isDevProxy) {
           return c.json(
             {
-              error:
-                "forbidden: cross-origin request rejected (same-origin only)",
+              error: 'forbidden: cross-origin request rejected (same-origin only)',
             },
             403,
           );
@@ -924,10 +806,10 @@ export function createApp(deps: ServerDeps): Hono {
       }
       // Belt-and-suspenders for browsers that send Sec-Fetch metadata: an
       // explicit cross-site marker is rejected regardless of the Origin dance.
-      if (c.req.header("sec-fetch-site") === "cross-site") {
+      if (c.req.header('sec-fetch-site') === 'cross-site') {
         return c.json(
           {
-            error: "forbidden: cross-site request rejected (same-origin only)",
+            error: 'forbidden: cross-site request rejected (same-origin only)',
           },
           403,
         );
@@ -946,24 +828,24 @@ export function createApp(deps: ServerDeps): Hono {
   // boot context too; anything else → the lazy context map, with
   // `ProjectContextError` mapped to 404 (unknown) / 409 (missing root).
   const api = new Hono<ProjectApiEnv>();
-  api.use("*", async (c, next: Next) => {
-    const raw = c.req.param("projectId");
+  api.use('*', async (c, next: Next) => {
+    const raw = c.req.param('projectId');
     if (raw === undefined) {
-      c.set("project", bootContext);
+      c.set('project', bootContext);
       return next();
     }
     if (!projectIdSchema.safeParse(raw).success) {
       return c.json({ error: `unknown project: ${raw}` }, 404);
     }
-    if (raw === "default" || raw === (await resolveBootProject())) {
-      c.set("project", bootContext);
+    if (raw === 'default' || raw === (await resolveBootProject())) {
+      c.set('project', bootContext);
       return next();
     }
     try {
-      c.set("project", await contexts.context(raw));
+      c.set('project', await contexts.context(raw));
     } catch (err) {
       if (err instanceof ProjectContextError) {
-        return err.reason === "missing-root"
+        return err.reason === 'missing-root'
           ? c.json({ error: `project folder not found: ${err.projectId}` }, 409)
           : c.json({ error: err.message }, 404);
       }
@@ -974,39 +856,37 @@ export function createApp(deps: ServerDeps): Hono {
 
   // ---- static GUI ----------------------------------------------------------
   const webDir = resolveWebDir();
-  const distDir = join(webDir, "dist");
-  const HTML_TYPE = "text/html; charset=utf-8";
+  const distDir = join(webDir, 'dist');
+  const HTML_TYPE = 'text/html; charset=utf-8';
   const staticFile = (name: string, type: string) => (): Response => {
     // Read per request — the files are tiny and this keeps dev iteration live.
     const body = readFileSync(join(webDir, name));
-    return new Response(body, { headers: { "content-type": type } });
+    return new Response(body, { headers: { 'content-type': type } });
   };
 
   let hintLogged = false;
   const serveShell = (c: Context): Response | undefined => {
-    const distIndex = join(distDir, "index.html");
+    const distIndex = join(distDir, 'index.html');
     // existsSync per request, like the reads below: `npm run build:web` in a
     // running cockpit takes effect on the next reload, no restart.
     const target = resolveGetRequest({
       path: c.req.path,
       distExists: existsSync(distIndex),
     });
-    if (target === "passthrough") return undefined;
-    if (target === "build-hint") {
+    if (target === 'passthrough') return undefined;
+    if (target === 'build-hint') {
       // Dev-only state (the tarball ships web/dist): serve the built-in hint
       // page instead of the app — the legacy fallback UI was deleted in R7.
       if (!hintLogged) {
         hintLogged = true;
-        console.log(
-          "cezar: web/dist is missing — run `npm run build:web` to build the cockpit",
-        );
+        console.log('cezar: web/dist is missing — run `npm run build:web` to build the cockpit');
       }
       return new Response(BUILD_HINT_HTML, {
-        headers: { "content-type": HTML_TYPE },
+        headers: { 'content-type': HTML_TYPE },
       });
     }
     return new Response(readFileSync(distIndex), {
-      headers: { "content-type": HTML_TYPE },
+      headers: { 'content-type': HTML_TYPE },
     });
   };
 
@@ -1015,39 +895,38 @@ export function createApp(deps: ServerDeps): Hono {
   // filenames are served: `basename('..')` is `'..'` (it resolves to the
   // assets dir itself and readFileSync would throw EISDIR), so dot-segments
   // and separator-bearing params get a 404, not a 500.
-  app.get("/assets/:file", (c) => {
-    const file = c.req.param("file");
-    if (!isSafeAssetFilename(file)) return c.json({ error: "not found" }, 404);
-    const path = join(distDir, "assets", file);
-    if (!existsSync(path) || !statSync(path).isFile())
-      return c.json({ error: "not found" }, 404);
+  app.get('/assets/:file', (c) => {
+    const file = c.req.param('file');
+    if (!isSafeAssetFilename(file)) return c.json({ error: 'not found' }, 404);
+    const path = join(distDir, 'assets', file);
+    if (!existsSync(path) || !statSync(path).isFile()) return c.json({ error: 'not found' }, 404);
     return new Response(readFileSync(path), {
       headers: {
-        "content-type": assetContentType(file),
-        "cache-control": ASSET_CACHE_CONTROL,
+        'content-type': assetContentType(file),
+        'cache-control': ASSET_CACHE_CONTROL,
       },
     });
   });
 
   // The favicon web/app/index.html points at (`../open-mercato.svg`).
-  app.get("/open-mercato.svg", staticFile("open-mercato.svg", "image/svg+xml"));
+  app.get('/open-mercato.svg', staticFile('open-mercato.svg', 'image/svg+xml'));
 
   // ---- meta ----------------------------------------------------------------
   // CORS — deliberately for /api/health ONLY (spec 011): the bookmarklets
   // fetch it cross-origin from github.com to discover which local ports run a
   // cockpit and which repo each serves. Health exposes no secrets beyond the
   // repo path/remote; every other endpoint stays same-origin.
-  app.use("/api/health", async (c, next) => {
-    c.header("access-control-allow-origin", "*");
-    if (c.req.method === "OPTIONS") {
+  app.use('/api/health', async (c, next) => {
+    c.header('access-control-allow-origin', '*');
+    if (c.req.method === 'OPTIONS') {
       // Preflight (e.g. Chrome Private Network Access) — allow the plain GET.
-      c.header("access-control-allow-methods", "GET");
-      c.header("access-control-allow-private-network", "true");
+      c.header('access-control-allow-methods', 'GET');
+      c.header('access-control-allow-private-network', 'true');
       return c.body(null, 204);
     }
     await next();
   });
-  app.get("/api/health", async (c) => {
+  app.get('/api/health', async (c) => {
     const [checks, repo, config, workspace] = await Promise.all([
       detectEnvironment(),
       getRepoInfo(bootRoot),
@@ -1075,9 +954,7 @@ export function createApp(deps: ServerDeps): Hono {
       defaultRunner: config.defaultRunner,
       // Non-blocking: cached availability or null-until-warm — health must never pay a `gh`
       // shell-out (the bookmarklet aborts its port probe at 800 ms). See detectGithubCached.
-      forge: forge
-        ? { kind: forge.kind, ...(forge.detectCached() ?? {}) }
-        : null,
+      forge: forge ? { kind: forge.kind, ...(forge.detectCached() ?? {}) } : null,
       capabilities: caps,
       // Workspace enumeration (multi-project spec) — additive, id+name ONLY.
       // NEVER `projects[].root` here: health is the one CORS-open route, and
@@ -1108,7 +985,7 @@ export function createApp(deps: ServerDeps): Hono {
     }
   };
 
-  app.get("/api/projects", async (c) => {
+  app.get('/api/projects', async (c) => {
     let projects: ProjectListEntry[] = [];
     let projectsDir = defaultWorkspaceConfig().projectsDir;
     try {
@@ -1141,7 +1018,7 @@ export function createApp(deps: ServerDeps): Hono {
    */
   const registerFolder = async (
     spelled: string,
-    source: "local" | "checkout",
+    source: 'local' | 'checkout',
   ): Promise<{
     status: 200 | 400 | 409 | 500;
     body: RegisterProjectResponse | { error: string };
@@ -1150,7 +1027,7 @@ export function createApp(deps: ServerDeps): Hono {
     // dialog hands back absolute paths, but a hand-written body (curl, a
     // future CLI) spells home the way a shell does.
     const requested = expandTilde(spelled);
-    if (!requested.startsWith("/")) {
+    if (!requested.startsWith('/')) {
       return {
         status: 400,
         body: { error: `not a folder: ${spelled} is not an absolute path` },
@@ -1171,16 +1048,14 @@ export function createApp(deps: ServerDeps): Hono {
     // `false` for a path that IS inside the root and merely absent — which
     // would tell a hosted user who typo'd a folder under their own checkout
     // root that it is "outside the browsable root".
-    const hostedBrowseRoot = capabilities().localHandoff
-      ? null
-      : resolveBrowseRoot(true, await workspaceProjectsDir());
+    const hostedBrowseRoot = capabilities().localHandoff ? null : resolveBrowseRoot(true, await workspaceProjectsDir());
     if (hostedBrowseRoot !== null) {
       if (!(await isLexicallyInsideBrowseRoot(hostedBrowseRoot, requested))) {
         // No resolved path in the message (fs-browse's rule): saying where the
         // root is would hand a remote viewer the layout the narrowing hides.
         return {
           status: 400,
-          body: { error: "folder is outside the browsable root" },
+          body: { error: 'folder is outside the browsable root' },
         };
       }
     }
@@ -1188,19 +1063,15 @@ export function createApp(deps: ServerDeps): Hono {
     // degrades a failed realpath to a plain resolve): a registry full of
     // `missing` rows the user never had is worse than a 400 they can act on.
     const info = await stat(requested).catch(() => null);
-    if (!info?.isDirectory())
-      return { status: 400, body: { error: `no such folder: ${spelled}` } };
+    if (!info?.isDirectory()) return { status: 400, body: { error: `no such folder: ${spelled}` } };
     // The REALPATH half, now that the path is known to exist: a symlink inside
     // the root pointing out of it spells as contained and is not. Same message
     // as the lexical rejection, so the two halves stay indistinguishable from
     // outside.
-    if (
-      hostedBrowseRoot !== null &&
-      !(await isInsideBrowseRoot(hostedBrowseRoot, requested))
-    ) {
+    if (hostedBrowseRoot !== null && !(await isInsideBrowseRoot(hostedBrowseRoot, requested))) {
       return {
         status: 400,
-        body: { error: "folder is outside the browsable root" },
+        body: { error: 'folder is outside the browsable root' },
       };
     }
     // The boot-time auto-registration guard, applied to the manual gesture
@@ -1222,9 +1093,7 @@ export function createApp(deps: ServerDeps): Hono {
     const real = await realpath(requested).catch(() => requested);
     let known = false;
     try {
-      known = (await loadWorkspaceConfig()).projects.some(
-        (p) => p.root === real,
-      );
+      known = (await loadWorkspaceConfig()).projects.some((p) => p.root === real);
     } catch {
       // unreadable workspace — treat as unknown; the write below will fail loudly
     }
@@ -1249,17 +1118,14 @@ export function createApp(deps: ServerDeps): Hono {
     }
     // Only a genuinely new project is an event — a re-add is a no-op for every
     // open cockpit's sidebar.
-    workspaceEvents.emit("project-added", { project });
+    workspaceEvents.emit('project-added', { project });
     return { status: 200, body: { project } };
   };
 
-  app.post("/api/projects", async (c) => {
-    const parsed = registerProjectSchema.safeParse(
-      await c.req.json().catch(() => null),
-    );
-    if (!parsed.success)
-      return c.json({ error: "root must be a non-empty path" }, 400);
-    const { status, body } = await registerFolder(parsed.data.root, "local");
+  app.post('/api/projects', async (c) => {
+    const parsed = registerProjectSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: 'root must be a non-empty path' }, 400);
+    const { status, body } = await registerFolder(parsed.data.root, 'local');
     return c.json(body, status);
   });
 
@@ -1278,11 +1144,7 @@ export function createApp(deps: ServerDeps): Hono {
   // deregistering mid-run would strand a live agent process under a root no
   // route can resolve any more — the run would keep burning tokens with no
   // cockpit able to show, message or cancel it.
-  const ACTIVE_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
-    "queued",
-    "running",
-    "waiting",
-  ]);
+  const ACTIVE_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>(['queued', 'running', 'waiting']);
 
   /**
    * How many of `projectId`'s runs this process is actively responsible for.
@@ -1299,13 +1161,11 @@ export function createApp(deps: ServerDeps): Hono {
   const activeRunCount = (projectId: string): number => {
     const ctx = contexts.peek(projectId);
     if (!ctx) return 0;
-    return ctx.store
-      .listRuns()
-      .filter((run) => ACTIVE_RUN_STATUSES.has(run.status)).length;
+    return ctx.store.listRuns().filter((run) => ACTIVE_RUN_STATUSES.has(run.status)).length;
   };
 
-  app.delete("/api/projects/:projectId", async (c) => {
-    const raw = c.req.param("projectId");
+  app.delete('/api/projects/:projectId', async (c) => {
+    const raw = c.req.param('projectId');
     // Same gate the scoped-route resolver applies, and the same 404 wording —
     // a malformed id is an unknown project, not a validation essay.
     if (!projectIdSchema.safeParse(raw).success) {
@@ -1314,7 +1174,7 @@ export function createApp(deps: ServerDeps): Hono {
     const bootId = await resolveBootProject();
     // `default` is the boot alias everywhere else in the API; honour it here
     // too rather than 404ing a spelling the cockpit is allowed to use.
-    const id = raw === "default" ? bootId : raw;
+    const id = raw === 'default' ? bootId : raw;
 
     let entry: WorkspaceProject | undefined;
     try {
@@ -1342,7 +1202,7 @@ export function createApp(deps: ServerDeps): Hono {
     if (active > 0) {
       return c.json(
         {
-          error: `${entry.name} has ${active} running task${active === 1 ? "" : "s"} — cancel or finish ${active === 1 ? "it" : "them"} before removing the project`,
+          error: `${entry.name} has ${active} running task${active === 1 ? '' : 's'} — cancel or finish ${active === 1 ? 'it' : 'them'} before removing the project`,
           runningTasks: active,
         },
         409,
@@ -1354,10 +1214,7 @@ export function createApp(deps: ServerDeps): Hono {
       removed = await removeProject(id);
     } catch (err) {
       // e.g. a read-only home — nothing was persisted (atomic tmp+rename).
-      return c.json(
-        { error: err instanceof Error ? err.message : String(err) },
-        500,
-      );
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
     }
     // Lost a race with another writer (or another cezar process): the entry is
     // gone, which is what the caller wanted, but say it honestly.
@@ -1365,7 +1222,7 @@ export function createApp(deps: ServerDeps): Hono {
     // In-process handles for a project no route can reach any more: store
     // closed (index flushed), manager's timers and usage subscription dropped.
     contexts.dispose(id);
-    workspaceEvents.emit("project-removed", { id });
+    workspaceEvents.emit('project-removed', { id });
     const body: RemoveProjectResponse = { removed: true, id };
     return c.json(body);
   });
@@ -1386,19 +1243,16 @@ export function createApp(deps: ServerDeps): Hono {
     name: z.string().trim().max(128).optional(),
     checkoutId: z.string().trim().max(128).optional(),
   });
-  app.post("/api/projects/checkout", async (c) => {
-    const parsed = checkoutSchema.safeParse(
-      await c.req.json().catch(() => null),
-    );
-    if (!parsed.success)
-      return c.json({ error: "url must be a GitHub repository" }, 400);
+  app.post('/api/projects/checkout', async (c) => {
+    const parsed = checkoutSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: 'url must be a GitHub repository' }, 400);
     const { url, name, checkoutId } = parsed.data;
     const result = await checkoutRepo({
       url,
       name,
       checkoutId,
       projectsDir: expandTilde(await workspaceProjectsDir()),
-      onProgress: (event) => workspaceEvents.emit("checkout-progress", event),
+      onProgress: (event) => workspaceEvents.emit('checkout-progress', event),
       // A closed dialog / navigated-away tab aborts the request; the clone is
       // killed and its partial directory removed rather than left running.
       signal: c.req.raw.signal,
@@ -1408,26 +1262,18 @@ export function createApp(deps: ServerDeps): Hono {
       // `reason` rides along on the 503 (`gh` unavailable) — the spec's
       // `{ error, reason }` degradation, mirroring the GitHub pane.
       return c.json(
-        "reason" in result
-          ? { error: result.error, reason: result.reason }
-          : { error: result.error },
+        'reason' in result ? { error: result.error, reason: result.reason } : { error: result.error },
         result.status,
       );
     }
-    const { status, body } = await registerFolder(result.target, "checkout");
+    const { status, body } = await registerFolder(result.target, 'checkout');
     if (status !== 200) {
       // The clone SUCCEEDED and its files are legitimately the user's, so this
       // path deliberately does NOT clean up — an unregisterable checkout is a
       // registry problem, not a reason to delete a repo we just fetched. Say
       // where it is so they can register it by hand.
-      const error =
-        "error" in body && body.error
-          ? body.error
-          : "could not register the checkout";
-      return c.json(
-        { error: `${error} (the clone is at ${result.target})` },
-        status,
-      );
+      const error = 'error' in body && body.error ? body.error : 'could not register the checkout';
+      return c.json({ error: `${error} (the clone is at ${result.target})` }, status);
     }
     return c.json(body, 200);
   });
@@ -1438,9 +1284,7 @@ export function createApp(deps: ServerDeps): Hono {
   // `~/.cezar/config.json` — global knobs only; the registry stays on
   // /api/projects above, and schemaVersion (a migration cursor, not a
   // setting) is deliberately omitted.
-  const workspaceConfigBody = (
-    config: WorkspaceConfig,
-  ): WorkspaceConfigResponse => ({
+  const workspaceConfigBody = (config: WorkspaceConfig): WorkspaceConfigResponse => ({
     projectsDir: config.projectsDir,
     resources: {
       maxParallel: config.resources.maxParallel,
@@ -1448,9 +1292,7 @@ export function createApp(deps: ServerDeps): Hono {
       worktreeRetentionDefault: config.resources.worktreeRetentionDefault,
     },
   });
-  app.get("/api/workspace/config", async (c) =>
-    c.json(workspaceConfigBody(await loadWorkspaceConfig())),
-  );
+  app.get('/api/workspace/config', async (c) => c.json(workspaceConfigBody(await loadWorkspaceConfig())));
 
   // Partial updates only — absent keys stay untouched. Bounds mirror the
   // workspace schema (src/workspace/config.ts, step 1.2) exactly, so a value
@@ -1460,41 +1302,26 @@ export function createApp(deps: ServerDeps): Hono {
     resources: z
       .object({
         maxParallel: z.number().int().min(1).max(16).optional(),
-        memoryLimitMb: z
-          .number()
-          .int()
-          .min(0)
-          .max(1_048_576)
-          .nullable()
-          .optional(),
+        memoryLimitMb: z.number().int().min(0).max(1_048_576).nullable().optional(),
         worktreeRetentionDefault: z.number().int().min(0).max(1000).optional(),
       })
       .optional(),
   });
-  app.put("/api/workspace/config", async (c) => {
-    const parsed = workspaceConfigUpdateSchema.safeParse(
-      await c.req.json().catch(() => null),
-    );
+  app.put('/api/workspace/config', async (c) => {
+    const parsed = workspaceConfigUpdateSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
-      return c.json(
-        { error: parsed.error.issues.map((i) => i.message).join("; ") },
-        400,
-      );
+      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
     }
     const { projectsDir, resources } = parsed.data;
     if (projectsDir !== undefined) {
       // Validated ON CHANGE, never at load (spec): expand `~`, `mkdir -p`,
       // probe real writability. Any failure → 400 and NO change persisted.
       const expanded = expandTilde(projectsDir);
-      if (!expanded.startsWith("/")) {
-        return c.json(
-          { error: `not writable: ${projectsDir} is not an absolute path` },
-          400,
-        );
+      if (!expanded.startsWith('/')) {
+        return c.json({ error: `not writable: ${projectsDir} is not an absolute path` }, 400);
       }
       const probeError = await probeWritableDir(expanded);
-      if (probeError !== null)
-        return c.json({ error: `not writable: ${probeError}` }, 400);
+      if (probeError !== null) return c.json({ error: `not writable: ${probeError}` }, 400);
     }
     let written: WorkspaceConfig;
     try {
@@ -1502,21 +1329,15 @@ export function createApp(deps: ServerDeps): Hono {
         // `projectsDir` is stored as written (`~` kept — see the schema note);
         // only the probe above sees the expanded form.
         if (projectsDir !== undefined) config.projectsDir = projectsDir;
-        if (resources?.maxParallel !== undefined)
-          config.resources.maxParallel = resources.maxParallel;
-        if (resources?.memoryLimitMb !== undefined)
-          config.resources.memoryLimitMb = resources.memoryLimitMb;
+        if (resources?.maxParallel !== undefined) config.resources.maxParallel = resources.maxParallel;
+        if (resources?.memoryLimitMb !== undefined) config.resources.memoryLimitMb = resources.memoryLimitMb;
         if (resources?.worktreeRetentionDefault !== undefined) {
-          config.resources.worktreeRetentionDefault =
-            resources.worktreeRetentionDefault;
+          config.resources.worktreeRetentionDefault = resources.worktreeRetentionDefault;
         }
       });
     } catch (err) {
       // e.g. a read-only home — nothing was persisted (atomic tmp+rename).
-      return c.json(
-        { error: err instanceof Error ? err.message : String(err) },
-        500,
-      );
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
     }
     // A resource change takes effect WITHOUT a restart: refresh the shared
     // semaphore's in-memory snapshot and pump every manager (step 2.5's hook).
@@ -1527,34 +1348,22 @@ export function createApp(deps: ServerDeps): Hono {
   // Global GUI state (`~/.cezar/ui-state.json`) — same parse/key-cap/shallow-
   // merge semantics as the per-repo /api/ui-state route below (the shared half
   // is `parseUiStateBody`), but backed by the workspace file.
-  app.get("/api/workspace/ui-state", async (c) =>
-    c.json(await readWorkspaceUiState()),
-  );
-  app.put(
-    "/api/workspace/ui-state",
-    bodyLimit({ maxSize: UI_STATE_BODY_LIMIT }),
-    async (c) => {
-      const parsed = parseUiStateBody(
-        workspaceUiStateSchema,
-        await c.req.json().catch(() => null),
+  app.get('/api/workspace/ui-state', async (c) => c.json(await readWorkspaceUiState()));
+  app.put('/api/workspace/ui-state', bodyLimit({ maxSize: UI_STATE_BODY_LIMIT }), async (c) => {
+    const parsed = parseUiStateBody(workspaceUiStateSchema, await c.req.json().catch(() => null));
+    if ('error' in parsed) return c.json({ error: parsed.error }, 400);
+    try {
+      return c.json(
+        await mergeWriteWorkspaceUiState((state) => ({
+          ...state,
+          ...parsed.data,
+        })),
       );
-      if ("error" in parsed) return c.json({ error: parsed.error }, 400);
-      try {
-        return c.json(
-          await mergeWriteWorkspaceUiState((state) => ({
-            ...state,
-            ...parsed.data,
-          })),
-        );
-      } catch (err) {
-        // A read-only home degrades to an unsaved pref, never a crash.
-        return c.json(
-          { error: err instanceof Error ? err.message : String(err) },
-          500,
-        );
-      }
-    },
-  );
+    } catch (err) {
+      // A read-only home degrades to an unsaved pref, never a crash.
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
 
   // ---- filesystem browse (multi-project spec, step 4.1) --------------------
   // WORKSPACE-level and same-origin: the directory picker behind "Add project
@@ -1565,15 +1374,12 @@ export function createApp(deps: ServerDeps): Hono {
   // open-in-* endpoints use) narrows it from the operator's home to
   // `projectsDir`, because a remote viewer has no business enumerating the
   // host's whole home. Read per request, so a `CEZ_REMOTE` flip applies live.
-  app.get("/api/fs/browse", async (c) => {
-    const root = resolveBrowseRoot(
-      !capabilities().localHandoff,
-      await workspaceProjectsDir(),
-    );
+  app.get('/api/fs/browse', async (c) => {
+    const root = resolveBrowseRoot(!capabilities().localHandoff, await workspaceProjectsDir());
     const result = await browseDirectory({
       root,
-      path: c.req.query("path"),
-      showHidden: c.req.query("showHidden") === "1",
+      path: c.req.query('path'),
+      showHidden: c.req.query('showHidden') === '1',
     });
     if (!result.ok) return c.json({ error: result.error }, result.status);
     return c.json(result.body);
@@ -1581,85 +1387,62 @@ export function createApp(deps: ServerDeps): Hono {
 
   // The bookmarklet generator bakes this key into the `javascript:` URLs —
   // `/new?auto=1` is honored only with it (spec 011). Same-origin only.
-  api.get("/launch-key", (c) => c.json({ key: c.get("project").launchKey }));
+  api.get('/launch-key', (c) => c.json({ key: c.get('project').launchKey }));
 
-  api.get("/skills", async (c) => {
-    const repoRoot = c.get("project").root;
+  api.get('/skills', async (c) => {
+    const repoRoot = c.get('project').root;
     // The default read stays fast and starts the team load in the background.
     // The cockpit follows it with `wait=1`, off the render path, so a cold
     // cache converges without polling or a manual reload (spec 005 / #555).
-    if (c.req.query("wait") === "1") await waitForTeamSkills(repoRoot);
+    if (c.req.query('wait') === '1') await waitForTeamSkills(repoRoot);
     return c.json(await discoverSkills(repoRoot));
   });
 
   // ---- GUI prefs (ui-state.json) --------------------------------------------
   // The read path is shared with the CLI (`src/ui-state.ts`) so `cezar serve` can honour a
   // preference set here — #391's dismissed skills banner — from one notion of the file.
-  api.get("/ui-state", async (c) =>
-    c.json(await readUiState(c.get("project").root)),
-  );
-  api.put(
-    "/ui-state",
-    bodyLimit({ maxSize: UI_STATE_BODY_LIMIT }),
-    async (c) => {
-      const { root: repoRoot, dataDir } = c.get("project");
-      // `.passthrough()` keeps unknown prefs (BACKWARD_COMPATIBILITY §3), but a
-      // single request may not stuff an unbounded key set (#429) — the shared
-      // parse+cap half of both ui-state routes lives in parseUiStateBody.
-      const parsed = parseUiStateBody(
-        uiStateSchema,
-        await c.req.json().catch(() => null),
-      );
-      if ("error" in parsed) return c.json({ error: parsed.error }, 400);
-      const merged = { ...(await readUiState(repoRoot)), ...parsed.data };
-      try {
-        await mkdir(dataDir, { recursive: true });
-        await writeFile(
-          uiStatePath(repoRoot),
-          `${JSON.stringify(merged, null, 2)}\n`,
-          "utf8",
-        );
-      } catch (err) {
-        return c.json(
-          { error: err instanceof Error ? err.message : String(err) },
-          500,
-        );
-      }
-      return c.json(merged);
-    },
-  );
+  api.get('/ui-state', async (c) => c.json(await readUiState(c.get('project').root)));
+  api.put('/ui-state', bodyLimit({ maxSize: UI_STATE_BODY_LIMIT }), async (c) => {
+    const { root: repoRoot, dataDir } = c.get('project');
+    // `.passthrough()` keeps unknown prefs (BACKWARD_COMPATIBILITY §3), but a
+    // single request may not stuff an unbounded key set (#429) — the shared
+    // parse+cap half of both ui-state routes lives in parseUiStateBody.
+    const parsed = parseUiStateBody(uiStateSchema, await c.req.json().catch(() => null));
+    if ('error' in parsed) return c.json({ error: parsed.error }, 400);
+    const merged = { ...(await readUiState(repoRoot)), ...parsed.data };
+    try {
+      await mkdir(dataDir, { recursive: true });
+      await writeFile(uiStatePath(repoRoot), `${JSON.stringify(merged, null, 2)}\n`, 'utf8');
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+    return c.json(merged);
+  });
 
   // Refresh team skills (spec 005): clone/fetch the configured skills repos,
   // then return the merged catalog. Degrades quietly — offline just means the
   // team entries stay as they were (or absent).
-  api.post("/skills/refresh", async (c) => {
-    const { root: repoRoot } = c.get("project");
+  api.post('/skills/refresh', async (c) => {
+    const { root: repoRoot } = c.get('project');
     await refreshTeamSkills(repoRoot);
     return c.json(await discoverSkills(repoRoot));
   });
 
-  api.get("/workflows", async (c) =>
-    c.json(await loadWorkflows(c.get("project").root)),
-  );
+  api.get('/workflows', async (c) => c.json(await loadWorkflows(c.get('project').root)));
 
   // Save an approved plan as a reusable chain (spec 008): YAML in
   // `.ai/cezar/workflows/<slug>.yaml` — from then on it's in the dropdown
   // like any other workflow.
-  api.post("/workflows", async (c) => {
-    const { root: repoRoot } = c.get("project");
-    const parsed = saveWorkflowSchema.safeParse(
-      await c.req.json().catch(() => null),
-    );
+  api.post('/workflows', async (c) => {
+    const { root: repoRoot } = c.get('project');
+    const parsed = saveWorkflowSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
-      return c.json(
-        { error: parsed.error.issues.map((i) => i.message).join("; ") },
-        400,
-      );
+      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
     }
     const steps = parsed.data.steps ?? skillsToSteps(parsed.data.skills ?? []);
     const issue = stepsIssue(steps);
     if (issue) return c.json({ error: issue }, 400);
-    const slug = slugify(parsed.data.name) || "chain";
+    const slug = slugify(parsed.data.name) || 'chain';
     const dir = join(repoRoot, WORKFLOWS_DIR);
     const path = join(dir, `${slug}.yaml`);
     // Pure skill stacks are written in the portable compact form (spec 012) —
@@ -1667,24 +1450,19 @@ export function createApp(deps: ServerDeps): Hono {
     const stack = skillStackOf(steps);
     const doc = {
       name: parsed.data.name,
-      ...(parsed.data.description
-        ? { description: parsed.data.description }
-        : {}),
+      ...(parsed.data.description ? { description: parsed.data.description } : {}),
       ...(stack ? { skills: stack } : { steps }),
     };
     try {
       await mkdir(dir, { recursive: true });
       // `wx` = fail if the file exists — no silent overwrite of a chain.
       await writeFile(path, stringifyYaml(doc), {
-        encoding: "utf8",
-        flag: parsed.data.overwrite ? "w" : "wx",
+        encoding: 'utf8',
+        flag: parsed.data.overwrite ? 'w' : 'wx',
       });
     } catch (err) {
-      if (err instanceof Error && "code" in err && err.code === "EEXIST") {
-        return c.json(
-          { error: `workflow file already exists: ${path}`, exists: true },
-          409,
-        );
+      if (err instanceof Error && 'code' in err && err.code === 'EEXIST') {
+        return c.json({ error: `workflow file already exists: ${path}`, exists: true }, 409);
       }
       const message = err instanceof Error ? err.message : String(err);
       return c.json({ error: message }, 500);
@@ -1694,30 +1472,24 @@ export function createApp(deps: ServerDeps): Hono {
 
   // Delete a saved workflow (spec 012 follow-up): file workflows only —
   // built-ins have no file and always come back.
-  api.delete("/workflows/:name", async (c) => {
-    const { root: repoRoot } = c.get("project");
-    const name = c.req.param("name");
+  api.delete('/workflows/:name', async (c) => {
+    const { root: repoRoot } = c.get('project');
+    const name = c.req.param('name');
     const { workflows } = await loadWorkflows(repoRoot);
     const wf = workflows.find((w) => w.name === name);
     if (!wf) return c.json({ error: `unknown workflow: ${name}` }, 404);
-    if (wf.source !== "file" || !wf.path) {
-      return c.json({ error: "built-in workflows cannot be deleted" }, 400);
+    if (wf.source !== 'file' || !wf.path) {
+      return c.json({ error: 'built-in workflows cannot be deleted' }, 400);
     }
     const dir = resolve(repoRoot, WORKFLOWS_DIR);
     const target = resolve(wf.path);
     if (!target.startsWith(dir + sep)) {
-      return c.json(
-        { error: "refusing to delete a file outside the workflows dir" },
-        400,
-      );
+      return c.json({ error: 'refusing to delete a file outside the workflows dir' }, 400);
     }
     try {
       await unlink(target);
     } catch (err) {
-      return c.json(
-        { error: err instanceof Error ? err.message : String(err) },
-        500,
-      );
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
     }
     return c.json({ ok: true, path: target });
   });
@@ -1725,15 +1497,10 @@ export function createApp(deps: ServerDeps): Hono {
   // Import support for the builder (spec 012): parse + validate a pasted
   // workflow YAML (either form) and hand back the normalized definition. The
   // server owns YAML parsing — the GUI stays dependency-free.
-  api.post("/workflows/parse", async (c) => {
-    const parsed = parseWorkflowSchema.safeParse(
-      await c.req.json().catch(() => null),
-    );
+  api.post('/workflows/parse', async (c) => {
+    const parsed = parseWorkflowSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
-      return c.json(
-        { error: parsed.error.issues.map((i) => i.message).join("; ") },
-        400,
-      );
+      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
     }
     let raw: unknown;
     try {
@@ -1744,10 +1511,7 @@ export function createApp(deps: ServerDeps): Hono {
     }
     const doc = workflowFileSchema.safeParse(raw);
     if (!doc.success) {
-      return c.json(
-        { error: doc.error.issues.map((i) => i.message).join("; ") },
-        400,
-      );
+      return c.json({ error: doc.error.issues.map((i) => i.message).join('; ') }, 400);
     }
     const normalized = normalizeWorkflowDoc(doc.data);
     const issue = stepsIssue(normalized.steps);
@@ -1758,14 +1522,11 @@ export function createApp(deps: ServerDeps): Hono {
   // Chain-from-prompt (spec 008): one cheap claude call proposes a chain of
   // steps for the task. Never blocks — degraded answers come back as a
   // one-step quick-task plan with `fallback: true`.
-  api.post("/plan", async (c) => {
-    const { root: repoRoot } = c.get("project");
+  api.post('/plan', async (c) => {
+    const { root: repoRoot } = c.get('project');
     const parsed = planSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
-      return c.json(
-        { error: parsed.error.issues.map((i) => i.message).join("; ") },
-        400,
-      );
+      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
     }
     return c.json(await planChain(repoRoot, parsed.data.task));
   });
@@ -1775,9 +1536,7 @@ export function createApp(deps: ServerDeps): Hono {
   // Additive `usage` field (#348): the latest CPU/RSS/proc-count sample of the
   // run's live process tree — absent for finished runs and when `ps` yields
   // nothing. The stored record itself is never touched.
-  const withUsage = (
-    run: RunRecord,
-  ): RunRecord & { usage?: ReturnType<typeof currentUsage> } => {
+  const withUsage = (run: RunRecord): RunRecord & { usage?: ReturnType<typeof currentUsage> } => {
     const usage = currentUsage(run.id);
     return usage ? { ...run, usage } : run;
   };
@@ -1792,62 +1551,40 @@ export function createApp(deps: ServerDeps): Hono {
   // Deliberately best-effort: bookkeeping must never cost the user their task,
   // so an unknown, stale or already-started id (markStarted → false) and any I/O
   // failure only log. The run has already been created by the time we get here.
-  const noteTodoStarted = async (
-    dataDir: string,
-    todoId: string,
-    taskId: string,
-  ): Promise<void> => {
+  const noteTodoStarted = async (dataDir: string, todoId: string, taskId: string): Promise<void> => {
     try {
       if (!(await markStarted(dataDir, todoId, taskId))) {
-        console.warn(
-          `[cezar] inbox entry ${todoId} not marked started (unknown or already started)`,
-        );
+        console.warn(`[cezar] inbox entry ${todoId} not marked started (unknown or already started)`);
       }
     } catch (err) {
-      console.warn(
-        `[cezar] could not mark inbox entry ${todoId} started: ${String(err)}`,
-      );
+      console.warn(`[cezar] could not mark inbox entry ${todoId} started: ${String(err)}`);
     }
   };
 
-  api.get("/runs", (c) =>
-    c.json(c.get("project").store.listRuns().map(withUsage)),
-  );
+  api.get('/runs', (c) => c.json(c.get('project').store.listRuns().map(withUsage)));
 
   // Registered before the `/:id/...` routes so "archive-finished" never
   // matches as a run id.
-  api.post("/runs/archive-finished", (c) =>
-    c.json({ archived: c.get("project").store.archiveFinished() }),
-  );
+  api.post('/runs/archive-finished', (c) => c.json({ archived: c.get('project').store.archiveFinished() }));
 
-  api.post("/runs/:id/archive", async (c) => {
-    const { store } = c.get("project");
-    const id = c.req.param("id");
+  api.post('/runs/:id/archive', async (c) => {
+    const { store } = c.get('project');
+    const id = c.req.param('id');
     // An empty/absent body archives (the common case); a malformed body degrades
     // to `{}` just as before, but a wrong-typed `archived` is now a 400 (#429).
-    const parsed = archiveSchema.safeParse(
-      await c.req.json().catch(() => ({})),
-    );
+    const parsed = archiveSchema.safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) {
-      return c.json(
-        { error: parsed.error.issues.map((i) => i.message).join("; ") },
-        400,
-      );
+      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
     }
     const run = store.setArchived(id, parsed.data.archived !== false);
-    return run ? c.json(run) : c.json({ error: "not found" }, 404);
+    return run ? c.json(run) : c.json({ error: 'not found' }, 404);
   });
 
-  api.post("/runs", async (c) => {
-    const { root: repoRoot, dataDir, manager } = c.get("project");
-    const parsed = startRunSchema.safeParse(
-      await c.req.json().catch(() => null),
-    );
+  api.post('/runs', async (c) => {
+    const { root: repoRoot, dataDir, manager } = c.get('project');
+    const parsed = startRunSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
-      return c.json(
-        { error: parsed.error.issues.map((i) => i.message).join("; ") },
-        400,
-      );
+      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
     }
     let workflow: WorkflowDef | undefined;
     if (parsed.data.steps) {
@@ -1855,22 +1592,18 @@ export function createApp(deps: ServerDeps): Hono {
       const issue = stepsIssue(parsed.data.steps);
       if (issue) return c.json({ error: issue }, 400);
       workflow = {
-        name: "(planned)",
-        source: "built-in",
+        name: '(planned)',
+        source: 'built-in',
         steps: parsed.data.steps,
       };
     } else {
       const { workflows } = await loadWorkflows(repoRoot);
       workflow = workflows.find((w) => w.name === parsed.data.workflow);
-      if (!workflow)
-        return c.json(
-          { error: `unknown workflow: ${parsed.data.workflow}` },
-          404,
-        );
+      if (!workflow) return c.json({ error: `unknown workflow: ${parsed.data.workflow}` }, 404);
     }
     const images = parsed.data.images?.map((img): ContentBlock => ({
-      type: "image",
-      source: { type: "base64", media_type: img.mediaType, data: img.data },
+      type: 'image',
+      source: { type: 'base64', media_type: img.mediaType, data: img.data },
     }));
     const input = {
       task: parsed.data.task,
@@ -1885,9 +1618,7 @@ export function createApp(deps: ServerDeps): Hono {
       // rather than an error — the run is still perfectly valid without them.
       // One decision here feeds the run record, the system prompt and
       // CEZ_TODOS_FILE alike (RunManager.agentEnv).
-      generateFollowups: capabilities().followups
-        ? parsed.data.generateFollowups
-        : false,
+      generateFollowups: capabilities().followups ? parsed.data.generateFollowups : false,
     };
     const variants = parsed.data.variants ?? 1;
     if (variants > 1) {
@@ -1899,7 +1630,7 @@ export function createApp(deps: ServerDeps): Hono {
         return c.json(
           {
             error:
-              "parallel variants need a git repository (each variant runs in its own worktree) — run ×1 here, or start cezar inside a git repo",
+              'parallel variants need a git repository (each variant runs in its own worktree) — run ×1 here, or start cezar inside a git repo',
           },
           400,
         );
@@ -1907,13 +1638,11 @@ export function createApp(deps: ServerDeps): Hono {
       const runs = manager.startVariants(workflow, input, variants);
       // The entry points at the first variant — the thread the composer navigates to.
       const first = runs[0];
-      if (parsed.data.todoId && first)
-        await noteTodoStarted(dataDir, parsed.data.todoId, first.id);
+      if (parsed.data.todoId && first) await noteTodoStarted(dataDir, parsed.data.todoId, first.id);
       return c.json({ runs }, 201);
     }
     const run = manager.startRun(workflow, input);
-    if (parsed.data.todoId)
-      await noteTodoStarted(dataDir, parsed.data.todoId, run.id);
+    if (parsed.data.todoId) await noteTodoStarted(dataDir, parsed.data.todoId, run.id);
     return c.json(run, 201);
   });
 
@@ -1923,19 +1652,19 @@ export function createApp(deps: ServerDeps): Hono {
     store
       .listRuns()
       .filter((r) => r.groupId === groupId)
-      .sort((a, b) => (a.variant ?? "").localeCompare(b.variant ?? ""));
+      .sort((a, b) => (a.variant ?? '').localeCompare(b.variant ?? ''));
 
   // Comparison data: per variant the status, cost, `git diff --stat` and the
   // first Progress-log lines from the handoff. The full diff is fetched per
   // variant via the existing GET /api/runs/:id/diff.
-  api.get("/groups/:groupId", async (c) => {
-    const { dataDir, store } = c.get("project");
-    const runs = groupRuns(store, c.req.param("groupId"));
-    if (runs.length === 0) return c.json({ error: "not found" }, 404);
+  api.get('/groups/:groupId', async (c) => {
+    const { dataDir, store } = c.get('project');
+    const runs = groupRuns(store, c.req.param('groupId'));
+    if (runs.length === 0) return c.json({ error: 'not found' }, 404);
     const detailed = await Promise.all(
       runs.map(async (r): Promise<GroupVariant> => ({
         id: r.id,
-        variant: r.variant ?? "?",
+        variant: r.variant ?? '?',
         title: r.title,
         status: r.status,
         archived: r.archived,
@@ -1943,13 +1672,13 @@ export function createApp(deps: ServerDeps): Hono {
         costUsd: r.costUsd,
         diffStat:
           r.worktreePath && existsSync(r.worktreePath)
-            ? await worktreeDiffStat(r.worktreePath, r.baseBranch ?? "HEAD")
-            : "",
+            ? await worktreeDiffStat(r.worktreePath, r.baseBranch ?? 'HEAD')
+            : '',
         handoffExcerpt: handoffProgressExcerpt(readHandoff(dataDir, r.id)),
       })),
     );
     return c.json({
-      groupId: c.req.param("groupId"),
+      groupId: c.req.param('groupId'),
       runs: detailed,
     } satisfies GroupResponse);
   });
@@ -1957,25 +1686,18 @@ export function createApp(deps: ServerDeps): Hono {
   // "Pick this one": the winner rests at `review` (spec 009 takes it from
   // there — send back / draft PR / finish); the losers are cancelled if
   // alive, archived, and their worktrees + branches removed.
-  api.post("/groups/:groupId/pick", async (c) => {
-    const { root: repoRoot, dataDir, store, manager } = c.get("project");
-    const runs = groupRuns(store, c.req.param("groupId"));
-    if (runs.length === 0) return c.json({ error: "not found" }, 404);
+  api.post('/groups/:groupId/pick', async (c) => {
+    const { root: repoRoot, dataDir, store, manager } = c.get('project');
+    const runs = groupRuns(store, c.req.param('groupId'));
+    if (runs.length === 0) return c.json({ error: 'not found' }, 404);
     const parsed = pickSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
-      return c.json(
-        { error: parsed.error.issues.map((i) => i.message).join("; ") },
-        400,
-      );
+      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
     }
     const winner = runs.find((r) => r.id === parsed.data.runId);
-    if (!winner)
-      return c.json({ error: "runId is not part of this group" }, 404);
+    if (!winner) return c.json({ error: 'runId is not part of this group' }, 404);
     if (manager.isActive(winner.id)) {
-      return c.json(
-        { error: "this variant is still active — wait for it to finish first" },
-        409,
-      );
+      return c.json({ error: 'this variant is still active — wait for it to finish first' }, 409);
     }
 
     // Winner: a non-review terminal state with a non-empty diff flips to
@@ -1984,40 +1706,32 @@ export function createApp(deps: ServerDeps): Hono {
     // not autonomous. An autonomous / gate-off winner keeps its `done` state with
     // the diff left in the worktree; an empty diff (or no worktree) stays too.
     if (
-      winner.status !== "review" &&
+      winner.status !== 'review' &&
       winner.worktreePath &&
       existsSync(winner.worktreePath) &&
       winner.autonomous !== true &&
       reviewGateEnabled(await loadConfig(repoRoot))
     ) {
-      const diff = await worktreeDiff(
-        winner.worktreePath,
-        winner.baseBranch ?? "HEAD",
-      );
-      if (diff.trim().length > 0 && !diff.startsWith("(diff failed")) {
-        store.updateRun(winner.id, { status: "review" });
+      const diff = await worktreeDiff(winner.worktreePath, winner.baseBranch ?? 'HEAD');
+      if (diff.trim().length > 0 && !diff.startsWith('(diff failed')) {
+        store.updateRun(winner.id, { status: 'review' });
       }
     }
     const losers = runs.filter((r) => r.id !== winner.id);
     store.appendEvent(winner.id, {
-      type: "lifecycle",
+      type: 'lifecycle',
       message: `picked from ${runs.length} variants — ${losers.length} other variant(s) archived`,
     });
-    appendHandoffHeartbeat(
-      dataDir,
-      winner.id,
-      `picked from ${runs.length} variants`,
-    );
+    appendHandoffHeartbeat(dataDir, winner.id, `picked from ${runs.length} variants`);
 
     for (const loser of losers) {
       if (manager.isActive(loser.id)) manager.cancel(loser.id);
-      if (loser.worktreePath)
-        await removeWorktree(repoRoot, loser.worktreePath, loser.branch);
+      if (loser.worktreePath) await removeWorktree(repoRoot, loser.worktreePath, loser.branch);
       store.updateRun(loser.id, { worktreePath: undefined, branch: undefined });
       store.setArchived(loser.id, true);
       store.appendEvent(loser.id, {
-        type: "lifecycle",
-        message: `variant ${winner.variant ?? "?"} was picked — this variant is archived, its worktree removed`,
+        type: 'lifecycle',
+        message: `variant ${winner.variant ?? '?'} was picked — this variant is archived, its worktree removed`,
       });
     }
     return c.json({
@@ -2025,10 +1739,10 @@ export function createApp(deps: ServerDeps): Hono {
     } satisfies PickVariantResponse);
   });
 
-  api.get("/runs/:id", (c) => {
-    const { store } = c.get("project");
-    const run = store.getRun(c.req.param("id"));
-    return run ? c.json(withUsage(run)) : c.json({ error: "not found" }, 404);
+  api.get('/runs/:id', (c) => {
+    const { store } = c.get('project');
+    const run = store.getRun(c.req.param('id'));
+    return run ? c.json(withUsage(run)) : c.json({ error: 'not found' }, 404);
   });
 
   // Editable titles (#389). The UI displays `titleSummary ?? title`, so a
@@ -2037,18 +1751,13 @@ export function createApp(deps: ServerDeps): Hono {
   // actually displays). The auto-summarizer only ever fills an *unset*
   // titleSummary (RunManager.recordTurnEnd), so an edit wins over any past or
   // future auto-summary. Answers the updated record.
-  api.patch("/runs/:id", async (c) => {
-    const { store } = c.get("project");
-    const id = c.req.param("id");
-    if (!store.getRun(id)) return c.json({ error: "not found" }, 404);
-    const parsed = patchRunSchema.safeParse(
-      await c.req.json().catch(() => null),
-    );
+  api.patch('/runs/:id', async (c) => {
+    const { store } = c.get('project');
+    const id = c.req.param('id');
+    if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
+    const parsed = patchRunSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
-      return c.json(
-        { error: parsed.error.issues.map((i) => i.message).join("; ") },
-        400,
-      );
+      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
     }
     if (parsed.data.title !== undefined) {
       // titleOrigin 'user' permanently stops the namer's live updates for this run
@@ -2056,74 +1765,62 @@ export function createApp(deps: ServerDeps): Hono {
       store.updateRun(id, {
         title: parsed.data.title,
         titleSummary: parsed.data.title,
-        titleOrigin: "user",
+        titleOrigin: 'user',
       });
     }
     return c.json(store.getRun(id));
   });
 
-  api.post("/runs/:id/cancel", (c) => {
-    const { store, manager } = c.get("project");
-    const id = c.req.param("id");
-    if (!store.getRun(id)) return c.json({ error: "not found" }, 404);
+  api.post('/runs/:id/cancel', (c) => {
+    const { store, manager } = c.get('project');
+    const id = c.req.param('id');
+    if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
     const cancelled = manager.cancel(id);
     return c.json({ cancelled });
   });
 
   // Live-session participation (spec 002): deliver a user message (text +
   // pasted screenshots) into the run's open claude session.
-  api.post("/runs/:id/messages", async (c) => {
-    const { store, manager } = c.get("project");
-    const id = c.req.param("id");
-    if (!store.getRun(id)) return c.json({ error: "not found" }, 404);
-    const parsed = messageSchema.safeParse(
-      await c.req.json().catch(() => null),
-    );
+  api.post('/runs/:id/messages', async (c) => {
+    const { store, manager } = c.get('project');
+    const id = c.req.param('id');
+    if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
+    const parsed = messageSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
-      return c.json(
-        { error: parsed.error.issues.map((i) => i.message).join("; ") },
-        400,
-      );
+      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
     }
     const content: ContentBlock[] = [
       ...parsed.data.images.map((img): ContentBlock => ({
-        type: "image",
-        source: { type: "base64", media_type: img.mediaType, data: img.data },
+        type: 'image',
+        source: { type: 'base64', media_type: img.mediaType, data: img.data },
       })),
-      ...(parsed.data.text.trim()
-        ? [{ type: "text", text: parsed.data.text } satisfies ContentBlock]
-        : []),
+      ...(parsed.data.text.trim() ? [{ type: 'text', text: parsed.data.text } satisfies ContentBlock] : []),
     ];
     const delivered = manager.sendMessage(id, content);
-    if (!delivered) return c.json({ error: "session closed" }, 409);
+    if (!delivered) return c.json({ error: 'session closed' }, 409);
     return c.json({ delivered: true });
   });
 
   // "Finish": gracefully close a waiting session — the run completes as done.
-  api.post("/runs/:id/finish", (c) => {
-    const { store, manager } = c.get("project");
-    const id = c.req.param("id");
-    if (!store.getRun(id)) return c.json({ error: "not found" }, 404);
+  api.post('/runs/:id/finish', (c) => {
+    const { store, manager } = c.get('project');
+    const id = c.req.param('id');
+    if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
     const finished = manager.finish(id);
-    if (!finished) return c.json({ error: "no open session" }, 409);
+    if (!finished) return c.json({ error: 'no open session' }, 409);
     return c.json({ finished: true });
   });
 
   // "Continue" (spec 003): reopen a finished run's session in-process.
-  api.post("/runs/:id/continue", async (c) => {
-    const { store, manager } = c.get("project");
-    const id = c.req.param("id");
-    if (!store.getRun(id)) return c.json({ error: "not found" }, 404);
+  api.post('/runs/:id/continue', async (c) => {
+    const { store, manager } = c.get('project');
+    const id = c.req.param('id');
+    if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
     // Bounded resume text (#429); an empty/absent body still just re-runs on the
     // run's current backend, and a runner/model override reopens on that engine (#401).
-    const parsed = continueSchema.safeParse(
-      await c.req.json().catch(() => ({})),
-    );
+    const parsed = continueSchema.safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) {
-      return c.json(
-        { error: parsed.error.issues.map((i) => i.message).join("; ") },
-        400,
-      );
+      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
     }
     const result = manager.continueRun(id, {
       text: parsed.data.text,
@@ -2136,42 +1833,33 @@ export function createApp(deps: ServerDeps): Hono {
 
   // "Open in terminal" (spec 003): hand the session off to a real terminal —
   // in the task's worktree when it still exists (spec 006).
-  api.post("/runs/:id/open-in-cli", async (c) => {
-    const { root: repoRoot, store } = c.get("project");
-    const id = c.req.param("id");
+  api.post('/runs/:id/open-in-cli', async (c) => {
+    const { root: repoRoot, store } = c.get('project');
+    const id = c.req.param('id');
     const run = store.getRun(id);
-    if (!run) return c.json({ error: "not found" }, 404);
+    if (!run) return c.json({ error: 'not found' }, 404);
     // Hosted mode: there is no "my machine" to open a terminal on. The UI
     // hides the button when localHandoff is false — this is defense in depth.
     if (!capabilities().localHandoff) {
       return c.json(
         {
           error:
-            "local handoff is disabled — this cockpit runs in hosted mode (CEZ_REMOTE); resume the session from a machine that has the checkout",
+            'local handoff is disabled — this cockpit runs in hosted mode (CEZ_REMOTE); resume the session from a machine that has the checkout',
         },
         409,
       );
     }
-    const sessionId = [...run.steps]
-      .reverse()
-      .find((s) => s.sessionId)?.sessionId;
-    if (!sessionId) return c.json({ error: "no agent session to resume" }, 409);
-    const cwd =
-      run.worktreePath && existsSync(run.worktreePath)
-        ? run.worktreePath
-        : repoRoot;
+    const sessionId = [...run.steps].reverse().find((s) => s.sessionId)?.sessionId;
+    if (!sessionId) return c.json({ error: 'no agent session to resume' }, 409);
+    const cwd = run.worktreePath && existsSync(run.worktreePath) ? run.worktreePath : repoRoot;
     const command = resumeCommand(run.runner, sessionId);
     // Fails closed on an id we do not recognise — see resumeCommand (#431).
-    if (!command)
-      return c.json(
-        { error: "the recorded session id has an unexpected shape" },
-        409,
-      );
+    if (!command) return c.json({ error: 'the recorded session id has an unexpected shape' }, 409);
     const opened = await openInTerminal(cwd, command);
     if (!opened) {
       return c.json(
         {
-          error: "no terminal emulator found",
+          error: 'no terminal emulator found',
           command: `cd '${cwd}' && ${command}`,
         },
         409,
@@ -2182,62 +1870,46 @@ export function createApp(deps: ServerDeps): Hono {
 
   // "Open in…" session takeover (#open-in): the editors/file-manager/terminal
   // detected on THIS machine. Empty in hosted mode (no local desktop to open).
-  api.get("/open-targets", (c) =>
-    c.json({ targets: capabilities().localHandoff ? detectOpenTargets() : [] }),
-  );
+  api.get('/open-targets', (c) => c.json({ targets: capabilities().localHandoff ? detectOpenTargets() : [] }));
 
   // Open a run's worktree (or the repo root) in the chosen local app.
-  api.post("/runs/:id/open-in", async (c) => {
-    const { root: repoRoot, store } = c.get("project");
-    const id = c.req.param("id");
+  api.post('/runs/:id/open-in', async (c) => {
+    const { root: repoRoot, store } = c.get('project');
+    const id = c.req.param('id');
     const run = store.getRun(id);
-    if (!run) return c.json({ error: "not found" }, 404);
+    if (!run) return c.json({ error: 'not found' }, 404);
     if (!capabilities().localHandoff) {
       return c.json(
         {
-          error:
-            "local handoff is disabled — this cockpit runs in hosted mode (CEZ_REMOTE)",
+          error: 'local handoff is disabled — this cockpit runs in hosted mode (CEZ_REMOTE)',
         },
         409,
       );
     }
     // Follows the safeParse convention (#429); the downstream allowlist match is the real
     // injection guard, this just validates the shape.
-    const parsedBody = openInSchema.safeParse(
-      await c.req.json().catch(() => null),
-    );
+    const parsedBody = openInSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsedBody.success) {
-      return c.json(
-        { error: parsedBody.error.issues.map((i) => i.message).join("; ") },
-        400,
-      );
+      return c.json({ error: parsedBody.error.issues.map((i) => i.message).join('; ') }, 400);
     }
     const { target, path: relPath } = parsedBody.data;
-    const dir =
-      run.worktreePath && existsSync(run.worktreePath)
-        ? run.worktreePath
-        : repoRoot;
+    const dir = run.worktreePath && existsSync(run.worktreePath) ? run.worktreePath : repoRoot;
 
     // Diff pane "open in OS default app" (#365): one worktree file, opened with the platform's
     // default handler for its type — not a directory in the file manager (that's `finder`
     // above) and not a session takeover (editors/CLIs above). `path` is re-validated against
     // the worktree here regardless of what the schema allowed, so a stale/forged path can never
     // escape it.
-    if (target === "default") {
+    if (target === 'default') {
       if (!run.worktreePath || !existsSync(run.worktreePath)) {
         return c.json({ error: NO_WORKTREE }, 409);
       }
-      if (!relPath)
-        return c.json(
-          { error: "path required for the default-app target" },
-          400,
-        );
+      if (!relPath) return c.json({ error: 'path required for the default-app target' }, 400);
       const result = await readWorktreePath(run.worktreePath, relPath);
-      if (result.kind !== "file") {
+      if (result.kind !== 'file') {
         return c.json(
           {
-            error:
-              result.kind === "dir" ? `not a file: ${relPath}` : result.error,
+            error: result.kind === 'dir' ? `not a file: ${relPath}` : result.error,
           },
           409,
         );
@@ -2265,11 +1937,7 @@ export function createApp(deps: ServerDeps): Hono {
       }
       const filePath = join(run.worktreePath, result.path);
       const opened = await openFileInDefaultApp(filePath);
-      if (!opened)
-        return c.json(
-          { error: `could not open ${result.path}`, path: filePath },
-          409,
-        );
+      if (!opened) return c.json({ error: `could not open ${result.path}`, path: filePath }, 409);
       return c.json({ opened: true, path: filePath });
     }
 
@@ -2287,25 +1955,17 @@ export function createApp(deps: ServerDeps): Hono {
     // and what the client's cliTargetResumes now labels. Resume-after-finish is untouched.
     const cliRunner = agentCliRunner(target);
     if (cliRunner) {
-      const engineOwnsSession =
-        run.status === "running" ||
-        run.status === "queued" ||
-        run.status === "waiting";
-      const sessionId = engineOwnsSession
-        ? undefined
-        : [...run.steps].reverse().find((s) => s.sessionId)?.sessionId;
+      const engineOwnsSession = run.status === 'running' || run.status === 'queued' || run.status === 'waiting';
+      const sessionId = engineOwnsSession ? undefined : [...run.steps].reverse().find((s) => s.sessionId)?.sessionId;
       // An id resumeCommand refuses (#431) degrades to a fresh CLI in the worktree,
       // exactly like a run that never recorded a session.
-      const resume =
-        sessionId && cliRunner === (run.runner ?? "claude")
-          ? resumeCommand(cliRunner, sessionId)
-          : null;
+      const resume = sessionId && cliRunner === (run.runner ?? 'claude') ? resumeCommand(cliRunner, sessionId) : null;
       const command = resume ?? cliRunner;
       const opened = await openInTerminal(dir, command);
       if (!opened) {
         return c.json(
           {
-            error: "no terminal emulator found",
+            error: 'no terminal emulator found',
             command: `cd '${dir}' && ${command}`,
           },
           409,
@@ -2315,60 +1975,54 @@ export function createApp(deps: ServerDeps): Hono {
     }
 
     const opened = await openInApp(target, dir);
-    if (!opened)
-      return c.json({ error: `could not open ${target}`, path: dir }, 409);
+    if (!opened) return c.json({ error: `could not open ${target}`, path: dir }, 409);
     return c.json({ opened: true, path: dir });
   });
 
   // Handoff journal (spec 007): the per-task handoff.md as markdown. 404 only
   // when the task is unknown; a task without a (yet) seeded file returns ''.
-  api.get("/runs/:id/handoff", (c) => {
-    const { dataDir, store } = c.get("project");
-    const run = store.getRun(c.req.param("id"));
-    if (!run) return c.json({ error: "not found" }, 404);
+  api.get('/runs/:id/handoff', (c) => {
+    const { dataDir, store } = c.get('project');
+    const run = store.getRun(c.req.param('id'));
+    if (!run) return c.json({ error: 'not found' }, 404);
     return c.text(readHandoff(dataDir, run.id), 200, {
-      "content-type": "text/markdown; charset=utf-8",
+      'content-type': 'text/markdown; charset=utf-8',
     });
   });
 
   // Agent screenshots — image blocks the run manager persisted out of tool
   // results (persistImage). `basename` pins reads inside the run's own dir.
   const IMAGE_TYPES: Record<string, string> = {
-    png: "image/png",
-    jpg: "image/jpeg",
-    webp: "image/webp",
-    gif: "image/gif",
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    webp: 'image/webp',
+    gif: 'image/gif',
   };
-  api.get("/runs/:id/images/:file", (c) => {
-    const { dataDir, store } = c.get("project");
-    const run = store.getRun(c.req.param("id"));
-    if (!run) return c.json({ error: "not found" }, 404);
-    const file = basename(c.req.param("file"));
-    const path = join(dataDir, "runs", `${run.id}-images`, file);
-    if (!existsSync(path)) return c.json({ error: "not found" }, 404);
-    const type =
-      IMAGE_TYPES[file.split(".").pop() ?? ""] ?? "application/octet-stream";
+  api.get('/runs/:id/images/:file', (c) => {
+    const { dataDir, store } = c.get('project');
+    const run = store.getRun(c.req.param('id'));
+    if (!run) return c.json({ error: 'not found' }, 404);
+    const file = basename(c.req.param('file'));
+    const path = join(dataDir, 'runs', `${run.id}-images`, file);
+    if (!existsSync(path)) return c.json({ error: 'not found' }, 404);
+    const type = IMAGE_TYPES[file.split('.').pop() ?? ''] ?? 'application/octet-stream';
     return new Response(readFileSync(path), {
       headers: {
-        "content-type": type,
-        "cache-control": "private, max-age=31536000, immutable",
+        'content-type': type,
+        'cache-control': 'private, max-age=31536000, immutable',
       },
     });
   });
 
   // Task diff (spec 006): what this run changed — its worktree vs its base.
-  api.get("/runs/:id/diff", async (c) => {
-    const { store } = c.get("project");
-    const run = store.getRun(c.req.param("id"));
-    if (!run) return c.json({ error: "not found" }, 404);
+  api.get('/runs/:id/diff', async (c) => {
+    const { store } = c.get('project');
+    const run = store.getRun(c.req.param('id'));
+    if (!run) return c.json({ error: 'not found' }, 404);
     if (!run.worktreePath || !existsSync(run.worktreePath)) {
-      return c.text(
-        "(no worktree — this task ran directly in the repo working tree)",
-      );
+      return c.text('(no worktree — this task ran directly in the repo working tree)');
     }
-    return c.text(
-      await worktreeDiff(run.worktreePath, run.baseBranch ?? "HEAD"),
-    );
+    return c.text(await worktreeDiff(run.worktreePath, run.baseBranch ?? 'HEAD'));
   });
 
   // ---- session git view (redesign R5 Step 1.2 — §"Git/session API additions").
@@ -2377,40 +2031,39 @@ export function createApp(deps: ServerDeps): Hono {
   // failure degrades to 409 + human-readable reason, 404 only for unknown ids.
   const worktreeOf = (run: RunRecord): string | null =>
     run.worktreePath && existsSync(run.worktreePath) ? run.worktreePath : null;
-  const NO_WORKTREE =
-    "no worktree — this task ran directly in the repo working tree";
+  const NO_WORKTREE = 'no worktree — this task ran directly in the repo working tree';
 
-  api.get("/runs/:id/changes", async (c) => {
-    const { store } = c.get("project");
-    const run = store.getRun(c.req.param("id"));
-    if (!run) return c.json({ error: "not found" }, 404);
+  api.get('/runs/:id/changes', async (c) => {
+    const { store } = c.get('project');
+    const run = store.getRun(c.req.param('id'));
+    if (!run) return c.json({ error: 'not found' }, 404);
     const worktree = worktreeOf(run);
     if (!worktree) return c.json({ error: NO_WORKTREE }, 409);
-    const result = await collectChanges(worktree, run.baseBranch ?? "HEAD");
+    const result = await collectChanges(worktree, run.baseBranch ?? 'HEAD');
     if (!result.ok) return c.json({ error: result.error }, 409);
     return c.json(result.changes);
   });
 
   // The run's own commits (<base>..HEAD on the worktree branch) — the Commits tab.
-  api.get("/runs/:id/commits", async (c) => {
-    const { store } = c.get("project");
-    const run = store.getRun(c.req.param("id"));
-    if (!run) return c.json({ error: "not found" }, 404);
+  api.get('/runs/:id/commits', async (c) => {
+    const { store } = c.get('project');
+    const run = store.getRun(c.req.param('id'));
+    if (!run) return c.json({ error: 'not found' }, 404);
     const worktree = worktreeOf(run);
     if (!worktree) return c.json({ error: NO_WORKTREE }, 409);
-    const result = await collectRunCommits(worktree, run.baseBranch ?? "HEAD");
+    const result = await collectRunCommits(worktree, run.baseBranch ?? 'HEAD');
     if (!result.ok) return c.json({ error: result.error }, 409);
     return c.json({ commits: result.commits });
   });
 
   // One of the run's commits, structured like the Changes tab (reuses collectCommitChanges).
-  api.get("/runs/:id/commit/:sha", async (c) => {
-    const { store } = c.get("project");
-    const run = store.getRun(c.req.param("id"));
-    if (!run) return c.json({ error: "not found" }, 404);
+  api.get('/runs/:id/commit/:sha', async (c) => {
+    const { store } = c.get('project');
+    const run = store.getRun(c.req.param('id'));
+    if (!run) return c.json({ error: 'not found' }, 404);
     const worktree = worktreeOf(run);
     if (!worktree) return c.json({ error: NO_WORKTREE }, 409);
-    const result = await collectCommitChanges(worktree, c.req.param("sha"));
+    const result = await collectCommitChanges(worktree, c.req.param('sha'));
     if (!result.ok) return c.json({ error: result.error }, 409);
     return c.json(result.commit);
   });
@@ -2421,30 +2074,26 @@ export function createApp(deps: ServerDeps): Hono {
   // image files only, for the preview's inline <img> — never HTML/JS/etc., so
   // no worktree file can become a same-origin document, and never past the
   // size cap. The no-script CSP neutralizes SVG opened as a top-level URL.
-  api.get("/runs/:id/files", async (c) => {
-    const { store } = c.get("project");
-    const run = store.getRun(c.req.param("id"));
-    if (!run) return c.json({ error: "not found" }, 404);
+  api.get('/runs/:id/files', async (c) => {
+    const { store } = c.get('project');
+    const run = store.getRun(c.req.param('id'));
+    if (!run) return c.json({ error: 'not found' }, 404);
     const worktree = worktreeOf(run);
     if (!worktree) return c.json({ error: NO_WORKTREE }, 409);
-    const result = await readWorktreePath(worktree, c.req.query("path") ?? "");
-    if (result.kind === "invalid" || result.kind === "missing") {
+    const result = await readWorktreePath(worktree, c.req.query('path') ?? '');
+    if (result.kind === 'invalid' || result.kind === 'missing') {
       return c.json({ error: result.error }, 409);
     }
-    if (result.kind === "dir") {
+    if (result.kind === 'dir') {
       return c.json({
-        type: "dir",
+        type: 'dir',
         path: result.path,
         entries: result.entries,
       });
     }
-    if (c.req.query("raw") === "1") {
+    if (c.req.query('raw') === '1') {
       const mime = imageMimeType(result.path);
-      if (!mime)
-        return c.json(
-          { error: `raw serving is limited to images: ${result.path}` },
-          409,
-        );
+      if (!mime) return c.json({ error: `raw serving is limited to images: ${result.path}` }, 409);
       if (result.tooLarge) {
         return c.json(
           {
@@ -2455,14 +2104,13 @@ export function createApp(deps: ServerDeps): Hono {
       }
       const bytes = await readFile(join(worktree, result.path));
       return c.body(new Uint8Array(bytes).buffer as ArrayBuffer, 200, {
-        "content-type": mime,
-        "x-content-type-options": "nosniff",
-        "content-security-policy":
-          "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+        'content-type': mime,
+        'x-content-type-options': 'nosniff',
+        'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; sandbox",
       });
     }
     return c.json({
-      type: "file",
+      type: 'file',
       path: result.path,
       size: result.size,
       binary: result.binary,
@@ -2471,30 +2119,25 @@ export function createApp(deps: ServerDeps): Hono {
     });
   });
 
-  api.post("/runs/:id/git/commit", async (c) => {
-    const { store } = c.get("project");
-    const run = store.getRun(c.req.param("id"));
-    if (!run) return c.json({ error: "not found" }, 404);
+  api.post('/runs/:id/git/commit', async (c) => {
+    const { store } = c.get('project');
+    const run = store.getRun(c.req.param('id'));
+    if (!run) return c.json({ error: 'not found' }, 404);
     const worktree = worktreeOf(run);
     if (!worktree) return c.json({ error: NO_WORKTREE }, 409);
-    const parsed = gitCommitSchema.safeParse(
-      await c.req.json().catch(() => null),
-    );
+    const parsed = gitCommitSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
-      return c.json(
-        { error: parsed.error.issues.map((i) => i.message).join("; ") },
-        400,
-      );
+      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
     }
     const result = await commitAll(worktree, parsed.data.message);
     if (!result.ok) return c.json({ error: result.error }, 409);
     return c.json({ committed: true, sha: result.sha });
   });
 
-  api.post("/runs/:id/git/push", async (c) => {
-    const { store } = c.get("project");
-    const run = store.getRun(c.req.param("id"));
-    if (!run) return c.json({ error: "not found" }, 404);
+  api.post('/runs/:id/git/push', async (c) => {
+    const { store } = c.get('project');
+    const run = store.getRun(c.req.param('id'));
+    if (!run) return c.json({ error: 'not found' }, 404);
     const worktree = worktreeOf(run);
     if (!worktree) return c.json({ error: NO_WORKTREE }, 409);
     const result = await pushCurrentBranch(worktree);
@@ -2511,21 +2154,16 @@ export function createApp(deps: ServerDeps): Hono {
   // `gh pr create --draft`; on success the run completes as done with the PR
   // badge. Failures come back as 409 with a `manual` merge command the GUI
   // shows next to the toast. CEZ_DRY_RUN=1 fakes the URL (no push, no gh).
-  api.post("/runs/:id/pr", async (c) => {
-    const { root: repoRoot, dataDir, store, manager } = c.get("project");
-    const id = c.req.param("id");
+  api.post('/runs/:id/pr', async (c) => {
+    const { root: repoRoot, dataDir, store, manager } = c.get('project');
+    const id = c.req.param('id');
     const run = store.getRun(id);
-    if (!run) return c.json({ error: "not found" }, 404);
-    if (manager.isActive(id))
-      return c.json(
-        { error: "run is still active — wait for the review gate" },
-        409,
-      );
+    if (!run) return c.json({ error: 'not found' }, 404);
+    if (manager.isActive(id)) return c.json({ error: 'run is still active — wait for the review gate' }, 409);
     if (!run.worktreePath || !existsSync(run.worktreePath) || !run.branch) {
       return c.json(
         {
-          error:
-            "no worktree/branch to publish — this task ran in the repo working tree",
+          error: 'no worktree/branch to publish — this task ran in the repo working tree',
         },
         400,
       );
@@ -2536,65 +2174,54 @@ export function createApp(deps: ServerDeps): Hono {
       handoffText: readHandoff(dataDir, id),
     });
     if (!outcome.ok) {
-      return c.json(
-        { error: outcome.error, manual: `git merge ${run.branch}` },
-        409,
-      );
+      return c.json({ error: outcome.error, manual: `git merge ${run.branch}` }, 409);
     }
     store.updateRun(id, {
       pullRequestUrl: outcome.url,
-      status: "done",
+      status: 'done',
       finishedAt: run.finishedAt ?? new Date().toISOString(),
     });
     store.appendEvent(id, {
-      type: "note",
-      message: `draft PR created: ${outcome.url}${outcome.dryRun ? " (dry run — no real PR)" : ""}`,
+      type: 'note',
+      message: `draft PR created: ${outcome.url}${outcome.dryRun ? ' (dry run — no real PR)' : ''}`,
     });
     return c.json({ url: outcome.url, dryRun: outcome.dryRun }, 201);
   });
 
   // Archived tasks keep their worktree for inspection; this is the explicit
   // "🧹 Remove worktree" cleanup (spec 006).
-  api.post("/runs/:id/remove-worktree", async (c) => {
-    const { root: repoRoot, store, manager } = c.get("project");
-    const id = c.req.param("id");
+  api.post('/runs/:id/remove-worktree', async (c) => {
+    const { root: repoRoot, store, manager } = c.get('project');
+    const id = c.req.param('id');
     const run = store.getRun(id);
-    if (!run) return c.json({ error: "not found" }, 404);
-    if (manager.isActive(id))
-      return c.json({ error: "run is active — cancel it first" }, 409);
-    if (run.worktreePath)
-      await removeWorktree(repoRoot, run.worktreePath, run.branch);
+    if (!run) return c.json({ error: 'not found' }, 404);
+    if (manager.isActive(id)) return c.json({ error: 'run is active — cancel it first' }, 409);
+    if (run.worktreePath) await removeWorktree(repoRoot, run.worktreePath, run.branch);
     store.updateRun(id, { worktreePath: undefined, branch: undefined });
     return c.json({ removed: true });
   });
 
-  api.delete("/runs/:id", async (c) => {
-    const { root: repoRoot, store, manager } = c.get("project");
-    const id = c.req.param("id");
-    if (manager.isActive(id))
-      return c.json({ error: "run is active — cancel it first" }, 409);
+  api.delete('/runs/:id', async (c) => {
+    const { root: repoRoot, store, manager } = c.get('project');
+    const id = c.req.param('id');
+    if (manager.isActive(id)) return c.json({ error: 'run is active — cancel it first' }, 409);
     const run = store.getRun(id);
-    if (!run) return c.json({ error: "not found" }, 404);
+    if (!run) return c.json({ error: 'not found' }, 404);
     // Delete cleans up after itself: worktree + branch go with the run (spec 006).
-    if (run.worktreePath)
-      await removeWorktree(repoRoot, run.worktreePath, run.branch);
-    return store.deleteRun(id)
-      ? c.json({ deleted: true })
-      : c.json({ error: "not found" }, 404);
+    if (run.worktreePath) await removeWorktree(repoRoot, run.worktreePath, run.branch);
+    return store.deleteRun(id) ? c.json({ deleted: true }) : c.json({ error: 'not found' }, 404);
   });
 
   // ---- worktree management panel (#483) --------------------------------------
   // List materialized task worktrees with disk usage + retention state, and a
   // "Reclaim now" action. Both additive; the per-row delete reuses the existing
   // /api/runs/:id/remove-worktree route above.
-  api.get("/worktrees", async (c) => {
-    const { root: repoRoot, store } = c.get("project");
+  api.get('/worktrees', async (c) => {
+    const { root: repoRoot, store } = c.get('project');
     // The keep-limit the panel reports is the one the enforcer will actually
     // apply — inherited from the workspace default when this repo sets none.
     const keep = await resolveWorktreeRetention(repoRoot);
-    const runs = store
-      .listRuns()
-      .filter((r) => r.worktreePath && existsSync(r.worktreePath));
+    const runs = store.listRuns().filter((r) => r.worktreePath && existsSync(r.worktreePath));
     const worktrees = await Promise.all(
       runs.map(async (r) => ({
         runId: r.id,
@@ -2615,18 +2242,12 @@ export function createApp(deps: ServerDeps): Hono {
   });
 
   const reclaimBodySchema = z.object({}).passthrough();
-  api.post("/worktrees/reclaim", async (c) => {
-    const { root: repoRoot, store } = c.get("project");
+  api.post('/worktrees/reclaim', async (c) => {
+    const { root: repoRoot, store } = c.get('project');
     // Accept an empty or `{}` body; retention is best-effort, so 200 always.
-    const parsed = reclaimBodySchema.safeParse(
-      await c.req.json().catch(() => ({})),
-    );
-    if (!parsed.success) return c.json({ error: "invalid body" }, 400);
-    const reclaimed = await reclaimWorktrees(
-      repoRoot,
-      store,
-      await resolveWorktreeRetention(repoRoot),
-    );
+    const parsed = reclaimBodySchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) return c.json({ error: 'invalid body' }, 400);
+    const reclaimed = await reclaimWorktrees(repoRoot, store, await resolveWorktreeRetention(repoRoot));
     return c.json({ reclaimed });
   });
 
@@ -2636,37 +2257,31 @@ export function createApp(deps: ServerDeps): Hono {
   // merely switched off) and the mutators 409 as defense in depth — the shape
   // the hosted-mode open-in-* handlers already use. Existing todos.json entries
   // are never touched, so flipping the env back on restores them.
-  api.get("/todos", async (c) =>
-    c.json(
-      capabilities().followups ? await readTodos(c.get("project").dataDir) : [],
-    ),
-  );
+  api.get('/todos', async (c) => c.json(capabilities().followups ? await readTodos(c.get('project').dataDir) : []));
 
   // Check off = delete the entry.
-  api.delete("/todos/:id", async (c) => {
-    const { dataDir } = c.get("project");
+  api.delete('/todos/:id', async (c) => {
+    const { dataDir } = c.get('project');
     if (!capabilities().followups) return c.json({ error: FOLLOWUPS_OFF }, 409);
-    const removed = await removeTodo(dataDir, c.req.param("id"));
-    return removed
-      ? c.json({ removed: true })
-      : c.json({ error: "not found" }, 404);
+    const removed = await removeTodo(dataDir, c.req.param('id'));
+    return removed ? c.json({ removed: true }) : c.json({ error: 'not found' }, 404);
   });
 
   // "▶ Run": turn an inbox entry into a task — a one-off single-step workflow
   // around the suggested skill when it exists, plain quick-task otherwise.
-  api.post("/todos/:id/start", async (c) => {
-    const { root: repoRoot, dataDir, manager } = c.get("project");
+  api.post('/todos/:id/start', async (c) => {
+    const { root: repoRoot, dataDir, manager } = c.get('project');
     if (!capabilities().followups) return c.json({ error: FOLLOWUPS_OFF }, 409);
-    const id = c.req.param("id");
+    const id = c.req.param('id');
     const todo = (await readTodos(dataDir)).find((t) => t.id === id);
-    if (!todo) return c.json({ error: "not found" }, 404);
+    if (!todo) return c.json({ error: 'not found' }, 404);
 
     // Body is optional and read exactly once (runner/model #401 + prompt #413 share it). A
     // request with none at all (the pre-pills/pre-composer client) stays `undefined`, same as an
     // empty `{}`. A body that IS present but is not valid JSON becomes `null`, which the schema
     // rejects → 400 (the `.catch(() => null)` pattern every other mutating route uses); mapping
     // it to `undefined` too would let a broken payload pass as "no body" and silently 201.
-    const rawBody = await c.req.text().catch(() => "");
+    const rawBody = await c.req.text().catch(() => '');
     let body: unknown;
     if (rawBody.trim().length > 0) {
       try {
@@ -2677,12 +2292,9 @@ export function createApp(deps: ServerDeps): Hono {
     }
     const parsed = startTodoSchema.safeParse(body);
     if (!parsed.success) {
-      return c.json(
-        { error: parsed.error.issues.map((i) => i.message).join("; ") },
-        400,
-      );
+      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
     }
-    if (todo.startedTaskId) return c.json({ error: "already started" }, 409);
+    if (todo.startedTaskId) return c.json({ error: 'already started' }, 409);
 
     let task = todoTaskText(todo);
     if (parsed.data?.prompt) task += `\n\n${parsed.data.prompt}`;
@@ -2692,15 +2304,15 @@ export function createApp(deps: ServerDeps): Hono {
       const skills = await discoverSkills(repoRoot);
       if (skills.some((s) => s.name === todo.suggestedSkill)) {
         workflow = {
-          name: "(inbox)",
+          name: '(inbox)',
           description: `Follow-up from the inbox — skill "${todo.suggestedSkill}"`,
-          source: "built-in",
+          source: 'built-in',
           steps: [
             {
-              id: "task",
-              name: "Do the task",
+              id: 'task',
+              name: 'Do the task',
               skill: todo.suggestedSkill,
-              prompt: "{{task}}",
+              prompt: '{{task}}',
             },
           ],
         };
@@ -2708,8 +2320,7 @@ export function createApp(deps: ServerDeps): Hono {
     }
     if (!workflow) {
       const { workflows } = await loadWorkflows(repoRoot);
-      workflow =
-        workflows.find((w) => w.name === "quick-task") ?? QUICK_TASK_WORKFLOW;
+      workflow = workflows.find((w) => w.name === 'quick-task') ?? QUICK_TASK_WORKFLOW;
     }
 
     const run = manager.startRun(workflow, {
@@ -2724,10 +2335,10 @@ export function createApp(deps: ServerDeps): Hono {
   // Per-run SSE: full replay from the NDJSON file, then live events. The
   // listener attaches before the replay and buffers, so nothing emitted
   // during the replay is lost or duplicated (dedup by seq).
-  api.get("/runs/:id/events", (c) => {
-    const { store } = c.get("project");
-    const id = c.req.param("id");
-    if (!store.getRun(id)) return c.json({ error: "not found" }, 404);
+  api.get('/runs/:id/events', (c) => {
+    const { store } = c.get('project');
+    const id = c.req.param('id');
+    if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
     return streamSSENoBuffer(c, async (stream) => {
       let replaying = true;
       let maxSeq = 0;
@@ -2741,7 +2352,7 @@ export function createApp(deps: ServerDeps): Hono {
       // EventSource ignores names it has no listener for.
       const writeEvent = (event: RunEvent) =>
         stream.writeSSE({
-          event: isV2WireEventType(event.type) ? "ui-event" : "run-event",
+          event: isV2WireEventType(event.type) ? 'ui-event' : 'run-event',
           data: JSON.stringify(event),
         });
       const onEvent = (payload: { runId: string; event: RunEvent }) => {
@@ -2751,13 +2362,13 @@ export function createApp(deps: ServerDeps): Hono {
       };
       const onRun = (run: RunRecord) => {
         if (run.id !== id) return;
-        void stream.writeSSE({ event: "run", data: JSON.stringify(run) });
+        void stream.writeSSE({ event: 'run', data: JSON.stringify(run) });
       };
-      store.on("event", onEvent);
-      store.on("run", onRun);
+      store.on('event', onEvent);
+      store.on('run', onRun);
       stream.onAbort(() => {
-        store.off("event", onEvent);
-        store.off("run", onRun);
+        store.off('event', onEvent);
+        store.off('run', onRun);
       });
 
       for (const event of store.readEvents(id)) {
@@ -2769,11 +2380,10 @@ export function createApp(deps: ServerDeps): Hono {
         if (event.seq > maxSeq) await writeEvent(event);
       }
       const run = store.getRun(id);
-      if (run)
-        await stream.writeSSE({ event: "run", data: JSON.stringify(run) });
+      if (run) await stream.writeSSE({ event: 'run', data: JSON.stringify(run) });
 
       while (!stream.aborted) {
-        await stream.writeSSE({ event: "ping", data: "" });
+        await stream.writeSSE({ event: 'ping', data: '' });
         await stream.sleep(15_000);
       }
     });
@@ -2784,27 +2394,24 @@ export function createApp(deps: ServerDeps): Hono {
   // shape; the legacy unprefixed alias stays bound to the boot project ONLY
   // (spec "Legacy aliases" — widening it would be a silent behavioral break;
   // the all-project stream arrives as `/api/workspace/events` in step 2.8).
-  api.get("/events", (c) => {
-    const { dataDir, store } = c.get("project");
+  api.get('/events', (c) => {
+    const { dataDir, store } = c.get('project');
     return streamSSENoBuffer(c, async (stream) => {
-      const onRun = (run: RunRecord) =>
-        void stream.writeSSE({ event: "run", data: JSON.stringify(run) });
+      const onRun = (run: RunRecord) => void stream.writeSSE({ event: 'run', data: JSON.stringify(run) });
       const onDeleted = (id: string) =>
         void stream.writeSSE({
-          event: "run-deleted",
+          event: 'run-deleted',
           data: JSON.stringify({ id }),
         });
       const sendTodos = async () => {
         const items: TodoItem[] = await readTodos(dataDir).catch(() => []);
-        await stream.writeSSE({ event: "todos", data: JSON.stringify(items) });
+        await stream.writeSSE({ event: 'todos', data: JSON.stringify(items) });
       };
       // Opt-in inbox (#471): subscribing is what creates this project's
       // watcher (step 2.3), so with the capability off we never subscribe —
       // no watcher, no fd. Scoped to this stream's dataDir: another
       // project's todos.json writes never reach this connection.
-      const offTodos = capabilities().followups
-        ? onTodosChanged(dataDir, () => void sendTodos())
-        : () => undefined;
+      const offTodos = capabilities().followups ? onTodosChanged(dataDir, () => void sendTodos()) : () => undefined;
       // Live resource telemetry (#348): the sampler ticks ~every 2 s only
       // while some run has a registered process; each tick is relayed as one
       // `usage` message (runId → {cpuPct, rssBytes, procCount}). Never
@@ -2817,18 +2424,18 @@ export function createApp(deps: ServerDeps): Hono {
         for (const [runId, sample] of Object.entries(usage)) {
           if (store.getRun(runId)) owned[runId] = sample;
         }
-        void stream.writeSSE({ event: "usage", data: JSON.stringify(owned) });
+        void stream.writeSSE({ event: 'usage', data: JSON.stringify(owned) });
       });
-      store.on("run", onRun);
-      store.on("deleted", onDeleted);
+      store.on('run', onRun);
+      store.on('deleted', onDeleted);
       stream.onAbort(() => {
-        store.off("run", onRun);
-        store.off("deleted", onDeleted);
+        store.off('run', onRun);
+        store.off('deleted', onDeleted);
         offTodos();
         offUsage();
       });
       while (!stream.aborted) {
-        await stream.writeSSE({ event: "ping", data: "" });
+        await stream.writeSSE({ event: 'ping', data: '' });
         await stream.sleep(15_000);
       }
     });
@@ -2849,49 +2456,41 @@ export function createApp(deps: ServerDeps): Hono {
   // (always live) and already-built lazy contexts are attached at connect;
   // contexts built later join via the `onContextBuilt` hook, so a project's
   // first API touch makes its events flow to streams already open.
-  app.get("/api/workspace/events", (c) => {
+  app.get('/api/workspace/events', (c) => {
     return streamSSENoBuffer(c, async (stream) => {
       // One detach bundle per attached project — the id guard makes a double
       // attach (connect-time snapshot vs. the built hook) impossible.
-      const attached = new Map<
-        string,
-        { store: RunStore; detach: () => void }
-      >();
-      const attach = (
-        project: string,
-        ctx: Pick<ProjectContext, "store" | "dataDir">,
-      ): void => {
+      const attached = new Map<string, { store: RunStore; detach: () => void }>();
+      const attach = (project: string, ctx: Pick<ProjectContext, 'store' | 'dataDir'>): void => {
         if (attached.has(project)) return;
         const { store, dataDir } = ctx;
         const onRun = (run: RunRecord) =>
           void stream.writeSSE({
-            event: "run",
+            event: 'run',
             data: JSON.stringify({ ...run, project }),
           });
         const onDeleted = (id: string) =>
           void stream.writeSSE({
-            event: "run-deleted",
+            event: 'run-deleted',
             data: JSON.stringify({ id, project }),
           });
         const sendTodos = async () => {
           const items: TodoItem[] = await readTodos(dataDir).catch(() => []);
           await stream.writeSSE({
-            event: "todos",
+            event: 'todos',
             data: JSON.stringify({ project, items }),
           });
         };
         // Same opt-in gate as the per-project stream (#471): no capability, no
         // watcher — and each subscription is scoped to its own dataDir (2.3).
-        const offTodos = capabilities().followups
-          ? onTodosChanged(dataDir, () => void sendTodos())
-          : () => undefined;
-        store.on("run", onRun);
-        store.on("deleted", onDeleted);
+        const offTodos = capabilities().followups ? onTodosChanged(dataDir, () => void sendTodos()) : () => undefined;
+        store.on('run', onRun);
+        store.on('deleted', onDeleted);
         attached.set(project, {
           store,
           detach: () => {
-            store.off("run", onRun);
-            store.off("deleted", onDeleted);
+            store.off('run', onRun);
+            store.off('deleted', onDeleted);
             offTodos();
           },
         });
@@ -2923,7 +2522,7 @@ export function createApp(deps: ServerDeps): Hono {
           }
           if (Object.keys(owned).length > 0) {
             void stream.writeSSE({
-              event: "usage",
+              event: 'usage',
               data: JSON.stringify({ project, usage: owned }),
             });
           }
@@ -2937,7 +2536,7 @@ export function createApp(deps: ServerDeps): Hono {
       // project removed and re-added on the same slug would rebuild a fresh
       // context whose events never reach this already-open stream.
       const offWorkspace = workspaceEvents.on((event, data) => {
-        if (event === "project-removed") {
+        if (event === 'project-removed') {
           const removed = (data as { id?: string }).id;
           if (removed !== undefined && attached.has(removed)) {
             attached.get(removed)?.detach();
@@ -2956,7 +2555,7 @@ export function createApp(deps: ServerDeps): Hono {
       });
 
       while (!stream.aborted) {
-        await stream.writeSSE({ event: "ping", data: "" });
+        await stream.writeSSE({ event: 'ping', data: '' });
         await stream.sleep(15_000);
       }
     });
@@ -2966,46 +2565,34 @@ export function createApp(deps: ServerDeps): Hono {
   // Issues + PRs of the repo's origin, read through the logged-in `gh` CLI.
   // Degrades to `{available:false, reason}` — no gh / no remote / offline all
   // just render as a hint in the tab, never an error.
-  api.get("/github", async (c) => {
-    const { root: repoRoot } = c.get("project");
-    const limit = Number.parseInt(c.req.query("limit") ?? "", 10);
-    return c.json(
-      await fetchGithub(
-        repoRoot,
-        c.req.query("refresh") === "1",
-        Number.isFinite(limit) ? limit : 30,
-      ),
-    );
+  api.get('/github', async (c) => {
+    const { root: repoRoot } = c.get('project');
+    const limit = Number.parseInt(c.req.query('limit') ?? '', 10);
+    return c.json(await fetchGithub(repoRoot, c.req.query('refresh') === '1', Number.isFinite(limit) ? limit : 30));
   });
 
   // The full comment thread for one issue/PR (#499). Additive sibling of /api/github — lazy
   // (fetched only while a detail view is open), zod-validated params, 400 on garbage, and the
   // same in-payload availability degrade (gh missing / offline / 404 all render as a hint).
   const commentsParams = z.object({
-    kind: z.enum(["issue", "pr"]),
+    kind: z.enum(['issue', 'pr']),
     number: z.coerce.number().int().positive(),
   });
-  api.get("/github/comments/:kind/:number", async (c) => {
-    const { root: repoRoot } = c.get("project");
+  api.get('/github/comments/:kind/:number', async (c) => {
+    const { root: repoRoot } = c.get('project');
     const parsed = commentsParams.safeParse({
-      kind: c.req.param("kind"),
-      number: c.req.param("number"),
+      kind: c.req.param('kind'),
+      number: c.req.param('number'),
     });
-    if (!parsed.success)
-      return c.json({ error: "invalid kind or number" }, 400);
+    if (!parsed.success) return c.json({ error: 'invalid kind or number' }, 400);
     return c.json(
-      await fetchGithubComments(
-        repoRoot,
-        parsed.data.kind,
-        parsed.data.number,
-        c.req.query("refresh") === "1",
-      ),
+      await fetchGithubComments(repoRoot, parsed.data.kind, parsed.data.number, c.req.query('refresh') === '1'),
     );
   });
 
   // ---- repo view -----------------------------------------------------------
-  api.get("/repo", async (c) => {
-    const { root: repoRoot } = c.get("project");
+  api.get('/repo', async (c) => {
+    const { root: repoRoot } = c.get('project');
     const info = await getRepoInfo(repoRoot);
     if (!info)
       return c.json({
@@ -3049,9 +2636,7 @@ export function createApp(deps: ServerDeps): Hono {
     // CEZ_REVIEW_GATE env default (OFF) decides".
     reviewGate: config.reviewGate ?? null,
   });
-  api.get("/config", async (c) =>
-    c.json(configAnswer(await loadConfig(c.get("project").root))),
-  );
+  api.get('/config', async (c) => c.json(configAnswer(await loadConfig(c.get('project').root))));
 
   // Set/clear the agents' config knobs (Settings → Agents; the Repo tab's
   // base-branch picker). Merges into the RAW config.json so user keys
@@ -3061,13 +2646,8 @@ export function createApp(deps: ServerDeps): Hono {
   const modelPresetSchema = z.string().trim().max(200).nullable().optional();
   const setConfigSchema = z.object({
     baseBranch: z.string().trim().min(1).max(200).nullable().optional(),
-    defaultRunner: z.enum(["claude", "codex", "opencode"]).optional(),
-    systemPrompt: z
-      .string()
-      .trim()
-      .max(20_000, "systemPrompt must be at most 20000 characters")
-      .nullable()
-      .optional(),
+    defaultRunner: z.enum(['claude', 'codex', 'opencode']).optional(),
+    systemPrompt: z.string().trim().max(20_000, 'systemPrompt must be at most 20000 characters').nullable().optional(),
     defaultModels: z
       .object({
         claude: modelPresetSchema,
@@ -3090,23 +2670,17 @@ export function createApp(deps: ServerDeps): Hono {
     // back to the env-default behavior (OFF).
     reviewGate: z.boolean().nullable().optional(),
   });
-  api.put("/config", async (c) => {
-    const { root: repoRoot, dataDir } = c.get("project");
-    const parsed = setConfigSchema.safeParse(
-      await c.req.json().catch(() => null),
-    );
+  api.put('/config', async (c) => {
+    const { root: repoRoot, dataDir } = c.get('project');
+    const parsed = setConfigSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
-      return c.json(
-        { error: parsed.error.issues.map((i) => i.message).join("; ") },
-        400,
-      );
+      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
     }
-    const configPath = join(dataDir, "config.json");
+    const configPath = join(dataDir, 'config.json');
     let raw: Record<string, unknown> = {};
     try {
-      const existing: unknown = JSON.parse(await readFile(configPath, "utf8"));
-      if (existing && typeof existing === "object")
-        raw = existing as Record<string, unknown>;
+      const existing: unknown = JSON.parse(await readFile(configPath, 'utf8'));
+      if (existing && typeof existing === 'object') raw = existing as Record<string, unknown>;
     } catch {
       // missing or malformed — start fresh
     }
@@ -3114,21 +2688,16 @@ export function createApp(deps: ServerDeps): Hono {
       if (parsed.data.baseBranch === null) delete raw.baseBranch;
       else raw.baseBranch = parsed.data.baseBranch;
     }
-    if (parsed.data.defaultRunner !== undefined)
-      raw.defaultRunner = parsed.data.defaultRunner;
+    if (parsed.data.defaultRunner !== undefined) raw.defaultRunner = parsed.data.defaultRunner;
     if (parsed.data.systemPrompt !== undefined) {
       // '' and null both clear: an emptied textarea means "no extra prompt".
-      if (
-        parsed.data.systemPrompt === null ||
-        parsed.data.systemPrompt === ""
-      ) {
+      if (parsed.data.systemPrompt === null || parsed.data.systemPrompt === '') {
         delete raw.systemPrompt;
       } else {
         raw.systemPrompt = parsed.data.systemPrompt;
       }
     }
-    if (parsed.data.maxParallel !== undefined)
-      raw.maxParallel = parsed.data.maxParallel;
+    if (parsed.data.maxParallel !== undefined) raw.maxParallel = parsed.data.maxParallel;
     if (parsed.data.worktreeRetention !== undefined) {
       // null clears back to the default (10); a number (including 0 = unlimited)
       // is stored as-is.
@@ -3145,10 +2714,7 @@ export function createApp(deps: ServerDeps): Hono {
     }
     if (parsed.data.memoryLimitMb !== undefined) {
       // null or 0 both mean "no ceiling" — drop the key back to the default.
-      if (
-        parsed.data.memoryLimitMb === null ||
-        parsed.data.memoryLimitMb === 0
-      ) {
+      if (parsed.data.memoryLimitMb === null || parsed.data.memoryLimitMb === 0) {
         delete raw.memoryLimitMb;
       } else {
         raw.memoryLimitMb = parsed.data.memoryLimitMb;
@@ -3157,12 +2723,12 @@ export function createApp(deps: ServerDeps): Hono {
     if (parsed.data.defaultModels !== undefined) {
       // Per-runner merge, so setting codex's preset never clobbers claude's.
       const current =
-        raw.defaultModels && typeof raw.defaultModels === "object"
+        raw.defaultModels && typeof raw.defaultModels === 'object'
           ? { ...(raw.defaultModels as Record<string, unknown>) }
           : {};
       for (const [runner, model] of Object.entries(parsed.data.defaultModels)) {
         if (model === undefined) continue;
-        if (model === null || model === "") delete current[runner];
+        if (model === null || model === '') delete current[runner];
         else current[runner] = model;
       }
       if (Object.keys(current).length === 0) delete raw.defaultModels;
@@ -3170,12 +2736,9 @@ export function createApp(deps: ServerDeps): Hono {
     }
     try {
       await mkdir(dataDir, { recursive: true });
-      await writeFile(configPath, `${JSON.stringify(raw, null, 2)}\n`, "utf8");
+      await writeFile(configPath, `${JSON.stringify(raw, null, 2)}\n`, 'utf8');
     } catch (err) {
-      return c.json(
-        { error: err instanceof Error ? err.message : String(err) },
-        500,
-      );
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
     }
     // Pre-R6 answer shape ({baseBranch, defaultRunner}) + additive R6 fields.
     return c.json(configAnswer(await loadConfig(repoRoot)));
@@ -3184,29 +2747,26 @@ export function createApp(deps: ServerDeps): Hono {
   // Agent config is project-scoped (spec #404, adapted to the multi-project
   // route seam from #521): handlers resolve the selected repo through the
   // same ProjectContext as every other mirrored route.
-  api.get("/agent-config", async (c) => {
+  api.get('/agent-config', async (c) => {
     const editable = capabilities().localHandoff;
-    return c.json(
-      await listAgentConfig(c.get("project").root, process.env, editable),
-    );
+    return c.json(await listAgentConfig(c.get('project').root, process.env, editable));
   });
 
-  api.get("/agent-config/:id", async (c) => {
-    const id = c.req.param("id");
+  api.get('/agent-config/:id', async (c) => {
+    const id = c.req.param('id');
     const def = findConfigFile(id);
-    if (!def) return c.json({ error: "unknown config file" }, 404);
-    if (def.tracked === "outside-repo" && !capabilities().localHandoff) {
+    if (!def) return c.json({ error: 'unknown config file' }, 404);
+    if (def.tracked === 'outside-repo' && !capabilities().localHandoff) {
       return c.json(
         {
-          error:
-            "this file lives in your home directory and is not served in hosted mode (CEZ_REMOTE)",
+          error: 'this file lives in your home directory and is not served in hosted mode (CEZ_REMOTE)',
         },
         409,
       );
     }
-    const read = await readConfigFile(id, c.get("project").root);
-    if (read === null) return c.json({ error: "unknown config file" }, 404);
-    if ("error" in read) return c.json({ error: read.error }, 500);
+    const read = await readConfigFile(id, c.get('project').root);
+    if (read === null) return c.json({ error: 'unknown config file' }, 404);
+    if ('error' in read) return c.json({ error: read.error }, 500);
     return c.json(read);
   });
 
@@ -3214,42 +2774,37 @@ export function createApp(deps: ServerDeps): Hono {
     content: z.string().max(2_000_000),
     version: z.string().nullable(),
   });
-  api.put("/agent-config/:id", async (c) => {
+  api.put('/agent-config/:id', async (c) => {
     // Config files may define hooks and MCP commands, so writes remain a
     // local-machine capability and are re-gated on every request.
     if (!capabilities().localHandoff) {
       return c.json(
         {
           error:
-            "editing agent config is disabled in hosted mode (CEZ_REMOTE) — edit it from the machine that owns the checkout",
+            'editing agent config is disabled in hosted mode (CEZ_REMOTE) — edit it from the machine that owns the checkout',
         },
         409,
       );
     }
-    const parsed = setAgentConfigSchema.safeParse(
-      await c.req.json().catch(() => null),
-    );
+    const parsed = setAgentConfigSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
-      return c.json(
-        { error: parsed.error.issues.map((issue) => issue.message).join("; ") },
-        400,
-      );
+      return c.json({ error: parsed.error.issues.map((issue) => issue.message).join('; ') }, 400);
     }
     const out = await writeConfigFile(
-      c.req.param("id"),
+      c.req.param('id'),
       parsed.data.content,
       parsed.data.version,
-      c.get("project").root,
+      c.get('project').root,
     );
-    if (out === null) return c.json({ error: "unknown config file" }, 404);
+    if (out === null) return c.json({ error: 'unknown config file' }, 404);
     if (!out.ok) return c.json({ error: out.error }, out.status);
     return c.json(out.read);
   });
 
-  api.get("/repo/diff", async (c) => {
-    const { root: repoRoot } = c.get("project");
+  api.get('/repo/diff', async (c) => {
+    const { root: repoRoot } = c.get('project');
     const info = await getRepoInfo(repoRoot);
-    if (!info) return c.text("not a git repository");
+    if (!info) return c.text('not a git repository');
     return c.text(await getDiff(info.root));
   });
 
@@ -3258,22 +2813,20 @@ export function createApp(deps: ServerDeps): Hono {
   // shape `{sha, subject, author, when, files, stat}` with 409 + reason on failure. The
   // legacy text answer below is a protected surface (BACKWARD_COMPATIBILITY.md §2) — its
   // shape, including the in-band failure sentences, stays exactly as it was.
-  api.get("/repo/commit/:sha", async (c) => {
-    const { root: repoRoot } = c.get("project");
+  api.get('/repo/commit/:sha', async (c) => {
+    const { root: repoRoot } = c.get('project');
     const info = await getRepoInfo(repoRoot);
-    if (c.req.query("structured") === "1") {
-      if (!info) return c.json({ error: "not a git repository" }, 409);
-      const result = await collectCommitChanges(info.root, c.req.param("sha"));
+    if (c.req.query('structured') === '1') {
+      if (!info) return c.json({ error: 'not a git repository' }, 409);
+      const result = await collectCommitChanges(info.root, c.req.param('sha'));
       if (!result.ok) return c.json({ error: result.error }, 409);
       return c.json(result.commit);
     }
-    if (!info) return c.text("not a git repository");
+    if (!info) return c.text('not a git repository');
     try {
-      return c.text(await getCommit(info.root, c.req.param("sha")));
+      return c.text(await getCommit(info.root, c.req.param('sha')));
     } catch (err) {
-      return c.text(
-        `(git show failed: ${err instanceof Error ? err.message : String(err)})`,
-      );
+      return c.text(`(git show failed: ${err instanceof Error ? err.message : String(err)})`);
     }
   });
 
@@ -3281,12 +2834,12 @@ export function createApp(deps: ServerDeps): Hono {
   // surface, untouched): the same {files, stat} shape the session /changes
   // route serves, here for the MAIN working tree's uncommitted changes vs
   // HEAD (redesign R5 Step 1.3 — §"Git/session API additions").
-  api.get("/repo/changes", async (c) => {
-    const { root: repoRoot } = c.get("project");
+  api.get('/repo/changes', async (c) => {
+    const { root: repoRoot } = c.get('project');
     const info = await getRepoInfo(repoRoot);
-    if (!info) return c.json({ error: "not a git repository" }, 409);
+    if (!info) return c.json({ error: 'not a git repository' }, 409);
     // The user's REAL working tree — never stage into their index (a GET must not write).
-    const result = await collectChanges(info.root, "HEAD", {
+    const result = await collectChanges(info.root, 'HEAD', {
       intentToAdd: false,
     });
     if (!result.ok) return c.json({ error: result.error }, 409);
@@ -3300,24 +2853,15 @@ export function createApp(deps: ServerDeps): Hono {
     name: z.string().trim().min(1).max(200),
     from: z.string().trim().min(1).max(200).optional(),
   });
-  api.post("/repo/branch", async (c) => {
-    const { root: repoRoot } = c.get("project");
+  api.post('/repo/branch', async (c) => {
+    const { root: repoRoot } = c.get('project');
     const info = await getRepoInfo(repoRoot);
-    if (!info) return c.json({ error: "not a git repository" }, 409);
-    const parsed = repoBranchSchema.safeParse(
-      await c.req.json().catch(() => null),
-    );
+    if (!info) return c.json({ error: 'not a git repository' }, 409);
+    const parsed = repoBranchSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
-      return c.json(
-        { error: parsed.error.issues.map((i) => i.message).join("; ") },
-        400,
-      );
+      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
     }
-    const result = await createOrSwitchBranch(
-      info.root,
-      parsed.data.name,
-      parsed.data.from,
-    );
+    const result = await createOrSwitchBranch(info.root, parsed.data.name, parsed.data.from);
     if (!result.ok) return c.json({ error: result.error }, 409);
     return c.json({ branch: result.branch, created: result.created });
   });
@@ -3329,7 +2873,7 @@ export function createApp(deps: ServerDeps): Hono {
   // the sub-app's routes under each prefix, handlers shared, internal order
   // (e.g. `/runs/archive-finished` before `/runs/:id/archive`) preserved.
   app.route(SCOPED_PREFIX, api);
-  app.route("/api", api);
+  app.route('/api', api);
 
   // ---- SPA catch-all -------------------------------------------------------
   // Last, so every route above still wins. Any other GET gets the cockpit shell:
@@ -3339,7 +2883,7 @@ export function createApp(deps: ServerDeps): Hono {
   // an unknown API path must never answer with HTML.
   // Without a web/dist build this serves the built-in build-hint page (dev-only
   // state — the published tarball ships web/dist), never a 404.
-  app.get("*", (c) => serveShell(c) ?? c.notFound());
+  app.get('*', (c) => serveShell(c) ?? c.notFound());
 
   return app;
 }
@@ -3354,14 +2898,14 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
   return serve({
     fetch: app.fetch,
     port,
-    hostname: deps.bindHost ?? "127.0.0.1",
+    hostname: deps.bindHost ?? '127.0.0.1',
   });
 }
 
 /** The bare hostname of a `Host` header — see `normalizeHostname`. `''` when the
  *  header is absent, which no allowlist matches. */
 function hostnameOfHost(host: string | undefined): string {
-  return host ? normalizeHostname(host) : "";
+  return host ? normalizeHostname(host) : '';
 }
 
 /** The `hostname:port` authority of a `Host` header, e.g. `127.0.0.1:4321`.
@@ -3371,11 +2915,8 @@ function hostnameOfHost(host: string | undefined): string {
  *  default port). That symmetry is what lets us compare the two without knowing
  *  our own scheme, which we cannot know behind a TLS-terminating proxy. */
 function authorityOfHost(host: string | undefined): string {
-  if (!host) return "";
-  const port =
-    host.match(/^\[[^\]]*\]:(\d+)$/)?.[1] ??
-    host.match(/^[^:]*:(\d+)$/)?.[1] ??
-    "";
+  if (!host) return '';
+  const port = host.match(/^\[[^\]]*\]:(\d+)$/)?.[1] ?? host.match(/^[^:]*:(\d+)$/)?.[1] ?? '';
   return `${normalizeHostname(host)}:${port}`;
 }
 
@@ -3386,7 +2927,7 @@ function authorityOfHost(host: string | undefined): string {
 function authorityOfOrigin(origin: string): string | null {
   try {
     const u = new URL(origin);
-    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
     return `${normalizeHostname(u.hostname)}:${u.port}`;
   } catch {
     return null;
@@ -3408,7 +2949,7 @@ function hostnameOfOrigin(origin: string): string | null {
 function resolveWebDir(): string {
   const here = dirname(fileURLToPath(import.meta.url));
   // here = <pkg>/dist/server (built) or <pkg>/src/server (tsx dev).
-  return join(here, "..", "..", "web");
+  return join(here, '..', '..', 'web');
 }
 
 /**
@@ -3441,15 +2982,12 @@ export function isSafeSessionId(sessionId: string): boolean {
  * guarantee than escaping, and platform-independent. Ids are UUID/CLI-minted
  * today; this keeps a future source safe.
  */
-export function resumeCommand(
-  runner: string | undefined,
-  sessionId: string,
-): string | null {
+export function resumeCommand(runner: string | undefined, sessionId: string): string | null {
   if (!isSafeSessionId(sessionId)) return null;
   switch (runner) {
-    case "codex":
+    case 'codex':
       return `codex resume ${sessionId}`;
-    case "opencode":
+    case 'opencode':
       return `opencode --session ${sessionId}`;
     default:
       return `claude --resume ${sessionId}`;
