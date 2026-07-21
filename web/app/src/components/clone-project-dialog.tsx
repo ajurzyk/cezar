@@ -1,5 +1,6 @@
+import { SettingsIcon } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate } from 'react-router'
+import { Link as RouterLink, useNavigate } from 'react-router'
 
 import { onWorkspaceEvent } from '@/api/global-events'
 import { useCheckoutProject, useProjects } from '@/api/queries'
@@ -135,13 +136,39 @@ export function CloneProjectDialog({
             disabled={checkout.isPending}
             onChange={(event) => setName(event.target.value)}
           />
-          <p
-            data-slot="clone-target"
-            className="truncate font-mono text-[11.5px] text-soft-foreground"
-            title={target}
-          >
-            {target}
-          </p>
+          <div className="flex min-w-0 items-center gap-1">
+            <p
+              data-slot="clone-target"
+              className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-soft-foreground"
+              title={target}
+            >
+              {target}
+            </p>
+            {checkout.isPending ? (
+              <Button
+                data-slot="clone-root-settings"
+                variant="ghost"
+                size="icon-sm"
+                className="size-7"
+                aria-label="Edit checkout root"
+                title="Edit checkout root"
+                disabled
+              >
+                <SettingsIcon className="size-3.5" aria-hidden="true" />
+              </Button>
+            ) : (
+              <Button asChild variant="ghost" size="icon-sm" className="size-7">
+                <RouterLink
+                  to="/settings/global/projects"
+                  data-slot="clone-root-settings"
+                  aria-label="Edit checkout root"
+                  title="Edit checkout root"
+                >
+                  <SettingsIcon className="size-3.5" aria-hidden="true" />
+                </RouterLink>
+              </Button>
+            )}
+          </div>
         </div>
 
         {/* One line, replaced in place: `git clone` emits a counter update every few hundred ms,
