@@ -26,7 +26,7 @@ import {
 } from '../workflows/types.js';
 import { planChain, slugify } from '../planner.js';
 import { discoverSkills } from '../skills.js';
-import { refreshTeamSkills } from '../skills-remote.js';
+import { refreshTeamSkills, waitForTeamSkills } from '../skills-remote.js';
 import { appendHandoffHeartbeat, handoffProgressExcerpt, readHandoff } from '../handoff.js';
 import { markStarted, onTodosChanged, readTodos, removeTodo, todoTaskText, type TodoItem } from '../todos.js';
 import type { RunEvent, RunRecord, RunStatus, RunStore } from '../runs/store.js';
@@ -1272,7 +1272,14 @@ export function createApp(deps: ServerDeps): Hono {
   // `/new?auto=1` is honored only with it (spec 011). Same-origin only.
   api.get('/launch-key', (c) => c.json({ key: c.get('project').launchKey }));
 
-  api.get('/skills', async (c) => c.json(await discoverSkills(c.get('project').root)));
+  api.get('/skills', async (c) => {
+    const repoRoot = c.get('project').root;
+    // The default read stays fast and starts the team load in the background.
+    // The cockpit follows it with `wait=1`, off the render path, so a cold
+    // cache converges without polling or a manual reload (spec 005 / #555).
+    if (c.req.query('wait') === '1') await waitForTeamSkills(repoRoot);
+    return c.json(await discoverSkills(repoRoot));
+  });
 
   // ---- GUI prefs (ui-state.json) --------------------------------------------
   // The read path is shared with the CLI (`src/ui-state.ts`) so `cezar serve` can honour a

@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useEffect } from 'react'
 
 import {
   browseFs,
@@ -26,6 +27,7 @@ import {
   getRunHandoff,
   getRuns,
   getSkills,
+  getSkillsWhenReady,
   getTodos,
   getUiState,
   getWorkflows,
@@ -85,6 +87,9 @@ export const queryKeys = {
   },
   get skills() {
     return [queryScope(), 'skills'] as const
+  },
+  get skillsReady() {
+    return [queryScope(), 'skills', 'ready'] as const
   },
   get launchKey() {
     return [queryScope(), 'launch-key'] as const
@@ -402,11 +407,29 @@ export function useWorkflows() {
  *  composer's `/` autocomplete fetches on first trigger, never on every thread visit. (The
  *  palette gets the same laziness structurally: its content mounts only while open.) */
 export function useSkills(enabled = true) {
-  return useQuery({
-    queryKey: queryKeys.skills,
+  const queryClient = useQueryClient()
+  const skillsKey = queryKeys.skills
+  const skillsScope = skillsKey[0]
+  const skills = useQuery({
+    queryKey: skillsKey,
     queryFn: ({ signal }) => getSkills({ signal }),
     enabled,
   })
+  const ready = useQuery({
+    queryKey: queryKeys.skillsReady,
+    queryFn: ({ signal }) => getSkillsWhenReady({ signal }),
+    enabled: enabled && skills.isSuccess,
+    staleTime: Infinity,
+    retry: false,
+  })
+
+  useEffect(() => {
+    // Treat the follow-up as best-effort. The fast catalog remains authoritative
+    // if an older server/proxy answers this additive request unexpectedly.
+    if (Array.isArray(ready.data)) queryClient.setQueryData([skillsScope, 'skills'], ready.data)
+  }, [queryClient, ready.data, skillsScope])
+
+  return skills
 }
 
 /** The bookmarklet auto-start secret (spec 011). Mounted ONLY by the Settings → Skills

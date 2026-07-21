@@ -248,6 +248,12 @@ export function getSkills(opts?: ReadOptions): Promise<Skill[]> {
   return get<Skill[]>('/api/skills', opts)
 }
 
+/** Wait for the server's already-started team-skill load. Used only after the fast catalog
+ * read has rendered, so a cold clone never delays opening a skill picker. */
+export function getSkillsWhenReady(opts?: ReadOptions): Promise<Skill[]> {
+  return get<Skill[]>('/api/skills?wait=1', opts)
+}
+
 /** Refresh the team skills repos (spec 005: clone/fetch, degrade quietly offline) and answer
  *  the merged catalog — the Settings → Skills "Refresh" button. */
 export function refreshSkills(): Promise<Skill[]> {
