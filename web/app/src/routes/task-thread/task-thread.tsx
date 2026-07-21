@@ -1,5 +1,5 @@
 import { MessageSquareTextIcon, SearchXIcon } from 'lucide-react'
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { Link, useLocation, useParams } from 'react-router'
 
 import { ApiError } from '@/api/client'
@@ -32,7 +32,10 @@ import {
   UserBubble,
 } from './thread-items'
 import { ContinueAction } from './follow-up-engine'
+import { AgentsDock } from './agents-dock'
 import { PlanDock, planCounts } from './plan-dock'
+import { collectSubagents, findSubagent, subagentChildren } from './subagent-dock'
+import { SubagentSheet } from './subagent-sheet'
 import { AcceptCelebration, ReviewPanel } from './review-panel'
 import { queuePosition } from './run-actions'
 import { RunHeader } from './run-header'
@@ -177,6 +180,8 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
   // plan hides the dock and the header mirror alike).
   const plan = latestPlanEntries(thread)
   const planTally = plan !== undefined && plan.length > 0 ? planCounts(plan) : undefined
+  // The Agents dock's data: the current fan-out's sub-agents, or [] when there is none to
+  // show (#474). Derived from the same reduced turns the thread renders — no new subscription.
   // The legacy session-open rule (web/app.js `updateDetail`): the composer can deliver while
   // the engine owns a live session — running queues the message, waiting answers it.
   const sessionOpen = run.status === 'running' || run.status === 'waiting'
@@ -186,6 +191,36 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
   // that has not run. Deliberately `queued` only: review/done/failed/cancelled keep the
   // existing copy and their Continue action.
   const queued = run.status === 'queued'
+  // A closed session can never settle its in-flight items — nothing in the reducer rewrites a
+  // `running` item on `session.ended`, so an interrupted fan-out stays `running` in the
+  // persisted stream forever. Without this, reopening it pulses `Agents · 0/1` above a dead
+  // transcript for good.
+  //
+  // Derived from `sessionOpen` rather than enumerated, so it cannot drift when a status is
+  // added: anything that is neither live nor still queued is closed. `review` matters most —
+  // it is where this pipeline's runs normally END, and `threadFooter` already calls it closed.
+  const runIsTerminal = !sessionOpen && run.status !== 'queued'
+  const agents = useMemo(() => collectSubagents(thread.turns, runIsTerminal), [thread.turns, runIsTerminal])
+  // The drill-down's whole state: which agent is open. Ephemeral by design (spec Q2/Q5) —
+  // sub-agents have no stable identity outside their run, so there is nothing to persist.
+  const [openAgentId, setOpenAgentId] = useState<string | undefined>(undefined)
+  // Item ids repeat across runs (codex mints `item_1`, `item_rv_1` per session), so a
+  // selection carried across a route change could pop the sheet open on an unrelated item.
+  const [selectionRunId, setSelectionRunId] = useState(run.id)
+  if (selectionRunId !== run.id) {
+    setSelectionRunId(run.id)
+    setOpenAgentId(undefined)
+  }
+  // Resolved from the turns, NOT from `agents`: the dock can yield to the transcript (Q6)
+  // while a sheet is open, and that must not slam the panel shut mid-read.
+  const openAgent = useMemo(
+    () => (openAgentId === undefined ? undefined : findSubagent(thread.turns, openAgentId, runIsTerminal)),
+    [thread.turns, openAgentId, runIsTerminal],
+  )
+  const openAgentChildren = useMemo(
+    () => (openAgentId === undefined ? [] : subagentChildren(thread.turns, openAgentId)),
+    [thread.turns, openAgentId],
+  )
   const sendMessage = useSendMessage(run.id)
 
   // The queued-run affordances (#472), passed only while the run is queued — so the bubbles
@@ -272,6 +307,18 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
 
       <AcceptCelebration status={run.status} />
 
+      {/* The drill-down for whichever Agents-dock row was clicked. Rendered outside the dock
+          so the sheet's portal is not affected by the dock's collapse state — but inside its
+          own card cache (module-level and run-keyed, so this is the SAME store the thread
+          uses), or tool cards expanded in the sheet would forget that on reopen. */}
+      <ThreadCardCache runId={run.id}>
+        <SubagentSheet
+          agent={openAgent}
+          entries={openAgentChildren}
+          onClose={() => setOpenAgentId(undefined)}
+        />
+      </ThreadCardCache>
+
       {/* The dock region (mockup `.dock`): plan dock, paused hint, then the composer.
           `bottom: var(--kb)` is the iOS keyboard lift — 0 until the visualViewport watcher
           publishes an inset. */}
@@ -286,6 +333,10 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
           </div>
         ) : null}
         <div className="mx-auto flex w-full max-w-[820px] flex-col gap-2.5">
+          {/* Agents above the plan: the fan-out is the more urgent "what is happening now",
+              and it is transient — the plan outlives it. Keyed by run id like the plan dock. */}
+          <AgentsDock key={`agents:${run.id}`} runId={run.id} agents={agents} onSelect={setOpenAgentId} />
+
           {plan !== undefined && plan.length > 0 ? (
             // Keyed by run id: the collapse default re-derives per task (see PlanDock).
             <PlanDock key={run.id} runId={run.id} entries={plan} />

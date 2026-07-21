@@ -39,10 +39,17 @@ export { isNearBottom }
 /** Right-aligned muted bubble — a v1 `user-message` line or the run's initial task. Renders any
  *  attached images inline; falls back to a count only when the URLs aren't available (older runs).
  *
+ *  The text renders as MARKDOWN, like `AssistantMessage` (#524): what a user sends is markdown as
+ *  often as what the agent replies — the GitHub hand-off prompt alone carries a `#N` heading-ish
+ *  line, a bare link and a `---` rule — and rendering one side raw made the same document look
+ *  broken on the way in and fine on the way out. `whitespace-pre-wrap` goes with it: Streamdown
+ *  owns the line breaks now, and leaving it on would double every blank line.
+ *
  *  `onEdit` / `onRemove` (#472) are the queued-run affordances: passing one renders its control.
  *  They are passed ONLY while the run is still queued, so once it starts the bubbles go read-only
  *  on the next `run` frame — the stack has become history. The initial prompt gets `onEdit` but
- *  never `onRemove`: a run with no prompt is not a run. */
+ *  never `onRemove`: a run with no prompt is not a run. The inline editor deliberately edits the
+ *  RAW markdown source (`text`), not the rendered output. */
 export function UserBubble({
   text,
   imageCount = 0,
@@ -123,7 +130,7 @@ export function UserBubble({
   return (
     <div
       data-slot="user-bubble"
-      className="group max-w-[78%] self-end rounded-2xl rounded-br-md bg-muted px-[15px] py-2.5 text-[13.5px] leading-[1.55] whitespace-pre-wrap md:max-w-[70%]"
+      className="group max-w-[78%] min-w-0 self-end rounded-2xl rounded-br-md bg-muted px-[15px] py-2.5 text-[13.5px] leading-[1.55] md:max-w-[70%]"
     >
       {onEdit || onRemove ? (
         <span
@@ -152,7 +159,7 @@ export function UserBubble({
           ) : null}
         </span>
       ) : null}
-      {text}
+      <Markdown breaks>{text}</Markdown>
       {images.length > 0 ? (
         <span data-slot="user-images" className="mt-2 flex flex-wrap justify-end gap-1.5">
           {images.map((url) => (
@@ -485,8 +492,12 @@ export function ToolCard({
 }
 
 /** A sub-agent entry inside a Task card — one level deep by design, so nested tools render
- *  without their own children. `scope` is the parent card's cache key, extended per child. */
-function NestedEntry({ entry, scope }: { entry: ThreadEntry; scope?: string }) {
+ *  without their own children. `scope` is the parent card's cache key, extended per child.
+ *
+ *  Exported for the sub-agent sheet (#474), which renders the SAME child entries in a focused
+ *  panel: the drill-down must look like the inline nesting, not like a second renderer that
+ *  drifts from it. */
+export function NestedEntry({ entry, scope }: { entry: ThreadEntry; scope?: string }) {
   switch (entry.kind) {
     case 'message':
       return <AssistantMessage text={entry.text} />
