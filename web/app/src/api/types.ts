@@ -266,7 +266,41 @@ export interface ProjectsResponse {
  *  the top level server-side, so a writer must send the whole `sidebar` object, not a leaf. */
 export interface WorkspaceUiState {
   sidebar?: { collapsed?: Record<string, boolean> } & Record<string, unknown>
+  /** Settings → Appearance, GLOBAL since step 3.5: accent + density describe the person at
+   *  the keyboard, not a repo, so they live in `~/.cezar/ui-state.json` and follow the user
+   *  across every project. Same shape as the per-repo `UiState.appearance` it superseded
+   *  (Migration 001 copied the old per-repo value up). */
+  appearance?: { accent?: 'lime' | 'violet'; density?: 'comfortable' | 'compact' | 'ultra' }
+  /** Settings → Notifications, GLOBAL since step 3.5 — one answer for the whole workspace,
+   *  since the delivering browser is one browser whichever project you are looking at. */
+  notifications?: { enabled?: boolean }
   [key: string]: unknown
+}
+
+/** `GET/PUT /api/workspace/config` — the settings slice of `~/.cezar/config.json` (step 2.7).
+ *  Global knobs only: the registry itself is `GET /api/projects`, and `schemaVersion` (a
+ *  migration cursor, not a setting) is deliberately absent. `resources` is the workspace's
+ *  host-protection budget — the ONLY effective `maxParallel`/`memoryLimitMb` since Phase 2
+ *  (spec §"Resource governance"); `worktreeRetentionDefault` seeds projects that set none. */
+export interface WorkspaceConfigResponse {
+  projectsDir: string
+  resources: {
+    maxParallel: number
+    memoryLimitMb: number | null
+    worktreeRetentionDefault: number
+  }
+}
+
+/** `PUT /api/workspace/config` body — partial: absent keys stay untouched. A rejected
+ *  `projectsDir` (not writable) 400s with the reason and persists NOTHING, resources
+ *  included, so callers may send both in one request only if they want that atomicity. */
+export interface SetWorkspaceConfigInput {
+  projectsDir?: string
+  resources?: {
+    maxParallel?: number
+    memoryLimitMb?: number | null
+    worktreeRetentionDefault?: number
+  }
 }
 
 /** `GET /api/launch-key` — the bookmarklet auto-start secret (spec 011). Fetched to COMPARE

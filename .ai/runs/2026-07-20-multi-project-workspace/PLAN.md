@@ -32,7 +32,7 @@
 | 3 | 3.2 | `/p/:projectId/*` routes + legacy redirects (params preserved) + `default` alias normalization | done | a1f68c5 |
 | 3 | 3.3 | Multi-project sidebar: groups, collapse persistence, 10-recent + More…, missing state, add-project button | done | 2b68a92 |
 | 3 | 3.4 | New-task project pill: scope swap, per-project draft keys, scoped submit | done | e08c5bf |
-| 3 | 3.5 | Settings split: registry `scope` field, `/settings/global/*` sections, project sections | todo | |
+| 3 | 3.5 | Settings split: registry `scope` field, `/settings/global/*` sections, project sections | done | 088ddfd |
 | 3 | 3.6 | Project-scoped bookmarklets (per-project launch-key URLs) | todo | |
 | 3 | 3.7 | BACKWARD_COMPATIBILITY.md: `/p/*` URLs + bookmarklet redirect | todo | |
 | 4 | 4.1 | `GET /api/fs/browse` (home-rooted, realpath containment, `CEZ_REMOTE` restriction) | todo | |

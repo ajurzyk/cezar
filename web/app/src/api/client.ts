@@ -41,11 +41,13 @@ import type {
   SaveWorkflowResponse,
   SetConfigInput,
   SetConfigResponse,
+  SetWorkspaceConfigInput,
   Skill,
   StartTodoResponse,
   TodoItem,
   UiState,
   WorkflowsResponse,
+  WorkspaceConfigResponse,
   WorkspaceUiState,
 } from './types'
 import { scopeApiPath } from './project-scope'
@@ -499,6 +501,19 @@ export function getWorkspaceUiState(opts?: ReadOptions): Promise<WorkspaceUiStat
  *  objects (`{ sidebar: {...} }`), never a nested leaf alone. Answers the merged state. */
 export function putWorkspaceUiState(patch: WorkspaceUiState): Promise<WorkspaceUiState> {
   return mutate<WorkspaceUiState>('PUT', '/api/workspace/ui-state', patch)
+}
+
+/** The global settings slice of `~/.cezar/config.json` (step 2.7) — Settings → Resources and
+ *  (step 4.4) the checkout-root field. Workspace-level, so never scope-prefixed. */
+export function getWorkspaceConfig(opts?: ReadOptions): Promise<WorkspaceConfigResponse> {
+  return get<WorkspaceConfigResponse>('/api/workspace/config', opts)
+}
+
+/** Partial update — absent keys stay untouched; answers the merged config. A `projectsDir`
+ *  the server cannot write to comes back as a 400 `ApiError` whose message is the reason,
+ *  which is exactly what the Projects pane renders inline (step 4.4). */
+export function putWorkspaceConfig(patch: SetWorkspaceConfigInput): Promise<WorkspaceConfigResponse> {
+  return mutate<WorkspaceConfigResponse>('PUT', '/api/workspace/config', patch)
 }
 
 /** Set/clear the agents' config knobs — base branch, default runner, system prompt, per-runner

@@ -25,6 +25,7 @@ import {
   getTodos,
   getUiState,
   getWorkflows,
+  getWorkspaceConfig,
   getWorkspaceUiState,
   getWorktrees,
   patchRun,
@@ -118,8 +119,12 @@ export const queryKeys = {
 export const workspaceQueryKeys = {
   projects: ['workspace', 'projects'] as const,
   /** `~/.cezar/ui-state.json` via `GET/PUT /api/workspace/ui-state` (step 2.7) — cross-project
-   *  GUI prefs, e.g. the sidebar's per-project collapse map (step 3.3). */
+   *  GUI prefs, e.g. the sidebar's per-project collapse map (step 3.3), and — since step 3.5 —
+   *  appearance + notifications, which describe the user rather than a repo. */
   uiState: ['workspace', 'ui-state'] as const,
+  /** `~/.cezar/config.json`'s settings slice via `GET/PUT /api/workspace/config` (step 2.7):
+   *  the global Resources knobs and the checkout root. */
+  config: ['workspace', 'config'] as const,
 }
 
 /** The workspace project registry (`GET /api/projects`): the `/p/:projectId` route gate's
@@ -384,6 +389,15 @@ export function useWorkspaceUiState() {
   return useQuery({
     queryKey: workspaceQueryKeys.uiState,
     queryFn: ({ signal }) => getWorkspaceUiState({ signal }),
+  })
+}
+
+/** The global settings slice of `~/.cezar/config.json` — Settings → Resources (step 3.5) and
+ *  the Projects pane's checkout root (step 4.4). Not scope-led: one workspace, one answer. */
+export function useWorkspaceConfig() {
+  return useQuery({
+    queryKey: workspaceQueryKeys.config,
+    queryFn: ({ signal }) => getWorkspaceConfig({ signal }),
   })
 }
 

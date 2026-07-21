@@ -23,7 +23,11 @@ import { WorkflowsLoading } from './routes/workflows/workflows-loading'
 import { GitTabLoading } from './routes/task-git/git-tab-loading'
 import { ThreadLoading } from './routes/task-thread/thread-loading'
 import { visibleSettingsSections } from './routes/settings/registry'
-import { SettingsIndexRoute, SettingsSectionRoute } from './routes/settings/settings-shell'
+import {
+  SettingsIndexRoute,
+  SettingsSectionRoute,
+  settingsSectionPath,
+} from './routes/settings/settings-shell'
 import { TasksOverviewRoute } from './routes/tasks-overview'
 
 /** Lazy ON PURPOSE: the thread view carries the markdown stack (Streamdown + remark/rehype,
@@ -370,19 +374,50 @@ export function AppRoutes() {
 
         {/* Settings (R6 Step 1.3): registry-driven — the section list, nav and routes all come
             from routes/settings/registry.tsx. Hidden sections are NOT routed, so their URLs are
-            honest 404s until the section ships (notifications unhides in Step 1.7). */}
-        <Route path="settings" element={<SettingsIndexRoute />} />
+            honest 404s until the section ships (notifications unhides in Step 1.7).
+
+            Only the PROJECT-scoped sections live here (multi-project spec, step 3.5); the
+            global ones are the top-level `/settings/global/*` block below. */}
+        <Route path="settings" element={<SettingsIndexRoute scope="project" />} />
         <Route path="settings/skills" element={<SettingsSkillsRedirect />} />
-        {visibleSettingsSections().map((section) => (
+        {visibleSettingsSections('project').map((section) => (
           <Route
             key={section.id}
             path={`settings/${section.id}`}
-            element={<SettingsSectionRoute section={section} />}
+            element={<SettingsSectionRoute section={section} scope="project" />}
+          />
+        ))}
+        {/* A section that MOVED out of the project area keeps its old URL working: every
+            pre-3.5 bookmark and every legacy flat `/settings/appearance` (which the redirect
+            below turns into `/p/<boot>/settings/appearance`) lands on the global twin instead
+            of a 404. Plain Navigate, not the scoped one — the target is outside every project. */}
+        {visibleSettingsSections('global').map((section) => (
+          <Route
+            key={section.id}
+            path={`settings/${section.id}`}
+            element={<Navigate to={settingsSectionPath('global', section.id)} replace />}
           />
         ))}
 
         <Route path="*" element={<NotFoundRoute />} />
       </Route>
+
+      {/* Global settings (multi-project spec, step 3.5) — the one cockpit area that is NOT
+          under `/p/:projectId`, because nothing here belongs to a project: appearance and
+          notifications are the user's, resources are the machine's, and the Projects pane IS
+          the registry. No `ProjectScopeProvider` above it, so its sections must read/write the
+          workspace routes (`/api/workspace/*`), which are never scope-prefixed.
+
+          Static segments outrank the `*` legacy redirect below in React Router's ranking, so
+          these win regardless of order — listed here for readability. */}
+      <Route path="/settings/global" element={<SettingsIndexRoute scope="global" />} />
+      {visibleSettingsSections('global').map((section) => (
+        <Route
+          key={section.id}
+          path={settingsSectionPath('global', section.id)}
+          element={<SettingsSectionRoute section={section} scope="global" />}
+        />
+      ))}
 
       {/* Everything else IS a legacy flat URL — the boot-project redirect owns it. The 404 for
           truly unknown paths still renders, scoped, after the redirect. */}

@@ -1,7 +1,15 @@
-import { FolderIcon, FolderOpenIcon, MenuIcon, PlusIcon, SearchIcon, XIcon } from 'lucide-react'
+import {
+  FolderIcon,
+  FolderOpenIcon,
+  MenuIcon,
+  PlusIcon,
+  SearchIcon,
+  SettingsIcon,
+  XIcon,
+} from 'lucide-react'
 import * as React from 'react'
 import type { ReactNode } from 'react'
-import { useLocation } from 'react-router'
+import { Link as RouterLink, useLocation } from 'react-router'
 
 import { openCommandPalette } from '@/components/command-palette'
 import { GithubIcon } from '@/components/icons'
@@ -411,9 +419,40 @@ function SidebarContent({
         <div data-slot="tools-menu">{toolsMenu}</div>
         {version ? <VersionChip version={version} latestVersion={latestVersion} /> : null}
         <CommandPaletteHint />
-        <ThemeToggle className="ml-auto" />
+        <GlobalSettingsLink onNavigate={onNavigate} className="ml-auto" />
+        <ThemeToggle />
       </div>
     </div>
+  )
+}
+
+/**
+ * The footer's way into `/settings/global/*` (multi-project spec, "Sidebar → Footer").
+ *
+ * A PLAIN router Link, deliberately: global settings sit outside every project, and the scoped
+ * `Link` this file otherwise uses would prefix the target with the active `/p/<id>` — a path
+ * that is not a route. Icon-only to keep the footer's one row intact; the accessible name and
+ * the tooltip both carry the label.
+ */
+function GlobalSettingsLink({
+  className,
+  onNavigate,
+}: {
+  className?: string
+  onNavigate?: () => void
+}) {
+  return (
+    <Button asChild variant="ghost" size="icon" className={cn('size-7', className)}>
+      <RouterLink
+        to="/settings/global"
+        data-slot="global-settings-link"
+        aria-label="Global settings"
+        title="Global settings"
+        onClick={onNavigate}
+      >
+        <SettingsIcon className="size-4" aria-hidden="true" />
+      </RouterLink>
+    </Button>
   )
 }
 

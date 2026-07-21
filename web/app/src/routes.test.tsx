@@ -156,11 +156,12 @@ const ROUTE_CASES: Array<[url: string, route: string, title: string]> = [
   ['/workflows', 'workflows', 'Loading workflows…'],
   ['/workflows/ship-it', 'workflows', 'Loading workflows…'],
   ['/skills', 'skills', 'Skills'],
+  // Project settings only (step 3.5) — appearance/notifications/resources/projects moved to
+  // the unscoped `/settings/global/*` area, covered in its own describe below.
   ['/settings', 'settings', 'Settings'],
-  ['/settings/bookmarklets', 'settings-bookmarklets', 'Bookmarklets'],
-  ['/settings/appearance', 'settings-appearance', 'Appearance'],
   ['/settings/agents', 'settings-agents', 'Agents'],
-  ['/settings/notifications', 'settings-notifications', 'Notifications'],
+  ['/settings/worktrees', 'settings-worktrees', 'Worktrees'],
+  ['/settings/bookmarklets', 'settings-bookmarklets', 'Bookmarklets'],
   ['/settings/prompt-templates', 'settings-prompt-templates', 'Prompt templates'],
 ]
 
@@ -212,9 +213,47 @@ describe('scoped route map (/p/:projectId)', () => {
   // section links are plain flat `to`s routed through the scope-aware Link.
   it('navigation links generated inside a project carry its prefix', () => {
     renderAt(`/p/${BOOT}/settings`)
-    const link = document.querySelector('[data-slot="settings-index"] a[data-section="appearance"]')
-    expect(link?.getAttribute('href')).toBe(`/p/${BOOT}/settings/appearance`)
+    const link = document.querySelector('[data-slot="settings-index"] a[data-section="agents"]')
+    expect(link?.getAttribute('href')).toBe(`/p/${BOOT}/settings/agents`)
   })
+})
+
+/**
+ * Global settings (step 3.5) — the one area OUTSIDE `/p/:projectId`. Two things must hold: the
+ * URLs render without any project scope, and the sections that MOVED there keep their old
+ * project-scoped URLs alive as redirects, so pre-split bookmarks still land.
+ */
+describe('the global settings area (/settings/global)', () => {
+  const GLOBAL_CASES: Array<[string, string, string]> = [
+    ['/settings/global', 'settings-global', 'Global settings'],
+    ['/settings/global/appearance', 'settings-global-appearance', 'Appearance'],
+    ['/settings/global/notifications', 'settings-global-notifications', 'Notifications'],
+    ['/settings/global/resources', 'settings-global-resources', 'Resources'],
+    ['/settings/global/projects', 'settings-global-projects', 'Projects'],
+  ]
+  for (const [url, route, title] of GLOBAL_CASES) {
+    it(`${url} → ${route}, unscoped`, () => {
+      renderAt(url)
+      expect(routeName()).toBe(route)
+      // Never redirected into a project: the pathname is the one that was asked for.
+      expect(currentPathname()).toBe(url)
+      expect(screen.getByRole('heading', { level: 1 }).textContent).toBe(title)
+    })
+  }
+
+  // A moved section's old URL, in both spellings a bookmark can have it.
+  for (const id of ['appearance', 'notifications', 'resources']) {
+    it(`/p/${BOOT}/settings/${id} redirects to the global twin`, () => {
+      renderAt(`/p/${BOOT}/settings/${id}`)
+      expect(currentPathname()).toBe(`/settings/global/${id}`)
+      expect(routeName()).toBe(`settings-global-${id}`)
+    })
+
+    it(`the legacy flat /settings/${id} lands on the global twin too`, () => {
+      renderAt(`/settings/${id}`)
+      expect(currentPathname()).toBe(`/settings/global/${id}`)
+    })
+  }
 })
 
 /** Legacy flat URLs (BACKWARD_COMPATIBILITY.md): every pre-multi-project path redirects to the

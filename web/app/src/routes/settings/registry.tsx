@@ -2,6 +2,8 @@ import {
   BellIcon,
   BookmarkIcon,
   BotIcon,
+  FolderGit2Icon,
+  FoldersIcon,
   GaugeIcon,
   KeyboardIcon,
   NotebookPenIcon,
@@ -17,11 +19,19 @@ import { BookmarkletsSection } from './bookmarklets-section'
 import { NotificationsSection } from './notifications-section'
 import { PromptTemplatesSection } from './prompt-templates-section'
 import { ResourcesSection } from './resources-section'
+import { WorktreesSection } from './worktrees-section'
 
 /**
  * The Settings section registry (R6 Step 1.3, spec §"Settings"): the ONE place a section is
  * declared. The shell renders the section nav and the routes from this list, so adding a
  * section later is one entry here — no layout work, no route wiring.
+ *
+ * Since the multi-project split (step 3.5, spec §"Settings split") every entry also declares
+ * its `scope`, and that single field decides everything downstream — which URL the section
+ * lives at (`/p/<id>/settings/<id>` vs `/settings/global/<id>`), which nav lists it, and which
+ * store it writes. The rule of thumb: does the setting describe THIS REPO (agents, worktrees,
+ * bookmarklets, prompt templates) or the person/machine (appearance, notifications, host
+ * resources, the project registry)?
  *
  * `hidden` sections are declared but not routed and not listed: they exist so the plan is
  * visible in code (`mcp`, `keyboard` — later phases; `notifications` unhid in Step 1.7)
@@ -33,10 +43,15 @@ export type SettingsSectionId =
   | 'appearance'
   | 'agents'
   | 'resources'
+  | 'worktrees'
+  | 'projects'
   | 'mcp'
   | 'notifications'
   | 'prompt-templates'
   | 'keyboard'
+
+/** Which settings area a section belongs to — and therefore which store it writes. */
+export type SettingsScope = 'project' | 'global'
 
 export interface SettingsSection {
   id: SettingsSectionId
@@ -45,6 +60,8 @@ export interface SettingsSection {
   description: string
   icon: ComponentType<SVGProps<SVGSVGElement>>
   component: ComponentType
+  /** `project` → `/p/<projectId>/settings/<id>`, `global` → `/settings/global/<id>`. */
+  scope: SettingsScope
   /** Declared but not yet implemented: no nav entry, no route (the URL is honestly a 404). */
   hidden?: boolean
 }
@@ -65,48 +82,30 @@ function comingSoon(title: string, Icon: ComponentType<SVGProps<SVGSVGElement>>)
 }
 
 export const SETTINGS_SECTIONS: SettingsSection[] = [
-  {
-    id: 'bookmarklets',
-    title: 'Bookmarklets',
-    description: 'Launch skills from a GitHub PR or issue.',
-    icon: BookmarkIcon,
-    component: BookmarkletsSection,
-  },
-  {
-    id: 'appearance',
-    title: 'Appearance',
-    description: 'Theme, accent and density.',
-    icon: PaletteIcon,
-    component: AppearanceSection,
-  },
+  // ---- project scope (`/p/<projectId>/settings/…`) — settings that describe THIS repo -------
   {
     id: 'agents',
     title: 'Agents',
     description: 'Default runner, models and system prompt.',
     icon: BotIcon,
     component: AgentsSection,
+    scope: 'project',
   },
   {
-    id: 'resources',
-    title: 'Resources',
-    description: 'Parallel tasks, per-task memory limit and worktree retention.',
-    icon: GaugeIcon,
-    component: ResourcesSection,
+    id: 'worktrees',
+    title: 'Worktrees',
+    description: 'How many finished task worktrees this project keeps on disk.',
+    icon: FolderGit2Icon,
+    component: WorktreesSection,
+    scope: 'project',
   },
   {
-    id: 'mcp',
-    title: 'MCP',
-    description: 'Model Context Protocol servers.',
-    icon: PlugIcon,
-    component: comingSoon('MCP', PlugIcon),
-    hidden: true,
-  },
-  {
-    id: 'notifications',
-    title: 'Notifications',
-    description: 'Browser notifications when an agent needs you.',
-    icon: BellIcon,
-    component: NotificationsSection,
+    id: 'bookmarklets',
+    title: 'Bookmarklets',
+    description: 'Launch skills from a GitHub PR or issue.',
+    icon: BookmarkIcon,
+    component: BookmarkletsSection,
+    scope: 'project',
   },
   {
     id: 'prompt-templates',
@@ -114,6 +113,54 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
     description: 'Reusable snippets for follow-up instructions.',
     icon: NotebookPenIcon,
     component: PromptTemplatesSection,
+    scope: 'project',
+  },
+  {
+    id: 'mcp',
+    title: 'MCP',
+    description: 'Model Context Protocol servers.',
+    icon: PlugIcon,
+    component: comingSoon('MCP', PlugIcon),
+    scope: 'project',
+    hidden: true,
+  },
+
+  // ---- global scope (`/settings/global/…`) — the user and the machine, in mockup order -----
+  {
+    id: 'appearance',
+    title: 'Appearance',
+    description: 'Theme, accent and density.',
+    icon: PaletteIcon,
+    component: AppearanceSection,
+    scope: 'global',
+  },
+  {
+    id: 'notifications',
+    title: 'Notifications',
+    description: 'Browser notifications when an agent needs you.',
+    icon: BellIcon,
+    component: NotificationsSection,
+    scope: 'global',
+  },
+  {
+    id: 'resources',
+    title: 'Resources',
+    description: 'Parallel tasks and per-task memory limit, across every project.',
+    icon: GaugeIcon,
+    component: ResourcesSection,
+    scope: 'global',
+  },
+  {
+    id: 'projects',
+    // SCAFFOLD ONLY. Step 4.4 owns this pane: the registry table (name, path, status, remove)
+    // and the checkout-root field with its inline server-side writability error. It is declared
+    // and routed here because the global nav must show the four sections the mockup shows —
+    // an absent entry would make the split look half-finished.
+    title: 'Projects',
+    description: 'The workspace registry and where GitHub checkouts land.',
+    icon: FoldersIcon,
+    component: comingSoon('Projects', FoldersIcon),
+    scope: 'global',
   },
   {
     id: 'keyboard',
@@ -121,11 +168,16 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
     description: 'Shortcuts.',
     icon: KeyboardIcon,
     component: comingSoon('Keyboard', KeyboardIcon),
+    scope: 'global',
     hidden: true,
   },
 ]
 
-/** What the shell nav and the route table actually show — hidden sections drop out entirely. */
-export function visibleSettingsSections(): SettingsSection[] {
-  return SETTINGS_SECTIONS.filter((section) => !section.hidden)
+/**
+ * What one settings area's nav and route table actually show — hidden sections drop out
+ * entirely, and so does everything belonging to the OTHER scope. The two areas are rendered by
+ * the same shell, so this filter is the only thing keeping them apart.
+ */
+export function visibleSettingsSections(scope: SettingsScope): SettingsSection[] {
+  return SETTINGS_SECTIONS.filter((section) => !section.hidden && section.scope === scope)
 }
