@@ -17,7 +17,7 @@ import type { RunManager } from '../workflows/run.js';
 import { allocateProjectSlug, clearProjectProbeCache, listProjects, registerProject } from '../workspace/projects.js';
 import { ProjectContexts } from './project-context.js';
 import { apiRequest } from './loopback-request.testkit.js';
-import { mergeWriteWorkspaceConfig } from '../workspace/config.js';
+import { loadWorkspaceConfig, mergeWriteWorkspaceConfig } from '../workspace/config.js';
 import {
   WorkspaceEventBus,
   createApp,
@@ -49,6 +49,7 @@ describe('workspace projects API', () => {
   const savedHome = process.env.CEZ_HOME;
   const savedRemote = process.env.CEZ_REMOTE;
   const savedFollowups = process.env.CEZ_FOLLOWUPS;
+  const savedSingleProject = process.env.CEZ_SINGLE_PROJECT;
   const savedDryRun = process.env.CEZ_DRY_RUN;
   let home: string;
   let repoRoot: string;
@@ -63,6 +64,7 @@ describe('workspace projects API', () => {
     store = RunStore.open(join(repoRoot, '.ai/cezar'));
     delete process.env.CEZ_REMOTE;
     delete process.env.CEZ_FOLLOWUPS;
+    delete process.env.CEZ_SINGLE_PROJECT;
     // Deterministic on any machine: no network, no real agent CLIs.
     process.env.CEZ_DRY_RUN = '1';
     clearProjectProbeCache();
@@ -77,6 +79,8 @@ describe('workspace projects API', () => {
     else process.env.CEZ_REMOTE = savedRemote;
     if (savedFollowups === undefined) delete process.env.CEZ_FOLLOWUPS;
     else process.env.CEZ_FOLLOWUPS = savedFollowups;
+    if (savedSingleProject === undefined) delete process.env.CEZ_SINGLE_PROJECT;
+    else process.env.CEZ_SINGLE_PROJECT = savedSingleProject;
     if (savedDryRun === undefined) delete process.env.CEZ_DRY_RUN;
     else process.env.CEZ_DRY_RUN = savedDryRun;
   });
@@ -135,6 +139,20 @@ describe('workspace projects API', () => {
       // Derived lazily by realpath lookup — the boot repo, not the other one.
       expect(body.bootProject).toBe(boot.id);
       expect(body.projectsDir).toBe('~/cezar/projects');
+    });
+
+    it('pins flagged reads to the boot project without pruning stored projects', async () => {
+      const boot = await registerProject(repoRoot);
+      const other = await registerProject(otherRoot);
+      process.env.CEZ_SINGLE_PROJECT = '1';
+
+      const body = await getProjects({ bootProjectId: boot.id });
+      expect(body.projects.map((project) => project.id)).toEqual([boot.id]);
+      expect(body.bootProject).toBe(boot.id);
+      expect((await loadWorkspaceConfig()).projects.map((project) => project.id)).toEqual([
+        boot.id,
+        other.id,
+      ]);
     });
 
     it('reports a deleted root as missing', async () => {
@@ -427,6 +445,16 @@ describe('workspace projects API', () => {
   });
 
   describe('GET /api/health — additive projects + bootProject', () => {
+    it('pins flagged health listings to the explicit boot identity', async () => {
+      const boot = await registerProject(repoRoot);
+      await registerProject(otherRoot);
+      process.env.CEZ_SINGLE_PROJECT = '1';
+
+      const body = await getHealth({ bootProjectId: boot.id });
+      expect(body.projects).toEqual([{ id: boot.id, name: boot.name }]);
+      expect(body.bootProject).toBe(boot.id);
+    });
+
     it('keeps the pre-workspace shape byte-identical and adds only projects + bootProject', async () => {
       const boot = await registerProject(repoRoot);
       const other = await registerProject(otherRoot);

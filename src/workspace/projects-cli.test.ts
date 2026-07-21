@@ -84,6 +84,20 @@ describe('cezar projects CLI', () => {
       expect(await run()).toBe(0);
       expect(io.out.join('\n')).toContain('no projects registered yet');
     });
+
+    it('pins listing to an explicit boot project while preserving default listings', async () => {
+      const boot = await registerProject(makeRepo('boot'));
+      await registerProject(makeRepo('other'));
+
+      expect(await runProjectsCommand([], { defaultRoot: repos, bootProjectId: boot.id, io })).toBe(0);
+      expect(io.out.join('\n')).toContain('boot');
+      expect(io.out.join('\n')).not.toContain('other');
+
+      io.out.length = 0;
+      expect(await run()).toBe(0);
+      expect(io.out.join('\n')).toContain('boot');
+      expect(io.out.join('\n')).toContain('other');
+    });
   });
 
   describe('add', () => {

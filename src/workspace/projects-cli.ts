@@ -37,13 +37,13 @@ const USAGE = `usage:
  */
 export async function runProjectsCommand(
   args: string[],
-  opts: { defaultRoot: string; io?: ProjectsCommandIo },
+  opts: { defaultRoot: string; bootProjectId?: string; io?: ProjectsCommandIo },
 ): Promise<number> {
   const io = opts.io ?? defaultIo;
   const [sub = 'list', ...rest] = args;
   switch (sub) {
     case 'list':
-      return listCommand(io);
+      return listCommand(io, opts.bootProjectId);
     case 'add':
       return addCommand(rest[0] ? resolve(rest[0]) : opts.defaultRoot, io);
     case 'remove':
@@ -68,8 +68,8 @@ function statusMark(status: string): string {
   return status === 'missing' ? '✗' : status === 'not-git' ? '·' : '✓';
 }
 
-async function listCommand(io: ProjectsCommandIo): Promise<number> {
-  const projects = await listProjects();
+async function listCommand(io: ProjectsCommandIo, bootProjectId?: string): Promise<number> {
+  const projects = await listProjects(bootProjectId ? { projectId: bootProjectId } : undefined);
   if (projects.length === 0) {
     io.log('\n  no projects registered yet');
     io.log('  start the cockpit in a repo (npx cezar) or add one: cezar projects add <dir>\n');
