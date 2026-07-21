@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import type { AgentEvent } from './agent-runner.js';
-import type { UiEvent } from './ui-events.js';
+import type { UiEvent, UiItem } from './ui-events.js';
 import { codexSessionStarted, createCodexUiState, mapCodexNotification } from './codex-ui-mapper.js';
 import { CodexAppServerRunner } from './codex-app-server-runner.js';
 
@@ -555,4 +555,98 @@ describe('CodexAppServerRunner v2 wiring (against the bundled mock app-server)',
     expect(v2).toContainEqual({ type: 'usage.updated', usage: { input: 1200, output: 300, total: 1500 } });
     expect(v2).toContainEqual({ type: 'turn.completed', turnId: 'turn_mock_1', stopReason: 'end_turn' });
   }, 30_000);
+});
+
+/**
+ * #528 — reasoning text must survive into the persisted `item.completed`
+ * snapshot. `item.delta`s are live-only (`UiEventSink` never writes them), so
+ * a completed reasoning item that carries no `content` would replay empty.
+ */
+describe('codex reasoning text survives replay (#528)', () => {
+  const THREAD = 'th_1';
+  const TURN = 'turn_1';
+
+  function fold(frames: unknown[]): UiEvent[] {
+    let state = createCodexUiState();
+    const events: UiEvent[] = [];
+    for (const frame of frames) {
+      const mapped = mapCodexNotification(frame, state);
+      state = mapped.state;
+      events.push(...mapped.events);
+    }
+    return events;
+  }
+
+  function completedReasoning(events: UiEvent[], id: string): UiItem | undefined {
+    return events.find(
+      (e): e is Extract<UiEvent, { type: 'item.completed' }> =>
+        e.type === 'item.completed' && e.item.kind === 'reasoning' && e.item.id === id,
+    )?.item;
+  }
+
+  const started = {
+    method: 'item/started',
+    params: { threadId: THREAD, turnId: TURN, item: { type: 'reasoning', id: 'item_rsn_1', summary: 'Tracing it' } },
+  };
+  const textDelta = (delta: string) => ({
+    method: 'item/reasoning/textDelta',
+    params: { threadId: THREAD, turnId: TURN, itemId: 'item_rsn_1', delta },
+  });
+
+  it('falls back to the accumulated deltas when item/completed carries no content', () => {
+    const events = fold([
+      started,
+      textDelta('The session cookie '),
+      textDelta('is dropped on refresh.'),
+      // The real app-server may close a reasoning item with the summary only.
+      {
+        method: 'item/completed',
+        params: { threadId: THREAD, turnId: TURN, item: { type: 'reasoning', id: 'item_rsn_1', summary: 'Tracing it' } },
+      },
+    ]);
+    expect(completedReasoning(events, 'item_rsn_1')).toEqual({
+      kind: 'reasoning',
+      id: 'item_rsn_1',
+      text: 'The session cookie is dropped on refresh.',
+    });
+  });
+
+  it('accumulates summaryDelta and summaryTextDelta on the same item', () => {
+    const events = fold([
+      started,
+      { method: 'item/reasoning/summaryDelta', params: { threadId: THREAD, turnId: TURN, itemId: 'item_rsn_1', delta: 'a' } },
+      { method: 'item/reasoning/summaryTextDelta', params: { threadId: THREAD, turnId: TURN, itemId: 'item_rsn_1', delta: 'b' } },
+      {
+        method: 'item/completed',
+        params: { threadId: THREAD, turnId: TURN, item: { type: 'reasoning', id: 'item_rsn_1' } },
+      },
+    ]);
+    expect(completedReasoning(events, 'item_rsn_1')).toMatchObject({ text: 'ab' });
+  });
+
+  it('wire content still wins over the accumulator', () => {
+    const events = fold([
+      started,
+      textDelta('streamed'),
+      {
+        method: 'item/completed',
+        params: { threadId: THREAD, turnId: TURN, item: { type: 'reasoning', id: 'item_rsn_1', content: 'authoritative' } },
+      },
+    ]);
+    expect(completedReasoning(events, 'item_rsn_1')).toMatchObject({ text: 'authoritative' });
+  });
+
+  it('does not leak one item’s reasoning into the next', () => {
+    const events = fold([
+      started,
+      textDelta('first'),
+      { method: 'item/completed', params: { threadId: THREAD, turnId: TURN, item: { type: 'reasoning', id: 'item_rsn_1' } } },
+      {
+        method: 'item/started',
+        params: { threadId: THREAD, turnId: TURN, item: { type: 'reasoning', id: 'item_rsn_2', summary: 'Next' } },
+      },
+      { method: 'item/completed', params: { threadId: THREAD, turnId: TURN, item: { type: 'reasoning', id: 'item_rsn_2', summary: 'Next' } } },
+    ]);
+    expect(completedReasoning(events, 'item_rsn_2')).toMatchObject({ text: 'Next' });
+  });
 });

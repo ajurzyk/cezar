@@ -52,6 +52,11 @@ export interface CodexUiMapperState {
   /** Accumulated `outputDelta` text per commandExecution item, attached to
    *  the final snapshot when the wire `item/completed` carries no output. */
   readonly outputs: ReadonlyMap<string, string>;
+  /** Accumulated reasoning delta text per reasoning item, attached to the
+   *  final snapshot when the wire `item/completed` carries no `content`.
+   *  Deltas are live-only (never persisted), so without this the reasoning
+   *  text is unrecoverable on replay and the row reads back empty (#528). */
+  readonly reasonings: ReadonlyMap<string, string>;
   /** True once `turn/plan/updated` has spoken IN THE CURRENT TURN. Both that
    *  notification and the `plan`/`todoList` item arm write `plan.updated`, so
    *  without a precedence rule the last frame wins and a prose plan item would
@@ -76,6 +81,7 @@ export function createCodexUiState(): CodexUiMapperState {
     currentTurnId: null,
     knownItems: new Set(),
     outputs: new Map(),
+    reasonings: new Map(),
     planFromNotification: false,
   };
 }
@@ -273,18 +279,22 @@ function mapItemLifecycle(
     type === 'agentMessage'
       ? messageItem(raw, id)
       : type === 'reasoning'
-        ? reasoningItem(raw, id)
+        ? reasoningItem(raw, id, eventType, state)
         : toolItem(raw, id, type, eventType, state);
   const events: UiEvent[] = [{ type: eventType, item }];
 
   // Track live ids (for delta synthesis) and drop bookkeeping on completion.
   if (eventType === 'item.completed') {
-    if (!state.knownItems.has(id) && !state.outputs.has(id)) return { events, state };
+    if (!state.knownItems.has(id) && !state.outputs.has(id) && !state.reasonings.has(id)) {
+      return { events, state };
+    }
     const knownItems = new Set(state.knownItems);
     knownItems.delete(id);
     const outputs = new Map(state.outputs);
     outputs.delete(id);
-    return { events, state: { ...state, knownItems, outputs } };
+    const reasonings = new Map(state.reasonings);
+    reasonings.delete(id);
+    return { events, state: { ...state, knownItems, outputs, reasonings } };
   }
   if (state.knownItems.has(id)) return { events, state };
   return { events, state: { ...state, knownItems: new Set(state.knownItems).add(id) } };
@@ -303,9 +313,19 @@ function messageItem(raw: Record<string, unknown>, id: string): UiMessageItem {
   return item;
 }
 
-/** `reasoning` → reasoning item — full `content` when present, else the summary. */
-function reasoningItem(raw: Record<string, unknown>, id: string): UiReasoningItem {
-  return { kind: 'reasoning', id, text: str(raw.content) ?? str(raw.summary) ?? '' };
+/** `reasoning` → reasoning item — full `content` when present, else what
+ *  `reasoning/*Delta` streamed, else the summary. The accumulator matters on
+ *  `item.completed`: deltas never reach disk, so a completed snapshot without
+ *  `content` would otherwise persist the short summary (or nothing) and the
+ *  row would read back empty after a reload (#528). */
+function reasoningItem(
+  raw: Record<string, unknown>,
+  id: string,
+  eventType: ItemEventType,
+  state: CodexUiMapperState,
+): UiReasoningItem {
+  const streamed = eventType === 'item.started' ? undefined : str(state.reasonings.get(id));
+  return { kind: 'reasoning', id, text: str(raw.content) ?? streamed ?? str(raw.summary) ?? '' };
 }
 
 /** The §7.1 status map — the wire word wins; an item without one derives its
@@ -485,7 +505,13 @@ function mapDelta(
     next.set(itemId, (next.get(itemId) ?? '') + delta);
     outputs = next;
   }
-  return { events, state: { ...state, knownItems, outputs } };
+  let reasonings: ReadonlyMap<string, string> = state.reasonings;
+  if (field === 'reasoning') {
+    const next = new Map(state.reasonings);
+    next.set(itemId, (next.get(itemId) ?? '') + delta);
+    reasonings = next;
+  }
+  return { events, state: { ...state, knownItems, outputs, reasonings } };
 }
 
 // ---- telemetry ---------------------------------------------------------------
