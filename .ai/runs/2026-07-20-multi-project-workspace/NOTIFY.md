@@ -28,3 +28,41 @@
 - Cache isolation fixes (github list/comments, team-skills) + regressions; workspace config/ui-state routes (projectsDir probe, semaphore refresh); GET /api/workspace/events (stamped, usage split, legacy stream protected); BC docs.
 - Validation green: typecheck; FULL suite 2895/2895; test:unit 31/31; build; test:package 8/8.
 - Phase 2 complete — server fully project-scoped behind byte-identical aliases.
+
+## 2026-07-21T05:20:00Z — om-auto-continue-pr-loop resume
+- Resumed by: @pkarw (re-entry — the three-signal lock from the creator run was still held by the same user)
+- Resume point: Step 3.3 (source: PLAN.md Tasks table; HANDOFF.md agreed at 3.1, but 3.1/3.2 landed after it was last written — table is fresher)
+- PR head SHA: cfc159b (origin/feat/multi-project-workspace)
+- Worktree handover: the creator run's worktree (task eeb2f1f6) went dormant 2026-07-20T23:38 with status=failed and no live process. This resume works the branch from worktree d89e350f instead and pushes to the same remote branch. The dormant worktree's local branch ref will lag — do not resume it without re-syncing.
+- Salvaged work: that session left an unpushed `cezar autosave` commit (cd954c4) carrying partial Step 3.3 — AppShell `projectGroups` slot + `AddProjectMenu`, `useProjectRuns`/`useWorkspaceUiState` queries, `WorkspaceUiState` type, `capBuckets()`. Decision: keep the changes, drop the autosave commit (unpushed, so no PR history is rewritten) and land them inside the proper Step 3.3 commit, which still owes the project-groups component, its wiring, and component unit tests.
+
+## 2026-07-21T06:05:00Z — decision: latent Step-3.1 defect fixed inside Step 3.4 (cf132d8)
+- `ProjectScopeProvider` reset the module scope from its `[projectId]` effect CLEANUP. React runs every destroy before any create, so on a project change the scope was nulled between the provider's render and the remounted children's mount effects — the arriving project's first requests (`/api/skills`, `/api/workflows`, `/api/config`, `/api/repo`) went out UNPREFIXED and cached under the wrong key.
+- Blast radius was wider than the pill: every in-tree cross-project navigation had the same shape, including the Step-3.3 sidebar project links.
+- Fix: the reset moved into its own mount-only effect, with a unit regression test.
+- Why not its own commit: Step 3.4's own acceptance test ("switch project → picker data and draft isolated") cannot pass without it, so splitting would have landed a knowingly-red Step.
+- Second decision (3.4): the project pill is hidden in a single-project workspace, following the Step-3.3 sidebar precedent (groups mount only when the registry holds >1). Spec and mockups are silent on the gate; covered by a test.
+
+## 2026-07-21T06:25:00Z — decisions: Step 3.5 settings split (496f051)
+- Retention + worktrees panel split out of Resources into a new PROJECT-scoped `worktrees` section, per the spec's "Resources→Worktrees" wording; the old `/settings/resources` retention e2e was retargeted and renamed.
+- Moved sections keep their old URLs: both `/p/<id>/settings/<global-id>` and the legacy flat spelling redirect to the global twin, so pre-split bookmarks still land. **Carry into Step 3.7's BACKWARD_COMPATIBILITY update.**
+- The global Projects pane is a routed `comingSoon` scaffold with a comment pointing at Step 4.4 (the global nav needed all four mockup sections present).
+- Appearance e2e now reads workspace ui-state under the pinned `CEZ_HOME` (`.ai/qa/cez-home`) instead of the repo's `.ai/cezar`.
+
+## 2026-07-21T07:10:00Z — BLOCKER at checkpoint 5: e2e suite never ran during Phase 3
+- Checkpoint 5's unit gate is fully green (typecheck; vitest 3030/3030 across 185 files; test:unit 31/31; build + check:pack; test:package 8/8), but the **e2e suite is 16 failed / 51 passed / 1 skipped across 7 focused specs**.
+- Root cause of the miss: `npm test` is `vitest run` against the DEFAULT config, which excludes e2e — e2e lives behind `npm run test:e2e` / `web/app/e2e/vitest.config.ts`. Every Phase 3 executor reported "full gate green" truthfully and still never executed a single e2e spec. The per-Step scratch sanity check cannot catch this class of break by construction.
+- The failures are NOT environmental. They are stale assertions against the pre-3.2 flat URL grammar: `new-task.e2e.ts` expects `/new` but the app now redirects to `/p/<id>/new`; `smoke.e2e.ts` waits on `nav a[href="/github"]` but nav hrefs are now scoped. Steps 3.5/3.6 updated the three settings specs they touched; the shared specs (smoke, new-task, quick-list) were never revisited.
+- One failure needs genuine triage rather than a mechanical URL update: `smoke.e2e.ts > marks exactly one nav item active` expects `['Skills']` and gets `['Settings']`, which may be a real nav-active regression from the Step-3.5 settings split rather than a stale assertion.
+- Decision: halt dispatch before Phase 4. Fix forward with a new Step **3.8** appended to the Tasks table (the run's convention — never rewrite a landed Step), then re-run checkpoint 5.
+
+## 2026-07-21T07:30:00Z — checkpoint 5 (steps 3.3..3.8, Phase 3 close)
+- Landed this window: multi-project sidebar (3.3), new-task project pill (3.4), settings project/global split (3.5), project-scoped bookmarklets (3.6), Phase 3 BC docs (3.7), e2e realignment (3.8).
+- Validation green: typecheck; vitest 3030/3030 across 185 files; test:unit 31/31; build + check:pack (297 files); test:package 8/8. All under `env -u CEZ_REMOTE`.
+- E2E after the 3.8 fix-forward: 162 passed / 4 failed / 4 skipped (21 of 25 files green), from 16 failed at checkpoint entry. The 4 residuals are pre-existing and individually accounted for in `checkpoint-5-checks.md` — verified via `git log origin/main..HEAD` that this branch never touched `mock-claude.mjs` or `src/runs/store.ts`.
+- Real regression #2 found this window (harness, not product): e2e was mutating the operator's real `~/.cezar/config.json` — 12 self-spawning specs never pinned `CEZ_HOME`, so since Phase 1 every run registered its `/tmp/cezar-e2e-*` fixture into the developer's live registry. 16 dead entries pruned; `fixtureServeEnv()` now pins `CEZ_HOME`. Second-order effect: once the registry held >1 project the sidebar switched to the grouped shell, so flat-shell specs failed by run ORDER — a genuinely confusing failure mode now closed.
+- Also fixed in 3.8: four specs (review-gate, task-changes, task-files, variants-compare) silently required an operator shell carrying `CEZ_REVIEW_GATE=1` (opt-in, default OFF since #489); now pinned by the harness.
+- Process finding worth carrying: `npm test` is `vitest run` against the DEFAULT config and EXCLUDES e2e. Per-Step scratch checks cannot catch a broken cockpit URL grammar by construction — only the checkpoint's e2e pass can. Recorded in HANDOFF.md's environment caveats.
+- UI evidence captured in `checkpoint-5-artifacts/` against the live dry-run env with three real projects registered (the grouped sidebar only renders above one project): `sidebar-multi-project.png`, `new-task-project-pill.png`, `settings-global.png`.
+- Carry-forward: branch is 29 ahead / 20 behind `origin/main` — merge `main` before landing.
+- Phase 3 complete. Next: Step 4.1.
