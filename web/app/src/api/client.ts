@@ -212,8 +212,8 @@ export function getProjects(opts?: ReadOptions): Promise<ProjectsResponse> {
 }
 
 /** One directory listing for the folder picker (`GET /api/fs/browse`, step 4.1). `path`
- *  omitted means the browse root — the server decides where that is (home locally, the
- *  checkout root when hosted), so the dialog never has to know. */
+ *  omitted means the independently configured browse root, so the dialog never has to know
+ *  or duplicate that workspace setting. */
 export function browseFs(path?: string, opts?: ReadOptions): Promise<FsBrowseResponse> {
   const query = path === undefined || path === '' ? '' : `?path=${encodeURIComponent(path)}`
   return get<FsBrowseResponse>(`/api/fs/browse${query}`, opts)

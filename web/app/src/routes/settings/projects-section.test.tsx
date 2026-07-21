@@ -71,6 +71,7 @@ function serve(answers: Answers = {}) {
     projectsDir: '~/cezar/projects',
   }
   const config: WorkspaceConfigResponse = {
+    browseRoot: '~/',
     projectsDir: '~/cezar/projects',
     resources: { maxParallel: 2, memoryLimitMb: null, worktreeRetentionDefault: 10 },
   }
@@ -87,6 +88,7 @@ function serve(answers: Answers = {}) {
       if (url === '/api/workspace/config' && method === 'GET') return json(config)
       if (url === '/api/workspace/config' && method === 'PUT') {
         if (answers.putConfig) return json(answers.putConfig.payload, answers.putConfig.status)
+        config.browseRoot = String(body?.browseRoot ?? config.browseRoot)
         config.projectsDir = String(body?.projectsDir ?? config.projectsDir)
         return json(config)
       }
@@ -131,6 +133,8 @@ const removeButton = (id: string) => row(id)?.querySelector<HTMLButtonElement>('
 const rootInput = () => document.querySelector<HTMLInputElement>('[data-slot="projects-checkout-root"]')
 const saveRoot = () => document.querySelector<HTMLButtonElement>('[data-action="projects-save-checkout-root"]')
 const inlineError = () => document.querySelector<HTMLElement>('[data-slot="projects-checkout-root-error"]')
+const browseInput = () => document.querySelector<HTMLInputElement>('[data-slot="projects-browse-root"]')
+const saveBrowse = () => document.querySelector<HTMLButtonElement>('[data-action="projects-save-browse-root"]')
 const confirmButton = () => document.querySelector<HTMLButtonElement>('[data-action="projects-confirm-remove"]')
 const deletes = () => requests.filter((r) => r.method === 'DELETE')
 
@@ -205,6 +209,22 @@ describe('Global settings → Projects', () => {
       expect(requests.filter((r) => r.method === 'GET' && r.url === '/api/projects')).toHaveLength(1),
     )
     expect(inlineError()).toBeNull()
+  })
+
+  it('saves the browse folder independently without refreshing the clone destination', async () => {
+    serve()
+    renderProjects()
+    await waitFor(() => expect(browseInput()).not.toBeNull())
+    expect(browseInput()!.value).toBe('~/')
+    fireEvent.change(browseInput()!, { target: { value: '~/source' } })
+    fireEvent.click(saveBrowse()!)
+    await waitFor(() =>
+      expect(requests.filter((r) => r.method === 'PUT' && r.url === '/api/workspace/config')).toEqual([
+        { method: 'PUT', url: '/api/workspace/config', body: { browseRoot: '~/source' } },
+      ]),
+    )
+    expect(rootInput()!.value).toBe('~/cezar/projects')
+    expect(requests.filter((r) => r.method === 'GET' && r.url === '/api/projects')).toHaveLength(0)
   })
 
   it('removes a project only after a confirm that promises no files are deleted', async () => {

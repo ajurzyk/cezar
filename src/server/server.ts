@@ -239,6 +239,8 @@ export interface RemoveProjectResponse {
  *  settings slice of `~/.cezar/config.json`: global knobs ONLY, never the
  *  project registry (that is `GET /api/projects`' job). */
 export interface WorkspaceConfigResponse {
+  /** Root exposed by the Add project directory browser (`~` kept). */
+  browseRoot: string;
   /** Checkout root for GUI-cloned projects — stored as written (`~` kept). */
   projectsDir: string;
   resources: {
@@ -611,7 +613,7 @@ function parseUiStateBody<S extends z.ZodTypeAny>(schema: S, body: unknown): { d
   return { data: parsed.data as z.infer<S> };
 }
 
-/** The `projectsDir` writability probe (multi-project spec, "API Contracts"):
+/** Workspace-root writability probe (multi-project spec, "API Contracts"):
  *  `mkdir -p`, `access W_OK`, then a real create/delete round-trip — W_OK alone
  *  can lie (e.g. a read-only mount still reports writable permission bits).
  *  Returns the failure message, or null when the directory is usable. */
@@ -985,6 +987,14 @@ export function createApp(deps: ServerDeps): Hono {
     }
   };
 
+  const workspaceBrowseRoot = async (): Promise<string> => {
+    try {
+      return (await loadWorkspaceConfig()).browseRoot;
+    } catch {
+      return defaultWorkspaceConfig().browseRoot;
+    }
+  };
+
   app.get('/api/projects', async (c) => {
     let projects: ProjectListEntry[] = [];
     let projectsDir = defaultWorkspaceConfig().projectsDir;
@@ -1048,7 +1058,9 @@ export function createApp(deps: ServerDeps): Hono {
     // `false` for a path that IS inside the root and merely absent — which
     // would tell a hosted user who typo'd a folder under their own checkout
     // root that it is "outside the browsable root".
-    const hostedBrowseRoot = capabilities().localHandoff ? null : resolveBrowseRoot(true, await workspaceProjectsDir());
+    const hostedBrowseRoot = capabilities().localHandoff
+      ? null
+      : resolveBrowseRoot(await workspaceBrowseRoot());
     if (hostedBrowseRoot !== null) {
       if (!(await isLexicallyInsideBrowseRoot(hostedBrowseRoot, requested))) {
         // No resolved path in the message (fs-browse's rule): saying where the
@@ -1285,6 +1297,7 @@ export function createApp(deps: ServerDeps): Hono {
   // /api/projects above, and schemaVersion (a migration cursor, not a
   // setting) is deliberately omitted.
   const workspaceConfigBody = (config: WorkspaceConfig): WorkspaceConfigResponse => ({
+    browseRoot: config.browseRoot,
     projectsDir: config.projectsDir,
     resources: {
       maxParallel: config.resources.maxParallel,
@@ -1298,6 +1311,7 @@ export function createApp(deps: ServerDeps): Hono {
   // workspace schema (src/workspace/config.ts, step 1.2) exactly, so a value
   // this route accepts can never be degraded away by the next load's `.catch`.
   const workspaceConfigUpdateSchema = z.object({
+    browseRoot: z.string().trim().min(1).max(4096).optional(),
     projectsDir: z.string().trim().min(1).max(4096).optional(),
     resources: z
       .object({
@@ -1312,13 +1326,14 @@ export function createApp(deps: ServerDeps): Hono {
     if (!parsed.success) {
       return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
     }
-    const { projectsDir, resources } = parsed.data;
-    if (projectsDir !== undefined) {
+    const { browseRoot, projectsDir, resources } = parsed.data;
+    for (const configuredRoot of [browseRoot, projectsDir]) {
+      if (configuredRoot === undefined) continue;
       // Validated ON CHANGE, never at load (spec): expand `~`, `mkdir -p`,
       // probe real writability. Any failure → 400 and NO change persisted.
-      const expanded = expandTilde(projectsDir);
+      const expanded = expandTilde(configuredRoot);
       if (!expanded.startsWith('/')) {
-        return c.json({ error: `not writable: ${projectsDir} is not an absolute path` }, 400);
+        return c.json({ error: `not writable: ${configuredRoot} is not an absolute path` }, 400);
       }
       const probeError = await probeWritableDir(expanded);
       if (probeError !== null) return c.json({ error: `not writable: ${probeError}` }, 400);
@@ -1326,8 +1341,8 @@ export function createApp(deps: ServerDeps): Hono {
     let written: WorkspaceConfig;
     try {
       written = await mergeWriteWorkspaceConfig((config) => {
-        // `projectsDir` is stored as written (`~` kept — see the schema note);
-        // only the probe above sees the expanded form.
+        // Roots are stored as written (`~` kept); only the probe expands them.
+        if (browseRoot !== undefined) config.browseRoot = browseRoot;
         if (projectsDir !== undefined) config.projectsDir = projectsDir;
         if (resources?.maxParallel !== undefined) config.resources.maxParallel = resources.maxParallel;
         if (resources?.memoryLimitMb !== undefined) config.resources.memoryLimitMb = resources.memoryLimitMb;
@@ -1369,13 +1384,10 @@ export function createApp(deps: ServerDeps): Hono {
   // WORKSPACE-level and same-origin: the directory picker behind "Add project
   // → open local folder". Directories only, and every answer is contained in a
   // single root — see src/server/fs-browse.ts for the containment rule and why
-  // it is realpath-based. The root is the ONLY thing decided here: hosted mode
-  // (`CEZ_REMOTE=1` / non-loopback bind — the same `localHandoff` predicate the
-  // open-in-* endpoints use) narrows it from the operator's home to
-  // `projectsDir`, because a remote viewer has no business enumerating the
-  // host's whole home. Read per request, so a `CEZ_REMOTE` flip applies live.
+  // it is realpath-based. The independently configured browse root is read per
+  // request, so a successful settings save applies without a restart.
   app.get('/api/fs/browse', async (c) => {
-    const root = resolveBrowseRoot(!capabilities().localHandoff, await workspaceProjectsDir());
+    const root = resolveBrowseRoot(await workspaceBrowseRoot());
     const result = await browseDirectory({
       root,
       path: c.req.query('path'),
