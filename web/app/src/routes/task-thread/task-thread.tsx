@@ -100,6 +100,17 @@ export function buildThreadRows(run: ApiRun, thread: ThreadState): ThreadRow[] {
   // the run record IS that message, so it renders from there, not from an invented event.
   if (run.task)
     rows.push({ key: 'task', node: <UserBubble text={run.task} images={run.taskImages ?? []} /> })
+  // Messages stacked onto the run while it waits for a slot (#472). Same provenance as the
+  // task bubble — they live on the record, not in the event stream, and the engine writes no
+  // `user-message` line for them (they are folded into the prompt, not sent as turns). So
+  // rendering them here is what keeps the thread showing exactly one bubble per authored
+  // message, before the run starts and after.
+  for (const message of run.queuedMessages ?? []) {
+    rows.push({
+      key: `queued:${message.id}`,
+      node: <UserBubble text={message.text} images={message.images ?? []} />,
+    })
+  }
   for (const turn of thread.turns) {
     if (turn.userMessage) {
       rows.push({

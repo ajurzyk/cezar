@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createQueryClient } from '@/api/query-client'
 import type { ApiRun, RunEvent, RunStatus } from '@/api/types'
 
-import { TaskThreadRoute, ThreadView } from './task-thread'
+import { buildThreadRows, TaskThreadRoute, ThreadView } from './task-thread'
 import { reduceThread } from './thread-state'
 
 afterEach(() => {
@@ -156,6 +156,70 @@ describe('ThreadView', () => {
     expect(
       document.querySelector('[data-slot="composer-disabled-action"]')?.textContent,
     ).toContain('Continue')
+  })
+
+  /** #472 — stacked messages render as their own bubbles, after the task. */
+  it('renders one bubble per stacked message, in order, with their images', () => {
+    renderView(
+      <ThreadView
+        run={run('queued', {
+          queuedMessages: [
+            { id: 'm1', text: 'also update the changelog', createdAt: '2026-07-21T10:00:00.000Z' },
+            {
+              id: 'm2',
+              text: 'and bump the version',
+              images: ['/api/runs/r1/images/pasted-1.png'],
+              createdAt: '2026-07-21T10:01:00.000Z',
+            },
+          ],
+        })}
+        thread={reduceThread([])}
+      />,
+    )
+    const bubbles = [...document.querySelectorAll('[data-slot="user-bubble"]')].map(
+      (b) => b.textContent ?? '',
+    )
+    expect(bubbles[0]).toContain('Summarize what this project does.')
+    expect(bubbles[1]).toContain('also update the changelog')
+    expect(bubbles[2]).toContain('and bump the version')
+    expect(
+      document.querySelector('img[src="/api/runs/r1/images/pasted-1.png"]'),
+    ).not.toBeNull()
+  })
+
+  /**
+   * The no-regression assertion, at the row-builder level rather than the DOM:
+   * an absent stack and an empty one must produce the same rows, and a run with
+   * no stack must produce exactly today's rows. Asserting on `buildThreadRows`
+   * keys keeps this free of Radix's per-render generated ids.
+   */
+  it('builds the same rows whether the stack is absent or empty', () => {
+    const keys = (extra: Partial<ApiRun>) =>
+      buildThreadRows(run('queued', extra), reduceThread(EVENTS)).map((r) => r.key)
+
+    const absent = keys({})
+    expect(absent[0]).toBe('task')
+    // No `queued:` row is invented for a run that has none.
+    expect(absent.some((k) => k.startsWith('queued:'))).toBe(false)
+    expect(keys({ queuedMessages: [] })).toEqual(absent)
+  })
+
+  it('inserts the stacked rows directly after the task row, in order', () => {
+    const keys = buildThreadRows(
+      run('queued', {
+        queuedMessages: [
+          { id: 'm1', text: 'one', createdAt: '2026-07-21T10:00:00.000Z' },
+          { id: 'm2', text: 'two', createdAt: '2026-07-21T10:01:00.000Z' },
+        ],
+      }),
+      reduceThread(EVENTS),
+    ).map((r) => r.key)
+
+    expect(keys.slice(0, 3)).toEqual(['task', 'queued:m1', 'queued:m2'])
+    // …and the rest of the transcript is untouched behind them.
+    expect(keys.slice(3)).toEqual(
+      buildThreadRows(run('queued'), reduceThread(EVENTS)).map((r) => r.key).slice(1),
+    )
   })
 
   /** #472 — a queued run has not started, so its prompt is still authorable. */
