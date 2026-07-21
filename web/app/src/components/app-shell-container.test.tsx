@@ -32,7 +32,7 @@ const HEALTH: HealthResponse = {
   checks: [],
   defaultRunner: 'claude',
   forge: null,
-  capabilities: { localHandoff: true, followups: true },
+  capabilities: { localHandoff: true, followups: true, singleProject: false },
 }
 
 /** One registered project — the degenerate workspace every existing install upgrades into. */

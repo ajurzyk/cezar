@@ -8,7 +8,7 @@ Source spec: `.ai/specs/2026-07-21-cez-single-project.md`
 
 | Phase | Step | Title | Status | Commit |
 |-------|------|-------|--------|--------|
-| 1 | 1.1 | Add the server and client single-project capability | todo | — |
+| 1 | 1.1 | Add the server and client single-project capability | done | 288eb59 |
 | 1 | 1.2 | Pin project listings to explicit boot identity | todo | — |
 | 2 | 2.1 | Refuse project-management HTTP surfaces before side effects | todo | — |
 | 2 | 2.2 | Refuse project CLI mutations in single-project mode | todo | — |

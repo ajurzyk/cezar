@@ -40,7 +40,7 @@ interface HealthBody {
   checks: unknown[];
   defaultRunner?: string;
   forge: unknown;
-  capabilities: { localHandoff: boolean; followups: boolean };
+  capabilities: { localHandoff: boolean; followups: boolean; singleProject: boolean };
   projects: { id: string; name: string }[];
   bootProject: string;
 }
@@ -457,6 +457,7 @@ describe('workspace projects API', () => {
       expect(body.capabilities).toEqual({
         localHandoff: true,
         followups: false,
+        singleProject: false,
       });
       // New fields: registered projects enumerated, boot project named.
       expect(body.projects.map((p) => p.id).sort()).toEqual([boot.id, other.id].sort());
