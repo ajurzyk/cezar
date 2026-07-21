@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { workspaceConfigPath } from '../paths.js';
 import { RunStore } from '../runs/store.js';
 import type { RunManager } from '../workflows/run.js';
+import { apiRequest } from './loopback-request.testkit.js';
 import { createApp } from './server.js';
 import type { FsBrowseResponse } from './fs-browse.js';
 
@@ -24,6 +25,7 @@ describe('GET /api/fs/browse (step 4.1)', () => {
   const savedHome = process.env.HOME;
   const savedCezHome = process.env.CEZ_HOME;
   const savedRemote = process.env.CEZ_REMOTE;
+  const savedBrowseRoot = process.env.CEZ_BROWSE_ROOT;
   /** Stands in for the operator's `$HOME` — `os.homedir()` honors it on posix. */
   let home: string;
   /** A real directory that is NOT under `home`: the escape target. */
@@ -37,6 +39,7 @@ describe('GET /api/fs/browse (step 4.1)', () => {
     process.env.HOME = home;
     process.env.CEZ_HOME = join(home, '.cezar');
     delete process.env.CEZ_REMOTE; // local mode is the default under test
+    delete process.env.CEZ_BROWSE_ROOT;
 
     mkdirSync(join(home, 'projects/repo/.git'), { recursive: true });
     mkdirSync(join(home, 'projects/plain'), { recursive: true });
@@ -50,7 +53,12 @@ describe('GET /api/fs/browse (step 4.1)', () => {
     const repoRoot = join(home, 'boot');
     mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
     store = RunStore.open(join(repoRoot, '.ai/cezar'));
-    app = createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test' });
+    app = createApp({
+      repoRoot,
+      store,
+      manager: {} as RunManager,
+      version: '0.0.0-test',
+    });
   });
 
   afterEach(() => {
@@ -59,6 +67,7 @@ describe('GET /api/fs/browse (step 4.1)', () => {
       ['HOME', savedHome],
       ['CEZ_HOME', savedCezHome],
       ['CEZ_REMOTE', savedRemote],
+      ['CEZ_BROWSE_ROOT', savedBrowseRoot],
     ] as const) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
@@ -66,7 +75,7 @@ describe('GET /api/fs/browse (step 4.1)', () => {
     for (const dir of [home, outside]) rmSync(dir, { recursive: true, force: true });
   });
 
-  const browse = (query = '') => app.request(`/api/fs/browse${query}`);
+  const browse = (query = '') => apiRequest(app, `/api/fs/browse${query}`);
   const body = async (res: Response) => (await res.json()) as FsBrowseResponse;
   const error = async (res: Response) => ((await res.json()) as { error: string }).error;
   const names = (payload: FsBrowseResponse) => payload.dirs.map((d) => d.name);
@@ -109,12 +118,7 @@ describe('GET /api/fs/browse (step 4.1)', () => {
   // ---- escape vectors ------------------------------------------------------
 
   it('rejects `..` traversal out of the root (absolute and relative spellings)', async () => {
-    for (const path of [
-      join(home, 'projects/../..'),
-      join(home, '..'),
-      '../..',
-      'projects/../../..',
-    ]) {
+    for (const path of [join(home, 'projects/../..'), join(home, '..'), '../..', 'projects/../../..']) {
       // Every case here is percent-encoded on the wire: the containment check
       // has to sit AFTER query decoding, which is where the handler reads it.
       const res = await browse(`?path=${encodeURIComponent(path)}`);
@@ -169,49 +173,54 @@ describe('GET /api/fs/browse (step 4.1)', () => {
     expect((await browse('?path=%00')).status).toBe(400);
   });
 
-  // ---- hosted mode ---------------------------------------------------------
+  // ---- configured browse root ---------------------------------------------
 
-  describe('hosted mode (CEZ_REMOTE=1) narrows the root to projectsDir', () => {
+  describe('an independent browseRoot', () => {
     beforeEach(() => {
       // Stored with a literal `~`, exactly as PUT /api/workspace/config keeps
       // it — so this also proves the hosted root expands the tilde.
       mkdirSync(join(home, '.cezar'), { recursive: true });
       writeFileSync(
         workspaceConfigPath(),
-        JSON.stringify({ projectsDir: '~/projects' }),
+        JSON.stringify({ browseRoot: '~/projects', projectsDir: '~/checkouts' }),
         'utf8',
       );
       process.env.CEZ_REMOTE = '1';
     });
 
-    it('roots the listing at projectsDir instead of home', async () => {
+    it('roots the listing at browseRoot instead of projectsDir or home', async () => {
       const payload = await body(await browse());
       expect(payload.path).toBe(join(home, 'projects'));
-      expect(payload.parent).toBeNull(); // projectsDir IS the ceiling now
+      expect(payload.parent).toBeNull(); // browseRoot IS the ceiling now
       expect(names(payload)).toEqual(expect.arrayContaining(['repo', 'plain']));
     });
 
-    it('rejects the home directory a local cockpit would happily list', async () => {
-      // The exact same request that answers 200 in local mode.
+    it('rejects the home directory in both hosted and local mode', async () => {
       const res = await browse(`?path=${encodeURIComponent(home)}`);
       expect(res.status).toBe(400);
       expect(await error(res)).toBe('path is outside the browsable root');
-      // Sanity: it really is only the flag that changed the answer.
       delete process.env.CEZ_REMOTE;
-      expect((await browse(`?path=${encodeURIComponent(home)}`)).status).toBe(200);
+      expect((await browse(`?path=${encodeURIComponent(home)}`)).status).toBe(400);
     });
 
-    it('404s when projectsDir does not exist yet', async () => {
-      writeFileSync(workspaceConfigPath(), JSON.stringify({ projectsDir: '~/not-created' }), 'utf8');
+    it('404s when browseRoot does not exist yet', async () => {
+      writeFileSync(workspaceConfigPath(), JSON.stringify({ browseRoot: '~/not-created' }), 'utf8');
       const res = await browse();
       expect(res.status).toBe(404);
       expect(await error(res)).toBe('browse root is not available');
     });
   });
 
+  it('takes the zero-config browse root from CEZ_BROWSE_ROOT', async () => {
+    process.env.CEZ_BROWSE_ROOT = '~/projects';
+    const payload = await body(await browse());
+    expect(payload.path).toBe(join(home, 'projects'));
+    expect(payload.parent).toBeNull();
+  });
+
   // ---- mounting ------------------------------------------------------------
 
   it('is workspace-level: never mirrored under /api/p/', async () => {
-    expect((await app.request('/api/p/default/fs/browse')).status).toBe(404);
+    expect((await apiRequest(app, '/api/p/default/fs/browse')).status).toBe(404);
   });
 });

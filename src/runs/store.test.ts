@@ -743,6 +743,14 @@ describe('RunStore — referenced-issue discovery (spec 2026-07-21-report-ref-di
     expect(loaded?.issueNumber).toBe(433);
   });
 
+  it('seeds an issue link while the run is still queued', () => {
+    const { store, run } = freshRun('Fix https://github.com/open-mercato/cezar/issues/554');
+    const loaded = store.getRun(run.id);
+    expect(loaded?.status).toBe('queued');
+    expect(loaded?.referencedIssueUrl).toBe('https://github.com/open-mercato/cezar/issues/554');
+    expect(loaded?.issueNumber).toBe(554);
+  });
+
   it('tracks issues independently of a created PR', () => {
     const { store, run } = freshRun();
     store.appendEvent(run.id, {
@@ -839,5 +847,74 @@ describe('RunStore — seq survives a restart (#424 symptom class)', () => {
     const store = RunStore.open(dataDir);
     const run = store.createRun({ title: 't', workflow: 'w', task: 't', steps: [] });
     expect(store.appendEvent(run.id, { type: 'note', message: 'first' }).seq).toBe(1);
+  });
+});
+
+/** #472 — the queued prompt stack. Additive optional field, and (like `task`)
+ *  deliberately outside `redactPatch`'s field list. */
+describe('RunStore — queuedMessages (#472)', () => {
+  let dataDir: string;
+
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), 'cez-store-'));
+  });
+
+  afterEach(() => {
+    rmSync(dataDir, { recursive: true, force: true });
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.CEZ_REDACT_SECRETS;
+  });
+
+  it('parses a runs.json written before the field existed', () => {
+    writeFileSync(join(dataDir, 'runs.json'), JSON.stringify([LEGACY_RUN]));
+    const store = RunStore.open(dataDir);
+    const run = store.getRun('legacy-1');
+    expect(run).toBeDefined();
+    // `undefined` reads as an empty stack — no migration, no default to write back.
+    expect(run?.queuedMessages).toBeUndefined();
+  });
+
+  it('round-trips a record carrying the stack', () => {
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({ title: 't', workflow: 'w', task: 'ship it', steps: [] });
+    store.updateRun(run.id, {
+      queuedMessages: [
+        { id: 'm1', text: 'and update the changelog', createdAt: '2026-07-21T10:00:00.000Z' },
+        {
+          id: 'm2',
+          text: 'see this mock',
+          images: [`/api/runs/${run.id}/images/pasted-1.png`],
+          createdAt: '2026-07-21T10:01:00.000Z',
+        },
+      ],
+    });
+    store.flush();
+
+    const reopened = RunStore.open(dataDir);
+    const stack = reopened.getRun(run.id)?.queuedMessages;
+    expect(stack).toHaveLength(2);
+    expect(stack?.[0]).toEqual({
+      id: 'm1',
+      text: 'and update the changelog',
+      createdAt: '2026-07-21T10:00:00.000Z',
+    });
+    expect(stack?.[1]?.images).toEqual([`/api/runs/${run.id}/images/pasted-1.png`]);
+  });
+
+  /** The `task` rule (above) extended to the stack: these strings are replayed
+   *  into `{{task}}` verbatim at dequeue, so redacting one would corrupt the run. */
+  it('leaves a secret in a stacked message verbatim, exactly as it leaves `task`', () => {
+    process.env.GITHUB_TOKEN = 'gho_thisisarealsecrettoken123456';
+    delete process.env.CEZ_REDACT_SECRETS;
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({ title: 't', workflow: 'w', task: 'deploy', steps: [] });
+    store.updateRun(run.id, {
+      queuedMessages: [
+        { id: 'm1', text: 'use gho_thisisarealsecrettoken123456', createdAt: '2026-07-21T10:00:00.000Z' },
+      ],
+    });
+    expect(store.getRun(run.id)?.queuedMessages?.[0]?.text).toBe(
+      'use gho_thisisarealsecrettoken123456',
+    );
   });
 });

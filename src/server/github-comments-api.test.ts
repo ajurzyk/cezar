@@ -7,6 +7,7 @@ import { RunStore } from '../runs/store.js';
 import type { RunManager } from '../workflows/run.js';
 import type { ForgeCommentsData } from './github.js';
 import { createApp } from './server.js';
+import { apiRequest } from './loopback-request.testkit.js';
 
 /**
  * `GET /api/github/comments/:kind/:number` (#499 Phase 2). The contract under test: zod-validated
@@ -41,7 +42,7 @@ describe('the github comments API', () => {
   });
 
   it('returns a dry-run thread for a valid issue request', async () => {
-    const res = await app.request('/api/github/comments/issue/142');
+    const res = await apiRequest(app, '/api/github/comments/issue/142');
     expect(res.status).toBe(200);
     const body = (await res.json()) as ForgeCommentsData;
     expect(body.available).toBe(true);
@@ -53,7 +54,7 @@ describe('the github comments API', () => {
   });
 
   it('serves timeline events beside the unchanged comments array (#525)', async () => {
-    const res = await app.request('/api/github/comments/issue/142');
+    const res = await apiRequest(app, '/api/github/comments/issue/142');
     const body = (await res.json()) as ForgeCommentsData;
 
     // Additive: comments keeps its exact shape, events arrives alongside it.
@@ -78,7 +79,7 @@ describe('the github comments API', () => {
   });
 
   it('gives every event a unique, stable id — they become React keys', async () => {
-    const res = await app.request('/api/github/comments/pr/137');
+    const res = await apiRequest(app, '/api/github/comments/pr/137');
     const body = (await res.json()) as ForgeCommentsData;
     const ids = body.events!.map((e) => e.id);
     expect(new Set(ids).size).toBe(ids.length);
@@ -86,28 +87,28 @@ describe('the github comments API', () => {
   });
 
   it('includes a merge event for a PR but not for an issue', async () => {
-    const pr = (await (await app.request('/api/github/comments/pr/137')).json()) as ForgeCommentsData;
-    const issue = (await (await app.request('/api/github/comments/issue/142')).json()) as ForgeCommentsData;
+    const pr = (await (await apiRequest(app, '/api/github/comments/pr/137')).json()) as ForgeCommentsData;
+    const issue = (await (await apiRequest(app, '/api/github/comments/issue/142')).json()) as ForgeCommentsData;
     expect(pr.events!.some((e) => e.kind === 'merged')).toBe(true);
     expect(issue.events!.some((e) => e.kind === 'merged')).toBe(false);
   });
 
   it('includes a PR review summary for a valid pr request', async () => {
-    const res = await app.request('/api/github/comments/pr/137');
+    const res = await apiRequest(app, '/api/github/comments/pr/137');
     expect(res.status).toBe(200);
     const body = (await res.json()) as ForgeCommentsData;
     expect(body.comments.some((c) => c.kind === 'review')).toBe(true);
   });
 
   it('rejects an unknown kind with 400 and an { error } body, not a throw', async () => {
-    const res = await app.request('/api/github/comments/banana/1');
+    const res = await apiRequest(app, '/api/github/comments/banana/1');
     expect(res.status).toBe(400);
     expect((await res.json()) as { error: string }).toHaveProperty('error');
   });
 
   it('rejects a non-numeric / non-positive number with 400', async () => {
-    expect((await app.request('/api/github/comments/issue/abc')).status).toBe(400);
-    expect((await app.request('/api/github/comments/issue/0')).status).toBe(400);
-    expect((await app.request('/api/github/comments/issue/-3')).status).toBe(400);
+    expect((await apiRequest(app, '/api/github/comments/issue/abc')).status).toBe(400);
+    expect((await apiRequest(app, '/api/github/comments/issue/0')).status).toBe(400);
+    expect((await apiRequest(app, '/api/github/comments/issue/-3')).status).toBe(400);
   });
 });

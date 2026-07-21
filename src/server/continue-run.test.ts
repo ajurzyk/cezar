@@ -5,6 +5,7 @@ import type { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { RunStore } from '../runs/store.js';
 import type { RunManager } from '../workflows/run.js';
+import { apiRequest } from './loopback-request.testkit.js';
 import { createApp } from './server.js';
 
 /**
@@ -24,7 +25,12 @@ describe('POST /api/runs/:id/continue override', () => {
     repoRoot = mkdtempSync(join(tmpdir(), 'cez-continue-'));
     store = RunStore.open(join(repoRoot, '.ai/cezar'));
     captured = undefined;
-    runId = store.createRun({ title: 't', workflow: 'quick-task', task: 't', steps: [] }).id;
+    runId = store.createRun({
+      title: 't',
+      workflow: 'quick-task',
+      task: 't',
+      steps: [],
+    }).id;
     const manager = {
       continueRun: (id: string, opts: { text?: string; runner?: string; model?: string } = {}) => {
         captured = { id, opts };
@@ -40,7 +46,7 @@ describe('POST /api/runs/:id/continue override', () => {
   });
 
   const post = (body: unknown) =>
-    app.request(`/api/runs/${runId}/continue`, {
+    apiRequest(app, `/api/runs/${runId}/continue`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
@@ -74,7 +80,7 @@ describe('POST /api/runs/:id/continue override', () => {
   });
 
   it('404s for an unknown run before validating the body', async () => {
-    const res = await app.request('/api/runs/missing/continue', {
+    const res = await apiRequest(app, '/api/runs/missing/continue', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: '{}',

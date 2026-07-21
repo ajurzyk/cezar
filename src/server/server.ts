@@ -74,20 +74,21 @@ import { ProjectContextError, ProjectContexts, type ProjectContext } from './pro
 import { reviewGateEnabled } from '../runs/review-gate.js';
 import { readUiState, uiStatePath } from '../ui-state.js';
 import { expandTilde } from '../paths.js';
-import { isLoopbackHost, resolveCapabilities } from './capabilities.js';
-import {
-  browseDirectory,
-  isInsideBrowseRoot,
-  isLexicallyInsideBrowseRoot,
-  resolveBrowseRoot,
-} from './fs-browse.js';
+import { isLoopbackHostHeader, normalizeHostname, resolveCapabilities } from './capabilities.js';
+import { browseDirectory, isInsideBrowseRoot, isLexicallyInsideBrowseRoot, resolveBrowseRoot } from './fs-browse.js';
 import { resolveForge } from './forge/index.js';
 import { fetchGithub, fetchGithubComments } from './github.js';
 import { ensureLaunchKey } from './launch-key.js';
 import { openInTerminal } from './open-in-terminal.js';
 import { agentCliRunner, detectOpenTargets, openFileInDefaultApp, openInApp } from './open-in-app.js';
 import { createDraftPr } from './pr.js';
-import { ASSET_CACHE_CONTROL, BUILD_HINT_HTML, assetContentType, isSafeAssetFilename, resolveGetRequest } from './static-ui.js';
+import {
+  ASSET_CACHE_CONTROL,
+  BUILD_HINT_HTML,
+  assetContentType,
+  isSafeAssetFilename,
+  resolveGetRequest,
+} from './static-ui.js';
 
 export interface ServerDeps {
   repoRoot: string;
@@ -175,8 +176,7 @@ export function projectRouteManifest(app: Hono): ProjectRouteInfo[] {
 }
 
 /** 409 body for the inbox mutators while the follow-up inbox is off (#471). */
-const FOLLOWUPS_OFF =
-  'the follow-up inbox is disabled — set CEZ_FOLLOWUPS=1 to enable it';
+const FOLLOWUPS_OFF = 'the follow-up inbox is disabled — set CEZ_FOLLOWUPS=1 to enable it';
 
 // ---- variant-compare response shapes (spec 010) ----------------------------
 // Named and exported so `api-types.test.ts` can drift-guard the cockpit's
@@ -239,6 +239,8 @@ export interface RemoveProjectResponse {
  *  settings slice of `~/.cezar/config.json`: global knobs ONLY, never the
  *  project registry (that is `GET /api/projects`' job). */
 export interface WorkspaceConfigResponse {
+  /** Root exposed by the Add project directory browser (`~` kept). */
+  browseRoot: string;
   /** Checkout root for GUI-cloned projects — stored as written (`~` kept). */
   projectsDir: string;
   resources: {
@@ -435,12 +437,20 @@ const workspaceUiStateSchema = z
 const uiStateSchema = z
   .object({
     lastTask: z
-      .object({ source: z.enum(['workflow', 'skill']), ref: z.string().min(1).max(200) })
+      .object({
+        source: z.enum(['workflow', 'skill']),
+        ref: z.string().min(1).max(200),
+      })
       .optional(),
     // Composer picker recency (newest first, capped) + the remembered worktree
     // choice for single-skill runs. Additive prefs, like the rest of ui-state.
     recentSources: z
-      .array(z.object({ source: z.enum(['workflow', 'skill']), ref: z.string().min(1).max(200) }))
+      .array(
+        z.object({
+          source: z.enum(['workflow', 'skill']),
+          ref: z.string().min(1).max(200),
+        }),
+      )
       .max(50)
       .optional(),
     lastWorktree: z.boolean().optional(),
@@ -497,9 +507,11 @@ const uiStateSchema = z
   })
   .passthrough();
 
-// Editable titles (#389). `title` is the only editable field for now.
+// Editable titles (#389), and the initial prompt while the run is still queued
+// (#472 — rejected with 409 on any other status by the handler).
 const patchRunSchema = z.object({
   title: z.string().trim().min(1).max(300).optional(),
+  task: z.string().trim().min(1).max(100_000).optional(),
 });
 
 // Session commit (redesign R5 — §"Git/session API additions").
@@ -517,23 +529,49 @@ const openInSchema = z.object({
   path: z.string().max(1_000).optional(),
 });
 
+const imageInputSchema = z.object({
+  mediaType: z.string().regex(/^image\//),
+  // ~5 MB per image once base64-decoded.
+  data: z.string().min(1).max(7_000_000),
+});
+
 const messageSchema = z
   .object({
     text: z.string().max(100_000).default(''),
-    images: z
-      .array(
-        z.object({
-          mediaType: z.string().regex(/^image\//),
-          // ~5 MB per image once base64-decoded.
-          data: z.string().min(1).max(7_000_000),
-        }),
-      )
-      .max(4)
-      .default([]),
+    images: z.array(imageInputSchema).max(4).default([]),
   })
   .refine((m) => m.text.trim().length > 0 || m.images.length > 0, {
     message: 'message needs text or at least one image',
   });
+
+// PATCH semantics are load-bearing here: an omitted field keeps its current value.
+// In particular, the cockpit edits text without re-uploading existing attachments.
+const queuedMessagePatchSchema = z
+  .object({
+    text: z.string().max(100_000).optional(),
+    images: z.array(imageInputSchema).max(4).optional(),
+  })
+  .refine((m) => m.text !== undefined || m.images !== undefined, {
+    message: 'message edit needs text or images',
+  });
+
+// Queued prompt stack bounds (#472). The per-message bounds mirror `messageSchema`
+// above; the one that actually matters is the FOLDED total, because 20 messages of
+// 100 000 chars each would otherwise compose a ~2 M-character {{task}}.
+const MAX_QUEUED_MESSAGES = 20;
+const MAX_QUEUED_IMAGES = 8;
+const MAX_FOLDED_TASK_CHARS = 200_000;
+
+/** Length of the prompt a run would execute with — `task` plus its whole stack,
+ *  composed exactly as `hydrateQueuedInput` composes it. Checked against the
+ *  PROSPECTIVE state so the user is stopped at the write, not at dequeue where
+ *  there would be no one left to tell. */
+function foldedLength(task: string, stack: Array<{ text: string }>): number {
+  return [task, ...stack.map((m) => m.text)]
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0)
+    .join('\n\n').length;
+}
 
 // "Continue"/"Send back" body (spec 003 / #401): every field optional, so an empty POST reopens
 // the last session on the run's current backend (backward compat). A runner/model override lets
@@ -594,10 +632,7 @@ function stripHostPort(host: string): string {
  *  schema, then cap the top-level key count so a `.passthrough()` schema can't
  *  accumulate an unbounded key set (#429). The merge-on-write stays with each
  *  route (they write different files) but is shallow in both. */
-function parseUiStateBody<S extends z.ZodTypeAny>(
-  schema: S,
-  body: unknown,
-): { data: z.infer<S> } | { error: string } {
+function parseUiStateBody<S extends z.ZodTypeAny>(schema: S, body: unknown): { data: z.infer<S> } | { error: string } {
   const parsed = schema.safeParse(body);
   if (!parsed.success) return { error: parsed.error.issues.map((i) => i.message).join('; ') };
   if (Object.keys(parsed.data as Record<string, unknown>).length > UI_STATE_MAX_KEYS) {
@@ -606,7 +641,7 @@ function parseUiStateBody<S extends z.ZodTypeAny>(
   return { data: parsed.data as z.infer<S> };
 }
 
-/** The `projectsDir` writability probe (multi-project spec, "API Contracts"):
+/** Workspace-root writability probe (multi-project spec, "API Contracts"):
  *  `mkdir -p`, `access W_OK`, then a real create/delete round-trip — W_OK alone
  *  can lie (e.g. a read-only mount still reports writable permission bits).
  *  Returns the failure message, or null when the directory is usable. */
@@ -668,7 +703,10 @@ export function createApp(deps: ServerDeps): Hono {
       return {
         // Explicit picks, not a spread: the registry schema passes unknown
         // keys through, and `root` must never ride along onto health.
-        projects: registry.map((p) => ({ id: p.id, name: p.name || basename(p.root) })),
+        projects: registry.map((p) => ({
+          id: p.id,
+          name: p.name || basename(p.root),
+        })),
         bootProject: await resolveBootProject(registry),
       };
     } catch {
@@ -706,29 +744,109 @@ export function createApp(deps: ServerDeps): Hono {
 
   const app = new Hono();
 
-  // DNS-rebinding guard, FIRST — before any route (including the CORS-open
-  // health) can answer. A browser at attacker.example whose DNS record flips
-  // to 127.0.0.1 sends requests that are same-origin to the attacker's page;
-  // the one tell left is the Host header, which still names the attacker's
-  // domain. In local mode every legitimate caller addresses the cockpit as
-  // localhost/127.x/[::1] (the bookmarklet's health probe included), so any
-  // other Host is refused outright. Hosted mode (`CEZ_REMOTE=1` or a
-  // non-loopback bind) is exempt — the operator deliberately exposed the
-  // server behind a hostname/proxy this code cannot enumerate. A missing Host
-  // header passes: browsers (the rebinding vector) always send one, and
-  // requiring it would break non-browser scripts and the test harness.
-  app.use('*', async (c, next) => {
-    if (!capabilities().localHandoff) return next();
-    const host = c.req.header('host');
-    if (host !== undefined && !isLoopbackHost(stripHostPort(host))) {
-      return c.json({ error: 'forbidden host' }, 403);
-    }
-    return next();
-  });
-
   // Reject oversized request bodies before they reach any handler (#429). GETs
   // and SSE carry no body, so this only ever gates the mutating routes.
   app.use('*', bodyLimit({ maxSize: GLOBAL_BODY_LIMIT }));
+
+  // ---- request-origin guard (#426) -----------------------------------------
+  // This server executes agents with shell access — "start a task" ≈ run code
+  // as the user — so "bind 127.0.0.1 + same-origin" is not a perimeter on its
+  // own: any page the user visits can still POST to us (CSRF), and DNS
+  // rebinding can point a foreign domain at loopback and read our responses.
+  // Two zero-config checks close both holes on every /api route EXCEPT
+  // /api/health (the intentional cross-origin discovery endpoint, spec 011 —
+  // it exposes nothing sensitive, see #431):
+  //   1. Host allowlist (loopback deployments only) — a request whose Host is
+  //      not a loopback name did not really originate from this machine. A
+  //      rebound `evil.com` still sends `Host: evil.com`, so this kills DNS
+  //      rebinding for reads AND writes. Skipped in hosted mode (CEZ_REMOTE /
+  //      non-loopback bind), where the reverse proxy forwards the real public
+  //      Host and TLS+auth own the perimeter.
+  //      The match runs through `isLoopbackHostHeader`, whose 127.0.0.0/8 test
+  //      is *anchored* and whose missing-Host answer is "untrusted". Both are
+  //      load-bearing: a `startsWith('127.')` prefix would accept the
+  //      attacker-registrable `127.0.0.1.evil.com`, and such a page is really
+  //      same-origin with us, so checks 2 and 3 would wave it through too.
+  //   2. Same-origin write guard — a cross-origin write always carries an
+  //      `Origin` header (browsers attach it to every non-GET), so its full
+  //      authority (host AND port) must match the served Host. A blind CSRF
+  //      POST from evil.tld is rejected; the cockpit's own same-origin fetch
+  //      (Origin === Host, or no Origin at all for non-browser callers) passes
+  //      untouched. Works in both local and hosted mode because it compares
+  //      Origin to the actual Host.
+  // Scope note: check 2 covers writes only. A cross-origin GET from any site
+  // still reaches the read routes — but its Host is ours, so it is a *forced
+  // request*, not a read: the same-origin policy stops the attacker seeing any
+  // response body (we send CORS headers on /api/health alone), and no GET
+  // handler mutates state. Rebinding, which WOULD make those reads legible, is
+  // what check 1 stops.
+  const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+  const isHostedMode = () => !resolveCapabilities(process.env, bindHost).localHandoff;
+  app.use('/api/*', async (c, next) => {
+    const hostName = hostnameOfHost(c.req.header('host'));
+    // Strict twin of `isLoopbackHost`: a *missing* Host is untrusted here (an
+    // absent header is not the "we defaulted to the loopback bind" case), and
+    // the loopback match is anchored so `127.0.0.1.evil.com` does not pass.
+    if (!isHostedMode() && !isLoopbackHostHeader(hostName)) {
+      return c.json(
+        {
+          error: 'forbidden: unexpected Host header — this request did not originate from this machine (see #426)',
+        },
+        403,
+      );
+    }
+
+    // /api/health stays CORS-open for bookmarklet discovery, but its Host is
+    // still checked above: cross-origin is legitimate, DNS rebinding is not.
+    if (c.req.path === '/api/health') return next();
+
+    if (MUTATING_METHODS.has(c.req.method)) {
+      const origin = c.req.header('origin');
+      if (origin !== undefined) {
+        const originHost = hostnameOfOrigin(origin);
+        // Compare the whole authority, not just the hostname: a different PORT
+        // is a different web origin, and on a dev machine `http://localhost:3000`
+        // is every bit as foreign as `https://evil.tld`. Matching on hostname
+        // alone would let any page served from another loopback port (a local
+        // dev server rendering attacker content, an XSS in a local app) start a
+        // shell-capable agent here.
+        const sameOrigin = !!originHost && authorityOfOrigin(origin) === authorityOfHost(c.req.header('host'));
+        // The one legitimate cross-port case is the `npm run dev` Vite proxy:
+        // the browser fetches same-origin from `localhost:5173`, Vite's
+        // `changeOrigin` rewrites Host to `127.0.0.1:<api port>` but forwards
+        // the original Origin, so the authorities no longer line up. The browser
+        // already told us what it thinks: `Sec-Fetch-Site: same-origin` is a
+        // forbidden header name that page JS cannot set, and a cross-port
+        // attacker page gets `same-site`, never `same-origin`. Requiring it
+        // (plus loopback on both ends) readmits the proxy without readmitting
+        // the attack. Browsers too old to send Sec-Fetch metadata simply fail
+        // closed here — they still work against a non-proxied cockpit.
+        const isDevProxy =
+          c.req.header('sec-fetch-site') === 'same-origin' &&
+          isLoopbackHostHeader(originHost) &&
+          isLoopbackHostHeader(hostName);
+        if (!sameOrigin && !isDevProxy) {
+          return c.json(
+            {
+              error: 'forbidden: cross-origin request rejected (same-origin only)',
+            },
+            403,
+          );
+        }
+      }
+      // Belt-and-suspenders for browsers that send Sec-Fetch metadata: an
+      // explicit cross-site marker is rejected regardless of the Origin dance.
+      if (c.req.header('sec-fetch-site') === 'cross-site') {
+        return c.json(
+          {
+            error: 'forbidden: cross-site request rejected (same-origin only)',
+          },
+          403,
+        );
+      }
+    }
+    return next();
+  });
 
   // The mirrored project-route table (spec "API Contracts → Project-scoped").
   // Every route below registers ONCE on this sub-app; `createApp` mounts it
@@ -781,7 +899,10 @@ export function createApp(deps: ServerDeps): Hono {
     const distIndex = join(distDir, 'index.html');
     // existsSync per request, like the reads below: `npm run build:web` in a
     // running cockpit takes effect on the next reload, no restart.
-    const target = resolveGetRequest({ path: c.req.path, distExists: existsSync(distIndex) });
+    const target = resolveGetRequest({
+      path: c.req.path,
+      distExists: existsSync(distIndex),
+    });
     if (target === 'passthrough') return undefined;
     if (target === 'build-hint') {
       // Dev-only state (the tarball ships web/dist): serve the built-in hint
@@ -790,9 +911,13 @@ export function createApp(deps: ServerDeps): Hono {
         hintLogged = true;
         console.log('cezar: web/dist is missing — run `npm run build:web` to build the cockpit');
       }
-      return new Response(BUILD_HINT_HTML, { headers: { 'content-type': HTML_TYPE } });
+      return new Response(BUILD_HINT_HTML, {
+        headers: { 'content-type': HTML_TYPE },
+      });
     }
-    return new Response(readFileSync(distIndex), { headers: { 'content-type': HTML_TYPE } });
+    return new Response(readFileSync(distIndex), {
+      headers: { 'content-type': HTML_TYPE },
+    });
   };
 
   // Hashed bundles/fonts of the built app. Vite fingerprints every name, so
@@ -806,7 +931,10 @@ export function createApp(deps: ServerDeps): Hono {
     const path = join(distDir, 'assets', file);
     if (!existsSync(path) || !statSync(path).isFile()) return c.json({ error: 'not found' }, 404);
     return new Response(readFileSync(path), {
-      headers: { 'content-type': assetContentType(file), 'cache-control': ASSET_CACHE_CONTROL },
+      headers: {
+        'content-type': assetContentType(file),
+        'cache-control': ASSET_CACHE_CONTROL,
+      },
     });
   });
 
@@ -887,6 +1015,14 @@ export function createApp(deps: ServerDeps): Hono {
     }
   };
 
+  const workspaceBrowseRoot = async (): Promise<string> => {
+    try {
+      return (await loadWorkspaceConfig()).browseRoot;
+    } catch {
+      return defaultWorkspaceConfig().browseRoot;
+    }
+  };
+
   app.get('/api/projects', async (c) => {
     let projects: ProjectListEntry[] = [];
     let projectsDir = defaultWorkspaceConfig().projectsDir;
@@ -908,7 +1044,9 @@ export function createApp(deps: ServerDeps): Hono {
   // folder-browser dialog's commit step, step 4.2). Workspace-level like its
   // GET twin. Everything here is a guard; the registry write itself is one
   // idempotent `registerProject` call.
-  const registerProjectSchema = z.object({ root: z.string().trim().min(1).max(4096) });
+  const registerProjectSchema = z.object({
+    root: z.string().trim().min(1).max(4096),
+  });
 
   /**
    * The register-a-folder half of `POST /api/projects`, factored out so the
@@ -919,13 +1057,19 @@ export function createApp(deps: ServerDeps): Hono {
   const registerFolder = async (
     spelled: string,
     source: 'local' | 'checkout',
-  ): Promise<{ status: 200 | 400 | 409 | 500; body: RegisterProjectResponse | { error: string } }> => {
+  ): Promise<{
+    status: 200 | 400 | 409 | 500;
+    body: RegisterProjectResponse | { error: string };
+  }> => {
     // `~` is expanded for the same reason `/api/fs/browse` expands it: the
     // dialog hands back absolute paths, but a hand-written body (curl, a
     // future CLI) spells home the way a shell does.
     const requested = expandTilde(spelled);
     if (!requested.startsWith('/')) {
-      return { status: 400, body: { error: `not a folder: ${spelled} is not an absolute path` } };
+      return {
+        status: 400,
+        body: { error: `not a folder: ${spelled} is not an absolute path` },
+      };
     }
     // Hosted mode: the same root the picker is narrowed to, re-checked — see
     // `isInsideBrowseRoot`. Local mode deliberately has NO containment: a
@@ -944,12 +1088,15 @@ export function createApp(deps: ServerDeps): Hono {
     // root that it is "outside the browsable root".
     const hostedBrowseRoot = capabilities().localHandoff
       ? null
-      : resolveBrowseRoot(true, await workspaceProjectsDir());
+      : resolveBrowseRoot(await workspaceBrowseRoot());
     if (hostedBrowseRoot !== null) {
       if (!(await isLexicallyInsideBrowseRoot(hostedBrowseRoot, requested))) {
         // No resolved path in the message (fs-browse's rule): saying where the
         // root is would hand a remote viewer the layout the narrowing hides.
-        return { status: 400, body: { error: 'folder is outside the browsable root' } };
+        return {
+          status: 400,
+          body: { error: 'folder is outside the browsable root' },
+        };
       }
     }
     // Existence is checked HERE rather than left to `registerProject` (which
@@ -962,7 +1109,10 @@ export function createApp(deps: ServerDeps): Hono {
     // as the lexical rejection, so the two halves stay indistinguishable from
     // outside.
     if (hostedBrowseRoot !== null && !(await isInsideBrowseRoot(hostedBrowseRoot, requested))) {
-      return { status: 400, body: { error: 'folder is outside the browsable root' } };
+      return {
+        status: 400,
+        body: { error: 'folder is outside the browsable root' },
+      };
     }
     // The boot-time auto-registration guard, applied to the manual gesture
     // too: `$HOME` and cezar's own task worktrees are exactly as wrong a
@@ -972,7 +1122,9 @@ export function createApp(deps: ServerDeps): Hono {
     if (!(await shouldRegisterProject(requested))) {
       return {
         status: 400,
-        body: { error: `not a project folder: ${spelled} is your home directory or a cezar task worktree` },
+        body: {
+          error: `not a project folder: ${spelled} is your home directory or a cezar task worktree`,
+        },
       };
     }
     // Asked BEFORE the write, because `registerProject` is idempotent and
@@ -991,12 +1143,18 @@ export function createApp(deps: ServerDeps): Hono {
       project = { ...entry, ...(await probeProjectStatus(entry.root)) };
     } catch (err) {
       // e.g. a read-only home — nothing was persisted (atomic tmp+rename).
-      return { status: 500, body: { error: err instanceof Error ? err.message : String(err) } };
+      return {
+        status: 500,
+        body: { error: err instanceof Error ? err.message : String(err) },
+      };
     }
     if (known) {
       // 409 with the EXISTING entry (spec): the dialog treats it as "you
       // already have this one" and navigates there rather than dead-ending.
-      return { status: 409, body: { project, error: `already registered as ${project.id}` } };
+      return {
+        status: 409,
+        body: { project, error: `already registered as ${project.id}` },
+      };
     }
     // Only a genuinely new project is an event — a re-add is a no-op for every
     // open cockpit's sidebar.
@@ -1026,11 +1184,7 @@ export function createApp(deps: ServerDeps): Hono {
   // deregistering mid-run would strand a live agent process under a root no
   // route can resolve any more — the run would keep burning tokens with no
   // cockpit able to show, message or cancel it.
-  const ACTIVE_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
-    'queued',
-    'running',
-    'waiting',
-  ]);
+  const ACTIVE_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>(['queued', 'running', 'waiting']);
 
   /**
    * How many of `projectId`'s runs this process is actively responsible for.
@@ -1171,6 +1325,7 @@ export function createApp(deps: ServerDeps): Hono {
   // /api/projects above, and schemaVersion (a migration cursor, not a
   // setting) is deliberately omitted.
   const workspaceConfigBody = (config: WorkspaceConfig): WorkspaceConfigResponse => ({
+    browseRoot: config.browseRoot,
     projectsDir: config.projectsDir,
     resources: {
       maxParallel: config.resources.maxParallel,
@@ -1178,14 +1333,13 @@ export function createApp(deps: ServerDeps): Hono {
       worktreeRetentionDefault: config.resources.worktreeRetentionDefault,
     },
   });
-  app.get('/api/workspace/config', async (c) =>
-    c.json(workspaceConfigBody(await loadWorkspaceConfig())),
-  );
+  app.get('/api/workspace/config', async (c) => c.json(workspaceConfigBody(await loadWorkspaceConfig())));
 
   // Partial updates only — absent keys stay untouched. Bounds mirror the
   // workspace schema (src/workspace/config.ts, step 1.2) exactly, so a value
   // this route accepts can never be degraded away by the next load's `.catch`.
   const workspaceConfigUpdateSchema = z.object({
+    browseRoot: z.string().trim().min(1).max(4096).optional(),
     projectsDir: z.string().trim().min(1).max(4096).optional(),
     resources: z
       .object({
@@ -1200,13 +1354,14 @@ export function createApp(deps: ServerDeps): Hono {
     if (!parsed.success) {
       return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
     }
-    const { projectsDir, resources } = parsed.data;
-    if (projectsDir !== undefined) {
+    const { browseRoot, projectsDir, resources } = parsed.data;
+    for (const configuredRoot of [browseRoot, projectsDir]) {
+      if (configuredRoot === undefined) continue;
       // Validated ON CHANGE, never at load (spec): expand `~`, `mkdir -p`,
       // probe real writability. Any failure → 400 and NO change persisted.
-      const expanded = expandTilde(projectsDir);
+      const expanded = expandTilde(configuredRoot);
       if (!expanded.startsWith('/')) {
-        return c.json({ error: `not writable: ${projectsDir} is not an absolute path` }, 400);
+        return c.json({ error: `not writable: ${configuredRoot} is not an absolute path` }, 400);
       }
       const probeError = await probeWritableDir(expanded);
       if (probeError !== null) return c.json({ error: `not writable: ${probeError}` }, 400);
@@ -1214,8 +1369,8 @@ export function createApp(deps: ServerDeps): Hono {
     let written: WorkspaceConfig;
     try {
       written = await mergeWriteWorkspaceConfig((config) => {
-        // `projectsDir` is stored as written (`~` kept — see the schema note);
-        // only the probe above sees the expanded form.
+        // Roots are stored as written (`~` kept); only the probe expands them.
+        if (browseRoot !== undefined) config.browseRoot = browseRoot;
         if (projectsDir !== undefined) config.projectsDir = projectsDir;
         if (resources?.maxParallel !== undefined) config.resources.maxParallel = resources.maxParallel;
         if (resources?.memoryLimitMb !== undefined) config.resources.memoryLimitMb = resources.memoryLimitMb;
@@ -1241,7 +1396,12 @@ export function createApp(deps: ServerDeps): Hono {
     const parsed = parseUiStateBody(workspaceUiStateSchema, await c.req.json().catch(() => null));
     if ('error' in parsed) return c.json({ error: parsed.error }, 400);
     try {
-      return c.json(await mergeWriteWorkspaceUiState((state) => ({ ...state, ...parsed.data })));
+      return c.json(
+        await mergeWriteWorkspaceUiState((state) => ({
+          ...state,
+          ...parsed.data,
+        })),
+      );
     } catch (err) {
       // A read-only home degrades to an unsaved pref, never a crash.
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
@@ -1252,13 +1412,10 @@ export function createApp(deps: ServerDeps): Hono {
   // WORKSPACE-level and same-origin: the directory picker behind "Add project
   // → open local folder". Directories only, and every answer is contained in a
   // single root — see src/server/fs-browse.ts for the containment rule and why
-  // it is realpath-based. The root is the ONLY thing decided here: hosted mode
-  // (`CEZ_REMOTE=1` / non-loopback bind — the same `localHandoff` predicate the
-  // open-in-* endpoints use) narrows it from the operator's home to
-  // `projectsDir`, because a remote viewer has no business enumerating the
-  // host's whole home. Read per request, so a `CEZ_REMOTE` flip applies live.
+  // it is realpath-based. The independently configured browse root is read per
+  // request, so a successful settings save applies without a restart.
   app.get('/api/fs/browse', async (c) => {
-    const root = resolveBrowseRoot(!capabilities().localHandoff, await workspaceProjectsDir());
+    const root = resolveBrowseRoot(await workspaceBrowseRoot());
     const result = await browseDirectory({
       root,
       path: c.req.query('path'),
@@ -1448,9 +1605,7 @@ export function createApp(deps: ServerDeps): Hono {
 
   // Registered before the `/:id/...` routes so "archive-finished" never
   // matches as a run id.
-  api.post('/runs/archive-finished', (c) =>
-    c.json({ archived: c.get('project').store.archiveFinished() }),
-  );
+  api.post('/runs/archive-finished', (c) => c.json({ archived: c.get('project').store.archiveFinished() }));
 
   api.post('/runs/:id/archive', async (c) => {
     const { store } = c.get('project');
@@ -1476,18 +1631,20 @@ export function createApp(deps: ServerDeps): Hono {
       // Inline chain (spec 008): an approved plan runs as an ad-hoc workflow.
       const issue = stepsIssue(parsed.data.steps);
       if (issue) return c.json({ error: issue }, 400);
-      workflow = { name: '(planned)', source: 'built-in', steps: parsed.data.steps };
+      workflow = {
+        name: '(planned)',
+        source: 'built-in',
+        steps: parsed.data.steps,
+      };
     } else {
       const { workflows } = await loadWorkflows(repoRoot);
       workflow = workflows.find((w) => w.name === parsed.data.workflow);
       if (!workflow) return c.json({ error: `unknown workflow: ${parsed.data.workflow}` }, 404);
     }
-    const images = parsed.data.images?.map(
-      (img): ContentBlock => ({
-        type: 'image',
-        source: { type: 'base64', media_type: img.mediaType, data: img.data },
-      }),
-    );
+    const images = parsed.data.images?.map((img): ContentBlock => ({
+      type: 'image',
+      source: { type: 'base64', media_type: img.mediaType, data: img.data },
+    }));
     const input = {
       task: parsed.data.task,
       model: parsed.data.model,
@@ -1511,7 +1668,10 @@ export function createApp(deps: ServerDeps): Hono {
       const repo = await getRepoInfo(repoRoot);
       if (!repo) {
         return c.json(
-          { error: 'parallel variants need a git repository (each variant runs in its own worktree) — run ×1 here, or start cezar inside a git repo' },
+          {
+            error:
+              'parallel variants need a git repository (each variant runs in its own worktree) — run ×1 here, or start cezar inside a git repo',
+          },
           400,
         );
       }
@@ -1542,24 +1702,25 @@ export function createApp(deps: ServerDeps): Hono {
     const runs = groupRuns(store, c.req.param('groupId'));
     if (runs.length === 0) return c.json({ error: 'not found' }, 404);
     const detailed = await Promise.all(
-      runs.map(
-        async (r): Promise<GroupVariant> => ({
-          id: r.id,
-          variant: r.variant ?? '?',
-          title: r.title,
-          status: r.status,
-          archived: r.archived,
-          tokensUsed: r.tokensUsed,
-          costUsd: r.costUsd,
-          diffStat:
-            r.worktreePath && existsSync(r.worktreePath)
-              ? await worktreeDiffStat(r.worktreePath, r.baseBranch ?? 'HEAD')
-              : '',
-          handoffExcerpt: handoffProgressExcerpt(readHandoff(dataDir, r.id)),
-        }),
-      ),
+      runs.map(async (r): Promise<GroupVariant> => ({
+        id: r.id,
+        variant: r.variant ?? '?',
+        title: r.title,
+        status: r.status,
+        archived: r.archived,
+        tokensUsed: r.tokensUsed,
+        costUsd: r.costUsd,
+        diffStat:
+          r.worktreePath && existsSync(r.worktreePath)
+            ? await worktreeDiffStat(r.worktreePath, r.baseBranch ?? 'HEAD')
+            : '',
+        handoffExcerpt: handoffProgressExcerpt(readHandoff(dataDir, r.id)),
+      })),
     );
-    return c.json({ groupId: c.req.param('groupId'), runs: detailed } satisfies GroupResponse);
+    return c.json({
+      groupId: c.req.param('groupId'),
+      runs: detailed,
+    } satisfies GroupResponse);
   });
 
   // "Pick this one": the winner rests at `review` (spec 009 takes it from
@@ -1613,7 +1774,9 @@ export function createApp(deps: ServerDeps): Hono {
         message: `variant ${winner.variant ?? '?'} was picked — this variant is archived, its worktree removed`,
       });
     }
-    return c.json({ winner: store.getRun(winner.id) } satisfies PickVariantResponse);
+    return c.json({
+      winner: store.getRun(winner.id),
+    } satisfies PickVariantResponse);
   });
 
   api.get('/runs/:id', (c) => {
@@ -1629,17 +1792,38 @@ export function createApp(deps: ServerDeps): Hono {
   // titleSummary (RunManager.recordTurnEnd), so an edit wins over any past or
   // future auto-summary. Answers the updated record.
   api.patch('/runs/:id', async (c) => {
-    const { store } = c.get('project');
+    const { store, manager } = c.get('project');
     const id = c.req.param('id');
     if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
     const parsed = patchRunSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
       return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
     }
+    // The prompt is editable only while the run is still queued (#472). Checked
+    // BEFORE the title write so a rejected PATCH is a no-op rather than a partial
+    // one. `title` itself keeps working on any status — no regression to #389.
+    if (parsed.data.task !== undefined) {
+      const foldedChars = foldedLength(parsed.data.task, store.getRun(id)?.queuedMessages ?? []);
+      if (foldedChars > MAX_FOLDED_TASK_CHARS) {
+        return c.json(
+          {
+            error: `prompt too long — ${MAX_FOLDED_TASK_CHARS} character limit across the task and its queued messages (would be ${foldedChars})`,
+          },
+          400,
+        );
+      }
+      if (!manager.editTask(id, parsed.data.task)) {
+        return c.json({ error: 'run already started' }, 409);
+      }
+    }
     if (parsed.data.title !== undefined) {
       // titleOrigin 'user' permanently stops the namer's live updates for this run
       // (spec 2026-07-17-task-auto-naming).
-      store.updateRun(id, { title: parsed.data.title, titleSummary: parsed.data.title, titleOrigin: 'user' });
+      store.updateRun(id, {
+        title: parsed.data.title,
+        titleSummary: parsed.data.title,
+        titleOrigin: 'user',
+      });
     }
     return c.json(store.getRun(id));
   });
@@ -1663,19 +1847,113 @@ export function createApp(deps: ServerDeps): Hono {
       return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
     }
     const content: ContentBlock[] = [
-      ...parsed.data.images.map(
+      ...parsed.data.images.map((img): ContentBlock => ({
+        type: 'image',
+        source: { type: 'base64', media_type: img.mediaType, data: img.data },
+      })),
+      ...(parsed.data.text.trim() ? [{ type: 'text', text: parsed.data.text } satisfies ContentBlock] : []),
+    ];
+    // Three-rung delivery ladder (#472). Branch on the ENGINE's answer rather
+    // than a status read here: the handler cannot observe the dequeue safely
+    // (the record is written a tick later), the engine can.
+    //   live session → delivered · still queued → folded into the prompt
+    //   starting up  → buffered  · anything else → 409, exactly as before
+    if (manager.sendMessage(id, content)) return c.json({ delivered: true });
+
+    const run = store.getRun(id);
+    const stack = run?.queuedMessages ?? [];
+    // Bounds apply only to a message that is actually about to be stacked. Without this
+    // gate an over-long message posted to a *finished* run would answer `400 prompt too
+    // long` when the truthful answer is `409 session closed`. The status read is safe
+    // here because it only decides whether to reject EARLY — `enqueueMessage` still
+    // re-checks against the engine's own queue before writing anything.
+    if (run?.status === 'queued') {
+      if (stack.length >= MAX_QUEUED_MESSAGES) {
+        return c.json({ error: `too many queued messages — ${MAX_QUEUED_MESSAGES} message limit` }, 400);
+      }
+      const stackedImages = stack.reduce((n, m) => n + (m.images?.length ?? 0), 0);
+      if (stackedImages + parsed.data.images.length > MAX_QUEUED_IMAGES) {
+        return c.json({ error: `too many queued images — ${MAX_QUEUED_IMAGES} image limit across the stack` }, 400);
+      }
+      const prospective = foldedLength(run.task, [...stack, { text: parsed.data.text }]);
+      if (prospective > MAX_FOLDED_TASK_CHARS) {
+        return c.json(
+          {
+            error: `prompt too long — ${MAX_FOLDED_TASK_CHARS} character limit across the task and its queued messages (would be ${prospective})`,
+          },
+          400,
+        );
+      }
+    }
+
+    const queued = manager.enqueueMessage(id, content);
+    if (queued) return c.json({ queued: true, message: queued });
+    if (manager.deferMessage(id, content)) return c.json({ deferred: true });
+    return c.json({ error: 'session closed' }, 409);
+  });
+
+  // Edit / remove a stacked message (#472). Registered before any conflicting
+  // `/:id` route so `queued-messages` never matches as a run id.
+  api.patch('/runs/:id/queued-messages/:msgId', async (c) => {
+    const { store, manager } = c.get('project');
+    const id = c.req.param('id');
+    const run = store.getRun(id);
+    if (!run) return c.json({ error: 'not found' }, 404);
+    const parsed = queuedMessagePatchSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
+    }
+    const msgId = c.req.param('msgId');
+    const stack = run.queuedMessages ?? [];
+    const existing = stack.find((m) => m.id === msgId);
+    if (!existing) return c.json({ error: 'not found' }, 404);
+
+    const effectiveText = parsed.data.text ?? existing.text;
+    const effectiveImageCount = parsed.data.images?.length ?? existing.images?.length ?? 0;
+    if (!effectiveText.trim() && effectiveImageCount === 0) {
+      return c.json({ error: 'message needs text or at least one image' }, 400);
+    }
+
+    const others = stack.filter((m) => m.id !== msgId);
+    const stackedImages = others.reduce((n, m) => n + (m.images?.length ?? 0), 0);
+    if (stackedImages + effectiveImageCount > MAX_QUEUED_IMAGES) {
+      return c.json({ error: `too many queued images — ${MAX_QUEUED_IMAGES} image limit across the stack` }, 400);
+    }
+    const prospective = foldedLength(run.task, [...others, { text: effectiveText }]);
+    if (prospective > MAX_FOLDED_TASK_CHARS) {
+      return c.json(
+        {
+          error: `prompt too long — ${MAX_FOLDED_TASK_CHARS} character limit across the task and its queued messages (would be ${prospective})`,
+        },
+        400,
+      );
+    }
+
+    const images: ContentBlock[] | undefined = parsed.data.images?.map(
         (img): ContentBlock => ({
           type: 'image',
           source: { type: 'base64', media_type: img.mediaType, data: img.data },
         }),
-      ),
-      ...(parsed.data.text.trim()
-        ? [{ type: 'text', text: parsed.data.text } satisfies ContentBlock]
-        : []),
-    ];
-    const delivered = manager.sendMessage(id, content);
-    if (!delivered) return c.json({ error: 'session closed' }, 409);
-    return c.json({ delivered: true });
+      );
+    const message = manager.editQueuedMessage(id, msgId, {
+      ...(parsed.data.text !== undefined ? { text: parsed.data.text } : {}),
+      ...(images !== undefined ? { images } : {}),
+    });
+    if (!message) return c.json({ error: 'run already started' }, 409);
+    return c.json({ message });
+  });
+
+  api.delete('/runs/:id/queued-messages/:msgId', (c) => {
+    const { store, manager } = c.get('project');
+    const id = c.req.param('id');
+    const run = store.getRun(id);
+    if (!run) return c.json({ error: 'not found' }, 404);
+    const msgId = c.req.param('msgId');
+    if (!(run.queuedMessages ?? []).some((m) => m.id === msgId)) {
+      return c.json({ error: 'not found' }, 404);
+    }
+    if (!manager.removeQueuedMessage(id, msgId)) return c.json({ error: 'run already started' }, 409);
+    return c.json({ removed: true });
   });
 
   // "Finish": gracefully close a waiting session — the run completes as done.
@@ -1719,7 +1997,10 @@ export function createApp(deps: ServerDeps): Hono {
     // hides the button when localHandoff is false — this is defense in depth.
     if (!capabilities().localHandoff) {
       return c.json(
-        { error: 'local handoff is disabled — this cockpit runs in hosted mode (CEZ_REMOTE); resume the session from a machine that has the checkout' },
+        {
+          error:
+            'local handoff is disabled — this cockpit runs in hosted mode (CEZ_REMOTE); resume the session from a machine that has the checkout',
+        },
         409,
       );
     }
@@ -1731,16 +2012,20 @@ export function createApp(deps: ServerDeps): Hono {
     if (!command) return c.json({ error: 'the recorded session id has an unexpected shape' }, 409);
     const opened = await openInTerminal(cwd, command);
     if (!opened) {
-      return c.json({ error: 'no terminal emulator found', command: `cd '${cwd}' && ${command}` }, 409);
+      return c.json(
+        {
+          error: 'no terminal emulator found',
+          command: `cd '${cwd}' && ${command}`,
+        },
+        409,
+      );
     }
     return c.json({ opened: true, command });
   });
 
   // "Open in…" session takeover (#open-in): the editors/file-manager/terminal
   // detected on THIS machine. Empty in hosted mode (no local desktop to open).
-  api.get('/open-targets', (c) =>
-    c.json({ targets: capabilities().localHandoff ? detectOpenTargets() : [] }),
-  );
+  api.get('/open-targets', (c) => c.json({ targets: capabilities().localHandoff ? detectOpenTargets() : [] }));
 
   // Open a run's worktree (or the repo root) in the chosen local app.
   api.post('/runs/:id/open-in', async (c) => {
@@ -1750,7 +2035,9 @@ export function createApp(deps: ServerDeps): Hono {
     if (!run) return c.json({ error: 'not found' }, 404);
     if (!capabilities().localHandoff) {
       return c.json(
-        { error: 'local handoff is disabled — this cockpit runs in hosted mode (CEZ_REMOTE)' },
+        {
+          error: 'local handoff is disabled — this cockpit runs in hosted mode (CEZ_REMOTE)',
+        },
         409,
       );
     }
@@ -1776,7 +2063,9 @@ export function createApp(deps: ServerDeps): Hono {
       const result = await readWorktreePath(run.worktreePath, relPath);
       if (result.kind !== 'file') {
         return c.json(
-          { error: result.kind === 'dir' ? `not a file: ${relPath}` : result.error },
+          {
+            error: result.kind === 'dir' ? `not a file: ${relPath}` : result.error,
+          },
           409,
         );
       }
@@ -1821,19 +2110,21 @@ export function createApp(deps: ServerDeps): Hono {
     // and what the client's cliTargetResumes now labels. Resume-after-finish is untouched.
     const cliRunner = agentCliRunner(target);
     if (cliRunner) {
-      const engineOwnsSession =
-        run.status === 'running' || run.status === 'queued' || run.status === 'waiting';
-      const sessionId = engineOwnsSession
-        ? undefined
-        : [...run.steps].reverse().find((s) => s.sessionId)?.sessionId;
+      const engineOwnsSession = run.status === 'running' || run.status === 'queued' || run.status === 'waiting';
+      const sessionId = engineOwnsSession ? undefined : [...run.steps].reverse().find((s) => s.sessionId)?.sessionId;
       // An id resumeCommand refuses (#431) degrades to a fresh CLI in the worktree,
       // exactly like a run that never recorded a session.
-      const resume =
-        sessionId && cliRunner === (run.runner ?? 'claude') ? resumeCommand(cliRunner, sessionId) : null;
+      const resume = sessionId && cliRunner === (run.runner ?? 'claude') ? resumeCommand(cliRunner, sessionId) : null;
       const command = resume ?? cliRunner;
       const opened = await openInTerminal(dir, command);
       if (!opened) {
-        return c.json({ error: 'no terminal emulator found', command: `cd '${dir}' && ${command}` }, 409);
+        return c.json(
+          {
+            error: 'no terminal emulator found',
+            command: `cd '${dir}' && ${command}`,
+          },
+          409,
+        );
       }
       return c.json({ opened: true, path: dir, command });
     }
@@ -1871,7 +2162,10 @@ export function createApp(deps: ServerDeps): Hono {
     if (!existsSync(path)) return c.json({ error: 'not found' }, 404);
     const type = IMAGE_TYPES[file.split('.').pop() ?? ''] ?? 'application/octet-stream';
     return new Response(readFileSync(path), {
-      headers: { 'content-type': type, 'cache-control': 'private, max-age=31536000, immutable' },
+      headers: {
+        'content-type': type,
+        'cache-control': 'private, max-age=31536000, immutable',
+      },
     });
   });
 
@@ -1946,13 +2240,22 @@ export function createApp(deps: ServerDeps): Hono {
       return c.json({ error: result.error }, 409);
     }
     if (result.kind === 'dir') {
-      return c.json({ type: 'dir', path: result.path, entries: result.entries });
+      return c.json({
+        type: 'dir',
+        path: result.path,
+        entries: result.entries,
+      });
     }
     if (c.req.query('raw') === '1') {
       const mime = imageMimeType(result.path);
       if (!mime) return c.json({ error: `raw serving is limited to images: ${result.path}` }, 409);
       if (result.tooLarge) {
-        return c.json({ error: `file too large to serve raw (${result.size} bytes): ${result.path}` }, 409);
+        return c.json(
+          {
+            error: `file too large to serve raw (${result.size} bytes): ${result.path}`,
+          },
+          409,
+        );
       }
       const bytes = await readFile(join(worktree, result.path));
       return c.body(new Uint8Array(bytes).buffer as ArrayBuffer, 200, {
@@ -1994,7 +2297,12 @@ export function createApp(deps: ServerDeps): Hono {
     if (!worktree) return c.json({ error: NO_WORKTREE }, 409);
     const result = await pushCurrentBranch(worktree);
     if (!result.ok) return c.json({ error: result.error }, 409);
-    return c.json({ pushed: true, branch: result.branch, remote: result.remote, upstreamSet: result.upstreamSet });
+    return c.json({
+      pushed: true,
+      branch: result.branch,
+      remote: result.remote,
+      upstreamSet: result.upstreamSet,
+    });
   });
 
   // Draft PR from the review gate (spec 009): final autosave → push →
@@ -2008,9 +2316,18 @@ export function createApp(deps: ServerDeps): Hono {
     if (!run) return c.json({ error: 'not found' }, 404);
     if (manager.isActive(id)) return c.json({ error: 'run is still active — wait for the review gate' }, 409);
     if (!run.worktreePath || !existsSync(run.worktreePath) || !run.branch) {
-      return c.json({ error: 'no worktree/branch to publish — this task ran in the repo working tree' }, 400);
+      return c.json(
+        {
+          error: 'no worktree/branch to publish — this task ran in the repo working tree',
+        },
+        400,
+      );
     }
-    const outcome = await createDraftPr({ repoRoot, run, handoffText: readHandoff(dataDir, id) });
+    const outcome = await createDraftPr({
+      repoRoot,
+      run,
+      handoffText: readHandoff(dataDir, id),
+    });
     if (!outcome.ok) {
       return c.json({ error: outcome.error, manual: `git merge ${run.branch}` }, 409);
     }
@@ -2095,9 +2412,7 @@ export function createApp(deps: ServerDeps): Hono {
   // merely switched off) and the mutators 409 as defense in depth — the shape
   // the hosted-mode open-in-* handlers already use. Existing todos.json entries
   // are never touched, so flipping the env back on restores them.
-  api.get('/todos', async (c) =>
-    c.json(capabilities().followups ? await readTodos(c.get('project').dataDir) : []),
-  );
+  api.get('/todos', async (c) => c.json(capabilities().followups ? await readTodos(c.get('project').dataDir) : []));
 
   // Check off = delete the entry.
   api.delete('/todos/:id', async (c) => {
@@ -2147,7 +2462,14 @@ export function createApp(deps: ServerDeps): Hono {
           name: '(inbox)',
           description: `Follow-up from the inbox — skill "${todo.suggestedSkill}"`,
           source: 'built-in',
-          steps: [{ id: 'task', name: 'Do the task', skill: todo.suggestedSkill, prompt: '{{task}}' }],
+          steps: [
+            {
+              id: 'task',
+              name: 'Do the task',
+              skill: todo.suggestedSkill,
+              prompt: '{{task}}',
+            },
+          ],
         };
       }
     }
@@ -2230,10 +2552,12 @@ export function createApp(deps: ServerDeps): Hono {
   api.get('/events', (c) => {
     const { dataDir, store } = c.get('project');
     return streamSSENoBuffer(c, async (stream) => {
-      const onRun = (run: RunRecord) =>
-        void stream.writeSSE({ event: 'run', data: JSON.stringify(run) });
+      const onRun = (run: RunRecord) => void stream.writeSSE({ event: 'run', data: JSON.stringify(run) });
       const onDeleted = (id: string) =>
-        void stream.writeSSE({ event: 'run-deleted', data: JSON.stringify({ id }) });
+        void stream.writeSSE({
+          event: 'run-deleted',
+          data: JSON.stringify({ id }),
+        });
       const sendTodos = async () => {
         const items: TodoItem[] = await readTodos(dataDir).catch(() => []);
         await stream.writeSSE({ event: 'todos', data: JSON.stringify(items) });
@@ -2242,9 +2566,7 @@ export function createApp(deps: ServerDeps): Hono {
       // watcher (step 2.3), so with the capability off we never subscribe —
       // no watcher, no fd. Scoped to this stream's dataDir: another
       // project's todos.json writes never reach this connection.
-      const offTodos = capabilities().followups
-        ? onTodosChanged(dataDir, () => void sendTodos())
-        : () => undefined;
+      const offTodos = capabilities().followups ? onTodosChanged(dataDir, () => void sendTodos()) : () => undefined;
       // Live resource telemetry (#348): the sampler ticks ~every 2 s only
       // while some run has a registered process; each tick is relayed as one
       // `usage` message (runId → {cpuPct, rssBytes, procCount}). Never
@@ -2298,18 +2620,25 @@ export function createApp(deps: ServerDeps): Hono {
         if (attached.has(project)) return;
         const { store, dataDir } = ctx;
         const onRun = (run: RunRecord) =>
-          void stream.writeSSE({ event: 'run', data: JSON.stringify({ ...run, project }) });
+          void stream.writeSSE({
+            event: 'run',
+            data: JSON.stringify({ ...run, project }),
+          });
         const onDeleted = (id: string) =>
-          void stream.writeSSE({ event: 'run-deleted', data: JSON.stringify({ id, project }) });
+          void stream.writeSSE({
+            event: 'run-deleted',
+            data: JSON.stringify({ id, project }),
+          });
         const sendTodos = async () => {
           const items: TodoItem[] = await readTodos(dataDir).catch(() => []);
-          await stream.writeSSE({ event: 'todos', data: JSON.stringify({ project, items }) });
+          await stream.writeSSE({
+            event: 'todos',
+            data: JSON.stringify({ project, items }),
+          });
         };
         // Same opt-in gate as the per-project stream (#471): no capability, no
         // watcher — and each subscription is scoped to its own dataDir (2.3).
-        const offTodos = capabilities().followups
-          ? onTodosChanged(dataDir, () => void sendTodos())
-          : () => undefined;
+        const offTodos = capabilities().followups ? onTodosChanged(dataDir, () => void sendTodos()) : () => undefined;
         store.on('run', onRun);
         store.on('deleted', onDeleted);
         attached.set(project, {
@@ -2347,7 +2676,10 @@ export function createApp(deps: ServerDeps): Hono {
             if (store.getRun(runId)) owned[runId] = sample;
           }
           if (Object.keys(owned).length > 0) {
-            void stream.writeSSE({ event: 'usage', data: JSON.stringify({ project, usage: owned }) });
+            void stream.writeSSE({
+              event: 'usage',
+              data: JSON.stringify({ project, usage: owned }),
+            });
           }
         }
       });
@@ -2391,9 +2723,7 @@ export function createApp(deps: ServerDeps): Hono {
   api.get('/github', async (c) => {
     const { root: repoRoot } = c.get('project');
     const limit = Number.parseInt(c.req.query('limit') ?? '', 10);
-    return c.json(
-      await fetchGithub(repoRoot, c.req.query('refresh') === '1', Number.isFinite(limit) ? limit : 30),
-    );
+    return c.json(await fetchGithub(repoRoot, c.req.query('refresh') === '1', Number.isFinite(limit) ? limit : 30));
   });
 
   // The full comment thread for one issue/PR (#499). Additive sibling of /api/github — lazy
@@ -2405,7 +2735,10 @@ export function createApp(deps: ServerDeps): Hono {
   });
   api.get('/github/comments/:kind/:number', async (c) => {
     const { root: repoRoot } = c.get('project');
-    const parsed = commentsParams.safeParse({ kind: c.req.param('kind'), number: c.req.param('number') });
+    const parsed = commentsParams.safeParse({
+      kind: c.req.param('kind'),
+      number: c.req.param('number'),
+    });
     if (!parsed.success) return c.json({ error: 'invalid kind or number' }, 400);
     return c.json(
       await fetchGithubComments(repoRoot, parsed.data.kind, parsed.data.number, c.req.query('refresh') === '1'),
@@ -2416,14 +2749,27 @@ export function createApp(deps: ServerDeps): Hono {
   api.get('/repo', async (c) => {
     const { root: repoRoot } = c.get('project');
     const info = await getRepoInfo(repoRoot);
-    if (!info) return c.json({ info: null, status: [], log: [], branches: [], baseBranch: null });
+    if (!info)
+      return c.json({
+        info: null,
+        status: [],
+        log: [],
+        branches: [],
+        baseBranch: null,
+      });
     const [status, log, branches, config] = await Promise.all([
       getStatus(info.root),
       getLog(info.root),
       getBranches(info.root),
       loadConfig(repoRoot),
     ]);
-    return c.json({ info, status, log, branches, baseBranch: config.baseBranch ?? null });
+    return c.json({
+      info,
+      status,
+      log,
+      branches,
+      baseBranch: config.baseBranch ?? null,
+    });
   });
 
   // The Settings → Agents knobs in one read (R6 Step 1.5) — an ADDITIVE
@@ -2456,14 +2802,13 @@ export function createApp(deps: ServerDeps): Hono {
   const setConfigSchema = z.object({
     baseBranch: z.string().trim().min(1).max(200).nullable().optional(),
     defaultRunner: z.enum(['claude', 'codex', 'opencode']).optional(),
-    systemPrompt: z
-      .string()
-      .trim()
-      .max(20_000, 'systemPrompt must be at most 20000 characters')
-      .nullable()
-      .optional(),
+    systemPrompt: z.string().trim().max(20_000, 'systemPrompt must be at most 20000 characters').nullable().optional(),
     defaultModels: z
-      .object({ claude: modelPresetSchema, codex: modelPresetSchema, opencode: modelPresetSchema })
+      .object({
+        claude: modelPresetSchema,
+        codex: modelPresetSchema,
+        opencode: modelPresetSchema,
+      })
       .optional(),
     // Concurrency + memory guard (Settings → Resources). maxParallel clamps to
     // the schema's 1–16; memoryLimitMb null/0 clears the ceiling.
@@ -2568,7 +2913,9 @@ export function createApp(deps: ServerDeps): Hono {
     if (!def) return c.json({ error: 'unknown config file' }, 404);
     if (def.tracked === 'outside-repo' && !capabilities().localHandoff) {
       return c.json(
-        { error: 'this file lives in your home directory and is not served in hosted mode (CEZ_REMOTE)' },
+        {
+          error: 'this file lives in your home directory and is not served in hosted mode (CEZ_REMOTE)',
+        },
         409,
       );
     }
@@ -2587,7 +2934,10 @@ export function createApp(deps: ServerDeps): Hono {
     // local-machine capability and are re-gated on every request.
     if (!capabilities().localHandoff) {
       return c.json(
-        { error: 'editing agent config is disabled in hosted mode (CEZ_REMOTE) — edit it from the machine that owns the checkout' },
+        {
+          error:
+            'editing agent config is disabled in hosted mode (CEZ_REMOTE) — edit it from the machine that owns the checkout',
+        },
         409,
       );
     }
@@ -2644,7 +2994,9 @@ export function createApp(deps: ServerDeps): Hono {
     const info = await getRepoInfo(repoRoot);
     if (!info) return c.json({ error: 'not a git repository' }, 409);
     // The user's REAL working tree — never stage into their index (a GET must not write).
-    const result = await collectChanges(info.root, 'HEAD', { intentToAdd: false });
+    const result = await collectChanges(info.root, 'HEAD', {
+      intentToAdd: false,
+    });
     if (!result.ok) return c.json({ error: result.error }, 409);
     return c.json(result.changes);
   });
@@ -2698,7 +3050,55 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
   // expose an agent-executing box to the network. `bindHost` exists only for a deliberate
   // hosted/VPS deployment (which also flips CEZ_REMOTE to gate the local-handoff endpoints) —
   // src/index.ts never passes it, so the loopback guarantee holds for the normal CLI.
-  return serve({ fetch: app.fetch, port, hostname: deps.bindHost ?? '127.0.0.1' });
+  return serve({
+    fetch: app.fetch,
+    port,
+    hostname: deps.bindHost ?? '127.0.0.1',
+  });
+}
+
+/** The bare hostname of a `Host` header — see `normalizeHostname`. `''` when the
+ *  header is absent, which no allowlist matches. */
+function hostnameOfHost(host: string | undefined): string {
+  return host ? normalizeHostname(host) : '';
+}
+
+/** The `hostname:port` authority of a `Host` header, e.g. `127.0.0.1:4321`.
+ *
+ *  The port is kept verbatim and is `''` when the header omits it — which is
+ *  exactly when a browser also omits it from `Origin` (both drop the scheme's
+ *  default port). That symmetry is what lets us compare the two without knowing
+ *  our own scheme, which we cannot know behind a TLS-terminating proxy. */
+function authorityOfHost(host: string | undefined): string {
+  if (!host) return '';
+  const port = host.match(/^\[[^\]]*\]:(\d+)$/)?.[1] ?? host.match(/^[^:]*:(\d+)$/)?.[1] ?? '';
+  return `${normalizeHostname(host)}:${port}`;
+}
+
+/** The `hostname:port` authority of an `Origin` header, or `null` when it is not
+ *  a parseable http(s) URL (the opaque `"null"` origin of a sandboxed iframe, a
+ *  `file://` page). `URL.port` is `''` for a scheme's default port, matching
+ *  `authorityOfHost`. */
+function authorityOfOrigin(origin: string): string | null {
+  try {
+    const u = new URL(origin);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    return `${normalizeHostname(u.hostname)}:${u.port}`;
+  } catch {
+    return null;
+  }
+}
+
+/** The hostname of an `Origin` header, or `null` when it is not a parseable URL
+ *  (e.g. the opaque `"null"` origin of a sandboxed iframe). Normalized through
+ *  the same path as `hostnameOfHost` so the two compare equal for IPv6 and for
+ *  trailing-dot FQDNs. */
+function hostnameOfOrigin(origin: string): string | null {
+  try {
+    return normalizeHostname(new URL(origin).hostname);
+  } catch {
+    return null;
+  }
 }
 
 function resolveWebDir(): string {

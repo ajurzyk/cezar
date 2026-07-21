@@ -34,7 +34,9 @@ import {
   getWorkspaceConfig,
   getWorkspaceUiState,
   getWorktrees,
+  editQueuedMessage,
   patchRun,
+  removeQueuedMessage,
   registerProject,
   removeProject,
   sendMessage,
@@ -565,6 +567,29 @@ export function useSendMessage(id: string) {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (message: MessageInput) => sendMessage(id, message),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.runs.all }),
+  })
+}
+
+/** Edit a message stacked on a queued run (`PATCH /api/runs/:id/queued-messages/:msgId`, #472).
+ *  Invalidates `runs.*` so the thread re-renders from the authoritative record — the stack lives
+ *  on the record, not in the event stream. Errors are the CALLER's to surface, as with
+ *  `useSendMessage`: a 409 means the run started, and the bubble goes read-only on the next
+ *  frame anyway. */
+export function useEditQueuedMessage(id: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ msgId, message }: { msgId: string; message: MessageInput }) =>
+      editQueuedMessage(id, msgId, message),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.runs.all }),
+  })
+}
+
+/** Remove a message stacked on a queued run (`DELETE /api/runs/:id/queued-messages/:msgId`). */
+export function useRemoveQueuedMessage(id: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (msgId: string) => removeQueuedMessage(id, msgId),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.runs.all }),
   })
 }

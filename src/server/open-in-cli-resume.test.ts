@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RunStore } from '../runs/store.js';
 import type { RunManager } from '../workflows/run.js';
 import { openInTerminal } from './open-in-terminal.js';
+import { apiRequest } from './loopback-request.testkit.js';
 
 // The terminal launcher actually spawns a process (osascript/cmd/x-terminal-emulator) — mocked
 // so this suite exercises only the command construction, never a real terminal window.
@@ -59,7 +60,7 @@ describe('POST /api/runs/:id/open-in — agent CLI resume vs fresh launch', () =
   };
 
   const openIn = (runId: string, target: string) =>
-    app().request(`/api/runs/${runId}/open-in`, {
+    apiRequest(app(), `/api/runs/${runId}/open-in`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ target }),
