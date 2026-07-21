@@ -400,26 +400,29 @@ async function excludeFromGit(repoRoot: string, pattern: string): Promise<void> 
 // DNS/TCP), so each source gets one implicit attempt per process. "Refresh"
 // always retries.
 const cloneAttempted = new Set<string>();
-let teamSkills: Skill[] = [];
-let firstLoadStarted = false;
+// Both maps are keyed by `repoRoot` (multi-project workspace, step 2.6): each
+// project resolves its own `.ai/cezar/config.json` → `skillsRepos`, so one
+// project's team-skill list must never be served under another project's scope.
+const teamSkillsByRoot = new Map<string, Skill[]>();
+const firstLoadStarted = new Set<string>();
 
 /**
- * The current team-skill list, straight from memory. The first call kicks off
- * an async background load (clone + list) and returns immediately — the GUI
- * refetches, so remote skills appear moments later instead of blocking the
- * first `GET /api/skills`.
+ * The current team-skill list for this project, straight from memory. The
+ * first call per `repoRoot` kicks off an async background load (clone + list)
+ * and returns immediately — the GUI refetches, so remote skills appear moments
+ * later instead of blocking the first `GET /api/skills`.
  */
 export function getTeamSkillsCached(repoRoot: string): Skill[] {
-  if (!firstLoadStarted) {
-    firstLoadStarted = true;
+  if (!firstLoadStarted.has(repoRoot)) {
+    firstLoadStarted.add(repoRoot);
     void loadTeamSkills(repoRoot, false).catch(() => undefined);
   }
-  return teamSkills;
+  return teamSkillsByRoot.get(repoRoot) ?? [];
 }
 
 /** Refresh: clone missing sources, `git fetch` existing ones, reload the list. */
 export async function refreshTeamSkills(repoRoot: string): Promise<Skill[]> {
-  firstLoadStarted = true;
+  firstLoadStarted.add(repoRoot);
   return loadTeamSkills(repoRoot, true);
 }
 
@@ -450,6 +453,6 @@ async function loadTeamSkills(repoRoot: string, refresh: boolean): Promise<Skill
       // degrade: this source contributes nothing
     }
   }
-  teamSkills = out;
+  teamSkillsByRoot.set(repoRoot, out);
   return out;
 }

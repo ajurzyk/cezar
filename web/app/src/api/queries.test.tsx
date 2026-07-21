@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ApiError } from './client'
 import { createQueryClient } from './query-client'
+import { setApiScope } from './project-scope'
 import { queryKeys, useHealth, usePatchRun, useRun, useRunChanges, useRuns } from './queries'
 
 const fetchMock = vi.fn<typeof fetch>()
@@ -45,25 +46,42 @@ const HEALTH = {
 
 describe('queryKeys', () => {
   // Step 3.2 invalidates by these. Keeping them stable and hierarchical is the whole contract:
-  // `['runs']` has to be a prefix of both the list and every detail key, or one invalidate call
-  // cannot reach them.
+  // the runs root has to be a prefix of both the list and every detail key, or one invalidate
+  // call cannot reach them. Since step 3.1 every key leads with the project scope — the
+  // `'default'` sentinel unscoped — so caches never bleed across projects.
   it('nests every run key under the list root', () => {
-    expect(queryKeys.runs.all).toEqual(['runs'])
-    expect(queryKeys.runs.list()).toEqual(['runs', 'list'])
-    expect(queryKeys.runs.detail('a')).toEqual(['runs', 'detail', 'a'])
-    expect(queryKeys.runs.diff('a')).toEqual(['runs', 'diff', 'a'])
+    expect(queryKeys.runs.all).toEqual(['default', 'runs'])
+    expect(queryKeys.runs.list()).toEqual(['default', 'runs', 'list'])
+    expect(queryKeys.runs.detail('a')).toEqual(['default', 'runs', 'detail', 'a'])
+    expect(queryKeys.runs.diff('a')).toEqual(['default', 'runs', 'diff', 'a'])
     for (const key of [queryKeys.runs.list(), queryKeys.runs.detail('a'), queryKeys.runs.diff('a')]) {
-      expect(key[0]).toBe(queryKeys.runs.all[0])
+      expect(key.slice(0, 2)).toEqual([...queryKeys.runs.all])
     }
   })
 
   it('keys github by limit so two page sizes are two caches', () => {
-    expect(queryKeys.github()).toEqual(['github', null])
+    expect(queryKeys.github()).toEqual(['default', 'github', null])
     expect(queryKeys.github({ limit: 5 })).not.toEqual(queryKeys.github({ limit: 50 }))
   })
 
   it('is stable across calls — an unstable key refetches forever', () => {
     expect(queryKeys.runs.detail('a')).toEqual(queryKeys.runs.detail('a'))
+  })
+
+  it('leads every key with the active project scope, so two projects are two caches', () => {
+    setApiScope('proj-a')
+    try {
+      expect(queryKeys.runs.list()).toEqual(['proj-a', 'runs', 'list'])
+      expect(queryKeys.health).toEqual(['proj-a', 'health'])
+      expect(queryKeys.todos).toEqual(['proj-a', 'todos'])
+      expect(queryKeys.github({ limit: 5 })).toEqual(['proj-a', 'github', 5])
+      const scoped = queryKeys.runs.detail('a')
+      setApiScope('proj-b')
+      // The same call under another scope is a DIFFERENT cache entry — the whole point.
+      expect(queryKeys.runs.detail('a')).not.toEqual(scoped)
+    } finally {
+      setApiScope(null)
+    }
   })
 })
 

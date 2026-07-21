@@ -38,6 +38,12 @@ BUILD_INPUT_PATHS="src web/app/src web/app/index.html web/app/vite.config.ts pac
 # `claude` login and reaches no network — the whole point for CI/e2e.
 export CEZ_DRY_RUN=1
 
+# The real CLI writes workspace state at boot (~/.cezar migrations + project
+# registration) — pin CEZ_HOME under .ai/qa so a test boot never touches the
+# developer's real ~/.cezar. Kept stable (not per-boot) so the reuse path
+# attaches to the same workspace the running instance was booted with.
+export CEZ_HOME="$QA_DIR/cez-home"
+
 FORCE=0
 FORCE_REBUILD=0
 for arg in "$@"; do
@@ -353,7 +359,7 @@ write_descriptor() {
       notes: "Booted from a production build with CEZ_DRY_RUN=1, so the agent CLIs are mocked and no login/network is needed. No backing services. Stop with .ai/scripts/test-env-down.sh. App log: .ai/qa/test-env-app.log.",
     }, null, 2) + "\n");
   ' "$ENV_DESCRIPTOR" "$BASE_URL" "$PORT" "$APP_PID" \
-    "CEZ_DRY_RUN=1 node dist/index.js --port $PORT --no-open" \
+    "CEZ_DRY_RUN=1 CEZ_HOME=.ai/qa/cez-home node dist/index.js --port $PORT --no-open" \
     "$BROWSER_INSTALLED" "$BROWSER_COMMAND" "$BROWSER_VERSION" "$BROWSER_NOTES" "$BROWSER_DESCRIPTOR"
 }
 

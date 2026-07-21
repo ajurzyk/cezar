@@ -168,6 +168,24 @@ export function groupRuns(runs: readonly RunRecord[], view: ListView): QuickList
   }))
 }
 
+/**
+ * Cap a bucketed list at `limit` rows ACROSS buckets, preserving bucket order (multi-project
+ * spec, step 3.3: each sidebar project group shows its "10 most recent tasks" and a More… row).
+ * A collapsed variant-group tile counts as one row — it occupies one row of sidebar. Buckets
+ * emptied by the cap are dropped, like `groupRuns` drops empty ones.
+ */
+export function capBuckets(buckets: readonly QuickListBucket[], limit: number): QuickListBucket[] {
+  const capped: QuickListBucket[] = []
+  let remaining = limit
+  for (const bucket of buckets) {
+    if (remaining <= 0) break
+    const rows = bucket.rows.slice(0, remaining)
+    remaining -= rows.length
+    capped.push({ label: bucket.label, rows })
+  }
+  return capped
+}
+
 /** The tab counts. `waiting` drives the Active tab's attention dot — the one thing that makes an
  *  un-selected tab worth looking at. */
 export function listCounts(runs: readonly RunRecord[]): {

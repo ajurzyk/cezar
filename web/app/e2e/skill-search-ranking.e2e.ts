@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { AgentBrowser } from './agent-browser'
+import { AgentBrowser, fixtureServeEnv } from './agent-browser'
 
 /**
  * #484 end-to-end: skill search must rank the (almost-)exact match to the TOP wherever it is
@@ -87,7 +87,7 @@ beforeAll(async () => {
   server = spawn(
     process.execPath,
     [join(repoRoot, 'dist/index.js'), 'serve', '--repo', dataRoot, '--port', String(port), '--no-open'],
-    { env: { ...process.env, CEZ_DRY_RUN: '1' }, stdio: 'ignore' },
+    { env: fixtureServeEnv(dataRoot), stdio: 'ignore' },
   )
   await waitForHealth(baseUrl)
 
