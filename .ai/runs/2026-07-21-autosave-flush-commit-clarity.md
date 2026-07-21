@@ -84,15 +84,15 @@ exist — `src/index.ts:87-118` has no such case) and the stale docstrings.
 
 ### Phase 1: Label autosave commits by reason
 
-- [ ] 1.1 Add `AutosaveReason` and reason-aware message to `autosaveCommit`
-- [ ] 1.2 Pass the reason at all four call sites
-- [ ] 1.3 Tests for reason-labelled messages
+- [x] 1.1 Add `AutosaveReason` and reason-aware message to `autosaveCommit` — 13fb782
+- [x] 1.2 Pass the reason at all four call sites — 13fb782
+- [x] 1.3 Tests for reason-labelled messages — 13fb782
 
 ### Phase 2: Conflict-marker guard
 
-- [ ] 2.1 Refuse to autosave unmerged paths / leftover conflict markers
-- [ ] 2.2 Tests for the guard
+- [x] 2.1 Refuse to autosave unmerged paths / leftover conflict markers — 13fb782
+- [x] 2.2 Tests for the guard — 13fb782
 
 ### Phase 3: Docs
 
-- [ ] 3.1 Correct README and docstrings
+- [x] 3.1 Correct README and docstrings — fff538b
