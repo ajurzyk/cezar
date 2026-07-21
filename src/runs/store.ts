@@ -34,8 +34,10 @@ const stepStateSchema = z.object({
   startedAt: z.string().optional(),
   finishedAt: z.string().optional(),
   error: z.string().optional(),
-  /** Latest claude session id — the user can `claude --resume <id>` with it. */
+  /** Latest backend-owned session id, used for same-backend Continue. */
   sessionId: z.string().optional(),
+  /** Backend that owns `sessionId`. Optional so pre-affinity runs.json files still parse. */
+  backend: z.enum(['claude', 'codex', 'opencode']).optional(),
   /** Dollar cost reported by the claude CLI for this step's turns. */
   costUsd: z.number().optional(),
 });

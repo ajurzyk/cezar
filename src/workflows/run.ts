@@ -801,8 +801,14 @@ export class RunManager {
     if (!['done', 'failed', 'cancelled', 'review'].includes(run.status)) {
       return { ok: false, error: `cannot continue a ${run.status} run` };
     }
-    const sessionId = [...run.steps].reverse().find((s) => s.sessionId)?.sessionId;
-    if (!sessionId) return { ok: false, error: 'no agent session to resume' };
+    const sessionStep = [...run.steps].reverse().find((s) => s.sessionId);
+    if (!sessionStep?.sessionId) return { ok: false, error: 'no agent session to resume' };
+    const targetRunner = opts.runner ?? run.runner ?? 'claude';
+    // Session ids are provider-owned opaque values. New records carry explicit
+    // affinity; for legacy records, the run's current runner is the conservative
+    // owner until a continuation emits a new, attributed session id (#562).
+    const sessionBackend = sessionStep.backend ?? run.runner ?? 'claude';
+    const resume = sessionBackend === targetRunner;
 
     // Follow-up runner/model override (#401): the composer lets the user pick which backend and
     // model handle this continuation. Omitted → the run's current backend/model is kept
@@ -815,7 +821,6 @@ export class RunManager {
       // this continuation will actually use (`opts.runner ?? record.runner ?? 'claude'` — the
       // same resolution `runContinuation` reads off the record). A model that is recognizably
       // another runner's preset would corrupt the run; free-form/custom ids pass untouched.
-      const targetRunner = opts.runner ?? run.runner ?? 'claude';
       if (opts.model && modelConflictsWithRunner(opts.model, targetRunner)) {
         return { ok: false, error: `model '${opts.model}' is not a ${targetRunner} model` };
       }
@@ -842,7 +847,13 @@ export class RunManager {
     const continuations = run.steps.filter((s) => s.id.startsWith('continue-')).length;
     const stepId = `continue-${continuations + 1}`;
     this.store.addStep(runId, { id: stepId, name: 'Continue', kind: 'agent' });
-    void this.runContinuation(runId, stepId, sessionId, opts.text?.trim() || 'Continue.').catch(
+    void this.runContinuation(
+      runId,
+      stepId,
+      resume ? sessionStep.sessionId : undefined,
+      targetRunner,
+      opts.text?.trim() || 'Continue.',
+    ).catch(
       (err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
         this.store.updateRun(runId, {
@@ -860,7 +871,8 @@ export class RunManager {
   private async runContinuation(
     runId: string,
     stepId: string,
-    sessionId: string,
+    sessionId: string | undefined,
+    backend: RunnerId,
     prompt: string,
   ): Promise<void> {
     // Continuation runs in the task's worktree when it still exists (spec
@@ -913,6 +925,7 @@ export class RunManager {
       iterations: 1,
       startedAt: new Date().toISOString(),
       sessionId,
+      backend,
     });
     this.store.appendEvent(runId, { type: 'step-start', stepId, name: 'Continue', kind: 'agent', iteration: 1 });
     this.store.appendEvent(runId, { type: 'user-message', stepId, text: prompt, imageCount: 0 });
@@ -934,7 +947,7 @@ export class RunManager {
       }
       this.store.appendEvent(runId, { ...event, stepId });
       if (event.type === 'session') {
-        this.store.updateStep(runId, stepId, { sessionId: event.sessionId });
+        this.store.updateStep(runId, stepId, { sessionId: event.sessionId, backend });
       }
       if (event.type === 'token-usage') {
         this.store.updateStep(runId, stepId, { tokensUsed: event.tokensUsed });
@@ -1010,7 +1023,7 @@ export class RunManager {
 
     // Backend + model come off the record: the run's current backend by default, or the
     // follow-up override that `continueRun` persisted before scheduling (#401).
-    const runner = createRunner(record?.runner ?? 'claude');
+    const runner = createRunner(backend);
     const session = runner.startSession(
       {
         // The Continue step is a fresh agent session on the same run — the
@@ -1027,7 +1040,7 @@ export class RunManager {
         env: this.agentEnv(runId, generateFollowups),
         model: record?.model,
         sessionId,
-        resume: true,
+        resume: sessionId !== undefined,
         timeoutMs: 0,
       },
       onEvent,
@@ -1386,7 +1399,8 @@ export class RunManager {
     }
 
     const sessionId = randomUUID();
-    this.store.updateStep(runId, step.id, { sessionId });
+    const backend = step.runner ?? taskBackend;
+    this.store.updateStep(runId, step.id, { sessionId, backend });
 
     const stepRecord = this.store.getRun(runId)?.steps.find((s) => s.id === step.id);
     const startTokens = stepRecord?.tokensUsed ?? 0;
@@ -1408,7 +1422,7 @@ export class RunManager {
       emit({ ...event, stepId: step.id });
       if (event.type === 'session') {
         // Codex/OpenCode mint their own session id — persist it so resume works.
-        this.store.updateStep(runId, step.id, { sessionId: event.sessionId });
+        this.store.updateStep(runId, step.id, { sessionId: event.sessionId, backend });
       }
       if (event.type === 'token-usage') {
         this.store.updateStep(runId, step.id, { tokensUsed: startTokens + event.tokensUsed });
