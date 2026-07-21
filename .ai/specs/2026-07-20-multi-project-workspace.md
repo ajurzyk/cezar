@@ -9,6 +9,7 @@
 > [new task](assets/2026-07-20-multi-project-workspace/new-task-project.html) ·
 > [global settings](assets/2026-07-20-multi-project-workspace/settings-global.html)
 > — light/dark screenshots alongside each `.html`.
+> Implementation evidence: [independent project folders](assets/2026-07-20-multi-project-workspace/settings-project-roots-dark.png).
 
 ## TLDR
 
