@@ -260,9 +260,30 @@ export function ReasoningItem({ text }: { text: string }) {
         </span>
       </CollapsibleTrigger>
       <CollapsibleContent>
-        <div className="px-6 py-1.5 text-[13px] leading-[1.6] whitespace-pre-wrap text-soft-foreground">{text}</div>
+        <div className="px-6 py-1.5 text-[13px] leading-[1.6] text-soft-foreground">
+          <Markdown breaks>{text}</Markdown>
+        </div>
       </CollapsibleContent>
     </Collapsible>
+  )
+}
+
+/**
+ * Live "the agent is working" affordance for an active session. A running run
+ * streams in bursts with quiet gaps between turns (thinking, tool setup), and
+ * with nothing on screen the user cannot tell whether more output is coming.
+ * This spinner + shimmering label sits at the tail of the thread for exactly
+ * the `running` window, so the session never looks stalled when it is not.
+ */
+export function WorkingIndicator() {
+  return (
+    <div
+      data-slot="working-indicator"
+      className="flex items-center gap-2 py-1 text-[13px] text-soft-foreground"
+    >
+      <LoaderCircleIcon role="status" aria-label="Working" className="size-3.5 shrink-0 animate-spin" />
+      <span className="shimmer font-medium">Working…</span>
+    </div>
   )
 }
 

@@ -187,6 +187,17 @@ describe('ReasoningItem', () => {
     expect(screen.getByRole('button').textContent).toBe(`Thinking — ${text}`)
   })
 
+  it('renders the expanded body as markdown — bold and list markup become elements, not literals', () => {
+    const md = 'First I check **the middleware**, then:\n\n- preserve the cookie\n- re-run the redirect'
+    const { container } = render(<ReasoningItem text={md} />)
+    fireEvent.click(screen.getByRole('button'))
+    const body = container.querySelector('[data-slot="collapsible-content"]')!
+    // The body markdown is rendered, not shown as raw source.
+    expect(body.querySelector('[data-streamdown="strong"]')?.textContent).toBe('the middleware')
+    expect(body.querySelectorAll('li').length).toBe(2)
+    expect(body.textContent).not.toContain('**the middleware**')
+  })
+
   // #528 — an empty item must not leave a bare, un-expandable "Thinking —" row.
   it.each([['', 'empty'], ['   ', 'spaces'], ['\n\t ', 'whitespace']])(
     'renders nothing for %s text (%s)',
