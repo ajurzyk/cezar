@@ -228,6 +228,34 @@ describe('ProjectGroups', () => {
     expect(group('shop').querySelector('[data-slot="project-attention"]')).toBeNull()
   })
 
+  it("the boot group reads the 'default' cache entry — the one the stream patches", async () => {
+    // The boot project mounts UNSCOPED (routes.tsx), so the main view and the SSE patcher both
+    // live under the 'default' scope key. The boot group must share that entry, or its list and
+    // needs-you badge freeze at whatever the expand-time fetch answered.
+    const client = createQueryClient()
+    serve({ '/api/workspace/ui-state': {}, '/api/p/cezar/runs': [] })
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={['/p/cezar/']}>
+          <ListViewProvider>
+            <ProjectGroups projects={[project(), project({ id: 'shop', name: 'shop', lastOpenedAt: '2026-07-19T00:00:00.000Z' })]} bootProjectId="cezar" forgeAvailable />
+          </ListViewProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+    await waitFor(() => expect(header('cezar').getAttribute('aria-expanded')).toBe('true'))
+    expect(taskLinks('cezar')).toHaveLength(0)
+
+    // A live `run` event lands in the cache exactly where global-events writes it: under
+    // ['default', 'runs', 'list'], never under the boot project's own id.
+    client.setQueryData(['default', 'runs', 'list'], [run({ status: 'waiting' })])
+
+    await waitFor(() => expect(taskLinks('cezar')).toHaveLength(1))
+    expect(group('cezar').querySelector('[data-slot="project-attention"]')?.textContent).toBe('1')
+    // The non-boot group keeps its own per-project key untouched.
+    expect(taskLinks('shop')).toHaveLength(0)
+  })
+
   it('renders a missing project greyed and inert, with no nav behind it', async () => {
     serve({ '/api/workspace/ui-state': {}, '/api/p/cezar/runs': [] })
     renderGroups([project(), project({ id: 'gone', name: 'old-spike', status: 'missing', lastOpenedAt: '2026-07-01T00:00:00.000Z' })])

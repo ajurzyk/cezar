@@ -166,6 +166,7 @@ export function ProjectGroups({
         <ProjectGroup
           key={project.id}
           project={project}
+          boot={project.id === bootProjectId}
           active={project.id === activeProjectId}
           collapsed={isProjectCollapsed(collapsed, project.id, activeProjectId)}
           onToggle={toggle}
@@ -184,6 +185,7 @@ export function ProjectGroups({
 
 function ProjectGroup({
   project,
+  boot,
   active,
   collapsed,
   onToggle,
@@ -196,6 +198,9 @@ function ProjectGroup({
   inboxCount,
 }: {
   project: ProjectListEntry
+  /** The boot project's runs cache lives under the `'default'` scope key (it mounts
+   *  unscoped) — see `useProjectRuns`' `boot` parameter. */
+  boot: boolean
   active: boolean
   collapsed: boolean
   onToggle: (projectId: string) => void
@@ -212,7 +217,7 @@ function ProjectGroup({
   // Collapsed (or missing) groups never fetch — a 40-project workspace costs one registry
   // request, not 40 run lists. A collapsed group still READS whatever is cached, which is what
   // keeps its attention badge alive after the user shuts it.
-  const runs = useProjectRuns(project.id, !collapsed && !missing)
+  const runs = useProjectRuns(project.id, !collapsed && !missing, boot)
   const onNavigate = useSidebarNavigate()
 
   const waiting = runs.data ? listCounts(runs.data).waiting : 0

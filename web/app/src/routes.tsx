@@ -147,17 +147,27 @@ function ProjectScopeRoute() {
   const { projectId = '' } = useParams()
   const location = useLocation()
   const projects = useProjects()
+  const health = useHealth()
 
   if (projectId === 'default') {
-    const boot = projects.data?.bootProject
-    if (boot === undefined) return <ScopeResolving />
-    const rest = location.pathname.replace(/^\/p\/default(?=\/|$)/, '')
-    return (
-      <Navigate
-        to={`/p/${encodeURIComponent(boot)}${rest || '/'}${location.search}${location.hash}`}
-        replace
-      />
-    )
+    // The registry names the boot slug; health's additive `bootProject` (the same slug) is the
+    // fallback when the registry query ERRORED. With neither and the registry still fetching,
+    // stay quiet; with the registry errored and no fallback either, fall through — the
+    // server-side `default` alias answers every `/api/p/default/*` route as the boot project,
+    // so mounting the scope (whose routed views own the honest error states) beats a permanent
+    // "Loading…" (the same doctrine as the projects-error path below).
+    const boot =
+      projects.data?.bootProject ?? (projects.isError ? health.data?.bootProject : undefined)
+    if (boot !== undefined) {
+      const rest = location.pathname.replace(/^\/p\/default(?=\/|$)/, '')
+      return (
+        <Navigate
+          to={`/p/${encodeURIComponent(boot)}${rest || '/'}${location.search}${location.hash}`}
+          replace
+        />
+      )
+    }
+    if (!projects.isError) return <ScopeResolving />
   }
 
   if (projects.data) {

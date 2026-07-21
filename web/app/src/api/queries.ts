@@ -259,10 +259,17 @@ export function useRuns() {
  * scope's events). `enabled: false` parks the fetch — a COLLAPSED group costs one registry
  * row, never a runs request (spec, "40 registered projects" row) — while still reading any
  * cached answer, which is what lets a collapsed group keep its attention badge.
+ *
+ * `boot: true` aliases the key scope to `'default'`: the boot project mounts UNSCOPED
+ * (routes.tsx keeps its legacy `/api/*` surface), so its main view and the SSE patcher both
+ * live under the `'default'`-led keys — the boot group must read that SAME entry, or its list
+ * and needs-you badge freeze at whatever the expand-time fetch answered. The fetch itself
+ * still goes to `/api/p/<bootId>/runs`, which the server answers byte-identically (the
+ * route-parity contract).
  */
-export function useProjectRuns(projectId: string, enabled = true) {
+export function useProjectRuns(projectId: string, enabled = true, boot = false) {
   return useQuery({
-    queryKey: [projectId, 'runs', 'list'] as const,
+    queryKey: [boot ? 'default' : projectId, 'runs', 'list'] as const,
     queryFn: ({ signal }) => getProjectRuns(projectId, { signal }),
     enabled,
   })

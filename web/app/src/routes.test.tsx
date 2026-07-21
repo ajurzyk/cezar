@@ -1,5 +1,5 @@
 import { QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, useLocation } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -356,6 +356,64 @@ describe('the /p/default alias', () => {
     renderAt('/p/default')
     expect(routeName()).toBe('tasks')
     expect(currentPathname()).toBe(`/p/${BOOT}/`)
+  })
+
+  it('a registry error still resolves the alias via health instead of loading forever', async () => {
+    // `/api/projects` down, `/api/health` already answered (it names the same boot slug): the
+    // alias must not park on the quiet resolving screen for good — health is the fallback.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        if (String(input).startsWith('/api/projects')) {
+          return new Response(JSON.stringify({ error: 'down' }), {
+            status: 500,
+            headers: { 'content-type': 'application/json' },
+          })
+        }
+        return new Promise<never>(() => {})
+      }),
+    )
+    const client = createQueryClient()
+    client.setQueryData(queryKeys.health, HEALTH)
+    render(
+      <QueryClientProvider client={client}>
+        <ThemeProvider>
+          <AppearanceProvider>
+            <MemoryRouter initialEntries={['/p/default/tasks/x']}>
+              <ListViewProvider>
+                <AppRoutes />
+                <LocationProbe />
+              </ListViewProvider>
+            </MemoryRouter>
+          </AppearanceProvider>
+        </ThemeProvider>
+      </QueryClientProvider>,
+    )
+    // The client retries a 5xx once with ~1 s of backoff before erroring — give it room.
+    await waitFor(() => expect(currentPathname()).toBe(`/p/${BOOT}/tasks/x`), { timeout: 4000 })
+    expect(routeName()).toBe('task-thread')
+  })
+
+  it('with the registry errored and no health either, the alias mounts the scope rather than spin', async () => {
+    // Nothing can name the real boot slug, but the server-side `default` alias answers every
+    // `/api/p/default/*` route as the boot project — mounting the routed view (whose own error
+    // states are the honest surface) beats a permanent "Loading…".
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        if (String(input).startsWith('/api/projects')) {
+          return new Response(JSON.stringify({ error: 'down' }), {
+            status: 500,
+            headers: { 'content-type': 'application/json' },
+          })
+        }
+        return new Promise<never>(() => {})
+      }),
+    )
+    renderAt('/p/default', { seed: false })
+    // The client retries a 5xx once with ~1 s of backoff before erroring — give it room.
+    await waitFor(() => expect(routeName()).toBe('tasks'), { timeout: 4000 })
+    expect(currentPathname()).toBe('/p/default')
   })
 })
 
