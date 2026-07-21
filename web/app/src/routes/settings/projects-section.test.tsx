@@ -171,6 +171,8 @@ describe('Global settings → Projects', () => {
     // The field keeps what the user typed, and the input is flagged for assistive tech.
     expect(rootInput()!.value).toBe('/opt/checkouts')
     expect(rootInput()!.getAttribute('aria-invalid')).toBe('true')
+    // A rejected save changed no authoritative data, so it must not refresh the registry.
+    expect(requests.filter((r) => r.method === 'GET' && r.url === '/api/projects')).toHaveLength(0)
   })
 
   it('clears the inline error as soon as the value changes again', async () => {
@@ -196,6 +198,11 @@ describe('Global settings → Projects', () => {
       expect(requests.filter((r) => r.method === 'PUT' && r.url === '/api/workspace/config')).toEqual([
         { method: 'PUT', url: '/api/workspace/config', body: { projectsDir: '~/code' } },
       ]),
+    )
+    // The clone dialog reads projectsDir from this response, not workspace/config. Refreshing
+    // it here keeps the next Add project opening coherent without a whole-app reload (#567).
+    await waitFor(() =>
+      expect(requests.filter((r) => r.method === 'GET' && r.url === '/api/projects')).toHaveLength(1),
     )
     expect(inlineError()).toBeNull()
   })
