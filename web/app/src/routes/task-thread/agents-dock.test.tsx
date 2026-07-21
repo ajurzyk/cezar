@@ -132,6 +132,25 @@ describe('AgentsDock — expanded rows', () => {
     expect(new Set([path(running!), path(completed!), path(failed!)]).size).toBe(3)
   })
 
+  it('renders a stalled agent as interrupted — not pulsing, not a checkmark', () => {
+    render(<AgentsDock runId={freshRun()} agents={[agent({ status: 'running', stalled: true })]} />)
+    const svg = glyph(rows()[0]!)
+    expect(svg.getAttribute('data-stalled')).toBe('true')
+    // Not the live glyph: no pulse, no amber fill — the run ended, nothing is working.
+    expect(svg.classList.contains('animate-pulse')).toBe(false)
+    expect(svg.querySelector('.fill-pending')).toBeNull()
+    // Not a success glyph either — it did not finish.
+    expect(svg.classList.contains('text-success')).toBe(false)
+    expect(document.querySelector('[data-slot="agent-activity"]')!.textContent).toBe('never finished')
+  })
+
+  it('keeps a stalled agent’s real activity line when it produced one', () => {
+    render(
+      <AgentsDock runId={freshRun()} agents={[agent({ status: 'running', stalled: true, activity: 'Ran npm test' })]} />,
+    )
+    expect(document.querySelector('[data-slot="agent-activity"]')!.textContent).toBe('Ran npm test')
+  })
+
   it('exposes each status on the row for styling and tests', () => {
     render(<AgentsDock runId={freshRun()} agents={[agent({ status: 'declined' })]} />)
     expect(rows()[0]!.getAttribute('data-status')).toBe('declined')

@@ -36,7 +36,6 @@ export function SubagentSheet({
         // Wider than the default `sm:max-w-sm`: this panel carries tool cards and diffs,
         // not a settings form.
         className="w-full gap-0 p-0 sm:max-w-xl"
-        aria-describedby={undefined}
       >
         {agent !== undefined ? <SheetBody agent={agent} entries={entries} /> : null}
       </SheetContent>
@@ -82,8 +81,18 @@ function SubagentStream({ entries, scope }: { entries: ThreadEntry[]; scope: str
 
   // Keyed on CONTENT, not entry count: `item.delta` grows the existing last entry in place,
   // so a length-only dep would never fire during the streaming this affordance exists for.
+  // `thread-state` applies deltas TWO ways — `item.text += delta` for message/reasoning and
+  // `item.output += delta` for tools — so both have to be in the signature. Counting only text
+  // would leave the panel pinned to a stale offset while a sub-agent streams command output,
+  // which is exactly the long-running case this affordance exists for.
   const signature = entries.reduce(
-    (sum, entry) => sum + (entry.kind === 'message' || entry.kind === 'reasoning' ? entry.text.length : 1),
+    (sum, entry) =>
+      sum +
+      (entry.kind === 'message' || entry.kind === 'reasoning'
+        ? entry.text.length
+        : entry.kind === 'tool'
+          ? (entry.output?.length ?? 0) + (entry.error?.length ?? 0)
+          : 0),
     entries.length,
   )
   useEffect(() => {

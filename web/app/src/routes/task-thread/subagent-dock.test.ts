@@ -112,12 +112,61 @@ describe('collectSubagents — Q6 visibility', () => {
     expect(subagentCounts(agents)).toEqual({ done: 0, total: 3 })
   })
 
-  it('drops SETTLED earlier agents once a later turn owns the fan-out', () => {
+  it('drops a fully SETTLED earlier fan-out once a later turn owns the dock', () => {
     const agents = collectSubagents([
       turn('turn-1', [task('a', 'completed')]),
       turn('turn-2', [task('c', 'running')]),
     ])
     expect(agents.map((agent) => agent.id)).toEqual(['c'])
+  })
+
+  // Carry-over is per TURN, not per item. Filtering to just the unsettled items made a row
+  // vanish the moment it finished and the denominator count DOWN — so a fan-out could never
+  // read N/N, and a failed agent lost its glyph instead of keeping it.
+  it('keeps a carried-over agent visible AFTER it settles, so the odometer only grows', () => {
+    const running = collectSubagents([
+      turn('turn-1', [task('a', 'running'), task('b', 'running')]),
+      turn('turn-2', [task('c', 'running')]),
+    ])
+    expect(subagentCounts(running)).toEqual({ done: 0, total: 3 })
+
+    // `a` finishes — the row stays, and the odometer goes UP, not down.
+    const oneDone = collectSubagents([
+      turn('turn-1', [task('a', 'completed'), task('b', 'running')]),
+      turn('turn-2', [task('c', 'running')]),
+    ])
+    expect(oneDone.map((agent) => agent.id)).toEqual(['a', 'b', 'c'])
+    expect(subagentCounts(oneDone)).toEqual({ done: 1, total: 3 })
+  })
+
+  it('keeps a FAILED carried-over agent on the board rather than hiding the failure', () => {
+    const agents = collectSubagents([
+      turn('turn-1', [task('a', 'failed'), task('b', 'running')]),
+      turn('turn-2', [task('c', 'running')]),
+    ])
+    expect(agents.map((agent) => agent.id)).toEqual(['a', 'b', 'c'])
+    expect(subagentCounts(agents)).toEqual({ done: 0, total: 3 })
+  })
+
+  // A stranded agent (overlapping opencode subtasks can leave one `running` forever) must not
+  // follow the user around for the rest of the session, pinning the dock open and hijacking
+  // the collapsed head with its stale activity.
+  it('does not resurrect a zombie from before the last finished fan-out', () => {
+    const agents = collectSubagents([
+      turn('turn-1', [task('zombie', 'running')]),
+      turn('turn-2', [task('old', 'completed')]), // a finished fan-out bounds the lookback
+      turn('turn-3', [task('now', 'running')]),
+    ])
+    expect(agents.map((agent) => agent.id)).toEqual(['now'])
+  })
+
+  it('looks past a steering turn that carries no agents at all', () => {
+    const agents = collectSubagents([
+      turn('turn-1', [task('a', 'running')]),
+      turn('turn-2', []), // the user steered; no fan-out here
+      turn('turn-3', [task('b', 'running')]),
+    ])
+    expect(agents.map((agent) => agent.id)).toEqual(['a', 'b'])
   })
 
   it('still counts a carried-over agent’s children recorded in its ORIGINAL turn', () => {
@@ -131,6 +180,42 @@ describe('collectSubagents — Q6 visibility', () => {
   it('shows a fully settled fan-out while it is still the latest turn', () => {
     const agents = collectSubagents([turn('turn-1', [task('a', 'completed')])])
     expect(agents).toHaveLength(1)
+  })
+})
+
+describe('collectSubagents — a terminal run', () => {
+  // Nothing in the reducer settles in-flight items on session end, so a cancelled run keeps
+  // `running` in its persisted stream forever. Reopening it must not pulse "0/1" for good.
+  it('marks agents left in flight as stalled instead of pretending they are live', () => {
+    const turns = [turn('turn-1', [task('a', 'running'), task('b', 'completed')])]
+    const [stalled, done] = collectSubagents(turns, true)
+    expect(stalled!.stalled).toBe(true)
+    // The wire status is NOT rewritten — that would fabricate an outcome nobody reported.
+    expect(stalled!.status).toBe('running')
+    expect(done!.stalled).toBeUndefined()
+  })
+
+  it('lets a stalled fan-out yield to the transcript once a newer turn exists', () => {
+    const turns = [
+      turn('turn-1', [task('a', 'running')]),
+      turn('turn-2', [childText('m', 'nobody', 'later')]),
+    ]
+    expect(collectSubagents(turns)).toHaveLength(1) // live run: the dock holds
+    expect(collectSubagents(turns, true)).toEqual([]) // terminal run: it lets go
+  })
+
+  it('never carries a stalled agent forward into a later fan-out', () => {
+    const turns = [
+      turn('turn-1', [task('a', 'running')]),
+      turn('turn-2', [task('b', 'running')]),
+    ]
+    expect(collectSubagents(turns, true).map((agent) => agent.id)).toEqual(['b'])
+  })
+
+  it('reports the same stalled flag through findSubagent, so the sheet agrees with the row', () => {
+    const turns = [turn('turn-1', [task('a', 'running')])]
+    expect(findSubagent(turns, 'a', true)!.stalled).toBe(true)
+    expect(findSubagent(turns, 'a', false)!.stalled).toBeUndefined()
   })
 })
 
@@ -307,6 +392,9 @@ describe('findSubagent — the sheet outlives the dock', () => {
     expect(found.status).toBe(row!.status)
     expect(found.toolCalls).toBe(row!.toolCalls)
     expect(found.agentType).toBe(row!.agentType)
+    // Built by the SAME summarizer, so the sheet cannot silently lose the activity line.
+    expect(found.activity).toBe(row!.activity)
+    expect(found.activity).toBe('Ran npm test')
   })
 
   it('is undefined for an unknown id and for a NESTED task item', () => {

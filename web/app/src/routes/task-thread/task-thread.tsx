@@ -136,7 +136,12 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
   const planTally = plan !== undefined && plan.length > 0 ? planCounts(plan) : undefined
   // The Agents dock's data: the current fan-out's sub-agents, or [] when there is none to
   // show (#474). Derived from the same reduced turns the thread renders — no new subscription.
-  const agents = useMemo(() => collectSubagents(thread.turns), [thread.turns])
+  // A terminal run can never settle its in-flight items — nothing in the reducer rewrites a
+  // `running` item on `session.ended`, so a cancelled fan-out stays `running` in the persisted
+  // stream forever. Without this, reopening a cancelled run pulses `Agents · 0/1` above a dead
+  // transcript for good.
+  const runIsTerminal = run.status === 'done' || run.status === 'failed' || run.status === 'cancelled'
+  const agents = useMemo(() => collectSubagents(thread.turns, runIsTerminal), [thread.turns, runIsTerminal])
   // The drill-down's whole state: which agent is open. Ephemeral by design (spec Q2/Q5) —
   // sub-agents have no stable identity outside their run, so there is nothing to persist.
   const [openAgentId, setOpenAgentId] = useState<string | undefined>(undefined)
@@ -150,8 +155,8 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
   // Resolved from the turns, NOT from `agents`: the dock can yield to the transcript (Q6)
   // while a sheet is open, and that must not slam the panel shut mid-read.
   const openAgent = useMemo(
-    () => (openAgentId === undefined ? undefined : findSubagent(thread.turns, openAgentId)),
-    [thread.turns, openAgentId],
+    () => (openAgentId === undefined ? undefined : findSubagent(thread.turns, openAgentId, runIsTerminal)),
+    [thread.turns, openAgentId, runIsTerminal],
   )
   const openAgentChildren = useMemo(
     () => (openAgentId === undefined ? [] : subagentChildren(thread.turns, openAgentId)),

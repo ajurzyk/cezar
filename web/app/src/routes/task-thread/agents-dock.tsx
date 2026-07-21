@@ -97,7 +97,7 @@ export function AgentsDock({
 function AgentRow({ agent, onSelect }: { agent: SubagentSummary; onSelect?: (id: string) => void }) {
   const body = (
     <>
-      <AgentIcon status={agent.status} />
+      <AgentIcon status={agent.status} stalled={agent.stalled === true} />
       <span className="min-w-0 shrink truncate font-medium">{agent.title}</span>
       {agent.agentType !== undefined ? (
         <span
@@ -108,7 +108,9 @@ function AgentRow({ agent, onSelect }: { agent: SubagentSummary; onSelect?: (id:
         </span>
       ) : null}
       <span data-slot="agent-activity" className="min-w-0 flex-1 truncate text-muted-foreground">
-        {agent.activity ?? 'starting…'}
+        {/* A stalled agent is not starting — the run ended under it. Say so rather than
+            leaving a hopeful "starting…" on a transcript that will never move again. */}
+        {agent.activity ?? (agent.stalled === true ? 'never finished' : 'starting…')}
       </span>
       <span data-slot="agent-tools" className="shrink-0 text-muted-foreground tabular-nums">
         {agent.toolCalls} {agent.toolCalls === 1 ? 'tool' : 'tools'}
@@ -139,7 +141,28 @@ function AgentRow({ agent, onSelect }: { agent: SubagentSummary; onSelect?: (id:
  * while working, a ✓ when done, a ✕ when not. Status is never color-only — the shapes differ,
  * which is what makes the dock legible to a color-blind reader (spec §Accessibility).
  */
-function AgentIcon({ status }: { status: ToolStatus }) {
+function AgentIcon({ status, stalled = false }: { status: ToolStatus; stalled?: boolean }) {
+  // The run ended while this agent was still in flight: it never finished and never will.
+  // Shown as an interrupted ring — NOT the pulsing "working" glyph (it is not working) and not
+  // a ✓ (it did not succeed). The status itself is left untouched; only the reading changes.
+  if (stalled) {
+    return (
+      <svg
+        aria-hidden
+        data-slot="agent-glyph"
+        data-stalled="true"
+        className="size-[15px] shrink-0 text-soft-foreground"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeDasharray="3 2.5"
+      >
+        <circle cx="12" cy="12" r="8.5" />
+      </svg>
+    )
+  }
   if (status === 'completed') {
     return (
       <svg

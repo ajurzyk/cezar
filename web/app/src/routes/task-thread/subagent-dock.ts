@@ -33,6 +33,17 @@ export interface SubagentSummary {
   toolCalls: number
   /** One-line readout from the most recent child; `undefined` ⇒ the row renders "starting…". */
   activity?: string
+  /**
+   * The agent never finished and never will: it was still `running`/`pending` when the run
+   * itself reached a terminal state (cancelled, failed, done).
+   *
+   * Nothing in the reducer settles in-flight items on `session.ended` — a cancelled run keeps
+   * `status: 'running'` in its persisted stream forever. Without this, reopening a cancelled
+   * run shows a pulsing `Agents · 0/1` above a dead transcript that can never advance. The
+   * status is NOT rewritten (that would fabricate an outcome the wire never reported); the row
+   * is marked stalled and rendered as interrupted rather than live.
+   */
+  stalled?: boolean
 }
 
 /** A settled agent is done moving: the dock stops treating the fan-out as live (spec Q6). */
@@ -106,33 +117,48 @@ function truncate(text: string): string {
  * message mid-fan-out opens a new turn, and the dock must not vanish while agents still run.
  * Once every agent settles and a newer turn exists, the dock yields to the transcript.
  *
- * Children are gathered across the anchor turn **and every later turn** for the same reason —
- * output produced after a steering message still belongs to the agent that produced it.
+ * Children are gathered from the first turn that contributes a row through the last turn —
+ * output produced after a steering message still belongs to the agent that produced it, and a
+ * carried-over agent owns children recorded back in its original turn.
  */
-export function collectSubagents(turns: ThreadTurn[]): SubagentSummary[] {
+export function collectSubagents(turns: ThreadTurn[], runIsTerminal = false): SubagentSummary[] {
   const anchorIndex = findLastIndex(turns, (turn) => turn.items.some(isRootTaskItem))
   if (anchorIndex === -1) return []
 
-  // The anchor turn's agents, PLUS any agent from an earlier turn that is still working.
+  // The anchor turn's agents, plus earlier turns that are still working.
+  //
   // Anchoring on the newest turn alone would drop a live fan-out the moment the main agent
   // spawned one more `Task` in a later turn — the dock would read `0/1` while three agents
-  // were still running, which is precisely what Q6 exists to prevent.
-  const earlierUnsettled: UiToolItem[] = []
-  for (let i = 0; i < anchorIndex; i += 1) {
-    for (const entry of turns[i]!.items) {
-      if (isRootTaskItem(entry) && !isSettled(entry.status)) earlierUnsettled.push(entry)
-    }
+  // were still running, which is precisely what Q6 exists to prevent. But the carry-over has
+  // to obey two rules that are easy to get wrong:
+  //
+  //  - **Whole turns, never individual items.** Carrying only the *unsettled* items would make
+  //    a row vanish the instant it finished and the denominator count DOWN (3 → 2 → 1, never
+  //    reaching N/N), and a `failed` agent would disappear instead of keeping its glyph. The
+  //    spec asks for stable rows and a monotonic odometer.
+  //  - **Bounded by the last finished fan-out.** Walking the whole transcript would let a
+  //    single stranded agent (overlapping opencode subtasks can leave one `running` forever —
+  //    a known mapper limitation) inject itself into every later fan-out, pin the dock open
+  //    for the rest of the run, and hijack the collapsed head with its stale activity. Stop at
+  //    the first earlier turn whose fan-out is entirely settled: that turn is history.
+  const live = (item: UiToolItem): boolean => !runIsTerminal && !isSettled(item.status)
+  const carried: UiToolItem[] = []
+  for (let i = anchorIndex - 1; i >= 0; i -= 1) {
+    const turnRoots = turns[i]!.items.filter(isRootTaskItem)
+    if (turnRoots.length === 0) continue // a steering turn carries no agents — look past it
+    if (!turnRoots.some(live)) break // a finished fan-out bounds the lookback
+    carried.unshift(...turnRoots)
   }
-  const roots = [...earlierUnsettled, ...turns[anchorIndex]!.items.filter(isRootTaskItem)]
+  const roots = [...carried, ...turns[anchorIndex]!.items.filter(isRootTaskItem)]
   const isLatestTurn = anchorIndex === turns.length - 1
-  if (!isLatestTurn && roots.every((item) => isSettled(item.status))) return []
+  if (!isLatestTurn && !roots.some(live)) return []
 
   // Children by parent id. Scanned from the FIRST turn that contributes a row (not the
   // anchor): an agent carried over from an earlier turn owns children recorded back there
   // too. An id that names no root is ignored — exactly as `groupThreadItems` renders such an
   // orphan at top level.
   const rootIds = new Set(roots.map((item) => item.id))
-  const firstIndex = earlierUnsettled.length > 0 ? indexOfFirstRoot(turns, rootIds) : anchorIndex
+  const firstIndex = carried.length > 0 ? indexOfFirstRoot(turns, rootIds) : anchorIndex
   const childrenOf = new Map<string, ThreadEntry[]>()
   for (let i = firstIndex; i < turns.length; i += 1) {
     for (const entry of turns[i]!.items) {
@@ -145,27 +171,30 @@ export function collectSubagents(turns: ThreadTurn[]): SubagentSummary[] {
     }
   }
 
-  return roots.map((item) => {
-    const children = childrenOf.get(item.id) ?? []
-    const summary: SubagentSummary = {
-      id: item.id,
-      title: splitToolTitle(item.title).detail ?? item.title,
-      status: item.status,
-      toolCalls: children.filter((child) => child.kind === 'tool').length,
+  return roots.map((item) => summarize(item, childrenOf.get(item.id) ?? [], runIsTerminal))
+}
+
+/** The one place a `SubagentSummary` is built — the dock and the sheet must never disagree. */
+function summarize(item: UiToolItem, children: ThreadEntry[], runIsTerminal: boolean): SubagentSummary {
+  const summary: SubagentSummary = {
+    id: item.id,
+    title: splitToolTitle(item.title).detail ?? item.title,
+    status: item.status,
+    toolCalls: children.filter((child) => child.kind === 'tool').length,
+  }
+  const agentType = agentTypeOf(item)
+  if (agentType !== undefined) summary.agentType = agentType
+  if (runIsTerminal && !isSettled(item.status)) summary.stalled = true
+  // Walk back from the newest child: a child that carries no line (an image, a blank
+  // message) must not blank the row when an older child still has something to say.
+  for (let i = children.length - 1; i >= 0; i -= 1) {
+    const activity = activityOf(children[i]!)
+    if (activity !== undefined) {
+      summary.activity = activity
+      break
     }
-    const agentType = agentTypeOf(item)
-    if (agentType !== undefined) summary.agentType = agentType
-    // Walk back from the newest child: a child that carries no line (an image, a blank
-    // message) must not blank the row when an older child still has something to say.
-    for (let i = children.length - 1; i >= 0; i -= 1) {
-      const activity = activityOf(children[i]!)
-      if (activity !== undefined) {
-        summary.activity = activity
-        break
-      }
-    }
-    return summary
-  })
+  }
+  return summary
 }
 
 /**
@@ -201,20 +230,17 @@ function findLastIndex<T>(items: T[], predicate: (item: T) => boolean): number {
  * them because a *different* surface decided to yield would be inexcusable. So the sheet
  * resolves its agent from the turns directly, and closes only when the user closes it.
  */
-export function findSubagent(turns: ThreadTurn[], id: string): SubagentSummary | undefined {
+export function findSubagent(
+  turns: ThreadTurn[],
+  id: string,
+  runIsTerminal = false,
+): SubagentSummary | undefined {
   for (let i = turns.length - 1; i >= 0; i -= 1) {
-    const item = turns[i]!.items.find((entry) => entry.id === id && isRootTaskItem(entry))
-    if (item === undefined || item.kind !== 'tool') continue
-    const children = subagentChildren(turns, id)
-    const summary: SubagentSummary = {
-      id: item.id,
-      title: splitToolTitle(item.title).detail ?? item.title,
-      status: item.status,
-      toolCalls: children.filter((child) => child.kind === 'tool').length,
-    }
-    const agentType = agentTypeOf(item)
-    if (agentType !== undefined) summary.agentType = agentType
-    return summary
+    const item = turns[i]!.items.find((entry): entry is UiToolItem => entry.id === id && isRootTaskItem(entry))
+    if (item === undefined) continue
+    // The SAME summarizer the dock row uses — the sheet's header must not disagree with the
+    // row the user clicked (and must carry `activity` rather than a structural blank).
+    return summarize(item, subagentChildren(turns, id), runIsTerminal)
   }
   return undefined
 }

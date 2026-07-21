@@ -20,7 +20,8 @@
 | 2 | 2.2 | Finished-run parity from replayed state | done | 87ac53a |
 | 3 | 3.1 | e2e smoke, opencode mapper hardening, mockup sync | done | 06436c3 |
 | 3 | 3.2-review-fix | Sheet outlives the dock's Q6 visibility rule | done | bd35f32 |
-| 3 | 3.3-review-fix | Codex latch leaks; anchor drops live agents; plan children; follow-tail | done | pending |
+| 3 | 3.3-review-fix | Codex latch leaks; anchor drops live agents; plan children; follow-tail | done | 73f15c7 |
+| 3 | 3.4-review-fix | Turn-granular bounded carry-over; stalled agents on terminal runs | done | pending |
 
 ## Goal
 
