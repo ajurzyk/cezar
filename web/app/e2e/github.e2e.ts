@@ -135,6 +135,59 @@ describe('the GitHub tab against the live dry-run server', () => {
     browser.press('Escape')
   })
 
+  it('renders the activity thread: comments, a commit row with a CI glyph, and events', async () => {
+    // The sibling spec (#499) called for thread e2e coverage and it never landed, so before #525
+    // this file had NO thread assertions at all. Under CEZ_DRY_RUN=1 the mock thread serves both
+    // comments and timeline events, so the whole interleave is honestly reachable here.
+    if (!forgeAvailable) return
+    const gh = await api<GithubPayload>('/api/github')
+    const pr = gh.prs[0]
+    if (!pr) return
+
+    browser.goto(`${baseUrl}/github/prs/${pr.number}`)
+    browser.waitForFunction(`document.querySelector('[data-slot="gh-thread"]') !== null`)
+
+    // The section is "Activity", not "Comments" — a twenty-row list headed `Comments · 2` would
+    // be incoherent once events render.
+    expect(
+      browser.evaluate(`document.querySelector('[data-slot="gh-thread-header"]').textContent`),
+    ).toContain('Activity')
+
+    // Conversation comments still render, through the markdown pipeline.
+    browser.waitForFunction(
+      `document.querySelectorAll('[data-slot="gh-thread-entry"]').length > 0`,
+    )
+
+    // Consecutive same-author commits collapse; expanding reveals the individual rows.
+    browser.waitForFunction(`document.querySelector('[data-slot="gh-commit-group"]') !== null`)
+    expect(
+      browser.evaluate(
+        `document.querySelector('[data-slot="gh-commit-group"] button').getAttribute('aria-expanded')`,
+      ),
+    ).toBe('false')
+    browser.click('[data-slot="gh-commit-group"] button')
+
+    // Expanded: commit rows, each keeping its own message and CI glyph.
+    browser.waitForFunction(
+      `document.querySelectorAll('[data-slot="gh-event-row"][data-kind="committed"]').length > 1`,
+    )
+    browser.waitForFunction(`document.querySelector('[data-slot="gh-commit-checks"]') !== null`)
+    // Mixed states in the fixtures, so more than one distinct glyph tone is on screen.
+    expect(
+      browser.evaluate(
+        `new Set([...document.querySelectorAll('[data-slot="gh-commit-checks"]')].map((el) => el.dataset.checks)).size > 1`,
+      ),
+    ).toBe(true)
+
+    // Non-commit events render too.
+    browser.waitForFunction(
+      `document.querySelector('[data-slot="gh-event-row"][data-kind="labeled"]') !== null`,
+    )
+
+    browser.waitForFunction(`document.querySelector('nav a[href="/github"]') !== null`)
+    browser.screenshot(`${artifactsDir}/github-thread-timeline.png`)
+  })
+
   it('below md the list is the page, and a detail URL swaps to the detail with a way back', async () => {
     if (!forgeAvailable) return
     const gh = await api<GithubPayload>('/api/github')
