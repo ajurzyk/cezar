@@ -19,3 +19,27 @@
   title across its lifecycle, so the dock row does not rename itself on completion.
 - Decision: Tasks-table SHAs are stamped by the FOLLOWING step's commit — a commit cannot contain
   its own post-amend SHA. `Status` is always correct in its own commit; only `Commit` trails by one.
+
+## 2026-07-21T10:48:00Z — final gate passed
+- Steps 1.1 … 3.1 complete. typecheck / npm test (2995) / test:unit / build / test:package all green.
+- `npm run test:e2e` reports failed on this branch AND identically on origin/main (7 failures,
+  same specs, none touched here) — proven by building and running the suite in a clean
+  merge-base worktree. Passed count differs by exactly +3: this branch's new spec.
+- PR opened: https://github.com/open-mercato/cezar/pull/550
+
+## 2026-07-21T11:00:00Z — adversarial review round 1 (subagent, opus)
+- 4 major + 6 minor findings. All actioned in `73f15c7`; see PLAN Risks and the PR comment.
+- Notable: the reviewer argued the Step 3.1 opencode "hardening" made things WORSE (a fabricated
+  `completed` for a subtask that may still be running, while the real misattribution is
+  pre-existing). Agreed and REVERTED it — an honest stuck row beats a false success.
+- Notable: the codex review latch survived turn end, so an interrupted review left a permanently
+  `running` task item and the dock would mount forever on a finished run. Fixed.
+- Notable: anchoring on the newest turn alone dropped still-running agents once a later turn
+  spawned another Task — the literal spec rule defeated its own stated Q6 intent. The collector
+  now unions unsettled earlier roots with the anchor turn's.
+- Gate re-run after fixes: 3007 tests green; dock e2e 3/3.
+- Label note: `gh pr edit --add-label` exited 0 without applying anything; labels were applied
+  via the REST endpoint and read back to confirm (known gh/Projects-classic deprecation path).
+
+## 2026-07-21T11:07:00Z — adversarial review round 2 dispatched
+- Re-reviewing the fix batch itself, because fix batches are where new defects enter.
