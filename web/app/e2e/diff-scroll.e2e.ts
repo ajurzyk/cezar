@@ -100,13 +100,23 @@ function buildFixtureRepo(dir: string): void {
   for (let index = 0; index < FIXTURE_FILES; index += 1) write(index, 'after')
 }
 
-/** Load /git in a forced mode and wait until the diff has rendered in that mode. */
+/** Which mode is currently loaded, so the virtual-mode tests can share one page load. */
+let loaded: 'flat' | 'virtual' | null = null
+
+/**
+ * Load /git in a forced mode and wait until the diff has rendered in that mode — and skip the
+ * navigation entirely when that mode is already up. Re-loading is the expensive part of this
+ * spec (flat mode paints ~1,900 highlighted rows, which is precisely the cost being measured),
+ * so the three virtual-mode assertions below deliberately share a single load and run in order.
+ */
 function openChanges(mode: 'flat' | 'virtual') {
+  if (loaded === mode) return
   browser.goto(`${baseUrl}/git?diff=${mode}`)
   browser.waitForFunction(
     `document.querySelector('[data-slot="diff-files"]')?.dataset.virtualized === '${mode === 'virtual'}'`,
   )
   browser.waitForFunction(`document.querySelector('[data-slot="diff-file"]') !== null`)
+  loaded = mode
 }
 
 beforeAll(async () => {

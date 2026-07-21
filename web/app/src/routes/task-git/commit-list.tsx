@@ -8,15 +8,22 @@ import { cn } from '@/lib/utils'
  * The commit log list, shared by the task Commits tab and the repo Commits segment — one
  * `sha · subject · author·when` row per commit, deep-linking to that commit's structured diff.
  *
- * Both lists are unbounded in the only direction that matters: a long-lived task's branch and
- * a repository's log both grow without a ceiling the reader controls. So they follow the SAME
- * two-tier rule as the transcript and the diff (`components/diff/diff-scroll.ts` §"THE
+ * Same two-tier rule as the transcript and the diff (`components/diff/diff-scroll.ts` §"THE
  * PERFORMANCE RULE"): flat with `content-visibility: auto` up to
- * {@link COMMIT_VIRTUALIZE_THRESHOLD} rows, virtua past it.
+ * {@link COMMIT_VIRTUALIZE_THRESHOLD} rows, virtua past it. Rows are a fixed single line, which
+ * makes this the easy case — `ROW_HEIGHT_PX` is exact rather than an estimate, so the flat
+ * tier's placeholders and virtua's initial guesses are right the first time.
  *
- * Rows here are a fixed single line, which makes this the easy case of that rule —
- * `ROW_HEIGHT_PX` is exact rather than an estimate, so the flat tier's placeholders and
- * virtua's initial guesses are both right the first time.
+ * WHICH CONSUMER ACTUALLY NEEDS THE VIRTUAL TIER — they are not symmetric, and it would be easy
+ * to assume they are:
+ *  - The TASK Commits tab is why this exists. `collectRunCommits` (src/server/git-changes.ts)
+ *    runs `git log <merge-base>..HEAD` with NO cap, and cezar autosaves a commit per turn, so a
+ *    long-running task genuinely reaches hundreds of rows.
+ *  - The REPO Commits segment cannot reach the threshold today: `getLog` (src/server/git.ts)
+ *    defaults to 20 and `server.ts` calls it without a count, so that list is 20 rows, full
+ *    stop. It shares this component for one renderer rather than two, and for the flat tier's
+ *    `content-visibility` — not because 20 rows need windowing. If that cap is ever lifted,
+ *    this is already correct; until then, don't read the virtual branch as protecting it.
  */
 
 /** Commit rows past which the list goes through virtua. */
