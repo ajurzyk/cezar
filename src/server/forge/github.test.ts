@@ -900,3 +900,41 @@ describe('fetchGithubComments timeline integration (#525)', () => {
     expect(data.comments.map((c) => c.kind)).toEqual(['comment', 'review']);
   });
 });
+
+describe('mergeThread is unaffected by events (#525)', () => {
+  // mergeThread is deliberately left UNCHANGED by #525: it still caps comments+reviews at 200 and
+  // still head-slices. Events are returned as their own array and interleaved client-side — there
+  // is no server-side merge. These tests pin that separation so a later refactor cannot quietly
+  // introduce a combined cap, which is the §2 defect the spec's review caught in its first draft.
+  const comment = (id: number, at: string): ForgeComment => ({
+    id, author: 'a', createdAt: at, body: '', kind: 'comment', url: `u${id}`,
+  });
+
+  it('takes only ForgeComment lists — events have no way in', () => {
+    const comments = Array.from({ length: 250 }, (_, i) =>
+      comment(i, new Date(Date.UTC(2026, 0, 1) + i * 1000).toISOString()),
+    );
+    const { comments: out, truncated } = mergeThread([comments]);
+    expect(out).toHaveLength(THREAD_ENTRY_CAP);
+    expect(truncated).toBe(true);
+    // Still the OLDEST 200 — the pre-existing head-slice, deliberately not switched to slice(-cap)
+    // like normalizeEvents. It is pre-existing behavior on a §2-frozen surface.
+    expect(out[0]!.id).toBe(0);
+    expect(out[out.length - 1]!.id).toBe(199);
+  });
+
+  it('produces the same output regardless of how many events the same fetch carried', () => {
+    const comments = [comment(1, '2026-01-01T00:00:00Z'), comment(2, '2026-01-02T00:00:00Z')];
+    const before = mergeThread([comments]);
+    // Normalizing 250 events alongside must not touch the comment stream in any way.
+    normalizeEvents(
+      Array.from({ length: 250 }, (_, i) => ({
+        event: 'labeled', id: i,
+        created_at: new Date(Date.UTC(2026, 0, 1) + i * 60_000).toISOString(),
+        actor: { login: 'a' }, label: { name: `l${i}` },
+      })),
+    );
+    expect(mergeThread([comments])).toEqual(before);
+    expect(before.truncated).toBe(false);
+  });
+});
