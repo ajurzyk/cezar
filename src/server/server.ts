@@ -2212,7 +2212,7 @@ export function createApp(deps: ServerDeps): Hono {
     if (!run) return c.json({ error: 'not found' }, 404);
     const worktree = worktreeOf(run);
     if (!worktree) return c.json({ error: NO_WORKTREE }, 409);
-    const result = await collectChanges(worktree, run.baseBranch ?? 'HEAD');
+    const result = await collectChanges(worktree, run.baseBranch ?? 'HEAD', { taskBranch: run.branch });
     if (!result.ok) return c.json({ error: result.error }, 409);
     return c.json(result.changes);
   });

@@ -422,6 +422,8 @@ export interface ChangedFile {
 export interface ChangesPayload {
   files: ChangedFile[]
   stat: { adds: number; dels: number; files: number }
+  /** Additive context for review tasks whose worktree HEAD no longer matches their own branch. */
+  repointedHead?: { headBranch: string; taskBranch: string }
 }
 
 /** `GET /api/runs/:id/files?path=` — a directory listing or one file (size-capped, binary
