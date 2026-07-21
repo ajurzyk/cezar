@@ -32,6 +32,7 @@ import {
   ToolCard,
   ToolStreak,
   UserBubble,
+  WorkingIndicator,
 } from './thread-items'
 import { ContinueAction } from './follow-up-engine'
 import { AgentsDock } from './agents-dock'
@@ -276,6 +277,11 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
             </p>
           )
         ) : null}
+
+        {/* Live session heartbeat: while the engine owns the turn (`running`), a spinner tails
+            the thread so quiet gaps between bursts don't read as "finished". `waiting` hands
+            off to the dock's reply hint, `queued` to the placeholder above — so `running` only. */}
+        {run.status === 'running' ? <WorkingIndicator /> : null}
 
         {/* Closed states read as the body's last line; the WAITING state lives in the dock
             (mockup `.paused-hint`), right above the composer it is asking the user to use. */}
