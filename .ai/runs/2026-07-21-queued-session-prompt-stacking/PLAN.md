@@ -22,7 +22,7 @@
 | 2 | 2.2 | Stacked bubbles | done | (backfilled at checkpoint) |
 | 2 | 2.3 | Inline edit / remove | done | (backfilled at checkpoint) |
 | 3 | 3.1 | E2E | done | (backfilled at checkpoint) |
-| 3 | 3.2 | Docs | todo | — |
+| 3 | 3.2 | Docs | done | (backfilled at checkpoint) |
 
 ## Goal
 
