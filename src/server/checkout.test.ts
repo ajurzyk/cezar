@@ -294,6 +294,7 @@ describe('checkoutRepo — clone, failure cleanup, existing target', () => {
 describe('POST /api/projects/checkout', () => {
   const savedHome = process.env.CEZ_HOME;
   const savedDryRun = process.env.CEZ_DRY_RUN;
+  const savedProjectsDir = process.env.CEZ_PROJECTS_DIR;
   let home: string;
   let repoRoot: string;
   let checkoutRoot: string;
@@ -305,6 +306,7 @@ describe('POST /api/projects/checkout', () => {
     checkoutRoot = join(home, 'cezar', 'projects');
     process.env.CEZ_HOME = home;
     process.env.CEZ_DRY_RUN = '1';
+    delete process.env.CEZ_PROJECTS_DIR;
     store = RunStore.open(join(repoRoot, '.ai/cezar'));
     clearProjectProbeCache();
   });
@@ -316,6 +318,8 @@ describe('POST /api/projects/checkout', () => {
     else process.env.CEZ_HOME = savedHome;
     if (savedDryRun === undefined) delete process.env.CEZ_DRY_RUN;
     else process.env.CEZ_DRY_RUN = savedDryRun;
+    if (savedProjectsDir === undefined) delete process.env.CEZ_PROJECTS_DIR;
+    else process.env.CEZ_PROJECTS_DIR = savedProjectsDir;
   });
 
   const makeApp = (over: Partial<ServerDeps> = {}) =>
@@ -380,6 +384,15 @@ describe('POST /api/projects/checkout', () => {
     // Immediately listable — the dialog navigates to `/p/<id>/` and the route
     // gate reads this list to decide the id is known.
     expect((await listProjectsViaApi()).projects.map((p) => p.id)).toContain(body.project?.id);
+  });
+
+  it('uses CEZ_PROJECTS_DIR as the zero-config checkout root and creates it recursively', async () => {
+    const fromEnv = join(home, 'deep', 'environment', 'checkouts');
+    process.env.CEZ_PROJECTS_DIR = fromEnv;
+    const { status, body } = await post({ url: 'open-mercato/cezar' });
+    expect(status).toBe(200);
+    expect(body.project?.root).toBe(join(fromEnv, 'cezar'));
+    expect(existsSync(join(fromEnv, 'cezar', '.git'))).toBe(true);
   });
 
   it('409s when the target folder already exists, leaving it and the registry untouched', async () => {

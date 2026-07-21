@@ -20,6 +20,8 @@ import { createApp, type WorkspaceConfigResponse } from './server.js';
  */
 describe('the workspace settings API (step 2.7)', () => {
   const savedHome = process.env.CEZ_HOME;
+  const savedBrowseRoot = process.env.CEZ_BROWSE_ROOT;
+  const savedProjectsDir = process.env.CEZ_PROJECTS_DIR;
   let home: string;
   let repoRoot: string;
   let store: RunStore;
@@ -29,6 +31,8 @@ describe('the workspace settings API (step 2.7)', () => {
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'cez-workspace-api-'));
     process.env.CEZ_HOME = home; // paths.ts sends all workspace paths here
+    delete process.env.CEZ_BROWSE_ROOT;
+    delete process.env.CEZ_PROJECTS_DIR;
     repoRoot = mkdtempSync(join(tmpdir(), 'cez-workspace-api-repo-'));
     mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
     store = RunStore.open(join(repoRoot, '.ai/cezar'));
@@ -49,6 +53,10 @@ describe('the workspace settings API (step 2.7)', () => {
     store.flush();
     if (savedHome === undefined) delete process.env.CEZ_HOME;
     else process.env.CEZ_HOME = savedHome;
+    if (savedBrowseRoot === undefined) delete process.env.CEZ_BROWSE_ROOT;
+    else process.env.CEZ_BROWSE_ROOT = savedBrowseRoot;
+    if (savedProjectsDir === undefined) delete process.env.CEZ_PROJECTS_DIR;
+    else process.env.CEZ_PROJECTS_DIR = savedProjectsDir;
     for (const dir of [home, repoRoot]) rmSync(dir, { recursive: true, force: true });
   });
 
@@ -69,6 +77,7 @@ describe('the workspace settings API (step 2.7)', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as WorkspaceConfigResponse & Record<string, unknown>;
     expect(body).toEqual({
+      browseRoot: '~/',
       projectsDir: '~/cezar/projects',
       resources: {
         maxParallel: 2,
@@ -82,6 +91,13 @@ describe('the workspace settings API (step 2.7)', () => {
     expect(body.schemaVersion).toBeUndefined();
   });
 
+  it('GET resolves both zero-config roots from the environment', async () => {
+    process.env.CEZ_BROWSE_ROOT = '~/source';
+    process.env.CEZ_PROJECTS_DIR = '~/clones';
+    const body = (await (await getConfig()).json()) as WorkspaceConfigResponse;
+    expect(body).toMatchObject({ browseRoot: '~/source', projectsDir: '~/clones' });
+  });
+
   it('PUT resources round-trips, persists to disk, and refreshes the semaphore cache', async () => {
     expect(semaphore.maxParallel()).toBe(2); // the pre-PUT snapshot
     const res = await putConfig({
@@ -89,6 +105,7 @@ describe('the workspace settings API (step 2.7)', () => {
     });
     expect(res.status).toBe(200);
     expect((await res.json()) as WorkspaceConfigResponse).toEqual({
+      browseRoot: '~/',
       projectsDir: '~/cezar/projects',
       resources: {
         maxParallel: 5,
@@ -152,6 +169,18 @@ describe('the workspace settings API (step 2.7)', () => {
     expect(readdirSync(dir)).toEqual([]);
   });
 
+  it('PUT browseRoot recursively creates and persists an independent browse directory', async () => {
+    const browseRoot = join(home, 'deep', 'source', 'repos');
+    const res = await putConfig({ browseRoot });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as WorkspaceConfigResponse).browseRoot).toBe(browseRoot);
+    expect(rawConfig().browseRoot).toBe(browseRoot);
+    expect(readdirSync(browseRoot)).toEqual([]);
+    expect(((await (await getConfig()).json()) as WorkspaceConfigResponse).projectsDir).toBe(
+      '~/cezar/projects',
+    );
+  });
+
   it('an unwritable projectsDir answers 400 "not writable: …" and persists NO change', async () => {
     await putConfig({ projectsDir: join(home, 'checkouts') }); // a known-good value first
     // A path under a regular file can never be created — fails on every
@@ -167,6 +196,12 @@ describe('the workspace settings API (step 2.7)', () => {
 
   it('a relative projectsDir is refused before any probe touches the filesystem', async () => {
     const res = await putConfig({ projectsDir: 'relative/path' });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toMatch(/^not writable: /);
+  });
+
+  it('a relative browseRoot is refused before any probe touches the filesystem', async () => {
+    const res = await putConfig({ browseRoot: 'relative/path' });
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toMatch(/^not writable: /);
   });

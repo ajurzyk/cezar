@@ -327,8 +327,8 @@ export interface FsBrowseDir {
   isRepo: boolean
 }
 
-/** `GET /api/fs/browse?path=` — the folder picker's listing. Rooted at the operator's home
- *  (hosted mode narrows it to the checkout root), directories only. */
+/** `GET /api/fs/browse?path=` — the folder picker's listing. Rooted at the independently
+ *  configured browse root, directories only. */
 export interface FsBrowseResponse {
   /** The realpath'd directory actually listed — never the spelling asked for, so the
    *  breadcrumb shows where the picker really is. */
@@ -367,6 +367,7 @@ export interface WorkspaceUiState {
  *  host-protection budget — the ONLY effective `maxParallel`/`memoryLimitMb` since Phase 2
  *  (spec §"Resource governance"); `worktreeRetentionDefault` seeds projects that set none. */
 export interface WorkspaceConfigResponse {
+  browseRoot: string
   projectsDir: string
   resources: {
     maxParallel: number
@@ -376,9 +377,10 @@ export interface WorkspaceConfigResponse {
 }
 
 /** `PUT /api/workspace/config` body — partial: absent keys stay untouched. A rejected
- *  `projectsDir` (not writable) 400s with the reason and persists NOTHING, resources
+ *  workspace root (not writable) 400s with the reason and persists NOTHING, resources
  *  included, so callers may send both in one request only if they want that atomicity. */
 export interface SetWorkspaceConfigInput {
+  browseRoot?: string
   projectsDir?: string
   resources?: {
     maxParallel?: number

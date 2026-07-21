@@ -385,9 +385,11 @@ export class RunStore extends EventEmitter {
         tokensUsed: 0,
       })),
     };
-    // A prompt that pastes a PR URL is already about that PR — seed the
-    // referenced tier so the chip exists before the first event (#407).
+    // A prompt that pastes a PR or issue URL is already about that item — seed
+    // both referenced tiers so queued runs can expose the reference before the
+    // first agent event (#407, #554).
     this.trackReferencedPrs(run, input.task);
+    this.trackReferencedIssues(run, input.task);
     this.runs.set(run.id, run);
     this.pruneOldRuns();
     this.touch(run);

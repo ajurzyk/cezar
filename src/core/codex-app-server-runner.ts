@@ -18,6 +18,7 @@ import {
   KILL_GRACE_MS,
 } from './claude-cli-runner.js';
 import { buildChildEnv } from './agent-env.js';
+import { parseAskRequest, type AskQuestion } from './ask.js';
 import { readNdjson } from './ndjson.js';
 import {
   codexSessionStarted,
@@ -85,6 +86,11 @@ interface Pending {
   reject: (err: Error) => void;
 }
 
+interface PendingUserInput {
+  readonly rpcId: number | string;
+  readonly questions: AskQuestion[];
+}
+
 /** One live `codex app-server` process driving a single thread. */
 class CodexSession implements AgentSession {
   readonly result: Promise<AgentRunResult>;
@@ -95,6 +101,7 @@ class CodexSession implements AgentSession {
   private activeTurnId: string | undefined;
   private nextId = 1;
   private readonly pending = new Map<number, Pending>();
+  private pendingUserInput: PendingUserInput | undefined;
   private readonly toolCalls: AgentToolCallRecord[] = [];
   private readonly textChunks: string[] = [];
   /** agentMessage item ids that streamed deltas — so `item/completed` for the
@@ -244,6 +251,12 @@ class CodexSession implements AgentSession {
     }
     const text = textOf(content);
     if (!text) return true;
+    if (this.pendingUserInput) {
+      const pending = this.pendingUserInput;
+      this.pendingUserInput = undefined;
+      this.write({ id: pending.rpcId, result: { answers: userInputAnswers(pending.questions, text) } });
+      return true;
+    }
     // Wait for the thread to exist, then steer the live turn or start a new one.
     void this.ready
       .then(() => this.startOrSteerTurn(text))
@@ -256,6 +269,7 @@ class CodexSession implements AgentSession {
 
   end(): void {
     if (!this.stdinOpen) return;
+    this.rejectPendingUserInput('session ended');
     this.stdinOpen = false;
     try {
       this.child.stdin.end();
@@ -274,6 +288,7 @@ class CodexSession implements AgentSession {
 
   interrupt(): void {
     this.stdinOpen = false;
+    this.rejectPendingUserInput('turn interrupted');
     // Best-effort graceful cancel of the in-flight turn, then hard stop.
     if (this.threadId && this.activeTurnId) {
       void this.request('turn/interrupt', { threadId: this.threadId, turnId: this.activeTurnId }).catch(
@@ -369,7 +384,29 @@ class CodexSession implements AgentSession {
       else p.resolve((msg.result as Record<string, unknown>) ?? {});
       return;
     }
+    if (msg.method === 'item/tool/requestUserInput' && (typeof msg.id === 'number' || typeof msg.id === 'string')) {
+      this.handleUserInputRequest(msg.id, msg.params ?? {});
+      return;
+    }
     if (typeof msg.method === 'string') this.handleNotification(msg.method, msg.params ?? {});
+  }
+
+  private handleUserInputRequest(rpcId: number | string, params: Record<string, unknown>): void {
+    const questions = codexAskQuestions(params.questions);
+    if (!questions) {
+      this.write({ id: rpcId, error: { code: -32602, message: 'unsupported or malformed requestUserInput payload' } });
+      return;
+    }
+    if (this.pendingUserInput) this.rejectPendingUserInput('superseded by a newer requestUserInput');
+    this.pendingUserInput = { rpcId, questions };
+    this.opts.onUiEvent?.({ type: 'ask.requested', requestId: `codex-${String(rpcId)}`, questions });
+  }
+
+  private rejectPendingUserInput(message: string): void {
+    const pending = this.pendingUserInput;
+    if (!pending) return;
+    this.pendingUserInput = undefined;
+    this.write({ id: pending.rpcId, error: { code: -32000, message } });
   }
 
   private handleNotification(method: string, params: Record<string, unknown>): void {
@@ -430,7 +467,9 @@ class CodexSession implements AgentSession {
         }
         break;
       }
-      case 'turn/completed': {
+      case 'turn/completed':
+      case 'turn/failed': {
+        this.pendingUserInput = undefined;
         this.activeTurnId = undefined;
         this.emit({ type: 'turn-end' });
         if (this.opts.autoEndAfterFirstTurn && this.stdinOpen && !this.autoEndTimer) {
@@ -471,6 +510,44 @@ interface JsonRpcMessage {
   params?: Record<string, unknown>;
   result?: unknown;
   error?: unknown;
+}
+
+function codexAskQuestions(value: unknown): AskQuestion[] | null {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 4) return null;
+  const questions: unknown[] = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    const question = raw as Record<string, unknown>;
+    if (question.isSecret === true) return null;
+    const id = stringField(question, 'id');
+    const header = stringField(question, 'header');
+    const prompt = stringField(question, 'question');
+    if (!id || !header || !prompt || !Array.isArray(question.options)) return null;
+    const options = question.options.map((option) => {
+      if (!option || typeof option !== 'object' || Array.isArray(option)) return null;
+      const record = option as Record<string, unknown>;
+      const label = stringField(record, 'label');
+      const description = stringField(record, 'description');
+      return label ? { label, ...(description ? { description } : {}) } : null;
+    }).filter((option): option is { label: string; description?: string } => option !== null);
+    questions.push({ id, header, question: prompt, options, multiSelect: false });
+  }
+  return parseAskRequest({ questions })?.questions ?? null;
+}
+
+function userInputAnswers(questions: AskQuestion[], text: string): Record<string, { answers: string[] }> {
+  const lines = text.split(/\r?\n/);
+  const hasStructuredAnswer = questions.some((question) => lines.some((line) => line.startsWith(`${question.header}:`)));
+  const answers: Record<string, { answers: string[] }> = {};
+  for (const [index, question] of questions.entries()) {
+    const prefix = `${question.header}:`;
+    const matching = lines.find((line) => line.startsWith(prefix));
+    const raw = matching?.slice(prefix.length).trim() ?? (!hasStructuredAnswer && index === 0 ? text.trim() : '');
+    answers[question.id ?? String(index)] = {
+      answers: raw === '' ? [] : raw.split(',').map((answer) => answer.trim()).filter(Boolean),
+    };
+  }
+  return answers;
 }
 
 /** ThreadItem `type`s that are conversation text, not tool activity. */

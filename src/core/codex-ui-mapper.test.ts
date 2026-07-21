@@ -54,6 +54,8 @@ const GOLDEN_FIXTURES = [
   // Reasoning streamed as textDelta and closed with a summary-only
   // `item/completed` — the wire shape #528 was reported against.
   'reasoning-stream',
+  // Current app-server v2 snapshot shape: summary/content are string arrays.
+  'reasoning-snapshot-arrays',
   'command-lifecycle',
   'file-change-and-mcp',
   // NOT app-server wire truth: codex has no `todoList` item and no `item/updated`
@@ -63,6 +65,9 @@ const GOLDEN_FIXTURES = [
   'turn-plan-updated',
   'turn-failed',
   'review-mode',
+  // Codex 0.144.6 generated schema, plus the current upstream spelling.
+  'collab-agent-tool-call',
+  'collab-tool-call',
 ] as const;
 
 describe('codex → v2 golden fixtures', () => {
@@ -738,6 +743,47 @@ describe('CodexAppServerRunner v2 wiring (against the bundled mock app-server)',
     }
   }, 30_000);
 
+  it('bridges native requestUserInput to ask.requested and answers the server request', async () => {
+    const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 60_000 });
+    const v2: UiEvent[] = [];
+    let resolveAsk!: () => void;
+    const asked = new Promise<void>((resolve) => { resolveAsk = resolve; });
+    const session = runner.startSession(
+      { userPrompt: 'ask me', cwd: process.cwd(), env: { MOCK_CODEX_ASK: '1' } },
+      undefined,
+      { autoEndAfterFirstTurn: true, onUiEvent: (event) => {
+        v2.push(event);
+        if (event.type === 'ask.requested') resolveAsk();
+      } },
+    );
+    await asked;
+    expect(v2).toContainEqual({
+      type: 'ask.requested', requestId: 'codex-ask-1', questions: [{
+        id: 'library', header: 'Library', question: 'Which test library?', multiSelect: false,
+        options: [{ label: 'Vitest', description: 'Use the existing test runner.' },
+          { label: 'Node test', description: 'Use node:test.' }],
+      }],
+    });
+    expect(session.sendMessage([{ type: 'text', text: 'Library: Vitest' }])).toBe(true);
+    await expect(session.result).resolves.toMatchObject({ sessionId: 'th_mock_1' });
+  }, 30_000);
+
+  it('routes an unstructured multi-question free-text reply to the first native question', async () => {
+    const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 60_000 });
+    let resolveAsk!: () => void;
+    const asked = new Promise<void>((resolve) => { resolveAsk = resolve; });
+    const session = runner.startSession(
+      { userPrompt: 'mock:native-codex-ask multi free text', cwd: process.cwd() },
+      undefined,
+      { autoEndAfterFirstTurn: true, onUiEvent: (event) => {
+        if (event.type === 'ask.requested') resolveAsk();
+      } },
+    );
+    await asked;
+    expect(session.sendMessage([{ type: 'text', text: 'Use sensible defaults' }])).toBe(true);
+    await expect(session.result).resolves.toMatchObject({ sessionId: 'th_mock_1' });
+  }, 30_000);
+
   it('rejects a failed resume through session.result without an unhandled rejection', async () => {
     const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 60_000 });
     const unhandled: unknown[] = [];
@@ -834,6 +880,32 @@ describe('codex reasoning text survives replay (#528)', () => {
   it('wire content still wins over the accumulator', () => {
     const events = fold([started(), textDelta('streamed'), completed({ content: 'authoritative' })]);
     expect(reasoningAt(events, 'item.completed')).toMatchObject({ text: 'authoritative' });
+  });
+
+  it('persists snapshot-only array summaries for replay', () => {
+    const events = fold([
+      started({ summary: [], content: [] }),
+      completed({ summary: ['Inspecting the conflict.', 'Choosing the compatible resolution.'], content: [] }),
+    ]);
+    expect(replayedText(events)).toBe('Inspecting the conflict.\nChoosing the compatible resolution.');
+  });
+
+  it('joins array content while keeping it authoritative over streamed text', () => {
+    const events = fold([
+      started({ summary: [], content: [] }),
+      textDelta('partial streamed text'),
+      completed({ summary: ['Short summary.'], content: ['First raw part.', 'Second raw part.'] }),
+    ]);
+    expect(replayedText(events)).toBe('First raw part.\nSecond raw part.');
+  });
+
+  it('keeps streamed raw reasoning ahead of an array summary snapshot', () => {
+    const events = fold([
+      started({ summary: [], content: [] }),
+      textDelta('Full streamed reasoning.'),
+      completed({ summary: ['Public summary.'], content: [] }),
+    ]);
+    expect(replayedText(events)).toBe('Full streamed reasoning.');
   });
 
   it('accumulates both summary delta methods into the summary channel', () => {

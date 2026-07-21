@@ -1,5 +1,4 @@
 import { readdir, realpath, stat } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { expandTilde } from '../paths.js';
 
@@ -71,20 +70,11 @@ export type BrowseResult =
 const MAX_ENTRIES = 1000;
 
 /**
- * The browse root (spec "API Contracts" + "Edge Cases → Hosted mode"):
- *
- * - local (the default `npx cezar` on loopback): the operator's home — they
- *   are browsing their own machine from their own browser, and their projects
- *   live wherever they like under `~`.
- * - hosted (`CEZ_REMOTE=1`, or a non-loopback bind — the same `localHandoff`
- *   predicate every other host-machine affordance is gated on): only
- *   `projectsDir`. Handing a remote viewer a listing of the host's whole home
- *   is the one place local and hosted trust genuinely differ, so hosted mode
- *   narrows the root rather than gating the route off — the add-project flow
- *   keeps working, it just cannot see past the checkout root.
+ * Expand the configured browse root. The workspace owns this independently
+ * from the checkout root, so browsing never follows a clone-destination edit.
  */
-export function resolveBrowseRoot(hosted: boolean, projectsDir: string): string {
-  return hosted ? expandTilde(projectsDir) : homedir();
+export function resolveBrowseRoot(browseRoot: string): string {
+  return expandTilde(browseRoot);
 }
 
 /** `candidate` is `root` or strictly beneath it. Both must already be
@@ -101,7 +91,7 @@ function contains(root: string, candidate: string): boolean {
  * question `browseDirectory` asks, exported for the ONE other route that must
  * ask it: `POST /api/projects` (step 4.2).
  *
- * Narrowing the browse root in hosted mode (above) only limits what the picker
+ * Configuring the browse root only limits what the picker
  * can SEE. A register call naming an arbitrary absolute path would walk around
  * that in one request — and a registered project's panes read its whole tree.
  * So the register route re-asks containment for itself, against the same root,
@@ -171,7 +161,7 @@ export async function browseDirectory(opts: {
   // unresolved root would reject legitimate paths on any machine whose home
   // sits behind a symlink (macOS `/tmp`, NFS automounts, `/home` → `/usr/home`).
   const root = await realpathOrNull(opts.root);
-  // Hosted mode with a `projectsDir` that does not exist yet lands here. There
+  // A configured browse root that does not exist yet lands here. There
   // is nothing to browse and nothing informative to say about a path the
   // caller cannot see anyway.
   if (root === null) return { ok: false, status: 404, error: 'browse root is not available' };

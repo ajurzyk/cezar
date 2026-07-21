@@ -59,15 +59,23 @@ const resourcesSchema = z
   })
   .passthrough();
 
+const workspacePathSchema = (envName: 'CEZ_BROWSE_ROOT' | 'CEZ_PROJECTS_DIR', fallback: string) => {
+  const defaultValue = () => process.env[envName]?.trim() || fallback;
+  return z.string().min(1).max(4096).default(defaultValue).catch(defaultValue);
+};
+
 const workspaceConfigSchema = z
   .object({
     /** Migration cursor (src/workspace/migrations.ts). Absent/bad → 0, which
      *  means "run every migration" — each one is idempotent, so that is safe. */
     schemaVersion: z.number().int().min(0).default(0).catch(0),
+    /** Root exposed by the Add project folder browser. Environment supplies
+     *  the zero-config default; an explicit workspace value wins thereafter. */
+    browseRoot: workspacePathSchema('CEZ_BROWSE_ROOT', '~/'),
     /** Checkout root for GUI-cloned projects. Stored as written (a literal
      *  `~` is expanded by the checkout flow, not here); validated writable
      *  when *changed*, never at load. */
-    projectsDir: z.string().min(1).max(4096).default('~/cezar/projects').catch('~/cezar/projects'),
+    projectsDir: workspacePathSchema('CEZ_PROJECTS_DIR', '~/cezar/projects'),
     // Function-form default/catch: mutators (step 1.3's registerProject) edit
     // these objects in place, so parses must never share one reference.
     resources: resourcesSchema.default(() => ({})).catch(() => resourcesSchema.parse({})),
