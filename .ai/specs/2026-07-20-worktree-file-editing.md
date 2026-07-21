@@ -18,7 +18,12 @@ twice — a metadata `file-edited` run event for visibility, and a bounded
 byte-exact snapshot for recovery — so a human mutation of a live agent worktree
 is both auditable and restorable. Writing is a **local-machine capability**: every write refuses under
 hosted mode (`CEZ_REMOTE`), enforced server-side. The editor is the `CodeEditor`
-component from #404 / PR #418 — no new dependency, no Monaco.
+component from #404 / PR #418 — no new dependency, no Monaco — highlighting the
+open file through the same `langForPath()` + Shiki pipeline the preview already
+uses, with a **debounced** editor-side tokenizer, because the preview's hook
+re-tokenizes the whole file synchronously on every content change
+(§Syntax highlighting in edit mode). Mockups of every state are in
+`.ai/specs/assets/2026-07-20-worktree-file-editing/` (§UI/UX).
 
 ## Open Questions — resolved autonomously
 
@@ -67,6 +72,7 @@ has open at the right line.
 | API client | `getRunFile()`, `web/app/src/api/client.ts:294-296`; `useRunFile()`, `api/queries.ts:155` | Read-only |
 | Tree + preview UI | `task-files.tsx`, `files-tree.tsx`, `file-preview.tsx`, `worktree-files.ts` | View-only |
 | Language for highlighting | `langForPath()`, `web/app/src/lib/highlighter.ts:150` | Exists — no new mapping needed |
+| Whole-file tokenizer | `useFileTokens()`, `web/app/src/routes/task-git/file-preview.tsx:134` | Exists — but **not reusable as-is** for an editor: it re-tokenizes on every `text` change, synchronously on the render path (§Syntax highlighting in edit mode H3) |
 | Highlighted **editable** control | `CodeEditor`, `web/app/src/components/code-editor.tsx` | **Only on PR #418's branch** |
 | Hosted-mode predicate | `resolveCapabilities()`, `src/server/capabilities.ts:42` (predicate at `:44`) | Exists (`localHandoff`) |
 | Atomic write precedent | `src/runs/store.ts:689-692` (tmp+rename) | Pattern exists — but fixed tmp name, no mode preservation |
@@ -742,13 +748,37 @@ string, so it cannot be fooled by an encoding round-trip — which is why
 
 Only what is unique; the tree and preview chrome already exist.
 
-- **View by default.** `file-preview.tsx` gains an **Edit** button, shown only
+Mockups live in `.ai/specs/assets/2026-07-20-worktree-file-editing/` — static HTML,
+no JavaScript, openable straight from disk. They share a `tokens.css` copied
+verbatim from `web/app/src/styles/index.css` (the one file allowed to carry raw
+hex, enforced by `web/app/src/design-guardian.test.ts`), so the surfaces below
+are drawn in the app's real tokens rather than an approximation of them. Each
+has a `-dark.png` / `-light.png` beside it.
+
+| Mockup | State |
+|---|---|
+| `files-view.html` | View mode, `editable: true` — the Edit button is the only new pixel |
+| `files-edit.html` | Edit mode, dirty — overlay editor, Save/Cancel, uncommitted-honesty banner |
+| `files-conflict.html` | `409` stale-base conflict — typed text preserved, Reload / Copy my version |
+| `files-states.html` | Not-editable and gated states: non-UTF-8, hosted mode, no-grammar, `tooLarge`, and the Phase 2 overwrite banner |
+
+`files-edit.html` and `files-conflict.html` render a **real** `<textarea>` over a
+**real** token layer with the geometry §Syntax highlighting in edit mode
+specifies, so the caret sitting on its glyph is that section's alignment
+invariant demonstrated rather than drawn. They are design targets for visual
+approval; the implementation is React against the existing components, not these
+files.
+
+- **View by default** (mockup: `files-view.html`). `file-preview.tsx` gains an **Edit** button, shown only
   when the `GET` reports `editable: true` — the server decides editability, the
   UI does not re-derive it. When `editable` is false the existing preview states
   why (binary / too large / not valid UTF-8).
-- **Edit mode** swaps the read-only `<pre>` for `CodeEditor` seeded with the
-  content and `language={langForPath(path) ?? 'plaintext'}`. Header shows
-  **Save** (disabled while clean or in-flight) and **Cancel**.
+- **Edit mode** (mockup: `files-edit.html`) swaps the read-only `<pre>` for
+  `CodeEditor` seeded with the content and
+  `language={langForPath(path) ?? 'plaintext'}`. Header shows **Save** (disabled
+  while clean or in-flight) and **Cancel**. Highlighting must survive the swap
+  and survive typing — see §Syntax highlighting in edit mode, which is where the
+  real work in this bullet is.
 - **Dirty state** blocks navigation — tree selection, route change, tab switch —
   with a confirm. The Files tab is a place users click around in; losing an edit
   to a stray click is the obvious failure to design out.
@@ -758,12 +788,91 @@ Only what is unique; the tree and preview chrome already exist.
 - **Uncommitted honesty.** While dirty and after saving, the header states the
   edit lives in the worktree and is not committed, linking the existing commit
   affordance.
-- **Conflict** is non-destructive: the user's text stays in the editor, with
-  **Reload** (discard mine, refetch) and **Copy my version**. Never auto-resolve.
-- **Hosted mode / kill switch** hide the Edit button via `fileEdit`. The server
-  still refuses — the hidden button is UX, the `409` is the control.
+- **Conflict** (mockup: `files-conflict.html`) is non-destructive: the user's
+  text stays in the editor, with **Reload** (discard mine, refetch) and **Copy my
+  version**. Never auto-resolve.
+- **Hosted mode / kill switch** hide the Edit button via `fileEdit` (mockup:
+  `files-states.html`). The server still refuses — the hidden button is UX, the
+  `409` is the control.
 - **Accessibility**: `CodeEditor` deliberately does not trap Tab, so keyboard
   navigation out keeps working. Preserve light/dark/system theming per AGENTS.md.
+
+## Syntax highlighting in edit mode
+
+The editor must highlight the file it has open, in the same colors as the
+preview, without making typing feel slow. That sounds like it comes free from
+reusing `file-preview.tsx`'s highlighting — it does not. Three of the four
+properties below are new work, and one of them decides whether typing drops
+frames.
+
+**H1 — One language resolution, shared.** Edit mode calls the same
+`langForPath(path)` (`web/app/src/lib/highlighter.ts:150`) the preview calls,
+resolves `null` to plaintext, and renders the same `data-lang` attribute. The
+same bytes must look identical either side of the Edit button; two call sites
+deciding "what language is this" independently is how they drift.
+
+**H2 — One theme, and it is already free.** `SYN_THEME`
+(`highlighter.ts:45-49`) emits `var(--syn-key)`, `var(--syn-str)` … as token
+`color` values rather than hex, with `bg: 'transparent'`. So a light/dark flip
+re-paints via CSS custom properties with **no re-tokenize** and no React state,
+in edit mode exactly as in view mode. Worth asserting rather than assuming: a
+future "optimization" that resolves the variables to hex at tokenize time would
+silently break theme switching inside the editor, and nothing else would catch
+it.
+
+**H3 — Re-tokenizing per keystroke is the jank, and the obvious reuse causes
+it.** `useFileTokens` (`file-preview.tsx:134-154`) lists `text` in its effect
+deps and, on a cache miss, calls `highlightSync(text, lang)` **during render**
+(`:153`) — a synchronous whole-file `codeToTokens` on the render path. That is
+correct for the preview, where `text` is constant for the life of a file. In an
+editor `text` changes on every keypress, so reusing the hook unchanged means one
+full-file tokenize per character, synchronously, before paint.
+
+H4's 1500-line cap bounds this, so it is frame drops rather than a freeze — but
+it bounds *lines*, not bytes: 1500 lines of long ones is still hundreds of KB
+tokenized per character, and even a 400-line source file is enough to make typing
+visibly stutter on a mid-range laptop. Worth stating plainly rather than
+overselling: the failure is a degraded, not a broken, editor. It is still not
+shippable. The editor therefore needs its own hook that (a) keeps the last
+good token set on screen while the user types, (b) re-tokenizes on a trailing
+debounce (~120 ms idle) off the render path, and (c) never blocks a keystroke on
+tokenization. Stale-by-one-debounce coloring is the correct trade; a stalled
+caret is not.
+
+**H4 — The same oversize cap, in both modes.** The preview stops highlighting
+past `HIGHLIGHT_MAX_LINES = 1500` (`file-preview.tsx:129`) and renders plaintext.
+Edit mode applies the **same** cap and the same fallback, for the same reason
+(H3 makes it more acute, not less). Because the content cap is a byte cap and
+this one is a line cap, a large-but-editable file that opens as plaintext in the
+preview must not suddenly attempt highlighting when edited.
+
+**Overlay geometry.** The transparent-text `<textarea>` and the `<pre>` of tokens
+must agree on `font-family`, `font-size`, `line-height`, `letter-spacing`,
+`tab-size`, `white-space`, wrapping mode, and horizontal padding, and must scroll
+as one. Any disagreement drifts the caret away from the glyph it is meant to sit
+on — the failure that makes an overlay editor feel broken. The preview's
+geometry is the target to match: `font-mono text-xs leading-[1.7]`, `px-4` rows,
+a `w-10 pr-3` gutter (`file-preview.tsx:162-169`). The mockups in §UI/UX pin
+these values in real CSS.
+
+**Grammar loading is asynchronous, and that is already handled.** Grammars arrive
+by dynamic `import()` (`highlighter.ts:89`), so the first render of a
+newly-encountered language is plaintext and upgrades when the chunk lands;
+`ensureLang` never rejects, and a failed fetch drops its cache entry so a later
+render retries (`:184-199`). Edit mode inherits this. The one new requirement:
+the async upgrade must repaint tokens **without touching the textarea's value or
+selection** — the user may have typed during the load.
+
+**Non-goal: widening grammar coverage.** The allowlist is 16 grammars
+(`highlighter.ts:89`) plus 17 aliases, chosen for what agent transcripts fence.
+A `.rb`, `.php`, `.java` or extension-less file (`Dockerfile`, `Makefile`,
+`.gitignore` — `langForPath` returns `null` when the last dot is at index `<= 0`)
+renders as untinted plaintext today and will render as untinted plaintext in the
+editor. That is a pre-existing limitation of the preview, not a regression this
+feature introduces, and **editability never depends on it** — a plaintext file is
+as editable as a TypeScript one, because editability is a UTF-8 question
+(§Encoding). Adding grammars is a separate, cheap change that benefits both
+surfaces at once, precisely because H1 keeps the resolution shared.
 
 ## Edge Cases & Failure Scenarios
 
@@ -782,6 +891,10 @@ Only what is unique; the tree and preview chrome already exist.
 | Request body over the cap | `413` before parsing. |
 | Disk full / EACCES during write | tmp write fails → tmp removed → `500` with the OS message; the original is untouched. |
 | Process dies between tmp write and rename | Original intact; a stray `.<file>.cez-tmp-<rand>` remains. No sweeper — zero-config forbids *required* new state, and a recognizable tmp name is enough. |
+| File whose extension has no grammar (`Dockerfile`, `.rb`, `.gitignore`) | `langForPath` → `null` → plaintext in **both** modes, and still fully editable. Highlighting coverage never gates editing (§Syntax highlighting H1, Non-goal). |
+| File longer than `HIGHLIGHT_MAX_LINES` (1500) | Plaintext in edit mode too, matching the preview (§Syntax highlighting H4). Editable up to the byte cap regardless. |
+| Grammar chunk fails to fetch while the editor is open | Plaintext now, retried on a later render; `ensureLang` never rejects. The textarea's value and selection are untouched (§Syntax highlighting). |
+| Theme switched (light/dark/system) mid-edit | Repaints through the `--syn-*` custom properties with no re-tokenize and no change to dirty state (§Syntax highlighting H2). |
 | CRLF / trailing newline | Bytes written verbatim. No normalization. |
 | Empty content | Allowed — truncating a file is a legitimate edit. |
 | Two cockpit tabs editing one file | Second save conflicts on `baseHash`. Same mechanism, no special case. |
@@ -798,8 +911,10 @@ server-wide Origin/Host middleware for mutating methods plus `GET
 …/edits/:hash` (§Security 5 — the
 largest single piece of blast radius here, and the one most likely to be
 descoped to #467), a write-path deny rule for `.git` / `node_modules`
-at any depth (§Write-path containment), one client type change, and one
-changed component.
+at any depth (§Write-path containment), one client type change, one
+changed component, and one new editor-side tokenizer hook — the preview's
+`useFileTokens` cannot be reused unchanged without a per-keystroke whole-file
+tokenize on the render path (§Syntax highlighting in edit mode H3).
 
 `readWorktreePath()` gains a **third** caller — `server.ts:1112` (the `GET`) and
 `server.ts:951` (the `open-in` default-app path, itself a security-relevant
@@ -882,7 +997,8 @@ the vertical split exists to protect.
 - **Phase 1 — edit and save, end to end.** Both routes + `worktree-write.ts` +
   hash/editable on the `GET` + `fileEdit` + kill switch + the `file-edited`
   event and its snapshot (with retention and run-deletion cleanup) + the editor
-  UI with dirty state and conflict handling. Shippable and useful on its own.
+  UI with dirty state, conflict handling, and highlighting that survives typing
+  (§Syntax highlighting in edit mode). Shippable and useful on its own.
 - **Phase 2 — divergence awareness.** The open-file hash watch and the
   post-save "agent overwrote your edit" banner, plus surfacing `file-edited` in
   the Session timeline. Phase 1 is safe without it (the edit is already
@@ -980,6 +1096,24 @@ phase completion.
    Per Q1, vendor `code-editor.tsx` if #418 has not merged, with a
    de-duplication follow-up. *Tests:* Edit button absent when `editable` is
    false and when `fileEdit` is false; present for editable text.
+7b. **Highlighting in edit mode** (§Syntax highlighting in edit mode). A
+   debounced editor-side tokenizer — **not** `useFileTokens`, which re-tokenizes
+   synchronously on the render path per `text` change — keeping the last good
+   tokens on screen while typing; the same `langForPath` resolution, the same
+   `data-lang`, the same `HIGHLIGHT_MAX_LINES` cap as the preview; and the
+   overlay geometry pinned so the caret tracks its glyph. Whichever way Q1 goes,
+   this is where the vendored or imported `CodeEditor` is made to satisfy H1–H4 —
+   #418 was not written against a 512 KB file. *Tests:* view mode and edit mode
+   produce the same `data-lang` and the same token colors for one file, including
+   a `null`-language file (`Dockerfile`) rendering as plaintext in both; typing N
+   characters triggers **one** tokenize, not N (assert the call count through the
+   `resetHighlighterForTests()` seam, `highlighter.ts:262`); a file over 1500
+   lines renders plaintext in edit mode; a theme flip mid-edit repaints with
+   **zero** re-tokenizes and leaves dirty state untouched; an async grammar
+   upgrade that lands mid-typing leaves the textarea's value and selection
+   unchanged; textarea and `<pre>` report identical computed
+   `font`/`line-height`/`letter-spacing`/`tab-size`/`white-space` and identical
+   left padding.
 8. **Dirty-state guard, conflict UX, and snapshot recovery.** Confirm on
    navigation while dirty; `409` conflict leaves typed text in the editor with
    Reload / Copy my version. Add `getRunEdit()` in `api/client.ts` and the
