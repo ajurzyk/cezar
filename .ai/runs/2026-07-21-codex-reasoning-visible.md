@@ -41,8 +41,8 @@ Ensure Codex reasoning is visible in the task thread when the app-server deliver
 
 ### Phase 1: Protocol fidelity
 
-- [ ] 1.1 Add a golden transcript that reproduces snapshot-only Codex reasoning with array fields.
-- [ ] 1.2 Normalize reasoning snapshot arrays without regressing streamed delta precedence.
+- [x] 1.1 Add a golden transcript that reproduces snapshot-only Codex reasoning with array fields. — 0f46997
+- [x] 1.2 Normalize reasoning snapshot arrays without regressing streamed delta precedence. — 0f46997
 
 ### Phase 2: Regression verification
 
