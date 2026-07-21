@@ -58,10 +58,14 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
   const titleContext = pageTitleContext(pathname)
   const bootProjectId = registry?.bootProject ?? health.data?.bootProject ?? null
   const isBootProject = projectId !== null && projectId === bootProjectId
+  const activeProject = registry?.projects.find((project) => project.id === projectId)
   const titleRuns = useProjectRuns(
     projectId ?? '',
-    projectId !== null && titleContext.taskId !== null,
-    isBootProject,
+    // Wait for the registry to identify the project before choosing the boot/non-boot cache
+    // key. Health can arrive first; fetching then would briefly populate a project-scoped key
+    // for the boot project before switching to the authoritative `default` key.
+    activeProject !== undefined && titleContext.taskId !== null,
+    registry?.bootProject === projectId,
   ).data
 
   // Global settings intentionally has no selected project. Everywhere else the URL id selects
@@ -70,7 +74,7 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
   const globalSettings = pathname === '/settings/global' || pathname.startsWith('/settings/global/')
   const projectName = globalSettings
     ? null
-    : (registry?.projects.find((project) => project.id === projectId)?.name ??
+    : (activeProject?.name ??
       (isBootProject ? (repoChipOf(health.data)?.name ?? null) : null))
   const titleRun = titleContext.taskId
     ? titleRuns?.find((run) => run.id === titleContext.taskId)
