@@ -8,6 +8,7 @@ import { RunStore } from '../runs/store.js';
 import type { RunManager } from '../workflows/run.js';
 import { clearProjectProbeCache, listProjects, registerProject } from '../workspace/projects.js';
 import { ProjectContexts } from './project-context.js';
+import { apiRequest } from './loopback-request.testkit.js';
 import { WorkspaceEventBus, createApp } from './server.js';
 
 /**
@@ -74,19 +75,20 @@ describe('GET /api/workspace/events', () => {
   });
 
   /** Register the other project and build its context via a first API touch. */
-  const buildOtherContext = async (): Promise<{ id: string; store: RunStore }> => {
+  const buildOtherContext = async (): Promise<{
+    id: string;
+    store: RunStore;
+  }> => {
     const other = await registerProject(otherRoot);
-    expect((await app.request(`/api/p/${other.id}/runs`)).status).toBe(200);
+    expect((await apiRequest(app, `/api/p/${other.id}/runs`)).status).toBe(200);
     const otherStore = contexts.peek(other.id)?.store;
     expect(otherStore).toBeDefined();
     return { id: other.id, store: otherStore as RunStore };
   };
 
   /** Open one SSE stream and return an incremental until-reader. */
-  const openStream = async (
-    url: string,
-  ): Promise<{ readUntil: (marker: string) => Promise<string> }> => {
-    const res = await app.request(url);
+  const openStream = async (url: string): Promise<{ readUntil: (marker: string) => Promise<string> }> => {
+    const res = await apiRequest(app, url);
     expect(res.status, url).toBe(200);
     expect(res.body, url).not.toBeNull();
     const reader = (res.body as ReadableStream<Uint8Array>).getReader();
@@ -112,9 +114,7 @@ describe('GET /api/workspace/events', () => {
 
   /** All payloads of one SSE event name delivered so far, in arrival order. */
   const payloadsOf = <T>(body: string, event: string): T[] =>
-    [...body.matchAll(new RegExp(`event: ${event}\\ndata: (.*)\\n`, 'g'))].map(
-      (m) => JSON.parse(m[1] as string) as T,
-    );
+    [...body.matchAll(new RegExp(`event: ${event}\\ndata: (.*)\\n`, 'g'))].map((m) => JSON.parse(m[1] as string) as T);
 
   it("carries BOTH projects' store events, each stamped with its project id", async () => {
     const other = await buildOtherContext();
@@ -122,8 +122,18 @@ describe('GET /api/workspace/events', () => {
     const ws = await openStream('/api/workspace/events');
     await ws.readUntil('event: ping');
 
-    const bootRun = store.createRun({ title: 'boot-run', workflow: 'quick-task', task: 'b', steps: [] });
-    const otherRun = other.store.createRun({ title: 'other-run', workflow: 'quick-task', task: 'o', steps: [] });
+    const bootRun = store.createRun({
+      title: 'boot-run',
+      workflow: 'quick-task',
+      task: 'b',
+      steps: [],
+    });
+    const otherRun = other.store.createRun({
+      title: 'other-run',
+      workflow: 'quick-task',
+      task: 'o',
+      steps: [],
+    });
 
     const body = await ws.readUntil(`"id":"${otherRun.id}"`);
     const runs = payloadsOf<{ id: string; project: string }>(body, 'run');
@@ -135,9 +145,7 @@ describe('GET /api/workspace/events', () => {
     // Deletions are stamped too.
     other.store.deleteRun(otherRun.id);
     const withDeleted = await ws.readUntil('event: run-deleted');
-    expect(payloadsOf(withDeleted, 'run-deleted')).toEqual([
-      { id: otherRun.id, project: other.id },
-    ]);
+    expect(payloadsOf(withDeleted, 'run-deleted')).toEqual([{ id: otherRun.id, project: other.id }]);
   });
 
   it('legacy /api/events stays boot-filtered with the byte-identical, UN-stamped shape', async () => {
@@ -148,8 +156,18 @@ describe('GET /api/workspace/events', () => {
 
     // Other project first: were it going to leak, it would arrive BEFORE the
     // boot event we wait for below.
-    other.store.createRun({ title: 'other-run', workflow: 'quick-task', task: 'o', steps: [] });
-    const bootRun = store.createRun({ title: 'boot-run', workflow: 'quick-task', task: 'b', steps: [] });
+    other.store.createRun({
+      title: 'other-run',
+      workflow: 'quick-task',
+      task: 'o',
+      steps: [],
+    });
+    const bootRun = store.createRun({
+      title: 'boot-run',
+      workflow: 'quick-task',
+      task: 'b',
+      steps: [],
+    });
 
     const body = await legacy.readUntil(`"id":"${bootRun.id}"`);
     // Byte-identical regression (BACKWARD_COMPATIBILITY §2): the data line is
@@ -162,22 +180,49 @@ describe('GET /api/workspace/events', () => {
 
   it('splits usage per project: one stamped event per project with live rows, none for row-less projects', async () => {
     const other = await buildOtherContext();
-    const bootRunId = store.createRun({ title: 'boot', workflow: 'quick-task', task: 'b', steps: [] }).id;
-    const otherRunId = other.store.createRun({ title: 'other', workflow: 'quick-task', task: 'o', steps: [] }).id;
+    const bootRunId = store.createRun({
+      title: 'boot',
+      workflow: 'quick-task',
+      task: 'b',
+      steps: [],
+    }).id;
+    const otherRunId = other.store.createRun({
+      title: 'other',
+      workflow: 'quick-task',
+      task: 'o',
+      steps: [],
+    }).id;
 
     const ws = await openStream('/api/workspace/events');
     await ws.readUntil('event: ping');
 
-    const bootSample: ProcessUsage = { cpuPct: 12.5, rssBytes: 111 * 1024, procCount: 2 };
-    const otherSample: ProcessUsage = { cpuPct: 99.9, rssBytes: 222 * 1024, procCount: 5 };
+    const bootSample: ProcessUsage = {
+      cpuPct: 12.5,
+      rssBytes: 111 * 1024,
+      procCount: 2,
+    };
+    const otherSample: ProcessUsage = {
+      cpuPct: 99.9,
+      rssBytes: 222 * 1024,
+      procCount: 5,
+    };
     emitUsageForTest({ [bootRunId]: bootSample, [otherRunId]: otherSample });
 
     const body = await ws.readUntil(`"project":"${other.id}","usage"`);
     await ws.readUntil(`"project":"${bootId}","usage"`);
-    const events = payloadsOf<{ project: string; usage: Record<string, ProcessUsage> }>(body, 'usage');
+    const events = payloadsOf<{
+      project: string;
+      usage: Record<string, ProcessUsage>;
+    }>(body, 'usage');
     expect(events).toHaveLength(2);
-    expect(events).toContainEqual({ project: bootId, usage: { [bootRunId]: bootSample } });
-    expect(events).toContainEqual({ project: other.id, usage: { [otherRunId]: otherSample } });
+    expect(events).toContainEqual({
+      project: bootId,
+      usage: { [bootRunId]: bootSample },
+    });
+    expect(events).toContainEqual({
+      project: other.id,
+      usage: { [otherRunId]: otherSample },
+    });
 
     // A snapshot owned entirely by one project → exactly ONE more event; the
     // row-less project emits nothing (no empty-record clears on this stream).
@@ -199,7 +244,7 @@ describe('GET /api/workspace/events', () => {
 
     // First API touch builds the context; the stream picks it up dynamically
     // via onContextBuilt.
-    expect((await app.request(`/api/p/${other.id}/runs`)).status).toBe(200);
+    expect((await apiRequest(app, `/api/p/${other.id}/runs`)).status).toBe(200);
     const otherStore = contexts.peek(other.id)?.store;
     expect(otherStore).toBeDefined();
     const run = (otherStore as RunStore).createRun({
@@ -223,7 +268,9 @@ describe('GET /api/workspace/events', () => {
 
     // Remove the project through the API — the stream must drop its attach
     // entry with the disposed context…
-    const del = await app.request(`/api/projects/${other.id}`, { method: 'DELETE' });
+    const del = await apiRequest(app, `/api/projects/${other.id}`, {
+      method: 'DELETE',
+    });
     expect(del.status).toBe(200);
     await ws.readUntil('event: project-removed');
 
@@ -232,7 +279,7 @@ describe('GET /api/workspace/events', () => {
     // rebuilt context's events were silently lost until reconnect).
     const readded = await registerProject(otherRoot);
     expect(readded.id).toBe(other.id);
-    expect((await app.request(`/api/p/${readded.id}/runs`)).status).toBe(200);
+    expect((await apiRequest(app, `/api/p/${readded.id}/runs`)).status).toBe(200);
     const rebuilt = contexts.peek(readded.id)?.store;
     expect(rebuilt).toBeDefined();
     expect(rebuilt).not.toBe(other.store);
@@ -258,9 +305,7 @@ describe('GET /api/workspace/events', () => {
     bus.emit('project-removed', { id: 'newbie' });
 
     const body = await ws.readUntil('event: project-removed');
-    expect(payloadsOf(body, 'project-added')).toEqual([
-      { project: { id: 'newbie', name: 'newbie' } },
-    ]);
+    expect(payloadsOf(body, 'project-added')).toEqual([{ project: { id: 'newbie', name: 'newbie' } }]);
     expect(payloadsOf(body, 'checkout-progress')).toEqual([{ url: 'octo/repo', phase: 'cloning' }]);
     expect(payloadsOf(body, 'project-removed')).toEqual([{ id: 'newbie' }]);
   });

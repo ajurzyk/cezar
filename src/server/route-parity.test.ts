@@ -7,6 +7,7 @@ import { RunStore } from '../runs/store.js';
 import type { RunManager } from '../workflows/run.js';
 import { clearProjectProbeCache, listProjects, registerProject } from '../workspace/projects.js';
 import { ProjectContexts } from './project-context.js';
+import { apiRequest } from './loopback-request.testkit.js';
 import { createApp, projectRouteManifest, type ProjectRouteInfo } from './server.js';
 
 /**
@@ -60,7 +61,12 @@ describe('project-route alias parity (unprefixed vs /api/p/<boot> vs /api/p/defa
     }
     clearProjectProbeCache();
     store = RunStore.open(join(repoRoot, '.ai/cezar'), { keepLive: true });
-    runId = store.createRun({ title: 'parity', workflow: 'quick-task', task: 'parity', steps: [] }).id;
+    runId = store.createRun({
+      title: 'parity',
+      workflow: 'quick-task',
+      task: 'parity',
+      steps: [],
+    }).id;
     contexts = new ProjectContexts({ listProjects });
     bootId = (await registerProject(repoRoot)).id;
     app = createApp({
@@ -107,7 +113,7 @@ describe('project-route alias parity (unprefixed vs /api/p/<boot> vs /api/p/defa
   }
 
   const answer = async (url: string, init?: RequestInit): Promise<Answer> => {
-    const res = await app.request(url, init);
+    const res = await apiRequest(app, url, init);
     return {
       url,
       status: res.status,
@@ -119,8 +125,7 @@ describe('project-route alias parity (unprefixed vs /api/p/<boot> vs /api/p/defa
   /** Body normalizer for routes whose DRY-RUN mock stamps `new Date()` per
    *  request (`/github*` — two back-to-back unprefixed calls differ by a
    *  millisecond too, so this is route-inherent, not alias drift). */
-  const stripTimestamps = (body: string): string =>
-    body.replace(/\d{4}-\d{2}-\d{2}T[0-9:.]+Z/g, '<ts>');
+  const stripTimestamps = (body: string): string => body.replace(/\d{4}-\d{2}-\d{2}T[0-9:.]+Z/g, '<ts>');
 
   /** Assert the three spellings of `path` answer byte-identically. Requests
    *  run sequentially so per-route caches can never race the comparison. */
@@ -163,21 +168,14 @@ describe('project-route alias parity (unprefixed vs /api/p/<boot> vs /api/p/defa
       expect(keys, expected).toContain(expected);
     }
     // Workspace-level routes must NOT be mirrored under /api/p/.
-    for (const workspaceOnly of [
-      'GET /health',
-      'GET /projects',
-      'POST /projects',
-      'GET /fs/browse',
-    ]) {
+    for (const workspaceOnly of ['GET /health', 'GET /projects', 'POST /projects', 'GET /fs/browse']) {
       expect(keys, workspaceOnly).not.toContain(workspaceOnly);
     }
   });
 
   it('answers every GET route byte-identically across the three spellings', async () => {
     const manifest = projectRouteManifest(app);
-    const gets = manifest.filter(
-      (r: ProjectRouteInfo) => r.method === 'GET' && !r.path.endsWith('/events'),
-    );
+    const gets = manifest.filter((r: ProjectRouteInfo) => r.method === 'GET' && !r.path.endsWith('/events'));
     expect(gets.length).toBeGreaterThanOrEqual(20);
     for (const route of gets) {
       await expectParity(fillParams(route.path));
@@ -185,11 +183,13 @@ describe('project-route alias parity (unprefixed vs /api/p/<boot> vs /api/p/defa
   });
 
   it('keeps mutating-route rejections byte-identical (targeted non-GET cases)', async () => {
-    const json = (method: string, body: unknown): (() => RequestInit) => () => ({
-      method,
-      body: JSON.stringify(body),
-      headers: { 'content-type': 'application/json' },
-    });
+    const json =
+      (method: string, body: unknown): (() => RequestInit) =>
+      () => ({
+        method,
+        body: JSON.stringify(body),
+        headers: { 'content-type': 'application/json' },
+      });
     // 400: invalid bodies never mutate, so parity can hit them repeatedly.
     await expectParity('/runs', json('POST', {}));
     await expectParity('/ui-state', json('PUT', 'nonsense'));
@@ -199,7 +199,9 @@ describe('project-route alias parity (unprefixed vs /api/p/<boot> vs /api/p/defa
     // 404: unknown ids.
     await expectParity('/runs/no-such-run/archive', json('POST', {}));
     await expectParity('/runs/no-such-run', json('PATCH', { title: 't' }));
-    await expectParity('/workflows/no-such-workflow', () => ({ method: 'DELETE' }));
+    await expectParity('/workflows/no-such-workflow', () => ({
+      method: 'DELETE',
+    }));
     await expectParity('/groups/no-such-group/pick', json('POST', { runId: 'x' }));
     // 409: the follow-up inbox is off (CEZ_FOLLOWUPS unset).
     await expectParity('/todos/t1/start', json('POST', {}));
@@ -209,7 +211,7 @@ describe('project-route alias parity (unprefixed vs /api/p/<boot> vs /api/p/defa
 
   /** Read one SSE response until its first ping, then hang up. */
   const sseHead = async (url: string): Promise<Answer> => {
-    const res = await app.request(url);
+    const res = await apiRequest(app, url);
     let body = '';
     if (res.body) {
       const reader = res.body.getReader();
@@ -262,38 +264,50 @@ describe('project-route alias parity (unprefixed vs /api/p/<boot> vs /api/p/defa
 
   it('unknown and malformed project ids answer 404 {error}', async () => {
     for (const url of ['/api/p/no-such-project/runs', '/api/p/no-such-project/events']) {
-      const res = await app.request(url);
+      const res = await apiRequest(app, url);
       expect(res.status, url).toBe(404);
-      expect(await res.json()).toEqual({ error: 'unknown project: no-such-project' });
+      expect(await res.json()).toEqual({
+        error: 'unknown project: no-such-project',
+      });
     }
     // Shape violations (uppercase, underscore) fail the zod gate before any
     // registry lookup — still a 404, never a 500 or a path touch.
-    const malformed = await app.request('/api/p/Bad_Id/runs');
+    const malformed = await apiRequest(app, '/api/p/Bad_Id/runs');
     expect(malformed.status).toBe(404);
-    expect(await malformed.json()).toEqual({ error: 'unknown project: Bad_Id' });
+    expect(await malformed.json()).toEqual({
+      error: 'unknown project: Bad_Id',
+    });
   });
 
   it('a registered project whose folder is gone answers 409 {error}', async () => {
     const other = await registerProject(otherRoot);
     rmSync(otherRoot, { recursive: true, force: true });
     clearProjectProbeCache(); // drop the status-probe TTL so the loss is seen
-    const res = await app.request(`/api/p/${other.id}/runs`);
+    const res = await apiRequest(app, `/api/p/${other.id}/runs`);
     expect(res.status).toBe(409);
-    expect(await res.json()).toEqual({ error: `project folder not found: ${other.id}` });
+    expect(await res.json()).toEqual({
+      error: `project folder not found: ${other.id}`,
+    });
   });
 
   it('a non-boot project builds lazily and answers with its own state', async () => {
     const other = await registerProject(otherRoot);
     expect(contexts.peek(other.id)).toBeUndefined(); // nothing until first touch
-    const runs = await app.request(`/api/p/${other.id}/runs`);
+    const runs = await apiRequest(app, `/api/p/${other.id}/runs`);
     expect(runs.status).toBe(200);
     expect(await runs.json()).toEqual([]); // its own (empty) store, not boot's
     expect(contexts.peek(other.id)).toBeDefined();
     // Its launch key is its own — never the boot project's secret.
-    const bootKey = ((await (await app.request('/api/launch-key')).json()) as { key: string }).key;
-    const otherKey = ((await (await app.request(`/api/p/${other.id}/launch-key`)).json()) as {
-      key: string;
-    }).key;
+    const bootKey = (
+      (await (await apiRequest(app, '/api/launch-key')).json()) as {
+        key: string;
+      }
+    ).key;
+    const otherKey = (
+      (await (await apiRequest(app, `/api/p/${other.id}/launch-key`)).json()) as {
+        key: string;
+      }
+    ).key;
     expect(otherKey).not.toBe(bootKey);
   });
 
@@ -304,22 +318,29 @@ describe('project-route alias parity (unprefixed vs /api/p/<boot> vs /api/p/defa
     writeFileSync(join(repoRoot, '.claude', 'settings.json'), '{"project":"boot"}', 'utf8');
     writeFileSync(join(otherRoot, '.claude', 'settings.json'), '{"project":"other"}', 'utf8');
 
-    const boot = await app.request('/api/agent-config/claude.project.settings');
-    const scoped = await app.request(`/api/p/${other.id}/agent-config/claude.project.settings`);
-    expect((await boot.json()) as { content: string }).toMatchObject({ content: '{"project":"boot"}' });
-    expect((await scoped.json()) as { content: string }).toMatchObject({ content: '{"project":"other"}' });
+    const boot = await apiRequest(app, '/api/agent-config/claude.project.settings');
+    const scoped = await apiRequest(app, `/api/p/${other.id}/agent-config/claude.project.settings`);
+    expect((await boot.json()) as { content: string }).toMatchObject({
+      content: '{"project":"boot"}',
+    });
+    expect((await scoped.json()) as { content: string }).toMatchObject({
+      content: '{"project":"other"}',
+    });
 
-    const current = (await (await app.request(
-      `/api/p/${other.id}/agent-config/claude.project.settings`,
-    )).json()) as { version: string };
-    const updated = await app.request(`/api/p/${other.id}/agent-config/claude.project.settings`, {
+    const current = (await (
+      await apiRequest(app, `/api/p/${other.id}/agent-config/claude.project.settings`)
+    ).json()) as { version: string };
+    const updated = await apiRequest(app, `/api/p/${other.id}/agent-config/claude.project.settings`, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ content: '{"project":"updated"}', version: current.version }),
+      body: JSON.stringify({
+        content: '{"project":"updated"}',
+        version: current.version,
+      }),
     });
     expect(updated.status).toBe(200);
     expect(
-      (await (await app.request('/api/agent-config/claude.project.settings')).json()) as { content: string },
+      (await (await apiRequest(app, '/api/agent-config/claude.project.settings')).json()) as { content: string },
     ).toMatchObject({ content: '{"project":"boot"}' });
   });
 });

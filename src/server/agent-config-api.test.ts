@@ -5,6 +5,7 @@ import type { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { RunStore } from '../runs/store.js';
 import type { RunManager } from '../workflows/run.js';
+import { apiRequest } from './loopback-request.testkit.js';
 import { createApp } from './server.js';
 
 /**
@@ -25,7 +26,12 @@ describe('the agent-config API', () => {
     repoRoot = mkdtempSync(join(tmpdir(), 'cez-agentcfg-'));
     mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
     store = RunStore.open(join(repoRoot, '.ai/cezar'));
-    app = createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test' });
+    app = createApp({
+      repoRoot,
+      store,
+      manager: {} as RunManager,
+      version: '0.0.0-test',
+    });
   });
   afterEach(() => {
     store.flush();
@@ -35,37 +41,47 @@ describe('the agent-config API', () => {
   });
 
   const put = (id: string, body: unknown) =>
-    app.request(`/api/agent-config/${id}`, {
+    apiRequest(app, `/api/agent-config/${id}`, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
     });
 
   it('GET lists the catalog with editable:true locally', async () => {
-    const res = await app.request('/api/agent-config');
+    const res = await apiRequest(app, '/api/agent-config');
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { editable: boolean; files: unknown[]; userMcp: unknown };
+    const body = (await res.json()) as {
+      editable: boolean;
+      files: unknown[];
+      userMcp: unknown;
+    };
     expect(body.editable).toBe(true);
     expect(body.files.length).toBeGreaterThan(10);
     expect(body.userMcp).not.toBeNull();
   });
 
   it('GET :id → 404 for an unknown id', async () => {
-    expect((await app.request('/api/agent-config/nope')).status).toBe(404);
+    expect((await apiRequest(app, '/api/agent-config/nope')).status).toBe(404);
   });
 
   it('GET :id reads an absent file as exists:false', async () => {
-    const res = await app.request('/api/agent-config/claude.project.settings');
+    const res = await apiRequest(app, '/api/agent-config/claude.project.settings');
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ exists: false, version: null });
   });
 
   it('PUT creates a file, then a correct-version PUT updates it', async () => {
-    const created = await put('claude.project.settings', { content: '{"a":1}', version: null });
+    const created = await put('claude.project.settings', {
+      content: '{"a":1}',
+      version: null,
+    });
     expect(created.status).toBe(200);
     const { version } = (await created.json()) as { version: string };
     expect(readFileSync(join(repoRoot, '.claude', 'settings.json'), 'utf8')).toBe('{"a":1}');
-    const updated = await put('claude.project.settings', { content: '{"a":2}', version });
+    const updated = await put('claude.project.settings', {
+      content: '{"a":2}',
+      version,
+    });
     expect(updated.status).toBe(200);
   });
 
@@ -75,7 +91,14 @@ describe('the agent-config API', () => {
 
   it('PUT rejects a stale version with 409', async () => {
     await put('claude.project.settings', { content: '{"a":1}', version: null });
-    expect((await put('claude.project.settings', { content: '{"a":2}', version: null })).status).toBe(409);
+    expect(
+      (
+        await put('claude.project.settings', {
+          content: '{"a":2}',
+          version: null,
+        })
+      ).status,
+    ).toBe(409);
   });
 
   it('PUT :id → 404 for an unknown id', async () => {
@@ -86,23 +109,33 @@ describe('the agent-config API', () => {
   // hosted mode, not just a user-scope one. settings.json defines hooks.
   it('hosted mode: EVERY write 409s — including a repo-local settings file', async () => {
     process.env.CEZ_REMOTE = '1';
-    const local = await put('claude.project.settings', { content: '{"hooks":{}}', version: null });
+    const local = await put('claude.project.settings', {
+      content: '{"hooks":{}}',
+      version: null,
+    });
     expect(local.status).toBe(409);
-    const userScope = await put('claude.user.settings', { content: '{}', version: null });
+    const userScope = await put('claude.user.settings', {
+      content: '{}',
+      version: null,
+    });
     expect(userScope.status).toBe(409);
   });
 
   it('hosted mode: repo-file reads work, home-dir file reads are withheld, userMcp is null', async () => {
     process.env.CEZ_REMOTE = '1';
-    const res = await app.request('/api/agent-config');
-    const body = (await res.json()) as { editable: boolean; userMcp: unknown; files: { writable: boolean }[] };
+    const res = await apiRequest(app, '/api/agent-config');
+    const body = (await res.json()) as {
+      editable: boolean;
+      userMcp: unknown;
+      files: { writable: boolean }[];
+    };
     expect(body.editable).toBe(false);
     expect(body.userMcp).toBeNull();
     expect(body.files.every((f) => f.writable === false)).toBe(true);
     // a repo-local file read still works (the cockpit already serves repo contents)
-    expect((await app.request('/api/agent-config/claude.project.settings')).status).toBe(200);
+    expect((await apiRequest(app, '/api/agent-config/claude.project.settings')).status).toBe(200);
     // but an OUTSIDE-REPO ($HOME) file's contents are NOT served — they can hold secrets
-    expect((await app.request('/api/agent-config/claude.user.settings')).status).toBe(409);
-    expect((await app.request('/api/agent-config/codex.user.config')).status).toBe(409);
+    expect((await apiRequest(app, '/api/agent-config/claude.user.settings')).status).toBe(409);
+    expect((await apiRequest(app, '/api/agent-config/codex.user.config')).status).toBe(409);
   });
 });
