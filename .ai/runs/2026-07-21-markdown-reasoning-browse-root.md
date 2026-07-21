@@ -47,8 +47,8 @@ Render agent reasoning as Markdown and keep the Add Project folder browser immed
 
 ### Phase 1: Reasoning Markdown
 
-- [ ] 1.1 Render Markdown reasoning with a compact preview
-- [ ] 1.2 Add reasoning Markdown regression coverage
+- [x] 1.1 Render Markdown reasoning with a compact preview — a16e01b
+- [x] 1.2 Add reasoning Markdown regression coverage — a16e01b
 
 ### Phase 2: Browse-root validation and cache coherence
 
