@@ -50,6 +50,8 @@ export interface StepState {
   error?: string
   /** Latest agent session id — `claude --resume <id>` and friends. */
   sessionId?: string
+  /** Backend that owns `sessionId`; absent on records written before backend affinity. */
+  backend?: Runner
   costUsd?: number
 }
 
@@ -72,7 +74,13 @@ export interface RunRecord {
   task: string
   /** URLs of images attached to the initial task prompt (#image-display). */
   taskImages?: string[]
+  /** Prompt messages stacked onto the run while it waits for a free agent slot (#472).
+   *  Folded into the prompt at dequeue — never delivered as their own turns. Editable and
+   *  removable only while `status === 'queued'`. Absent on every pre-#472 run. */
+  queuedMessages?: QueuedMessage[]
   model?: string
+  /** Normalized provider/model identity used for attribution and reproducible replay. */
+  modelIdentity?: string
   runner?: Runner
   /** Echo of the extra system prompt the run used (POST override or config default). */
   systemPrompt?: string
@@ -103,8 +111,20 @@ export interface RunRecord {
   markerRefs?: { pr?: number; issue?: number }
   /** The referenced tier's working set (distinct PR URLs spotted, capped server-side). */
   referencedPrCandidates?: string[]
+  /** The issue this task is ABOUT (spec 2026-07-21-report-ref-discovery): auto-discovered from
+   *  `github.com/…/issues/N` links in the conversation. Display-only; never gates actions. */
+  referencedIssueUrl?: string
+  /** The referenced-issue working set, persisted like `referencedPrCandidates`. Capped. */
+  referencedIssueCandidates?: string[]
+  /** Autonomous mode (#autonomous): the run never parks at `waiting` or the terminal `review`
+   *  gate. Absent = falsy = not autonomous. */
+  autonomous?: boolean
   /** Absent when the run executed in the repo working tree rather than its own worktree. */
   worktreePath?: string
+  /** Set when count-based retention (#483) reclaimed the worktree DIRECTORY (the branch is
+   *  kept): the dir is gone but recoverable, and the run is out of the retention budget until
+   *  it is re-materialized. */
+  worktreeReclaimedAt?: string
   branch?: string
   baseBranch?: string
   /** Parallel variants (spec 010): runs sharing a groupId are one group. */
@@ -307,8 +327,8 @@ export interface FsBrowseDir {
   isRepo: boolean
 }
 
-/** `GET /api/fs/browse?path=` — the folder picker's listing. Rooted at the operator's home
- *  (hosted mode narrows it to the checkout root), directories only. */
+/** `GET /api/fs/browse?path=` — the folder picker's listing. Rooted at the independently
+ *  configured browse root, directories only. */
 export interface FsBrowseResponse {
   /** The realpath'd directory actually listed — never the spelling asked for, so the
    *  breadcrumb shows where the picker really is. */
@@ -347,6 +367,7 @@ export interface WorkspaceUiState {
  *  host-protection budget — the ONLY effective `maxParallel`/`memoryLimitMb` since Phase 2
  *  (spec §"Resource governance"); `worktreeRetentionDefault` seeds projects that set none. */
 export interface WorkspaceConfigResponse {
+  browseRoot: string
   projectsDir: string
   resources: {
     maxParallel: number
@@ -356,9 +377,10 @@ export interface WorkspaceConfigResponse {
 }
 
 /** `PUT /api/workspace/config` body — partial: absent keys stay untouched. A rejected
- *  `projectsDir` (not writable) 400s with the reason and persists NOTHING, resources
+ *  workspace root (not writable) 400s with the reason and persists NOTHING, resources
  *  included, so callers may send both in one request only if they want that atomicity. */
 export interface SetWorkspaceConfigInput {
+  browseRoot?: string
   projectsDir?: string
   resources?: {
     maxParallel?: number
@@ -658,13 +680,60 @@ export interface GithubComment {
   url: string
 }
 
+/** The timeline event kinds the thread renders (#525) — an allowlist, so an unknown GitHub event
+ *  type is dropped server-side rather than reaching the client. Mirrors
+ *  `ForgeTimelineEventKind`. */
+export type GithubTimelineEventKind =
+  | 'committed'
+  | 'labeled'
+  | 'unlabeled'
+  | 'assigned'
+  | 'unassigned'
+  | 'merged'
+  | 'closed'
+  | 'reopened'
+  | 'head_ref_force_pushed'
+  | 'cross-referenced'
+  | 'renamed'
+
+/** One non-comment timeline row (#525) — commit, label change, assignment, merge, force-push,
+ *  cross-reference or rename. Mirrors `ForgeTimelineEvent`. Deliberately a separate type from
+ *  `GithubComment` rather than a widened `kind`, which would break narrowing below. */
+export interface GithubTimelineEvent {
+  id: string
+  kind: GithubTimelineEventKind
+  /** Login — or the git author name for `committed`, which carries no GitHub actor. */
+  actor: string
+  /** Absent for `committed`. */
+  avatarUrl?: string
+  createdAt: string
+  url?: string
+  /** `committed` — full 40-char SHA. */
+  sha?: string
+  /** `committed` — first line, capped at 120 chars. */
+  message?: string
+  /** `committed` — **absent** (lookup failed/skipped) and **`null`** (no CI configured) both
+   *  render no glyph, but stay distinct values. */
+  checks?: 'passing' | 'failing' | 'pending' | null
+  label?: { name: string; color?: string }
+  /** `assigned`/`unassigned` login, or the new title for `renamed`. */
+  subject?: string
+  refNumber?: number
+  refTitle?: string
+  refIsPr?: boolean
+}
+
 /** `GET /api/github/comments/:kind/:number` — degrades to `{ available: false, reason }` like the
  *  list fetch, never an error. */
 export interface GithubCommentsData {
   available: boolean
   reason?: string
   comments: GithubComment[]
+  /** True when either stream hit its cap, or the timeline fetch stopped short. */
   truncated?: boolean
+  /** Timeline events (#525) — additive and optional; absent when the server degraded to the
+   *  legacy comments-only fetch. Capped independently of `comments`. */
+  events?: GithubTimelineEvent[]
 }
 
 // ---- GUI prefs (`PUT /api/ui-state`) -----------------------------------------------------------
@@ -749,9 +818,13 @@ export interface MessageInput {
 }
 
 /** `PATCH /api/runs/:id` (#389). `title`: trimmed server-side, 1–300 chars. The edit sets both
- *  `title` and `titleSummary`, so it wins over any auto-summary. Answers the updated record. */
+ *  `title` and `titleSummary`, so it wins over any auto-summary. Answers the updated record.
+ *  `task` (#472): the initial prompt, editable only while the run is still queued — any other
+ *  status answers `409 run already started`. 1–100 000 chars, and bounded again by the folded
+ *  total across the task and its stack. */
 export interface PatchRunInput {
   title?: string
+  task?: string
 }
 
 /** Per-runner default model preset (Settings → Agents, R6 1.5): the composer preselects this
@@ -935,8 +1008,36 @@ export interface CreatePrResponse {
   dryRun?: boolean
 }
 
+/** `POST /api/runs/:id/messages` answers one of three shapes (#472), by how far the run has got:
+ *  `delivered` — a live session took it; `queued` — still waiting for a slot, so it was stacked
+ *  onto the prompt (the stored entry rides along); `deferred` — the run is mid-spawn, so it was
+ *  buffered and will arrive as an ordinary follow-up turn the moment the session opens. Anything
+ *  else is still a `409`. Pre-#472 clients only ever saw `delivered` and keep working. */
 export interface MessageResponse {
-  delivered: boolean
+  delivered?: boolean
+  queued?: boolean
+  deferred?: boolean
+  message?: QueuedMessage
+}
+
+/** One prompt message stacked onto a queued run (#472). */
+export interface QueuedMessage {
+  id: string
+  text: string
+  /** `/api/runs/:id/images/…` URLs — attachments are persisted, never inlined. */
+  images?: string[]
+  createdAt: string
+}
+
+/** `PATCH /api/runs/:id/queued-messages/:msgId` (#472) — replaces the entry's text and images.
+ *  `404` unknown run or message id; `409 run already started`. */
+export interface EditQueuedMessageResponse {
+  message: QueuedMessage
+}
+
+/** `DELETE /api/runs/:id/queued-messages/:msgId` (#472). */
+export interface RemoveQueuedMessageResponse {
+  removed: boolean
 }
 
 /** `POST /api/runs/:id/open-in-cli` — a terminal was spawned with `command` running in it.

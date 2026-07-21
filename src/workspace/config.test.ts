@@ -19,16 +19,24 @@ import {
  */
 describe('workspace config', () => {
   const originalHome = process.env.CEZ_HOME;
+  const originalBrowseRoot = process.env.CEZ_BROWSE_ROOT;
+  const originalProjectsDir = process.env.CEZ_PROJECTS_DIR;
   let home: string;
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'cez-workspace-'));
     process.env.CEZ_HOME = home; // paths.ts sends all workspace paths here
+    delete process.env.CEZ_BROWSE_ROOT;
+    delete process.env.CEZ_PROJECTS_DIR;
   });
 
   afterEach(() => {
     if (originalHome === undefined) delete process.env.CEZ_HOME;
     else process.env.CEZ_HOME = originalHome;
+    if (originalBrowseRoot === undefined) delete process.env.CEZ_BROWSE_ROOT;
+    else process.env.CEZ_BROWSE_ROOT = originalBrowseRoot;
+    if (originalProjectsDir === undefined) delete process.env.CEZ_PROJECTS_DIR;
+    else process.env.CEZ_PROJECTS_DIR = originalProjectsDir;
     rmSync(home, { recursive: true, force: true });
     vi.restoreAllMocks();
   });
@@ -50,10 +58,25 @@ describe('workspace config', () => {
     const config = await loadWorkspaceConfig();
     expect(config).toEqual(defaultWorkspaceConfig());
     expect(config.schemaVersion).toBe(0);
+    expect(config.browseRoot).toBe('~/');
     expect(config.projectsDir).toBe('~/cezar/projects');
     expect(config.resources).toEqual({ maxParallel: 2, memoryLimitMb: null, worktreeRetentionDefault: 10 });
     expect(config.projects).toEqual([]);
     expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('takes zero-config roots from the environment while explicit stored values win', async () => {
+    process.env.CEZ_BROWSE_ROOT = '~/source';
+    process.env.CEZ_PROJECTS_DIR = '~/checkouts';
+    expect(defaultWorkspaceConfig()).toMatchObject({
+      browseRoot: '~/source',
+      projectsDir: '~/checkouts',
+    });
+    write({ browseRoot: '/srv/source', projectsDir: '/srv/checkouts' });
+    expect(await loadWorkspaceConfig()).toMatchObject({
+      browseRoot: '/srv/source',
+      projectsDir: '/srv/checkouts',
+    });
   });
 
   it('round-trips a merge-written config, with the file at mode 0600', async () => {
@@ -147,12 +170,14 @@ describe('workspace config', () => {
   it('degrades bad values per-key instead of discarding the file', async () => {
     write({
       schemaVersion: 'two',
+      browseRoot: 42,
       projectsDir: 42,
       resources: { maxParallel: 99, memoryLimitMb: 'lots', worktreeRetentionDefault: -1 },
       projects: [project('good')],
     });
     const config = await loadWorkspaceConfig();
     expect(config.schemaVersion).toBe(0);
+    expect(config.browseRoot).toBe('~/');
     expect(config.projectsDir).toBe('~/cezar/projects');
     expect(config.resources).toEqual({ maxParallel: 2, memoryLimitMb: null, worktreeRetentionDefault: 10 });
     expect(config.projects).toEqual([project('good')]);

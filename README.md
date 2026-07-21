@@ -309,7 +309,7 @@ a GitHub page.
 One `cezar serve` hosts **every repo you work in**, not just the one you started
 it in. Each repo cezar boots in registers itself in a per-user registry at
 `~/.cezar/config.json` — the workspace file that also holds the global knobs
-(the parallel cap, the memory ceiling, the checkout root). Nothing is added to
+(the parallel cap, the memory ceiling, the browse root, and the checkout root). Nothing is added to
 the repo: per-project state stays exactly where it was, in that repo's
 `.ai/cezar/`.
 
@@ -326,7 +326,8 @@ and task list — and the new-task composer names the project it will run in.
 
 **Adding a project** — the **+** button beside *New task*:
 
-- 📂 **Open local folder…** browses your home directory in a folder picker and
+- 📂 **Open local folder…** browses from the configured browse root
+  (**Settings → Projects**, default `~/`) in a folder picker and
   registers the folder you pick.
 - ⬇️ **Clone from GitHub…** clones with your logged-in `gh` into the checkout
   root (**Settings → Projects**, default `~/cezar/projects`) with live progress,
@@ -361,10 +362,10 @@ bound to the project cezar was started in; the cockpit redirects flat paths to
 their `/p/<boot>/…` twin. Existing bookmarks, bookmarklets and scripts need no
 change.
 
-> **Hosted cockpit?** In [remote mode](#remote-access-host-cezar-on-a-server)
-> the folder picker is narrowed from your home directory to the checkout root —
-> a remote viewer has no business enumerating the host's whole home. Adding and
-> cloning projects keep working.
+> **Hosted cockpit?** The folder picker is confined to the independent browse
+> root. Set `CEZ_BROWSE_ROOT` narrowly before first boot (or save it in
+> **Settings → Projects**) when a remote viewer should not enumerate the host's
+> whole home. Clones continue to use the separate checkout root.
 
 ---
 
@@ -431,6 +432,8 @@ Useful environment variables:
 | `CEZ_CLAUDE_BIN=/path/to/claude` | Override which `claude` binary is used. |
 | `CEZ_CODEX_BIN=/path/to/codex` | Override which `codex` binary is used. |
 | `CEZ_OPENCODE_BIN=/path/to/opencode` | Override which `opencode` binary is used. |
+| `CEZ_BROWSE_ROOT=~/` | Default root for **Add project → Open local folder…**. The picker cannot navigate above it; a saved workspace value overrides the environment default and must name an existing folder. |
+| `CEZ_PROJECTS_DIR=~/cezar/projects` | Default destination for **Clone from GitHub**. Saved workspace settings override it, and missing directories are created recursively. |
 | `GITHUB_TOKEN` | Fallback for GitHub reads/PRs when `gh` isn't authenticated. |
 | `CEZ_ENV_PASSTHROUGH=A,B` | Forward these extra host env vars to spawned agents. By default agents get a least-privilege env (safe shell/toolchain vars + the backend's own auth + `GITHUB_TOKEN` + `CEZ_*`), not your full environment — use this to add a var an agent needs. |
 | `CEZ_AGENT_ENV_FULL=1` | Escape hatch: give spawned agents the full host environment (pre-hardening behavior). Off by default; only set it if you understand that this hands every host secret to the agent process. |

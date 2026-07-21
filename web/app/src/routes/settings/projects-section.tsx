@@ -102,28 +102,73 @@ function ProjectsPane({
       data-slot="projects-section"
       className="mx-auto flex w-full max-w-2xl flex-col gap-7 p-4 pb-[calc(90px+env(safe-area-inset-bottom))] md:p-6 md:pb-6"
     >
-      <CheckoutRootField projectsDir={config.projectsDir} />
+      <WorkspaceRootField
+        configKey="browseRoot"
+        value={config.browseRoot}
+        title="Default browse folder"
+        hint="Where “Open local folder…” starts. The picker cannot navigate above this folder."
+        placeholder="~/"
+        slot="browse"
+        savedLabel="Browse folder"
+        footer="Only affects folder browsing; GitHub checkouts use the separate checkout folder."
+      />
+      <WorkspaceRootField
+        configKey="projectsDir"
+        value={config.projectsDir}
+        title="Default checkout folder"
+        hint="Where “Clone from GitHub” puts new projects: <folder>/<project name>."
+        placeholder="~/cezar/projects"
+        slot="checkout"
+        savedLabel="Checkout folder"
+        footer="Only affects new checkouts; projects already registered keep their location."
+        refreshProjects
+      />
       <RegistryTable registry={registry} />
     </div>
   )
 }
 
-/** The `projectsDir` field — edited locally, saved explicitly, and validated by the SERVER. */
-function CheckoutRootField({ projectsDir }: { projectsDir: string }) {
+/** A workspace folder — edited locally, saved explicitly, and validated by the SERVER. */
+function WorkspaceRootField({
+  configKey,
+  value: configuredValue,
+  title,
+  hint,
+  placeholder,
+  slot,
+  savedLabel,
+  footer,
+  refreshProjects = false,
+}: {
+  configKey: 'browseRoot' | 'projectsDir'
+  value: string
+  title: string
+  hint: string
+  placeholder: string
+  slot: 'browse' | 'checkout'
+  savedLabel: string
+  footer: string
+  refreshProjects?: boolean
+}) {
   const queryClient = useQueryClient()
   // The merged config the PUT answers with lands straight in the workspace-config query. The
-  // projects response also carries projectsDir for the clone dialog, so invalidate that
-  // authoritative answer too; otherwise reopening Add project keeps the old root until reload.
+  // projects response carries projectsDir for the clone dialog, while every fs-browse result is
+  // relative to browseRoot. Invalidate the corresponding authoritative cache after either save.
   const save = useMutation({
-    mutationFn: (next: string) => putWorkspaceConfig({ projectsDir: next }),
+    mutationFn: (next: string) =>
+      putWorkspaceConfig(configKey === 'browseRoot' ? { browseRoot: next } : { projectsDir: next }),
     onSuccess: (result) => {
       queryClient.setQueryData(workspaceQueryKeys.config, result)
-      void queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.projects })
+      if (configKey === 'browseRoot') {
+        void queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.fsBrowseRoot })
+      } else if (refreshProjects) {
+        void queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.projects })
+      }
     },
   })
-  const [value, setValue] = useState(projectsDir)
+  const [value, setValue] = useState(configuredValue)
   const trimmed = value.trim()
-  const unchanged = trimmed === projectsDir
+  const unchanged = trimmed === configuredValue
   // The 400's message ("not writable: …"), shown until the next attempt. `save.error` is the
   // ApiError `errorFor` built from the server's own `{ error }` — passed through untouched,
   // because paraphrasing "permission denied on /opt/checkouts" as "invalid path" throws away
@@ -132,19 +177,23 @@ function CheckoutRootField({ projectsDir }: { projectsDir: string }) {
 
   return (
     <SettingsField
-      title="Checkout root"
-      hint="Where “Clone from GitHub” puts new projects: <root>/<project name>. The folder must be writable — cezar verifies it before saving."
+      title={title}
+      hint={`${hint} ${
+        configKey === 'browseRoot'
+          ? 'Choose an existing folder; it is verified writable before saving.'
+          : 'The folder is created recursively if needed, then verified writable before saving.'
+      }`}
     >
       <div className="flex items-center gap-2">
         <input
           type="text"
           spellCheck={false}
-          aria-label="Checkout root"
+          aria-label={title}
           aria-invalid={serverError !== null}
-          data-slot="projects-checkout-root"
+          data-slot={`projects-${slot}-root`}
           value={value}
           disabled={save.isPending}
-          placeholder="~/cezar/projects"
+          placeholder={placeholder}
           onChange={(event) => {
             setValue(event.target.value)
             // Editing clears the stale failure: the message names a path that is no longer in
@@ -157,10 +206,10 @@ function CheckoutRootField({ projectsDir }: { projectsDir: string }) {
           type="button"
           variant="outline"
           size="sm"
-          data-action="projects-save-checkout-root"
+          data-action={`projects-save-${slot}-root`}
           disabled={unchanged || trimmed === '' || save.isPending}
           onClick={() =>
-            save.mutate(trimmed, { onSuccess: () => toast(`Checkout root set to ${trimmed}`) })
+            save.mutate(trimmed, { onSuccess: () => toast(`${savedLabel} set to ${trimmed}`) })
           }
         >
           Save
@@ -169,12 +218,12 @@ function CheckoutRootField({ projectsDir }: { projectsDir: string }) {
       {serverError !== null ? (
         // The mockup's error line: the reason, then what did NOT happen — a failed probe
         // persists nothing, and saying so stops the reader wondering which value is live.
-        <p data-slot="projects-checkout-root-error" role="alert" className="text-[11px] text-danger">
+        <p data-slot={`projects-${slot}-root-error`} role="alert" className="text-[11px] text-danger">
           {serverError} — setting unchanged
         </p>
       ) : (
         <p className="text-[11px] text-soft-foreground">
-          Only affects new checkouts; projects already registered keep their location.
+          {footer}
         </p>
       )}
     </SettingsField>

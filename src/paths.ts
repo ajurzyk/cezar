@@ -84,9 +84,9 @@ export function workspaceUiStatePath(): string {
 /**
  * Expand a leading `~` to the user's home. Lives here with the other homedir
  * logic (see the module note above — one place owns `homedir()`): the
- * `projectsDir` setting is stored as the user wrote it (a literal `~`), so
+ * workspace browse/checkout roots are stored as the user wrote them (a literal `~`), so
  * every consumer that must touch the REAL directory — the writability probe on
- * `PUT /api/workspace/config`, the hosted-mode browse root in
+ * `PUT /api/workspace/config`, the browse root in
  * `src/server/fs-browse.ts` — expands it through this one helper.
  */
 export function expandTilde(path: string): string {

@@ -84,6 +84,15 @@ function remarkHardBreaks() {
 const HARD_BREAKS = [...Object.values(defaultRemarkPlugins), remarkHardBreaks]
 
 /**
+ * A compact preview still uses the real Markdown parser, but it cannot expose links or block
+ * structure: ReasoningItem places an invisible collapsible trigger over this text, so a nested
+ * focusable anchor would create a second control under the button. Disallowed block elements are
+ * unwrapped to their text while the inline vocabulary (emphasis, strong, strike and code) stays.
+ */
+const INLINE_ELEMENTS = ['p', 'strong', 'em', 'del', 'code', 'a'] as const
+const INLINE_COMPONENTS = { p: 'span', a: 'span' } as const
+
+/**
  * Memoized per message (Streamdown additionally memoizes per block): during streaming only the
  * message whose `children` string actually grew re-renders — the research doc's one hard rule
  * for markdown in chat threads.
@@ -94,16 +103,21 @@ const HARD_BREAKS = [...Object.values(defaultRemarkPlugins), remarkHardBreaks]
 export const Markdown = memo(function Markdown({
   children,
   breaks = false,
+  inline = false,
 }: {
   children: string
   breaks?: boolean
+  inline?: boolean
 }) {
   return (
     <Streamdown
-      className="thread-markdown"
+      className={inline ? 'thread-markdown thread-markdown-inline' : 'thread-markdown'}
       plugins={{ code: shikiPlugin }}
       shikiTheme={[SYN_THEME, SYN_THEME]}
       remarkPlugins={breaks ? HARD_BREAKS : undefined}
+      allowedElements={inline ? INLINE_ELEMENTS : undefined}
+      unwrapDisallowed={inline || undefined}
+      components={inline ? INLINE_COMPONENTS : undefined}
       // Copy + language chip on every fence (the deliverable); download is file-manager noise
       // in a chat, and table export dropdowns are R5-territory chrome.
       controls={{ code: { copy: true, download: false }, table: false, mermaid: false }}

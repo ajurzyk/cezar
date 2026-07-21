@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseAskMarker, stripAskMarker, type AskRequest } from '../core/ask.js';
 import { type AgentSession } from '../core/claude-cli-runner.js';
@@ -30,7 +30,7 @@ import { loadConfig, resolveWorktreeRetention } from '../config.js';
 import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff, worktreeShortstat } from '../git-worktree.js';
 import { getRepoInfo } from '../server/git.js';
 import { loadWorkflows } from './load.js';
-import type { RunRecord, RunStore } from '../runs/store.js';
+import type { QueuedMessage, RunRecord, RunStore } from '../runs/store.js';
 import { reclaimWorktrees, rematerializeReclaimedWorktree } from '../runs/retention.js';
 import { extractTaskRefs, refineTaskRefs, titleRefNumber } from '../runs/task-refs.js';
 import { parseTaskMarkers, stripTaskMarkers } from '../runs/task-markers.js';
@@ -102,8 +102,13 @@ interface ActiveRun {
   currentStepId?: string;
   idleTimer?: NodeJS.Timeout;
   autosaveTimer?: NodeJS.Timeout;
-  /** Running counter for persisted agent screenshots (`screenshot-<n>.png`). */
-  imageSeq?: number;
+  /* The screenshot counter lives on `RunManager.queuedImageSeq` (#472), keyed by
+   * run id — a queued run persists attachments with no `ActiveRun` at all. */
+  /** Has a session EVER opened on this run (#472)? `session` alone cannot answer
+   *  it — teardown sets it back to `undefined`, so a closed session and one that
+   *  never opened look identical. This distinguishes "still starting up, buffer
+   *  the message" from "genuinely closed, 409". */
+  sessionEverOpened?: boolean;
   /** Autonomous mode (#autonomous): never park at `waiting` — auto-nudge the agent to keep
    *  going until it signals done or the safety cap is hit. */
   autonomous?: boolean;
@@ -142,6 +147,13 @@ export interface StartRunInput {
   /** Follow-up inbox generation (spec 007, #444). Omitted means enabled for
    *  compatibility; the handoff journal runs either way. */
   generateFollowups?: boolean;
+  /** Attachments from the queued prompt stack (#472), re-encoded from disk by
+   *  `hydrateQueuedInput` at dequeue. Kept separate from `images` because those
+   *  are persisted into `taskImages` on the way through `execute()` — folding
+   *  the stack's (already-persisted) files in there would write duplicate files
+   *  and make the task bubble render the stack's images as its own. In-memory
+   *  only: rebuilt from the record on every hydration, never persisted. */
+  stackedImages?: ContentBlock[];
 }
 
 /**
@@ -180,6 +192,30 @@ export function composeSystemPrompt(...parts: Array<string | undefined>): string
  * issue/PR (#357). `path` is only ever an absolute path under
  * `.ai/cezar/runs/<runId>-images/` (see `RunManager.persistImage`).
  */
+/** Inverse of `persistImage`'s extension mapping (#472) — a persisted attachment
+ *  is re-encoded from disk at dequeue and needs its media type back. */
+export function mediaTypeFor(name: string): string {
+  const ext = name.split('.').pop()?.toLowerCase();
+  return ext === 'jpg' ? 'image/jpeg'
+    : ext === 'webp' ? 'image/webp'
+    : ext === 'gif' ? 'image/gif'
+    : 'image/png';
+}
+
+/** Highest `<prefix>-<n>.<ext>` suffix already present in a run's image dir (#472).
+ *  `screenshot-*` and `pasted-*` share one numbering space, so this scans both and
+ *  returns 0 for a missing/empty directory. */
+export function highestImageSeq(dir: string): number {
+  try {
+    return readdirSync(dir).reduce((max, name) => {
+      const m = /^(?:screenshot|pasted)-(\d+)\./.exec(name);
+      return m ? Math.max(max, Number(m[1])) : max;
+    }, 0);
+  } catch {
+    return 0;
+  }
+}
+
 export interface PersistedAttachment {
   name: string;
   url: string;
@@ -247,6 +283,13 @@ export class RunManager {
   // `waiting ⊆ active` — always cleared together via dropActive().
   private readonly waiting = new Set<string>();
   private readonly pendingJobs = new Map<string, { workflow: WorkflowDef; input: StartRunInput }>();
+  /** Per-run image counter behind `pasted-<n>` / `screenshot-<n>` (#472). Lives on
+   *  the manager rather than the `ActiveRun` so a *queued* run — which has no
+   *  `ActiveRun` at all — can persist attachments. Seeded lazily from disk. */
+  private readonly queuedImageSeq = new Map<string, number>();
+  /** Messages that landed in the dequeue → session-open gap (#472), flushed as
+   *  ordinary follow-up turns the moment the session opens. In-memory only. */
+  private readonly deferredMessages = new Map<string, ContentBlock[][]>();
   private pumping = false;
   /**
    * Runs normally isolate in worktrees and may execute in parallel. When that
@@ -482,7 +525,12 @@ export class RunManager {
         this.pendingJobs.delete(runId);
         if (!job) continue;
         this.starting.add(runId);
-        void this.execute(runId, job.workflow, job.input).catch((err: unknown) => {
+        // Rebuild the prompt from the store at the last instant (#472), so an edit
+        // or a stacked message that landed while the run waited is honored. Entered
+        // in the same synchronous tick as the `pendingJobs.delete` above, so no
+        // handler can observe a half-dequeued run.
+        const input = this.hydrateQueuedInput(runId, job.input);
+        void this.execute(runId, job.workflow, input).catch((err: unknown) => {
           const message = err instanceof Error ? err.message : String(err);
           this.store.updateRun(runId, {
             status: 'failed',
@@ -535,7 +583,11 @@ export class RunManager {
           }
           this.pendingJobs.set(run.id, {
             workflow,
-            input: {
+            // Folded through the same helper `pump()` uses (#472) so a restart
+            // carries the stack. Idempotent: hydration always composes from
+            // `run.task` + the stack, never from an already-folded `input.task`,
+            // so re-hydrating at dequeue yields the same string, not a doubled one.
+            input: this.hydrateQueuedInput(run.id, {
               task: run.task,
               model: run.model,
               runner: run.runner,
@@ -545,7 +597,7 @@ export class RunManager {
               // recovered queued autonomous run would run non-autonomously (no
               // auto-nudge) and later wrongly park at `review`.
               autonomous: run.autonomous,
-            },
+            }),
           });
           this.queue.push(run.id);
           this.store.appendEvent(run.id, { type: 'lifecycle', message: 'cezar restarted — task re-queued' });
@@ -722,6 +774,233 @@ export class RunManager {
   }
 
   /**
+   * Fold a queued run's persisted prompt — `run.task` plus everything stacked
+   * onto it (#472) — into the job input that is about to execute.
+   *
+   * Called from `pump()` immediately before `execute()`, which makes the RECORD
+   * the single source of truth for a queued run's prompt. Before this, the
+   * executing copy lived in `pendingJobs` (memory) while the record held a
+   * second one, so an edit that PATCHed the record silently did nothing until a
+   * restart. `recover()` rebuilds through the same helper, so both paths agree.
+   *
+   * **Read-only, and that is load-bearing.** It composes into the in-memory
+   * `input` and never writes the folded string back to `RunRecord.task`; the
+   * task and its stack stay separate on disk for the life of the run. Writing
+   * back would re-append the whole stack on every recovery and compound without
+   * bound — asserted directly by a test.
+   */
+  private hydrateQueuedInput(runId: string, input: StartRunInput): StartRunInput {
+    const run = this.store.getRun(runId);
+    if (!run) return input;
+    const stack = run.queuedMessages ?? [];
+    if (!stack.length) return { ...input, task: run.task };
+
+    const task = [run.task, ...stack.map((m) => m.text)]
+      .map((part) => part.trim())
+      .filter((part) => part.length > 0)
+      .join('\n\n');
+
+    const stackedImages: ContentBlock[] = [];
+    for (const url of stack.flatMap((m) => m.images ?? [])) {
+      const name = url.split('/').pop();
+      if (!name || name.includes('..') || name.includes('/') || name.includes('\\')) continue;
+      try {
+        const data = readFileSync(join(this.dataDir, 'runs', `${runId}-images`, name));
+        stackedImages.push({
+          type: 'image',
+          source: { type: 'base64', media_type: mediaTypeFor(name), data: data.toString('base64') },
+        });
+      } catch {
+        // Degrade, never fail the boot (AGENTS.md): the user deleted `.ai/cezar/`
+        // or the file is unreadable — start with the text and say which image went.
+        this.store.appendEvent(runId, {
+          type: 'note',
+          message: `queued attachment ${name} could not be read — starting without it`,
+        });
+      }
+    }
+
+    return { ...input, task, ...(stackedImages.length ? { stackedImages } : {}) };
+  }
+
+  /**
+   * Still waiting for a slot? Checked against the engine's own queue rather than
+   * the record's `status` (#472): the record is written by `execute()` a tick
+   * after `pump()` dequeues, so a status read can see `queued` for a run that has
+   * already started. `pendingJobs` is deleted synchronously at dequeue, so it is
+   * the authoritative answer for "can this prompt still be amended".
+   */
+  private isQueued(runId: string): boolean {
+    return this.pendingJobs.has(runId);
+  }
+
+  /** Split `ContentBlock[]` into the persisted shape a stacked message holds. */
+  private toQueuedMessage(runId: string, content: ContentBlock[]): QueuedMessage {
+    const text = content
+      .filter((b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n');
+    const images = content
+      .filter((b): b is Extract<ContentBlock, { type: 'image' }> => b.type === 'image')
+      .map((b) => this.persistImage(runId, b.source.media_type, b.source.data, 'pasted'))
+      .filter((saved): saved is PersistedAttachment => saved !== null)
+      .map((saved) => saved.url);
+    return {
+      id: randomUUID(),
+      text,
+      ...(images.length ? { images } : {}),
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * Append a prompt message onto a still-queued run (#472). Returns the stored
+   * entry, or null when the run has already started — the caller then falls
+   * through to `deferMessage`.
+   */
+  enqueueMessage(runId: string, content: ContentBlock[]): QueuedMessage | null {
+    if (!this.isQueued(runId)) return null;
+    const run = this.store.getRun(runId);
+    if (!run) return null;
+    const message = this.toQueuedMessage(runId, content);
+    this.store.updateRun(runId, { queuedMessages: [...(run.queuedMessages ?? []), message] });
+    return message;
+  }
+
+  /** Edit a stacked message in place. Omitted fields retain their current value. */
+  editQueuedMessage(
+    runId: string,
+    msgId: string,
+    edit: { text?: string; images?: ContentBlock[] },
+  ): QueuedMessage | null {
+    if (!this.isQueued(runId)) return null;
+    const run = this.store.getRun(runId);
+    const stack = run?.queuedMessages;
+    if (!stack) return null;
+    const at = stack.findIndex((m) => m.id === msgId);
+    if (at < 0) return null;
+    const current = stack[at]!;
+    const replacementImages = edit.images === undefined
+      ? current.images
+      : this.toQueuedMessage(runId, edit.images).images;
+    const replacement: QueuedMessage = {
+      id: msgId,
+      text: edit.text ?? current.text,
+      ...(replacementImages?.length ? { images: replacementImages } : {}),
+      createdAt: current.createdAt,
+    };
+    const next = [...stack];
+    next[at] = replacement;
+    this.store.updateRun(runId, { queuedMessages: next });
+    // Images the edit dropped are now orphans.
+    this.dropOrphanImages(runId, stack[at]!.images ?? [], next);
+    return replacement;
+  }
+
+  /** Remove a stacked message and its now-orphaned attachments. */
+  removeQueuedMessage(runId: string, msgId: string): boolean {
+    if (!this.isQueued(runId)) return false;
+    const run = this.store.getRun(runId);
+    const stack = run?.queuedMessages;
+    if (!stack) return false;
+    const target = stack.find((m) => m.id === msgId);
+    if (!target) return false;
+    const next = stack.filter((m) => m.id !== msgId);
+    this.store.updateRun(runId, { queuedMessages: next });
+    this.dropOrphanImages(runId, target.images ?? [], next);
+    return true;
+  }
+
+  /**
+   * Delete image files no longer referenced by anything (#472). Best effort — a
+   * leftover file is harmless and goes with the run. Never touches a URL still
+   * referenced by another stacked entry or by the initial prompt's `taskImages`.
+   */
+  private dropOrphanImages(runId: string, candidates: string[], stack: QueuedMessage[]): void {
+    if (!candidates.length) return;
+    const run = this.store.getRun(runId);
+    const referenced = new Set([
+      ...(run?.taskImages ?? []),
+      ...stack.flatMap((m) => m.images ?? []),
+    ]);
+    for (const url of candidates) {
+      if (referenced.has(url)) continue;
+      const name = url.split('/').pop();
+      // Defend the join against a crafted URL: only a bare file name may be deleted.
+      if (!name || name.includes('..') || name.includes('/') || name.includes('\\')) continue;
+      try {
+        rmSync(join(this.dataDir, 'runs', `${runId}-images`, name), { force: true });
+      } catch {
+        /* best effort */
+      }
+    }
+  }
+
+  /**
+   * Edit the initial prompt of a still-queued run (#472). Re-derives the
+   * heuristic title and the PR/issue chips, but never re-runs the LLM namer —
+   * it already fired at creation and a second model call per edit is unjustified.
+   */
+  editTask(runId: string, task: string): boolean {
+    if (!this.isQueued(runId)) return false;
+    const run = this.store.getRun(runId);
+    if (!run) return false;
+    const workflow = this.pendingJobs.get(runId)?.workflow;
+    const skillHint = workflow?.steps.find((s) => stepKind(s) === 'agent' && s.skill)?.skill?.trim();
+    const refs = refineTaskRefs(extractTaskRefs(task), skillHint);
+    // Hand-edited titles always win (#389): `user` beats the heuristic, and a
+    // `marker` title the agent declared beats it too.
+    const keepTitle = run.titleOrigin === 'user' || run.titleOrigin === 'marker';
+    this.store.updateRun(runId, {
+      task,
+      ...(keepTitle || !workflow ? {} : { title: makeRunTitle(task, workflow) }),
+      ...(refs.prNumber !== undefined ? { prNumber: refs.prNumber } : {}),
+      ...(refs.issueNumber !== undefined ? { issueNumber: refs.issueNumber } : {}),
+    });
+    return true;
+  }
+
+  /**
+   * Buffer a message that arrived in the gap between dequeue and session-open
+   * (#472). `pump()` has already folded the stack and `execute()` is spawning the
+   * backend, so there is nothing left to amend and no session to deliver into —
+   * without this rung the message would 409, a genuinely dropped message in the
+   * feature built to stop dropping them. Flushed as an ordinary follow-up turn
+   * the instant the session opens; dropped if the run never starts, which the
+   * existing error path already surfaces.
+   *
+   * The buffer lives on the manager rather than the `ActiveRun` because the
+   * `ActiveRun` does not exist yet for part of this window.
+   */
+  deferMessage(runId: string, content: ContentBlock[]): boolean {
+    // The window spans two sub-states: `starting` (no `ActiveRun` yet) and the
+    // longer stretch where the `ActiveRun` exists but the backend is still being
+    // spawned. `execute()` deletes the run from `starting` as soon as it builds
+    // the state — seconds before the session opens — so checking `starting`
+    // alone would reopen exactly the drop this rung exists to close.
+    const state = this.active.get(runId);
+    const startingUp = this.starting.has(runId) || (state !== undefined && !state.sessionEverOpened && !state.cancelled);
+    if (!startingUp) return false;
+    const pending = this.deferredMessages.get(runId) ?? [];
+    pending.push(content);
+    this.deferredMessages.set(runId, pending);
+    return true;
+  }
+
+  /** Deliver anything `deferMessage` buffered, once the session is live. */
+  private flushDeferred(runId: string): void {
+    const pending = this.deferredMessages.get(runId);
+    if (!pending?.length) return;
+    // Re-buffer whatever the session refused rather than dropping it. `sendMessage`
+    // answers false when the session is not open yet — and silently losing a message
+    // here would be precisely the failure `deferMessage` exists to prevent. Anything
+    // left over is retried by the next session that opens on this run.
+    const unsent = pending.filter((content) => !this.sendMessage(runId, content));
+    if (unsent.length) this.deferredMessages.set(runId, unsent);
+    else this.deferredMessages.delete(runId);
+  }
+
+  /**
    * Deliver a user message into the run's live claude session (mid-turn or
    * while `waiting`). Returns false when there is no open session — the GUI
    * then offers "Continue" instead.
@@ -739,7 +1018,7 @@ export class RunManager {
     // these as user attachments (vs. agent tool screenshots) on disk (#357).
     const persisted = content
       .filter((b): b is Extract<ContentBlock, { type: 'image' }> => b.type === 'image')
-      .map((b) => this.persistImage(runId, state, b.source.media_type, b.source.data, 'pasted'))
+      .map((b) => this.persistImage(runId, b.source.media_type, b.source.data, 'pasted'))
       .filter((saved): saved is PersistedAttachment => saved !== null);
     const images = persisted.map((saved) => saved.url);
     this.store.appendEvent(runId, {
@@ -942,7 +1221,7 @@ export class RunManager {
     const sink = this.makeUiSink(runId, stepId);
     const onEvent = (event: AgentEvent) => {
       if (event.type === 'image') {
-        const saved = this.persistImage(runId, state, event.mediaType, event.data);
+        const saved = this.persistImage(runId, event.mediaType, event.data);
         if (saved) this.store.appendEvent(runId, { type: 'image', stepId, ...saved });
         return;
       }
@@ -1091,6 +1370,8 @@ export class RunManager {
       { onUiEvent: (event) => this.handleRunnerUiEvent(runId, state, sink, event) },
     );
     state.session = session;
+    state.sessionEverOpened = true;
+    this.flushDeferred(runId);
     state.currentStepId = stepId;
     state.interrupt = () => session.interrupt();
     if (session.pid !== undefined) registerRunProcess(runId, session.pid);
@@ -1270,7 +1551,7 @@ export class RunManager {
     if (input.images?.length) {
       const persisted = input.images
         .filter((b): b is Extract<ContentBlock, { type: 'image' }> => b.type === 'image')
-        .map((b) => this.persistImage(runId, state, b.source.media_type, b.source.data, 'pasted'))
+        .map((b) => this.persistImage(runId, b.source.media_type, b.source.data, 'pasted'))
         .filter((saved): saved is PersistedAttachment => saved !== null);
       if (persisted.length) {
         this.store.updateRun(runId, { taskImages: persisted.map((p) => p.url) });
@@ -1278,8 +1559,12 @@ export class RunManager {
       }
     }
     // Task screenshots go with the FIRST agent step's opening message only —
-    // later steps and retry loops run in fresh sessions without them.
-    let startImages = input.images;
+    // later steps and retry loops run in fresh sessions without them. Stacked
+    // attachments (#472) ride along too, but are NOT re-persisted above: they
+    // already live on disk, and adding them to `taskImages` would both duplicate
+    // the files and make the task bubble claim the stack's images as its own.
+    let startImages =
+      input.stackedImages?.length ? [...(input.images ?? []), ...input.stackedImages] : input.images;
 
     const lastAgentIdx = findLastAgentStepIndex(workflow);
 
@@ -1472,7 +1757,7 @@ export class RunManager {
     const sink = this.makeUiSink(runId, step.id);
     const onEvent = (event: AgentEvent) => {
       if (event.type === 'image') {
-        const saved = this.persistImage(runId, state, event.mediaType, event.data);
+        const saved = this.persistImage(runId, event.mediaType, event.data);
         if (saved) emit({ type: 'image', stepId: step.id, ...saved });
         return;
       }
@@ -1607,6 +1892,8 @@ export class RunManager {
       return err instanceof Error ? err.message : String(err);
     }
     state.session = session;
+    state.sessionEverOpened = true;
+    this.flushDeferred(runId);
     state.currentStepId = step.id;
     state.interrupt = () => session.interrupt();
     if (session.pid !== undefined) registerRunProcess(runId, session.pid);
@@ -1848,7 +2135,6 @@ export class RunManager {
    */
   private persistImage(
     runId: string,
-    state: ActiveRun,
     mediaType: string,
     data: string,
     namePrefix: string = 'screenshot',
@@ -1860,13 +2146,32 @@ export class RunManager {
         : /webp/.test(mediaType) ? 'webp'
         : /gif/.test(mediaType) ? 'gif'
         : 'img';
-      state.imageSeq = (state.imageSeq ?? 0) + 1;
-      const name = `${namePrefix}-${state.imageSeq}.${ext}`;
       const dir = join(this.dataDir, 'runs', `${runId}-images`);
       mkdirSync(dir, { recursive: true });
-      const path = join(dir, name);
-      writeFileSync(path, Buffer.from(data, 'base64'));
-      return { name, url: `/api/runs/${runId}/images/${name}`, path };
+      // Seed from the highest numeric suffix already on disk, NOT the file count:
+      // `screenshot-*` and `pasted-*` share one numbering space, so counting would
+      // re-issue a live number after any deletion. Only matters on the first write
+      // of a process (restart case) — afterwards the map is authoritative.
+      let seq = this.queuedImageSeq.get(runId);
+      if (seq === undefined) seq = highestImageSeq(dir);
+      // `persistImage` is fully synchronous, so two pastes cannot interleave between
+      // the read of the counter and the write. The exclusive-create flag is the
+      // belt-and-braces guard for a stale seed: it degrades to a renamed file rather
+      // than a silent overwrite.
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        seq += 1;
+        const name = `${namePrefix}-${seq}.${ext}`;
+        const path = join(dir, name);
+        try {
+          writeFileSync(path, Buffer.from(data, 'base64'), { flag: 'wx' });
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'EEXIST') continue;
+          throw err;
+        }
+        this.queuedImageSeq.set(runId, seq);
+        return { name, url: `/api/runs/${runId}/images/${name}`, path };
+      }
+      return null;
     } catch {
       return null;
     }

@@ -13,7 +13,7 @@ import {
   Trash2Icon,
   WrenchIcon,
 } from 'lucide-react'
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { ZoomableImage } from '@/components/zoomable-image'
@@ -43,22 +43,155 @@ export { isNearBottom }
  *  often as what the agent replies — the GitHub hand-off prompt alone carries a `#N` heading-ish
  *  line, a bare link and a `---` rule — and rendering one side raw made the same document look
  *  broken on the way in and fine on the way out. `whitespace-pre-wrap` goes with it: Streamdown
- *  owns the line breaks now, and leaving it on would double every blank line. */
+ *  owns the line breaks now, and leaving it on would double every blank line.
+ *
+ *  `onEdit` / `onRemove` (#472) are the queued-run affordances: passing one renders its control.
+ *  They are passed ONLY while the run is still queued, so once it starts the bubbles go read-only
+ *  on the next `run` frame — the stack has become history. The initial prompt gets `onEdit` but
+ *  never `onRemove`: a run with no prompt is not a run. The inline editor deliberately edits the
+ *  RAW markdown source (`text`), not the rendered output. */
 export function UserBubble({
   text,
   imageCount = 0,
   images = [],
+  onEdit,
+  onRemove,
+  editLabel = 'Edit message',
+  removeLabel = 'Remove message',
 }: {
   text: string
   imageCount?: number
   images?: readonly string[]
+  onEdit?: (text: string) => Promise<void>
+  onRemove?: () => Promise<void>
+  editLabel?: string
+  removeLabel?: string
 }) {
   const missing = imageCount - images.length
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(text)
+  const [busy, setBusy] = useState(false)
+  const [actionError, setActionError] = useState<string>()
+
+  const startEditing = () => {
+    setDraft(text)
+    setActionError(undefined)
+    setEditing(true)
+  }
+  const save = async () => {
+    const next = draft.trim()
+    // An empty edit is a no-op rather than a delete: removing is its own, explicit action.
+    if (!next || next === text) {
+      setEditing(false)
+      return
+    }
+    setBusy(true)
+    setActionError(undefined)
+    try {
+      await onEdit?.(next)
+      setEditing(false)
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not save the message')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const remove = async () => {
+    setBusy(true)
+    setActionError(undefined)
+    try {
+      await onRemove?.()
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not remove the message')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (editing) {
+    return (
+      <div
+        data-slot="user-bubble"
+        data-editing="true"
+        className="max-w-[78%] self-end rounded-2xl rounded-br-md bg-muted px-[15px] py-2.5 text-[13.5px] leading-[1.55] md:max-w-[70%]"
+      >
+        <textarea
+          autoFocus
+          aria-label="Edit the message"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            // Escape cancels; ⌘/Ctrl+Enter saves. Plain Enter stays a newline — these are
+            // prompt paragraphs, not chat sends.
+            if (e.key === 'Escape') {
+              e.stopPropagation()
+              setEditing(false)
+            } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+              e.preventDefault()
+              void save()
+            }
+          }}
+          className="block max-h-[220px] min-h-[60px] w-full resize-none rounded-md bg-background px-2 py-1.5 text-[13.5px] outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+        />
+        <span className="mt-1.5 flex justify-end gap-1.5">
+          <button
+            type="button"
+            onClick={() => setEditing(false)}
+            disabled={busy}
+            className="rounded-sm px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-background hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => void save()}
+            disabled={busy}
+            className="rounded-sm bg-primary px-2 py-1 text-xs font-semibold text-primary-foreground hover:brightness-[0.96] focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
+          >
+            {busy ? <LoaderCircleIcon className="size-3.5 animate-spin" /> : 'Save'}
+          </button>
+        </span>
+        {actionError ? <p role="alert" className="mt-1.5 text-xs text-danger">{actionError}</p> : null}
+      </div>
+    )
+  }
+
   return (
     <div
       data-slot="user-bubble"
-      className="max-w-[78%] min-w-0 self-end rounded-2xl rounded-br-md bg-muted px-[15px] py-2.5 text-[13.5px] leading-[1.55] md:max-w-[70%]"
+      className="group max-w-[78%] min-w-0 self-end rounded-2xl rounded-br-md bg-muted px-[15px] py-2.5 text-[13.5px] leading-[1.55] md:max-w-[70%]"
     >
+      {onEdit || onRemove ? (
+        <span
+          data-slot="bubble-actions"
+          className="mb-1 flex justify-end gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100"
+        >
+          {onEdit ? (
+            <button
+              type="button"
+              aria-label={editLabel}
+              onClick={startEditing}
+              disabled={busy}
+              className="rounded-sm p-1 text-soft-foreground hover:bg-background hover:text-foreground focus-visible:opacity-100 focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
+            >
+              <SquarePenIcon className="size-3.5" />
+            </button>
+          ) : null}
+          {onRemove ? (
+            <button
+              type="button"
+              aria-label={removeLabel}
+              onClick={() => void remove()}
+              disabled={busy}
+              className="rounded-sm p-1 text-soft-foreground hover:bg-background hover:text-danger focus-visible:opacity-100 focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
+            >
+              <Trash2Icon className="size-3.5" />
+            </button>
+          ) : null}
+        </span>
+      ) : null}
+      {actionError ? <p role="alert" className="mb-1 text-xs text-danger">{actionError}</p> : null}
       <Markdown breaks>{text}</Markdown>
       {images.length > 0 ? (
         <span data-slot="user-images" className="mt-2 flex flex-wrap justify-end gap-1.5">
@@ -109,25 +242,38 @@ export function NoteLine({ note }: { note: ThreadNote }) {
  * Streams live — the reducer grows `text` in place, so the summary line grows with it.
  */
 export function ReasoningItem({ text }: { text: string }) {
+  const previewId = useId()
   // A mapper regression that mints an empty reasoning item should degrade
   // quietly rather than render a bare, un-expandable "Thinking —" row (#528).
   if (text.trim() === '') return null
   const firstLine = text.split('\n', 1)[0] ?? ''
   const truncated = firstLine.length < text.length
   return (
-    <Collapsible data-slot="reasoning" className="min-w-0">
-      <CollapsibleTrigger className="group flex w-full items-center gap-1.5 rounded-md p-0.5 text-left text-[13px] text-soft-foreground hover:text-muted-foreground">
+    <Collapsible data-slot="reasoning" className="group/reasoning min-w-0">
+      <div
+        id={previewId}
+        className="relative flex w-full items-center gap-1.5 rounded-md p-0.5 text-left text-[13px] text-soft-foreground hover:text-muted-foreground"
+      >
         <ChevronRightIcon
           aria-hidden
-          className="size-3.5 shrink-0 transition-transform group-data-[state=open]:rotate-90"
+          className="size-3.5 shrink-0 transition-transform group-data-[state=open]/reasoning:rotate-90"
         />
-        <span className="min-w-0 truncate">
-          Thinking — <em className="text-muted-foreground not-italic">{firstLine}</em>
-          {truncated ? '…' : ''}
-        </span>
-      </CollapsibleTrigger>
+        <span className="shrink-0">Thinking — </span>
+        <div className="min-w-0 truncate text-muted-foreground">
+          <Markdown inline>{firstLine}</Markdown>
+        </div>
+        {truncated ? <span aria-hidden>…</span> : null}
+        {/* Keep rendered Markdown OUTSIDE the trigger: links are unwrapped above, and the native
+            button overlays the preview without inheriting invalid block descendants. */}
+        <CollapsibleTrigger
+          aria-labelledby={previewId}
+          className="absolute inset-0 rounded-md focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
+        />
+      </div>
       <CollapsibleContent>
-        <div className="px-6 py-1.5 text-[13px] leading-[1.6] whitespace-pre-wrap text-soft-foreground">{text}</div>
+        <div className="px-6 py-1.5 text-[13px] leading-[1.6] text-soft-foreground">
+          <Markdown>{text}</Markdown>
+        </div>
       </CollapsibleContent>
     </Collapsible>
   )

@@ -34,7 +34,9 @@ import {
   getWorkspaceConfig,
   getWorkspaceUiState,
   getWorktrees,
+  editQueuedMessage,
   patchRun,
+  removeQueuedMessage,
   registerProject,
   removeProject,
   sendMessage,
@@ -144,7 +146,8 @@ export const workspaceQueryKeys = {
   /** One directory listing from `GET /api/fs/browse` (step 4.2's folder picker). Keyed by the
    *  browsed path — `null` is the browse root, whose absolute location only the server knows.
    *  Not scope-led: there is one filesystem behind the workspace, not one per project. */
-  fsBrowse: (path: string | null) => ['workspace', 'fs-browse', path] as const,
+  fsBrowseRoot: ['workspace', 'fs-browse'] as const,
+  fsBrowse: (path: string | null) => [...workspaceQueryKeys.fsBrowseRoot, path] as const,
 }
 
 /** The workspace project registry (`GET /api/projects`): the `/p/:projectId` route gate's
@@ -569,6 +572,29 @@ export function useSendMessage(id: string) {
   })
 }
 
+/** Edit a message stacked on a queued run (`PATCH /api/runs/:id/queued-messages/:msgId`, #472).
+ *  Invalidates `runs.*` so the thread re-renders from the authoritative record — the stack lives
+ *  on the record, not in the event stream. Errors are the CALLER's to surface, as with
+ *  `useSendMessage`: a 409 means the run started, and the bubble goes read-only on the next
+ *  frame anyway. */
+export function useEditQueuedMessage(id: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ msgId, message }: { msgId: string; message: MessageInput }) =>
+      editQueuedMessage(id, msgId, message),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.runs.all }),
+  })
+}
+
+/** Remove a message stacked on a queued run (`DELETE /api/runs/:id/queued-messages/:msgId`). */
+export function useRemoveQueuedMessage(id: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (msgId: string) => removeQueuedMessage(id, msgId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.runs.all }),
+  })
+}
+
 /** Issues + PRs through the forge (`/api/github`). `enabled` exists for the GitHub tab's
  *  legacy two-shot load: the background everything-open fetch (limit 1000) waits until the
  *  fast default batch has proven the forge reachable — no point paying the big `gh` call
@@ -587,7 +613,7 @@ export function useGithub(params: { limit?: number } = {}, enabled = true) {
 export function useGithubComments(kind: 'issue' | 'pr', number: number, enabled = true) {
   return useQuery({
     queryKey: queryKeys.githubComments(kind, number),
-    queryFn: ({ signal }) => getGithubComments(kind, number, { signal }),
+    queryFn: ({ signal }) => getGithubComments(kind, number, {}, { signal }),
     enabled,
     staleTime: 60_000,
   })

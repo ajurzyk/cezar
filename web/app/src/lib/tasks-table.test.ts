@@ -8,6 +8,7 @@ import {
   formatCost,
   formatMem,
   prNumber,
+  taskReference,
   taskPrUrl,
   usageCells,
   workflowLabel,
@@ -167,6 +168,27 @@ describe('taskPrUrl', () => {
 
   it('is undefined when the task has no PR association at all', () => {
     expect(taskPrUrl(run())).toBeUndefined()
+  })
+})
+
+describe('taskReference', () => {
+  it('shows the known issue while an issue-driven task is queued', () => {
+    expect(taskReference(run({ status: 'queued', issueNumber: 554 }))).toEqual({
+      kind: 'Issue',
+      number: 554,
+    })
+  })
+
+  it('prefers a pull request once the task has one', () => {
+    expect(
+      taskReference(
+        run({
+          issueNumber: 554,
+          referencedIssueUrl: 'https://github.com/o/r/issues/554',
+          pullRequestUrl: 'https://github.com/o/r/pull/600',
+        })
+      )
+    ).toEqual({ kind: 'PR', number: 600, url: 'https://github.com/o/r/pull/600' })
   })
 })
 

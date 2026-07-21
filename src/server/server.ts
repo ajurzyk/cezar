@@ -239,6 +239,8 @@ export interface RemoveProjectResponse {
  *  settings slice of `~/.cezar/config.json`: global knobs ONLY, never the
  *  project registry (that is `GET /api/projects`' job). */
 export interface WorkspaceConfigResponse {
+  /** Root exposed by the Add project directory browser (`~` kept). */
+  browseRoot: string;
   /** Checkout root for GUI-cloned projects — stored as written (`~` kept). */
   projectsDir: string;
   resources: {
@@ -505,9 +507,11 @@ const uiStateSchema = z
   })
   .passthrough();
 
-// Editable titles (#389). `title` is the only editable field for now.
+// Editable titles (#389), and the initial prompt while the run is still queued
+// (#472 — rejected with 409 on any other status by the handler).
 const patchRunSchema = z.object({
   title: z.string().trim().min(1).max(300).optional(),
+  task: z.string().trim().min(1).max(100_000).optional(),
 });
 
 // Session commit (redesign R5 — §"Git/session API additions").
@@ -525,23 +529,49 @@ const openInSchema = z.object({
   path: z.string().max(1_000).optional(),
 });
 
+const imageInputSchema = z.object({
+  mediaType: z.string().regex(/^image\//),
+  // ~5 MB per image once base64-decoded.
+  data: z.string().min(1).max(7_000_000),
+});
+
 const messageSchema = z
   .object({
     text: z.string().max(100_000).default(''),
-    images: z
-      .array(
-        z.object({
-          mediaType: z.string().regex(/^image\//),
-          // ~5 MB per image once base64-decoded.
-          data: z.string().min(1).max(7_000_000),
-        }),
-      )
-      .max(4)
-      .default([]),
+    images: z.array(imageInputSchema).max(4).default([]),
   })
   .refine((m) => m.text.trim().length > 0 || m.images.length > 0, {
     message: 'message needs text or at least one image',
   });
+
+// PATCH semantics are load-bearing here: an omitted field keeps its current value.
+// In particular, the cockpit edits text without re-uploading existing attachments.
+const queuedMessagePatchSchema = z
+  .object({
+    text: z.string().max(100_000).optional(),
+    images: z.array(imageInputSchema).max(4).optional(),
+  })
+  .refine((m) => m.text !== undefined || m.images !== undefined, {
+    message: 'message edit needs text or images',
+  });
+
+// Queued prompt stack bounds (#472). The per-message bounds mirror `messageSchema`
+// above; the one that actually matters is the FOLDED total, because 20 messages of
+// 100 000 chars each would otherwise compose a ~2 M-character {{task}}.
+const MAX_QUEUED_MESSAGES = 20;
+const MAX_QUEUED_IMAGES = 8;
+const MAX_FOLDED_TASK_CHARS = 200_000;
+
+/** Length of the prompt a run would execute with — `task` plus its whole stack,
+ *  composed exactly as `hydrateQueuedInput` composes it. Checked against the
+ *  PROSPECTIVE state so the user is stopped at the write, not at dequeue where
+ *  there would be no one left to tell. */
+function foldedLength(task: string, stack: Array<{ text: string }>): number {
+  return [task, ...stack.map((m) => m.text)]
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0)
+    .join('\n\n').length;
+}
 
 // "Continue"/"Send back" body (spec 003 / #401): every field optional, so an empty POST reopens
 // the last session on the run's current backend (backward compat). A runner/model override lets
@@ -611,14 +641,16 @@ function parseUiStateBody<S extends z.ZodTypeAny>(schema: S, body: unknown): { d
   return { data: parsed.data as z.infer<S> };
 }
 
-/** The `projectsDir` writability probe (multi-project spec, "API Contracts"):
- *  `mkdir -p`, `access W_OK`, then a real create/delete round-trip — W_OK alone
+/** Workspace-root writability probe (multi-project spec, "API Contracts"):
+ *  optional `mkdir -p`, `access W_OK`, then a real create/delete round-trip — W_OK alone
  *  can lie (e.g. a read-only mount still reports writable permission bits).
  *  Returns the failure message, or null when the directory is usable. */
-async function probeWritableDir(dir: string): Promise<string | null> {
+async function probeWritableDir(dir: string, create: boolean): Promise<string | null> {
   const probe = join(dir, `.cez-write-probe-${process.pid}-${Date.now().toString(36)}`);
   try {
-    await mkdir(dir, { recursive: true });
+    if (create) await mkdir(dir, { recursive: true });
+    const info = await stat(dir);
+    if (!info.isDirectory()) return `${dir} is not a directory`;
     await access(dir, fsConstants.W_OK);
     await writeFile(probe, '', 'utf8');
     await unlink(probe);
@@ -985,6 +1017,14 @@ export function createApp(deps: ServerDeps): Hono {
     }
   };
 
+  const workspaceBrowseRoot = async (): Promise<string> => {
+    try {
+      return (await loadWorkspaceConfig()).browseRoot;
+    } catch {
+      return defaultWorkspaceConfig().browseRoot;
+    }
+  };
+
   app.get('/api/projects', async (c) => {
     let projects: ProjectListEntry[] = [];
     let projectsDir = defaultWorkspaceConfig().projectsDir;
@@ -1048,7 +1088,9 @@ export function createApp(deps: ServerDeps): Hono {
     // `false` for a path that IS inside the root and merely absent — which
     // would tell a hosted user who typo'd a folder under their own checkout
     // root that it is "outside the browsable root".
-    const hostedBrowseRoot = capabilities().localHandoff ? null : resolveBrowseRoot(true, await workspaceProjectsDir());
+    const hostedBrowseRoot = capabilities().localHandoff
+      ? null
+      : resolveBrowseRoot(await workspaceBrowseRoot());
     if (hostedBrowseRoot !== null) {
       if (!(await isLexicallyInsideBrowseRoot(hostedBrowseRoot, requested))) {
         // No resolved path in the message (fs-browse's rule): saying where the
@@ -1285,6 +1327,7 @@ export function createApp(deps: ServerDeps): Hono {
   // /api/projects above, and schemaVersion (a migration cursor, not a
   // setting) is deliberately omitted.
   const workspaceConfigBody = (config: WorkspaceConfig): WorkspaceConfigResponse => ({
+    browseRoot: config.browseRoot,
     projectsDir: config.projectsDir,
     resources: {
       maxParallel: config.resources.maxParallel,
@@ -1298,6 +1341,7 @@ export function createApp(deps: ServerDeps): Hono {
   // workspace schema (src/workspace/config.ts, step 1.2) exactly, so a value
   // this route accepts can never be degraded away by the next load's `.catch`.
   const workspaceConfigUpdateSchema = z.object({
+    browseRoot: z.string().trim().min(1).max(4096).optional(),
     projectsDir: z.string().trim().min(1).max(4096).optional(),
     resources: z
       .object({
@@ -1312,22 +1356,39 @@ export function createApp(deps: ServerDeps): Hono {
     if (!parsed.success) {
       return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
     }
-    const { projectsDir, resources } = parsed.data;
-    if (projectsDir !== undefined) {
-      // Validated ON CHANGE, never at load (spec): expand `~`, `mkdir -p`,
-      // probe real writability. Any failure → 400 and NO change persisted.
-      const expanded = expandTilde(projectsDir);
+    const { browseRoot, projectsDir, resources } = parsed.data;
+    for (const [configuredRoot, create] of [
+      [browseRoot, false],
+      [projectsDir, true],
+    ] as const) {
+      if (configuredRoot === undefined) continue;
+      // Validated ON CHANGE, never at load (spec): browse roots must already
+      // exist; checkout roots use `mkdir -p`. Both get a real write probe.
+      // Any failure → 400 and NO change persisted.
+      const expanded = expandTilde(configuredRoot);
       if (!expanded.startsWith('/')) {
-        return c.json({ error: `not writable: ${projectsDir} is not an absolute path` }, 400);
+        return c.json({ error: `not writable: ${configuredRoot} is not an absolute path` }, 400);
       }
-      const probeError = await probeWritableDir(expanded);
+      if (!create) {
+        try {
+          if (!(await stat(expanded)).isDirectory()) {
+            return c.json({ error: `browse folder is not a directory: ${configuredRoot}` }, 400);
+          }
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+            return c.json({ error: `browse folder does not exist: ${configuredRoot}` }, 400);
+          }
+          return c.json({ error: `browse folder unavailable: ${err instanceof Error ? err.message : String(err)}` }, 400);
+        }
+      }
+      const probeError = await probeWritableDir(expanded, create);
       if (probeError !== null) return c.json({ error: `not writable: ${probeError}` }, 400);
     }
     let written: WorkspaceConfig;
     try {
       written = await mergeWriteWorkspaceConfig((config) => {
-        // `projectsDir` is stored as written (`~` kept — see the schema note);
-        // only the probe above sees the expanded form.
+        // Roots are stored as written (`~` kept); only the probe expands them.
+        if (browseRoot !== undefined) config.browseRoot = browseRoot;
         if (projectsDir !== undefined) config.projectsDir = projectsDir;
         if (resources?.maxParallel !== undefined) config.resources.maxParallel = resources.maxParallel;
         if (resources?.memoryLimitMb !== undefined) config.resources.memoryLimitMb = resources.memoryLimitMb;
@@ -1369,13 +1430,10 @@ export function createApp(deps: ServerDeps): Hono {
   // WORKSPACE-level and same-origin: the directory picker behind "Add project
   // → open local folder". Directories only, and every answer is contained in a
   // single root — see src/server/fs-browse.ts for the containment rule and why
-  // it is realpath-based. The root is the ONLY thing decided here: hosted mode
-  // (`CEZ_REMOTE=1` / non-loopback bind — the same `localHandoff` predicate the
-  // open-in-* endpoints use) narrows it from the operator's home to
-  // `projectsDir`, because a remote viewer has no business enumerating the
-  // host's whole home. Read per request, so a `CEZ_REMOTE` flip applies live.
+  // it is realpath-based. The independently configured browse root is read per
+  // request, so a successful settings save applies without a restart.
   app.get('/api/fs/browse', async (c) => {
-    const root = resolveBrowseRoot(!capabilities().localHandoff, await workspaceProjectsDir());
+    const root = resolveBrowseRoot(await workspaceBrowseRoot());
     const result = await browseDirectory({
       root,
       path: c.req.query('path'),
@@ -1752,12 +1810,29 @@ export function createApp(deps: ServerDeps): Hono {
   // titleSummary (RunManager.recordTurnEnd), so an edit wins over any past or
   // future auto-summary. Answers the updated record.
   api.patch('/runs/:id', async (c) => {
-    const { store } = c.get('project');
+    const { store, manager } = c.get('project');
     const id = c.req.param('id');
     if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
     const parsed = patchRunSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
       return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
+    }
+    // The prompt is editable only while the run is still queued (#472). Checked
+    // BEFORE the title write so a rejected PATCH is a no-op rather than a partial
+    // one. `title` itself keeps working on any status — no regression to #389.
+    if (parsed.data.task !== undefined) {
+      const foldedChars = foldedLength(parsed.data.task, store.getRun(id)?.queuedMessages ?? []);
+      if (foldedChars > MAX_FOLDED_TASK_CHARS) {
+        return c.json(
+          {
+            error: `prompt too long — ${MAX_FOLDED_TASK_CHARS} character limit across the task and its queued messages (would be ${foldedChars})`,
+          },
+          400,
+        );
+      }
+      if (!manager.editTask(id, parsed.data.task)) {
+        return c.json({ error: 'run already started' }, 409);
+      }
     }
     if (parsed.data.title !== undefined) {
       // titleOrigin 'user' permanently stops the namer's live updates for this run
@@ -1796,9 +1871,107 @@ export function createApp(deps: ServerDeps): Hono {
       })),
       ...(parsed.data.text.trim() ? [{ type: 'text', text: parsed.data.text } satisfies ContentBlock] : []),
     ];
-    const delivered = manager.sendMessage(id, content);
-    if (!delivered) return c.json({ error: 'session closed' }, 409);
-    return c.json({ delivered: true });
+    // Three-rung delivery ladder (#472). Branch on the ENGINE's answer rather
+    // than a status read here: the handler cannot observe the dequeue safely
+    // (the record is written a tick later), the engine can.
+    //   live session → delivered · still queued → folded into the prompt
+    //   starting up  → buffered  · anything else → 409, exactly as before
+    if (manager.sendMessage(id, content)) return c.json({ delivered: true });
+
+    const run = store.getRun(id);
+    const stack = run?.queuedMessages ?? [];
+    // Bounds apply only to a message that is actually about to be stacked. Without this
+    // gate an over-long message posted to a *finished* run would answer `400 prompt too
+    // long` when the truthful answer is `409 session closed`. The status read is safe
+    // here because it only decides whether to reject EARLY — `enqueueMessage` still
+    // re-checks against the engine's own queue before writing anything.
+    if (run?.status === 'queued') {
+      if (stack.length >= MAX_QUEUED_MESSAGES) {
+        return c.json({ error: `too many queued messages — ${MAX_QUEUED_MESSAGES} message limit` }, 400);
+      }
+      const stackedImages = stack.reduce((n, m) => n + (m.images?.length ?? 0), 0);
+      if (stackedImages + parsed.data.images.length > MAX_QUEUED_IMAGES) {
+        return c.json({ error: `too many queued images — ${MAX_QUEUED_IMAGES} image limit across the stack` }, 400);
+      }
+      const prospective = foldedLength(run.task, [...stack, { text: parsed.data.text }]);
+      if (prospective > MAX_FOLDED_TASK_CHARS) {
+        return c.json(
+          {
+            error: `prompt too long — ${MAX_FOLDED_TASK_CHARS} character limit across the task and its queued messages (would be ${prospective})`,
+          },
+          400,
+        );
+      }
+    }
+
+    const queued = manager.enqueueMessage(id, content);
+    if (queued) return c.json({ queued: true, message: queued });
+    if (manager.deferMessage(id, content)) return c.json({ deferred: true });
+    return c.json({ error: 'session closed' }, 409);
+  });
+
+  // Edit / remove a stacked message (#472). Registered before any conflicting
+  // `/:id` route so `queued-messages` never matches as a run id.
+  api.patch('/runs/:id/queued-messages/:msgId', async (c) => {
+    const { store, manager } = c.get('project');
+    const id = c.req.param('id');
+    const run = store.getRun(id);
+    if (!run) return c.json({ error: 'not found' }, 404);
+    const parsed = queuedMessagePatchSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
+    }
+    const msgId = c.req.param('msgId');
+    const stack = run.queuedMessages ?? [];
+    const existing = stack.find((m) => m.id === msgId);
+    if (!existing) return c.json({ error: 'not found' }, 404);
+
+    const effectiveText = parsed.data.text ?? existing.text;
+    const effectiveImageCount = parsed.data.images?.length ?? existing.images?.length ?? 0;
+    if (!effectiveText.trim() && effectiveImageCount === 0) {
+      return c.json({ error: 'message needs text or at least one image' }, 400);
+    }
+
+    const others = stack.filter((m) => m.id !== msgId);
+    const stackedImages = others.reduce((n, m) => n + (m.images?.length ?? 0), 0);
+    if (stackedImages + effectiveImageCount > MAX_QUEUED_IMAGES) {
+      return c.json({ error: `too many queued images — ${MAX_QUEUED_IMAGES} image limit across the stack` }, 400);
+    }
+    const prospective = foldedLength(run.task, [...others, { text: effectiveText }]);
+    if (prospective > MAX_FOLDED_TASK_CHARS) {
+      return c.json(
+        {
+          error: `prompt too long — ${MAX_FOLDED_TASK_CHARS} character limit across the task and its queued messages (would be ${prospective})`,
+        },
+        400,
+      );
+    }
+
+    const images: ContentBlock[] | undefined = parsed.data.images?.map(
+        (img): ContentBlock => ({
+          type: 'image',
+          source: { type: 'base64', media_type: img.mediaType, data: img.data },
+        }),
+      );
+    const message = manager.editQueuedMessage(id, msgId, {
+      ...(parsed.data.text !== undefined ? { text: parsed.data.text } : {}),
+      ...(images !== undefined ? { images } : {}),
+    });
+    if (!message) return c.json({ error: 'run already started' }, 409);
+    return c.json({ message });
+  });
+
+  api.delete('/runs/:id/queued-messages/:msgId', (c) => {
+    const { store, manager } = c.get('project');
+    const id = c.req.param('id');
+    const run = store.getRun(id);
+    if (!run) return c.json({ error: 'not found' }, 404);
+    const msgId = c.req.param('msgId');
+    if (!(run.queuedMessages ?? []).some((m) => m.id === msgId)) {
+      return c.json({ error: 'not found' }, 404);
+    }
+    if (!manager.removeQueuedMessage(id, msgId)) return c.json({ error: 'run already started' }, 409);
+    return c.json({ removed: true });
   });
 
   // "Finish": gracefully close a waiting session — the run completes as done.

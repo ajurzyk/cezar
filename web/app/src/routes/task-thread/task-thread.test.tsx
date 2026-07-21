@@ -1,5 +1,5 @@
 import { QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { ReactElement } from 'react'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createQueryClient } from '@/api/query-client'
 import type { ApiRun, RunEvent, RunStatus } from '@/api/types'
 
-import { TaskThreadRoute, ThreadView } from './task-thread'
+import { buildThreadRows, TaskThreadRoute, ThreadView } from './task-thread'
 import { reduceThread } from './thread-state'
 
 afterEach(() => {
@@ -173,6 +173,287 @@ describe('ThreadView', () => {
     expect(
       document.querySelector('[data-slot="composer-disabled-action"]')?.textContent,
     ).toContain('Continue')
+  })
+
+  /** #472 — stacked messages render as their own bubbles, after the task. */
+  it('renders one bubble per stacked message, in order, with their images', () => {
+    renderView(
+      <ThreadView
+        run={run('queued', {
+          queuedMessages: [
+            { id: 'm1', text: 'also update the changelog', createdAt: '2026-07-21T10:00:00.000Z' },
+            {
+              id: 'm2',
+              text: 'and bump the version',
+              images: ['/api/runs/r1/images/pasted-1.png'],
+              createdAt: '2026-07-21T10:01:00.000Z',
+            },
+          ],
+        })}
+        thread={reduceThread([])}
+      />,
+    )
+    const bubbles = [...document.querySelectorAll('[data-slot="user-bubble"]')].map(
+      (b) => b.textContent ?? '',
+    )
+    expect(bubbles[0]).toContain('Summarize what this project does.')
+    expect(bubbles[1]).toContain('also update the changelog')
+    expect(bubbles[2]).toContain('and bump the version')
+    expect(
+      document.querySelector('img[src="/api/runs/r1/images/pasted-1.png"]'),
+    ).not.toBeNull()
+  })
+
+  /**
+   * The no-regression assertion, at the row-builder level rather than the DOM:
+   * an absent stack and an empty one must produce the same rows, and a run with
+   * no stack must produce exactly today's rows. Asserting on `buildThreadRows`
+   * keys keeps this free of Radix's per-render generated ids.
+   */
+  it('builds the same rows whether the stack is absent or empty', () => {
+    const keys = (extra: Partial<ApiRun>) =>
+      buildThreadRows(run('queued', extra), reduceThread(EVENTS)).map((r) => r.key)
+
+    const absent = keys({})
+    expect(absent[0]).toBe('task')
+    // No `queued:` row is invented for a run that has none.
+    expect(absent.some((k) => k.startsWith('queued:'))).toBe(false)
+    expect(keys({ queuedMessages: [] })).toEqual(absent)
+  })
+
+  it('inserts the stacked rows directly after the task row, in order', () => {
+    const keys = buildThreadRows(
+      run('queued', {
+        queuedMessages: [
+          { id: 'm1', text: 'one', createdAt: '2026-07-21T10:00:00.000Z' },
+          { id: 'm2', text: 'two', createdAt: '2026-07-21T10:01:00.000Z' },
+        ],
+      }),
+      reduceThread(EVENTS),
+    ).map((r) => r.key)
+
+    expect(keys.slice(0, 3)).toEqual(['task', 'queued:m1', 'queued:m2'])
+    // …and the rest of the transcript is untouched behind them.
+    expect(keys.slice(3)).toEqual(
+      buildThreadRows(run('queued'), reduceThread(EVENTS)).map((r) => r.key).slice(1),
+    )
+  })
+
+  /**
+   * Review fix: the affordance callbacks are memoized on the mutations' `mutateAsync`
+   * functions, not on the mutation RESULT objects — TanStack returns a fresh result object
+   * every render, which would rebuild every thread row each time and defeat the memo that
+   * exists because these threads get big enough to virtualize.
+   *
+   * Asserted as the observable consequence: re-rendering with identical inputs neither
+   * duplicates nor loses the affordances, and the row builder is pure.
+   */
+  it('re-renders a queued run without duplicating or losing the affordances', () => {
+    const fixture = run('queued', {
+      queuedMessages: [{ id: 'm1', text: 'stacked', createdAt: '2026-07-21T10:00:00.000Z' }],
+    })
+    const thread = reduceThread(EVENTS)
+
+    // The row builder is pure: same inputs, same rows.
+    expect(buildThreadRows(fixture, thread).map((r) => r.key)).toEqual(
+      buildThreadRows(fixture, thread).map((r) => r.key),
+    )
+
+    const { rerender } = renderView(<ThreadView run={fixture} thread={thread} />)
+    expect(screen.getAllByLabelText('Remove message')).toHaveLength(1)
+    rerender(
+      <QueryClientProvider client={createQueryClient()}>
+        <MemoryRouter>
+          <ThreadView run={fixture} thread={thread} />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+    expect(screen.getAllByLabelText('Remove message')).toHaveLength(1)
+    expect(screen.getAllByLabelText('Edit message')).toHaveLength(1)
+  })
+
+  /** #472 — the edit/remove affordances exist only while the run is queued. */
+  it('offers edit + remove on stacked bubbles and edit-only on the prompt, while queued', () => {
+    renderView(
+      <ThreadView
+        run={run('queued', {
+          queuedMessages: [{ id: 'm1', text: 'stacked', createdAt: '2026-07-21T10:00:00.000Z' }],
+        })}
+        thread={reduceThread([])}
+      />,
+    )
+    // The prompt is editable but never removable — a run with no prompt is not a run.
+    expect(screen.getByLabelText('Edit the prompt')).toBeTruthy()
+    expect(screen.getAllByLabelText('Edit message')).toHaveLength(1)
+    expect(screen.getAllByLabelText('Remove message')).toHaveLength(1)
+  })
+
+  it('renders the bubbles read-only once the run is running', () => {
+    renderView(
+      <ThreadView
+        run={run('running', {
+          queuedMessages: [{ id: 'm1', text: 'stacked', createdAt: '2026-07-21T10:00:00.000Z' }],
+        })}
+        thread={reduceThread([])}
+      />,
+    )
+    expect(screen.queryByLabelText('Edit the prompt')).toBeNull()
+    expect(screen.queryByLabelText('Edit message')).toBeNull()
+    expect(screen.queryByLabelText('Remove message')).toBeNull()
+  })
+
+  it('PATCHes the edited text, and Escape cancels without writing', async () => {
+    const calls: Array<{ url: string; method: string; body: unknown }> = []
+
+    renderView(
+      <ThreadView
+        run={run('queued', {
+          queuedMessages: [{ id: 'm1', text: 'typo here', createdAt: '2026-07-21T10:00:00.000Z' }],
+        })}
+        thread={reduceThread([])}
+      />,
+    )
+    // Stubbed AFTER render: renderView installs its own fetch stub, and the mutations
+    // only fire on the clicks below.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({
+          url: String(input),
+          method: init?.method ?? 'GET',
+          body: init?.body ? JSON.parse(String(init.body)) : undefined,
+        })
+        // GET answers `[]`: our own invalidateQueries refetches the runs LIST, and the
+        // header's queuePositions would choke on a non-array.
+        const body = (init?.method ?? 'GET') === 'GET' ? '[]' : '{}'
+        return Promise.resolve(
+          new Response(body, { status: 200, headers: { 'content-type': 'application/json' } }),
+        )
+      }),
+    )
+
+    // Escape first: opens the editor, changes the text, cancels — nothing is written.
+    fireEvent.click(screen.getAllByLabelText('Edit message')[0]!)
+    fireEvent.change(screen.getByLabelText('Edit the message'), { target: { value: 'discarded' } })
+    fireEvent.keyDown(screen.getByLabelText('Edit the message'), { key: 'Escape' })
+    expect(screen.queryByLabelText('Edit the message')).toBeNull()
+    expect(calls.some((c) => c.method === 'PATCH')).toBe(false)
+
+    // Then a real edit.
+    fireEvent.click(screen.getAllByLabelText('Edit message')[0]!)
+    fireEvent.change(screen.getByLabelText('Edit the message'), { target: { value: 'fixed now' } })
+    fireEvent.click(screen.getByText('Save'))
+
+    await waitFor(() => expect(calls.some((c) => c.method === 'PATCH')).toBe(true))
+    const patch = calls.find((c) => c.method === 'PATCH')!
+    expect(patch.url).toContain('/queued-messages/m1')
+    expect(patch.body).toMatchObject({ text: 'fixed now' })
+  })
+
+  it('keeps a failed edit open and surfaces the server error', async () => {
+    renderView(
+      <ThreadView
+        run={run('queued', {
+          queuedMessages: [{ id: 'm1', text: 'typo here', createdAt: '2026-07-21T10:00:00.000Z' }],
+        })}
+        thread={reduceThread([])}
+      />,
+    )
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(
+        new Response(JSON.stringify({ error: 'run already started' }), {
+          status: 409,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )),
+    )
+
+    fireEvent.click(screen.getAllByLabelText('Edit message')[0]!)
+    fireEvent.change(screen.getByLabelText('Edit the message'), { target: { value: 'fixed now' } })
+    fireEvent.click(screen.getByText('Save'))
+
+    expect((await screen.findByRole('alert')).textContent).toContain('run already started')
+    expect((screen.getByLabelText('Edit the message') as HTMLTextAreaElement).value).toBe('fixed now')
+  })
+
+  it('DELETEs a removed message', async () => {
+    const calls: string[] = []
+
+    renderView(
+      <ThreadView
+        run={run('queued', {
+          queuedMessages: [{ id: 'm1', text: 'remove me', createdAt: '2026-07-21T10:00:00.000Z' }],
+        })}
+        thread={reduceThread([])}
+      />,
+    )
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        if ((init?.method ?? 'GET') === 'DELETE') calls.push(String(input))
+        // GET answers `[]`: our own invalidateQueries refetches the runs LIST, and the
+        // header's queuePositions would choke on a non-array.
+        const body = (init?.method ?? 'GET') === 'GET' ? '[]' : '{}'
+        return Promise.resolve(
+          new Response(body, { status: 200, headers: { 'content-type': 'application/json' } }),
+        )
+      }),
+    )
+    fireEvent.click(screen.getAllByLabelText('Remove message')[0]!)
+    await waitFor(() => expect(calls).toHaveLength(1))
+    expect(calls[0]).toContain('/queued-messages/m1')
+  })
+
+  it('PATCHes the run itself when the initial prompt is edited', async () => {
+    const bodies: unknown[] = []
+
+    renderView(<ThreadView run={run('queued')} thread={reduceThread([])} />)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        if ((init?.method ?? 'GET') === 'PATCH' && !String(input).includes('queued-messages')) {
+          bodies.push(init?.body ? JSON.parse(String(init.body)) : undefined)
+        }
+        // GET answers `[]`: our own invalidateQueries refetches the runs LIST, and the
+        // header's queuePositions would choke on a non-array.
+        const body = (init?.method ?? 'GET') === 'GET' ? '[]' : '{}'
+        return Promise.resolve(
+          new Response(body, { status: 200, headers: { 'content-type': 'application/json' } }),
+        )
+      }),
+    )
+    fireEvent.click(screen.getByLabelText('Edit the prompt'))
+    fireEvent.change(screen.getByLabelText('Edit the message'), { target: { value: 'a better prompt' } })
+    fireEvent.click(screen.getByText('Save'))
+
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toMatchObject({ task: 'a better prompt' })
+  })
+
+  /** #472 — a queued run has not started, so its prompt is still authorable. */
+  it('queued → the composer is ENABLED with its own placeholder and hint, and no Continue', () => {
+    renderView(<ThreadView run={run('queued')} thread={reduceThread(EVENTS)} />)
+    const textarea = screen.getByLabelText('Reply to the agent') as HTMLTextAreaElement
+    expect(textarea.disabled).toBe(false)
+    expect(textarea.placeholder).toBe('Add to the prompt — sent when the run starts…')
+    expect(document.querySelector('[data-slot="queued-hint"]')?.textContent).toContain(
+      'folded into the prompt before the run starts',
+    )
+    // Continue is meaningless for a run that has not run.
+    expect(document.querySelector('[data-slot="composer-disabled-action"]')).toBeNull()
+  })
+
+  /**
+   * The scope boundary: the queued branch is `queued` ONLY. Every other closed
+   * status keeps the legacy copy — including the string `composer.e2e.ts` asserts.
+   */
+  it('done keeps the legacy disabled copy and shows no queued hint', () => {
+    renderView(<ThreadView run={run('done')} thread={reduceThread(EVENTS)} />)
+    const textarea = screen.getByLabelText('Reply to the agent') as HTMLTextAreaElement
+    expect(textarea.disabled).toBe(true)
+    expect(textarea.placeholder).toBe('Session closed — Continue to reopen.')
+    expect(document.querySelector('[data-slot="queued-hint"]')).toBeNull()
   })
 
   it('closed with no resumable session → disabled composer, and no Continue button invented', () => {

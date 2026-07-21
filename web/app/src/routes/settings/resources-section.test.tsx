@@ -25,6 +25,7 @@ let requests: Array<{ method: string; url: string; body?: unknown }> = []
 function serve(resources: Partial<WorkspaceConfigResponse['resources']> = {}) {
   requests = []
   const state: WorkspaceConfigResponse = {
+    browseRoot: '~/',
     projectsDir: '~/cezar/projects',
     resources: { maxParallel: 2, memoryLimitMb: null, worktreeRetentionDefault: 10, ...resources },
   }

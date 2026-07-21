@@ -1,4 +1,4 @@
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { hashKey, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowLeftIcon,
   CheckIcon,
@@ -11,14 +11,20 @@ import {
   TagIcon,
   TriangleAlertIcon,
 } from 'lucide-react'
-import { useEffect, useMemo, useState, type DragEvent, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react'
 import { useParams } from 'react-router'
 
 import { Link, Navigate } from '@/lib/project-router'
 
-import { getGithub, putUiState } from '@/api/client'
+import { getGithub, getGithubComments, putUiState } from '@/api/client'
 import { queryKeys, useGithub, useGithubComments, useSkills, useUiState, useWorkflows } from '@/api/queries'
-import type { GithubComment, GithubItem, UiState } from '@/api/types'
+import type {
+  GithubComment,
+  GithubItem,
+  GithubTimelineEvent,
+  GithubTimelineEventKind,
+  UiState,
+} from '@/api/types'
 import { CenteredState } from '@/components/centered-state'
 import type { EnginePick } from '@/components/engine-pills'
 import { GithubIcon } from '@/components/icons'
@@ -112,12 +118,48 @@ export function GithubRoute({ view }: { view: GithubView }) {
       })
   }
 
+  // The thread actually ON SCREEN, so a manual refresh can bust its SERVER cache.
+  //
+  // Deliberately a ref fed from the rendered `selected`, NOT derived from the `:n` route param.
+  // With no `:n` the tab still renders a thread — `selected` falls back to `items[0]` (see below,
+  // legacy behavior) — so keying off the URL would leave the bare `/github` and `/github/prs`
+  // routes, i.e. the default landing pages, refreshing nothing. A ref because this mutation is
+  // defined before `selected` exists and reads it at click time, not render time.
+  const openThreadRef = useRef<{ kind: 'issue' | 'pr'; number: number } | null>(null)
+
   const refresh = useMutation({
     mutationFn: () => getGithub({ refresh: true }),
     onSuccess: (data) => {
       queryClient.setQueryData(queryKeys.github({}), data)
       // The refresh busted the server cache; the full batch must re-run against it.
       void queryClient.invalidateQueries({ queryKey: queryKeys.github({ limit: FULL_LIMIT }) })
+
+      // The open thread must be re-fetched with `refresh: true` (#525). Invalidating its key is
+      // NOT enough, and was the bug in the first attempt: an invalidate re-requests
+      // `/api/github/comments/…` WITHOUT `refresh=1`, and the route only busts `commentsCache`
+      // when that param is present — so the client dutifully refetched and was handed the same
+      // ≤60 s-old object. Pressing refresh has to reach `gh`, or it is theatre.
+      const open = openThreadRef.current
+      if (!open) {
+        // No thread on screen (the unavailable branch) — nothing mounted, so clearing is free.
+        void queryClient.removeQueries({ queryKey: ['github', 'comments'] })
+        return
+      }
+      const openKey = queryKeys.githubComments(open.kind, open.number)
+      // Fire-and-forget rather than awaited in `mutationFn`: a thread fetch that fails must not
+      // discard an already-successful list refresh.
+      void getGithubComments(open.kind, open.number, { refresh: true })
+        .then((thread) => queryClient.setQueryData(openKey, thread))
+        .catch(() => {
+          /* the list refresh still landed; leave the thread showing what it has */
+        })
+      // Every OTHER cached thread is now suspect but not on screen — drop it so it refetches when
+      // next opened. The open one MUST be excluded: removing a mounted query resets it to pending
+      // and flashes the loading skeleton under the user.
+      void queryClient.removeQueries({
+        queryKey: ['github', 'comments'],
+        predicate: (q) => q.queryHash !== hashKey(openKey),
+      })
     },
     onError: (error) => toast(error.message, { tone: 'danger' }),
   })
@@ -181,6 +223,9 @@ export function GithubRoute({ view }: { view: GithubView }) {
     return <GithubLoading />
   }
 
+  // No thread is mounted on the unavailable path — keep the ref honest rather than stale.
+  openThreadRef.current = null
+
   if (!gh.available) {
     return (
       <div data-route="github" className="flex min-h-full flex-col">
@@ -221,6 +266,10 @@ export function GithubRoute({ view }: { view: GithubView }) {
   // list so a deep link to #N still opens even while a filter is active.
   const selected =
     number === null ? (items[0] ?? null) : (allItems.find((item) => item.number === number) ?? null)
+  // Feed the refresh mutation the thread that is genuinely rendered — including the no-`:n`
+  // fallback to items[0], which is what the bare /github and /github/prs routes show.
+  openThreadRef.current = selected ? { kind: selected.kind, number: selected.number } : null
+
   const listPath = view === 'issues' ? '/github' : '/github/prs'
 
   return (
@@ -595,7 +644,7 @@ function GithubDetail({
         )}
       </div>
 
-      <GithubThread item={item} />
+      <GithubThread item={item} colors={colors} />
 
       {children}
     </article>
@@ -607,9 +656,35 @@ function GithubDetail({
  *  issue body does. Lazy — only fetched while this detail view is mounted. Everything degrades:
  *  loading → skeleton, unreachable → one-line reason + "open on GitHub", empty → nothing (the
  *  count badge already said there were none). */
-function GithubThread({ item }: { item: GithubItem }) {
+function GithubThread({ item, colors }: { item: GithubItem; colors: Record<string, string> }) {
   const thread = useGithubComments(item.kind, item.number)
   const data = thread.data
+
+  // Interleave client-side (#525): the server returns comments and events as two independently
+  // capped arrays and deliberately does NOT merge them — ordering is presentation, and a
+  // server-side merge would either reshape the §2-protected response or force a combined cap.
+  const entries = useMemo(() => {
+    const merged: ThreadRow[] = [
+      ...(data?.comments ?? []).map((comment) => ({ row: 'comment' as const, comment })),
+      ...(data?.events ?? []).map((event) => ({ row: 'event' as const, event })),
+    ]
+    // Compare parsed instants, not the raw strings. Both streams are UTC, but at DIFFERENT
+    // precisions: events go through `toISOString()` (always milliseconds, `…00.000Z`) while
+    // comments keep GitHub's second-precision `…00Z`. A string compare puts `.` (46) before `Z`
+    // (90), so an event would always sort above a comment made in the same second — not a
+    // tie-break, a systematic bias. Array.prototype.sort is stable, so equal instants keep
+    // insertion order (comments first, matching pre-#525 behavior).
+    //
+    // `normalizeReviews` emits `createdAt: ''` for a review with no `submitted_at` (a pending
+    // one), and `Date.parse('')` is NaN. An NaN comparator result coerces to +0, which makes the
+    // sort inconsistent rather than crashing — so those rows are pinned to the top explicitly
+    // instead of landing wherever the engine happens to leave them.
+    const key = (entry: ThreadRow): number => {
+      const parsed = Date.parse(at(entry))
+      return Number.isNaN(parsed) ? -Infinity : parsed
+    }
+    return merged.sort((a, b) => key(a) - key(b))
+  }, [data?.comments, data?.events])
 
   if (thread.isPending) {
     return (
@@ -642,8 +717,10 @@ function GithubThread({ item }: { item: GithubItem }) {
   }
 
   // An empty thread renders nothing: the count badge already communicated "no discussion", and an
-  // empty "Comments · 0" section would be noise on the many quiet issues/PRs.
-  if (data.comments.length === 0) return null
+  // empty "Activity" section would be noise on the many quiet issues/PRs. Counts BOTH streams
+  // (#525) — keyed on comments alone this would hide the whole feature on its motivating case, a
+  // merged PR with commits, labels and a merge event but no conversation.
+  if (entries.length === 0) return null
 
   return (
     <section data-slot="gh-thread" className="mt-6 border-t border-border pt-5">
@@ -651,12 +728,24 @@ function GithubThread({ item }: { item: GithubItem }) {
         data-slot="gh-thread-header"
         className="mb-4 text-[11px] font-semibold tracking-wide text-soft-foreground uppercase"
       >
-        Comments · {data.comments.length}
+        {/* "Activity", not "Comments": heading a twenty-row list `Comments · 2` would be
+            incoherent once events render. The comment count stays as a secondary. This is a
+            different surface from the row badge, which still counts comments only. */}
+        Activity · {data.comments.length} comment{data.comments.length === 1 ? '' : 's'}
       </h3>
       <ul className="flex flex-col gap-5">
-        {data.comments.map((comment) => (
-          <ThreadEntry key={`${comment.kind}-${comment.id}`} comment={comment} />
-        ))}
+        {groupCommitRuns(entries).map((grouped) =>
+          grouped.group === 'commits' ? (
+            <CommitGroup key={grouped.commits[0]!.id} commits={grouped.commits} colors={colors} />
+          ) : grouped.entry.row === 'comment' ? (
+            <ThreadEntry
+              key={`${grouped.entry.comment.kind}-${grouped.entry.comment.id}`}
+              comment={grouped.entry.comment}
+            />
+          ) : (
+            <EventRow key={grouped.entry.event.id} event={grouped.entry.event} colors={colors} />
+          ),
+        )}
       </ul>
       {data.truncated ? (
         <a
@@ -671,6 +760,238 @@ function GithubThread({ item }: { item: GithubItem }) {
         </a>
       ) : null}
     </section>
+  )
+}
+
+/** One row in the interleaved thread (#525) — a conversation comment/review, or a timeline event.
+ *  A discriminated union rather than a widened `GithubComment['kind']`, so each branch keeps its
+ *  own narrowing. */
+export type ThreadRow =
+  | { row: 'comment'; comment: GithubComment }
+  | { row: 'event'; event: GithubTimelineEvent }
+
+/** Sort key for either row shape. */
+const at = (entry: ThreadRow): string =>
+  entry.row === 'comment' ? entry.comment.createdAt : entry.event.createdAt
+
+/** A rendered row after commit-run grouping: either a single row, or a run of consecutive commits
+ *  by one author that collapses behind an expander. */
+export type GroupedRow =
+  | { group: 'single'; entry: ThreadRow }
+  | { group: 'commits'; commits: GithubTimelineEvent[] }
+
+/**
+ * Collapse runs of consecutive `committed` events by the same author (#525), the way github.com
+ * does — otherwise a 40-commit PR buries the discussion.
+ *
+ * Entirely client-side and purely presentational: the wire stays a flat list where every commit
+ * keeps its own message and CI glyph, so nothing is lost to a collapse and the heuristic can
+ * change without a §2 conversation.
+ *
+ * A run ends at an author change or at any non-commit row. A run of one is not a group — a lone
+ * commit should render as a plain row, not a "1 commit" expander. Exported for unit tests.
+ */
+export function groupCommitRuns(entries: ThreadRow[]): GroupedRow[] {
+  const out: GroupedRow[] = []
+  let run: GithubTimelineEvent[] = []
+
+  const flush = () => {
+    if (run.length === 0) return
+    // A single commit is not a group.
+    if (run.length === 1) out.push({ group: 'single', entry: { row: 'event', event: run[0]! } })
+    else out.push({ group: 'commits', commits: run })
+    run = []
+  }
+
+  for (const entry of entries) {
+    const isCommit = entry.row === 'event' && entry.event.kind === 'committed'
+    if (isCommit && entry.row === 'event') {
+      const prev = run[run.length - 1]
+      if (prev && prev.actor !== entry.event.actor) flush() // author change ends the run
+      run.push(entry.event)
+      continue
+    }
+    flush() // any non-commit row interrupts the run
+    out.push({ group: 'single', entry })
+  }
+  flush()
+  return out
+}
+
+/** A collapsed run of consecutive commits — `{actor} added {n} commits`, expanding to the
+ *  individual rows, each of which keeps its own message and CI glyph. */
+function CommitGroup({ commits, colors }: { commits: GithubTimelineEvent[]; colors: Record<string, string> }) {
+  const [open, setOpen] = useState(false)
+  const actor = commits[0]?.actor ?? '?'
+
+  if (open) {
+    return (
+      <>
+        <li data-slot="gh-commit-group" data-open="true" className="min-w-0">
+          <button
+            type="button"
+            aria-expanded={true}
+            onClick={() => setOpen(false)}
+            className="flex items-center gap-1.5 font-mono text-[11px] text-soft-foreground hover:text-foreground"
+          >
+            <span aria-hidden="true">{EVENT_GLYPH.committed}</span>
+            <span className="font-sans font-medium text-foreground">{actor}</span>
+            <span>added {commits.length} commits</span>
+          </button>
+        </li>
+        {commits.map((commit) => (
+          <EventRow key={commit.id} event={commit} colors={colors} />
+        ))}
+      </>
+    )
+  }
+
+  return (
+    <li data-slot="gh-commit-group" data-open="false" className="min-w-0">
+      <button
+        type="button"
+        aria-expanded={false}
+        onClick={() => setOpen(true)}
+        className="flex items-center gap-1.5 font-mono text-[11px] text-soft-foreground hover:text-foreground"
+      >
+        <span aria-hidden="true">{EVENT_GLYPH.committed}</span>
+        <span className="font-sans font-medium text-foreground">{actor}</span>
+        <span>added {commits.length} commits</span>
+        <span className="shrink-0">{shortAge(commits[commits.length - 1]!.createdAt)}</span>
+      </button>
+    </li>
+  )
+}
+
+/** Per-kind glyph. Deliberately text glyphs rather than icon components: `EventRow` is a single
+ *  muted line and an icon set would pull it visually level with the comment cards it sits
+ *  between. */
+const EVENT_GLYPH: Record<GithubTimelineEventKind, string> = {
+  committed: '⚙',
+  labeled: '◆',
+  unlabeled: '◇',
+  assigned: '◍',
+  unassigned: '◌',
+  merged: '⑃',
+  closed: '⊘',
+  reopened: '⊙',
+  head_ref_force_pushed: '↻',
+  'cross-referenced': '↗',
+  renamed: '✎',
+}
+
+/**
+ * One timeline event — deliberately NOT a `ThreadEntry`: single line, muted, no card, no avatar
+ * block, so events read as connective tissue between comments rather than competing with them.
+ * Mirrors github.com's density.
+ */
+function EventRow({ event, colors }: { event: GithubTimelineEvent; colors: Record<string, string> }) {
+  return (
+    <li
+      data-slot="gh-event-row"
+      data-kind={event.kind}
+      className={cn(
+        'flex min-w-0 items-center gap-1.5 font-mono text-[11px] text-soft-foreground',
+        event.kind === 'merged' && 'text-accent-foreground',
+      )}
+    >
+      <span aria-hidden="true" className="shrink-0">
+        {EVENT_GLYPH[event.kind]}
+      </span>
+      <span className="font-sans font-medium text-foreground">{event.actor}</span>
+      <EventPhrase event={event} colors={colors} />
+      <span className="shrink-0">{shortAge(event.createdAt)}</span>
+      {event.url ? (
+        <a
+          href={event.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label={`open ${event.kind} on GitHub`}
+          className="ml-auto shrink-0 text-muted-foreground hover:text-foreground"
+        >
+          <ExternalLinkIcon aria-hidden="true" className="size-2.5" />
+        </a>
+      ) : null}
+    </li>
+  )
+}
+
+/** The kind-specific middle of an event row. Split out so `EventRow` stays a layout shell and
+ *  each phrase can be asserted on its own in tests. */
+function EventPhrase({ event, colors }: { event: GithubTimelineEvent; colors: Record<string, string> }) {
+  switch (event.kind) {
+    case 'committed':
+      return (
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span className="shrink-0">committed</span>
+          {event.sha ? <span className="shrink-0 text-muted-foreground">{event.sha.slice(0, 7)}</span> : null}
+          {event.message ? (
+            <span className="truncate font-sans text-foreground">{event.message}</span>
+          ) : null}
+          <CommitChecks checks={event.checks} />
+        </span>
+      )
+    case 'labeled':
+    case 'unlabeled':
+      return (
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span className="shrink-0">{event.kind === 'labeled' ? 'added the' : 'removed the'}</span>
+          {event.label ? (
+            <span
+              data-slot="gh-event-label"
+              style={labelChipStyle(event.label.color ?? colors[event.label.name])}
+              className="max-w-[12rem] truncate rounded-full border px-1.5 py-px font-sans text-[10px]"
+            >
+              {event.label.name}
+            </span>
+          ) : null}
+          <span className="shrink-0">label</span>
+        </span>
+      )
+    case 'assigned':
+    case 'unassigned':
+      return (
+        <span className="truncate">
+          {event.kind === 'assigned' ? 'assigned' : 'unassigned'} {event.subject ?? 'someone'}
+        </span>
+      )
+    case 'merged':
+      return <span>merged this</span>
+    case 'closed':
+      return <span>closed this</span>
+    case 'reopened':
+      return <span>reopened this</span>
+    case 'head_ref_force_pushed':
+      return <span>force-pushed</span>
+    case 'renamed':
+      return <span className="truncate">renamed this to {event.subject ?? '—'}</span>
+    case 'cross-referenced':
+      return (
+        <span className="truncate">
+          referenced this in {event.refNumber ? `#${event.refNumber}` : 'another thread'}
+          {event.refTitle ? ` ${event.refTitle}` : ''}
+        </span>
+      )
+  }
+}
+
+/** The rolled-up CI glyph on a commit row (#525) — reuses `CHECKS_GLYPH`/`CHECKS_TONE`, the same
+ *  source of truth as the list row's indicator and the detail pane's badge.
+ *
+ *  Renders nothing for BOTH `null` (the commit has no CI configured) and `undefined` (the rollup
+ *  query failed or was skipped). The two are deliberately distinct values on the wire even though
+ *  they look identical here — absence of a glyph should not have to mean "we know there is no CI". */
+function CommitChecks({ checks }: { checks: GithubTimelineEvent['checks'] }) {
+  if (!checks) return null
+  return (
+    <span
+      data-slot="gh-commit-checks"
+      data-checks={checks}
+      aria-label={`checks ${checks}`}
+      className={cn('shrink-0', CHECKS_TONE[checks])}
+    >
+      {CHECKS_GLYPH[checks]}
+    </span>
   )
 }
 
