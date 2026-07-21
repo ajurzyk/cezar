@@ -288,7 +288,11 @@ or a new fixture set forgets one — a named row fails. The matrix:
 - tool status `running`, `completed`, `failed`
 - reasoning items (thinking / reasoning items / reasoning parts)
 - structured diffs (Edit input / fileChange.changes / patch parts)
-- sub-agent task items (Task / review-mode items / subtask parts)
+- sub-agent task items (Task / review-mode span / subtask parts) — one item per
+  sub-agent: codex's `enteredReviewMode`/`exitedReviewMode` pair folds into a
+  single `task` item with a running→completed lifecycle, so a consumer counting
+  task items counts agents, not frames (spec
+  `.ai/specs/2026-07-20-grouped-subagent-display.md`, #474)
 - `usage.updated` with raw token counts
 - `turn.completed` with a `stopReason`
 - sub-agent **nesting** via `parentItemId` (claude + opencode; codex has no wire
