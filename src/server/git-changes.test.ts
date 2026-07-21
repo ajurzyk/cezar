@@ -128,6 +128,43 @@ describe('collectChanges — structured diff vs base', () => {
     expect(result.changes.stat).toEqual({ adds: 0, dels: 0, files: 0 });
   });
 
+  it('limits a repointed task worktree to uncommitted changes', async () => {
+    writeFileSync(join(dir, 'base.txt'), 'base\n');
+    g(dir, 'add', '-A');
+    g(dir, 'commit', '-m', 'base');
+    g(dir, 'checkout', '-b', 'review/pr-42');
+    writeFileSync(join(dir, 'reviewed.txt'), 'belongs to the reviewed PR\n');
+    g(dir, 'add', '-A');
+    g(dir, 'commit', '-m', 'reviewed change');
+    writeFileSync(join(dir, 'reviewed.txt'), 'resolved locally by this review task\n');
+    g(dir, 'add', 'reviewed.txt');
+
+    const result = await collectChanges(dir, 'main', { taskBranch: 'cez/task1234' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.changes.files.map((file) => file.path)).toEqual(['reviewed.txt']);
+    expect(result.changes.repointedHead).toEqual({
+      headBranch: 'review/pr-42',
+      taskBranch: 'cez/task1234',
+    });
+  });
+
+  it('keeps committed task changes when HEAD matches the task branch', async () => {
+    writeFileSync(join(dir, 'base.txt'), 'base\n');
+    g(dir, 'add', '-A');
+    g(dir, 'commit', '-m', 'base');
+    g(dir, 'checkout', '-b', 'cez/task1234');
+    writeFileSync(join(dir, 'task.txt'), 'task change\n');
+    g(dir, 'add', '-A');
+    g(dir, 'commit', '-m', 'task change');
+
+    const result = await collectChanges(dir, 'main', { taskBranch: 'cez/task1234' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.changes.files.map((file) => file.path)).toEqual(['task.txt']);
+    expect(result.changes.repointedHead).toBeUndefined();
+  });
+
   it('caps oversized per-file patches with a truncation note', async () => {
     writeFileSync(join(dir, 'a.txt'), 'hello\n');
     g(dir, 'add', '-A');
@@ -442,6 +479,20 @@ describe('session git API routes', () => {
     expect(body.stat).toEqual({ adds: 1, dels: 0, files: 1 });
 
     expect((await apiRequest(app, '/api/runs/nope/changes')).status).toBe(404);
+  });
+
+  it('GET /changes uses the persisted task branch to detect a repointed HEAD', async () => {
+    writeFileSync(join(worktree, 'reviewed.txt'), 'reviewed branch history\n');
+    g(worktree, 'add', '-A');
+    g(worktree, 'commit', '-m', 'reviewed change');
+    g(worktree, 'branch', '-m', 'review/pr-42');
+    writeFileSync(join(worktree, 'reviewed.txt'), 'uncommitted conflict resolution\n');
+
+    const res = await apiRequest(app, `/api/runs/${run.id}/changes`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ChangesPayload;
+    expect(body.files.map((file) => file.path)).toEqual(['reviewed.txt']);
+    expect(body.repointedHead).toEqual({ headBranch: 'review/pr-42', taskBranch: 'task' });
   });
 
   it('runs without a worktree get 409 + reason (JSON, never HTML) on every session-git route', async () => {

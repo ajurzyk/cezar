@@ -157,6 +157,13 @@ function ChangesView({ run }: { run: ApiRun }) {
         onAction={onAction}
       />
 
+      {changes.data?.repointedHead ? (
+        <p data-slot="repointed-head-note" className="border-b px-4 py-2 text-xs text-soft-foreground md:px-6">
+          HEAD is on <code>{changes.data.repointedHead.headBranch}</code>, not this task&apos;s branch{' '}
+          <code>{changes.data.repointedHead.taskBranch}</code> — showing uncommitted changes only.
+        </p>
+      ) : null}
+
       {changes.isPending ? (
         <p data-slot="changes-loading" className="px-4 py-6 text-center text-xs text-soft-foreground md:px-6">
           Loading changes…
