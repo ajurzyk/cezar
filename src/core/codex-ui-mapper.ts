@@ -9,8 +9,8 @@
  * replaying wire-faithful frame sequences live in `__fixtures__/codex/`.
  *
  * Robustness rule: input is untrusted wire data — the mapper never throws;
- * responses, server→client requests (approval prompts — reserved for the
- * `permission.*` events later) and unknown methods map to zero events.
+ * responses, server→client requests (handled by the session transport) and
+ * unknown methods map to zero events.
  *
  * State is explicit and treated as immutable: callers thread the returned
  * `state` into the next call. Ids are deterministic — codex items and turns
@@ -45,6 +45,12 @@ export interface ReasoningAccumulator {
   readonly text: string;
   /** `item/reasoning/summaryDelta` + `summaryTextDelta` — the condensed summary. */
   readonly summary: string;
+}
+
+interface CodexCollabTask {
+  readonly itemId: string;
+  readonly prompt?: string;
+  readonly model?: string;
 }
 
 export interface CodexUiMapperState {
@@ -98,6 +104,10 @@ export interface CodexUiMapperState {
    *  same id. An unpaired exit falls back to its own item, so a stream that
    *  starts mid-review still renders. */
   readonly reviewItemId: string | null;
+  /** Child thread → stable task item created by a Codex collaboration spawn.
+   * Installed 0.144.6 uses `collabAgentToolCall`; newer protocol revisions use
+   * `collabToolCall`. Both carry the receiver ids used for child attribution. */
+  readonly collabTasks: ReadonlyMap<string, CodexCollabTask>;
 }
 
 export interface CodexUiMapping {
@@ -115,6 +125,7 @@ export function createCodexUiState(): CodexUiMapperState {
     reasonings: new Map(),
     planFromNotification: false,
     reviewItemId: null,
+    collabTasks: new Map(),
   };
 }
 
@@ -135,8 +146,7 @@ export function codexSessionStarted(threadId: string, state: CodexUiMapperState)
 /** Fold one parsed JSON-RPC frame into v2 events. Never throws. */
 export function mapCodexNotification(frame: unknown, state: CodexUiMapperState): CodexUiMapping {
   if (!isRecord(frame) || typeof frame.method !== 'string') return { events: [], state };
-  // A frame with both `method` and `id` is a server→client REQUEST (the
-  // approval prompts) — reserved for `permission.requested` later.
+  // Server requests are answered by CodexSession, not the notification mapper.
   if (frame.id !== undefined) return { events: [], state };
   const params = isRecord(frame.params) ? frame.params : {};
   switch (frame.method) {
@@ -342,6 +352,11 @@ function mapItemLifecycle(
       : type === 'reasoning'
         ? reasoningItem(raw, id, state)
         : toolItem(raw, id, type, eventType, state);
+  if (type === 'collabAgentToolCall' || type === 'collabToolCall') {
+    return mapCollabToolCall(raw, id, eventType, state);
+  }
+  const parentItemId = collabParentItemId(params, state);
+  if (parentItemId !== undefined) item.parentItemId = parentItemId;
   const events: UiEvent[] = [{ type: eventType, item }];
 
   // Track live ids (for delta synthesis) and drop bookkeeping on completion.
@@ -359,6 +374,80 @@ function mapItemLifecycle(
   }
   if (state.knownItems.has(id)) return { events, state };
   return { events, state: { ...state, knownItems: new Set(state.knownItems).add(id) } };
+}
+
+/** A spawn creates one task row; later send/wait/resume/close calls update the
+ * same row through receiver-thread correlation instead of creating duplicates. */
+function mapCollabToolCall(
+  raw: Record<string, unknown>,
+  id: string,
+  eventType: ItemEventType,
+  state: CodexUiMapperState,
+): CodexUiMapping {
+  const operation = str(raw.tool) ?? str(raw.operation);
+  const receiverIds = stringArray(raw.receiverThreadIds ?? raw.receiver_thread_ids);
+  const isSpawn = operation === 'spawnAgent' || operation === 'spawn_agent';
+  if (isSpawn) {
+    const prompt = str(raw.prompt);
+    const model = str(raw.model);
+    const task: CodexCollabTask = { itemId: id, ...(prompt ? { prompt } : {}), ...(model ? { model } : {}) };
+    let collabTasks = state.collabTasks;
+    if (receiverIds.length > 0) {
+      const next = new Map(state.collabTasks);
+      for (const threadId of receiverIds) next.set(threadId, task);
+      collabTasks = next;
+    }
+    const status = collabStatus(raw, receiverIds, eventType);
+    const mappedType: ItemEventType = eventType === 'item.started'
+      ? eventType
+      : status === 'running' || status === 'pending' ? 'item.updated' : 'item.completed';
+    return {
+      events: [{ type: mappedType, item: collabTaskItem(task, status) }],
+      state: { ...state, collabTasks },
+    };
+  }
+
+  const tasks = new Map<string, CodexCollabTask>();
+  for (const threadId of receiverIds) {
+    const task = state.collabTasks.get(threadId);
+    if (task) tasks.set(task.itemId, task);
+  }
+  if (tasks.size === 0) return { events: [], state };
+  const status = collabStatus(raw, receiverIds, eventType);
+  const mappedType: ItemEventType = status === 'running' || status === 'pending' ? 'item.updated' : 'item.completed';
+  return {
+    events: [...tasks.values()].map((task) => ({ type: mappedType, item: collabTaskItem(task, status) })),
+    state,
+  };
+}
+
+function collabTaskItem(task: CodexCollabTask, status: ToolStatus): UiToolItem {
+  const display = toolDisplay('Task', task.prompt ? { description: task.prompt } : undefined);
+  const input: Record<string, unknown> = {};
+  if (task.prompt) input.prompt = task.prompt;
+  if (task.model) input.model = task.model;
+  return {
+    kind: 'tool', id: task.itemId, name: 'spawnAgent', toolKind: 'task', title: display.title, status,
+    ...(Object.keys(input).length > 0 ? { input } : {}),
+  };
+}
+
+function collabStatus(raw: Record<string, unknown>, receiverIds: string[], eventType: ItemEventType): ToolStatus {
+  const states = isRecord(raw.agentsStates) ? raw.agentsStates
+    : isRecord(raw.agents_states) ? raw.agents_states : undefined;
+  const statuses = receiverIds
+    .map((threadId) => (states && isRecord(states[threadId]) ? states[threadId].status : undefined))
+    .filter((status): status is string => typeof status === 'string');
+  if (statuses.some((status) => status === 'errored' || status === 'notFound' || status === 'not_found')) return 'failed';
+  if (statuses.some((status) => status === 'interrupted')) return 'declined';
+  if (statuses.length > 0 && statuses.every((status) => status === 'completed' || status === 'shutdown')) return 'completed';
+  if (statuses.some((status) => status === 'running' || status === 'pendingInit' || status === 'pending_init')) return 'running';
+  return toolStatus(raw, eventType);
+}
+
+function collabParentItemId(params: Record<string, unknown>, state: CodexUiMapperState): string | undefined {
+  const threadId = threadIdOf(params);
+  return threadId ? state.collabTasks.get(threadId)?.itemId : undefined;
 }
 
 /**
@@ -477,6 +566,7 @@ function longer(a: string | undefined, b: string | undefined): string | undefine
  *  status from the lifecycle phase it arrived in. */
 const STATUS_MAP: Readonly<Record<string, ToolStatus>> = {
   inProgress: 'running',
+  in_progress: 'running',
   completed: 'completed',
   failed: 'failed',
   declined: 'declined',
@@ -629,7 +719,10 @@ function mapDelta(
   const events: UiEvent[] = [];
   let knownItems: ReadonlySet<string> = state.knownItems;
   if (!knownItems.has(itemId)) {
-    events.push({ type: 'item.started', item: synthesizedItem(itemId, field) });
+    const item = synthesizedItem(itemId, field);
+    const parentItemId = collabParentItemId(params, state);
+    if (parentItemId !== undefined) item.parentItemId = parentItemId;
+    events.push({ type: 'item.started', item });
     knownItems = new Set(knownItems).add(itemId);
   }
   events.push({ type: 'item.delta', itemId, field, delta });
@@ -692,6 +785,10 @@ function str(value: unknown): string | undefined {
 
 function num(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string' && entry !== '') : [];
 }
 
 function turnIdOf(params: Record<string, unknown>): string | undefined {

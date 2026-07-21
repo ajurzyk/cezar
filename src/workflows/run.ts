@@ -38,6 +38,7 @@ import { autoNamingActive, generateRunName, liveTitleUpdatesEnabled, postValidat
 import { reviewGateEnabled } from '../runs/review-gate.js';
 import { WorkspaceSemaphore } from '../workspace/semaphore.js';
 import { UiEventSink } from '../runs/ui-event-sink.js';
+import type { UiEvent } from '../core/ui-events.js';
 import { chainStepNote, DEFAULT_ALLOWED_TOOLS, stepKind, type WorkflowDef, type WorkflowStepDef } from './types.js';
 
 const CHECK_OUTPUT_CAP = 20_000;
@@ -1087,7 +1088,7 @@ export class RunManager {
         timeoutMs: 0,
       },
       onEvent,
-      { onUiEvent: (event) => sink.handle(event) },
+      { onUiEvent: (event) => this.handleRunnerUiEvent(runId, state, sink, event) },
     );
     state.session = session;
     state.currentStepId = stepId;
@@ -1597,7 +1598,10 @@ export class RunManager {
           timeoutMs: interactive ? 0 : undefined,
         },
         onEvent,
-        { autoEndAfterFirstTurn: !interactive, onUiEvent: (event) => sink.handle(event) },
+        {
+          autoEndAfterFirstTurn: !interactive,
+          onUiEvent: (event) => this.handleRunnerUiEvent(runId, state, sink, event),
+        },
       );
     } catch (err) {
       return err instanceof Error ? err.message : String(err);
@@ -1641,6 +1645,18 @@ export class RunManager {
       persist: (event) => this.store.appendEvent(runId, { ...event, stepId }),
       emitLive: (event) => this.store.emitEphemeral(runId, { ...event, stepId }),
     });
+  }
+
+  /** Native backend asks arrive before turn-end. Persist and park immediately
+   * so the cockpit shows attention and the run releases its workspace slot. */
+  private handleRunnerUiEvent(runId: string, state: ActiveRun, sink: UiEventSink, event: UiEvent): void {
+    sink.handle(event);
+    if (event.type !== 'ask.requested' || state.cancelled) return;
+    this.clearIdleTimer(state);
+    this.waiting.add(runId);
+    this.store.updateRun(runId, { status: 'waiting', activity: undefined });
+    if (state.currentStepId) this.store.updateStep(runId, state.currentStepId, { status: 'waiting' });
+    void this.pump();
   }
 
   /**
