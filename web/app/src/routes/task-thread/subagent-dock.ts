@@ -135,7 +135,13 @@ export function collectSubagents(turns: ThreadTurn[], runIsTerminal = false): Su
   //  - **Whole turns, never individual items.** Carrying only the *unsettled* items would make
   //    a row vanish the instant it finished and the denominator count DOWN (3 → 2 → 1, never
   //    reaching N/N), and a `failed` agent would disappear instead of keeping its glyph. The
-  //    spec asks for stable rows and a monotonic odometer.
+  //    spec asks for stable rows and an odometer that only grows.
+  //
+  //    The guarantee this buys is monotonicity **within a fan-out episode**, not across the
+  //    whole run: when the carried turn finally settles in full, the walk stops carrying it and
+  //    the dock re-scopes to the current fan-out (`1/3` → `0/1`). That step is deliberate — the
+  //    earlier fan-out really is history at that point — and it happens at a turn boundary
+  //    rather than mid-flight, which is what made the per-item version incoherent.
   //  - **Bounded by the last finished fan-out.** Walking the whole transcript would let a
   //    single stranded agent (overlapping opencode subtasks can leave one `running` forever —
   //    a known mapper limitation) inject itself into every later fan-out, pin the dock open
@@ -209,7 +215,23 @@ export function subagentCounts(agents: SubagentSummary[]): { done: number; total
   }
 }
 
-/** What the collapsed head names: the first agent still working, else the first row. */
+/**
+ * The one-line readout for an agent, used by BOTH the collapsed head and the expanded row so
+ * the two can never tell different stories about the same agent. A stalled agent is not
+ * starting — the run ended under it, and the transcript will never move again.
+ */
+export function subagentActivityText(agent: SubagentSummary): string {
+  return agent.activity ?? (agent.stalled === true ? 'never finished' : 'starting…')
+}
+
+/**
+ * What the collapsed head names: the first agent still working, else the first row.
+ *
+ * Deliberately NOT stalled-aware: `stalled` is only ever set when the run is terminal, and on a
+ * terminal run every agent is either settled or stalled — so a "skip the stalled ones" filter
+ * could never change the outcome. The head and the row are kept consistent by both rendering
+ * `subagentActivityText`, not by picking a different agent.
+ */
 export function activeSubagent(agents: SubagentSummary[]): SubagentSummary | undefined {
   return agents.find((agent) => !isSettled(agent.status)) ?? agents[0]
 }

@@ -21,7 +21,8 @@
 | 3 | 3.1 | e2e smoke, opencode mapper hardening, mockup sync | done | 06436c3 |
 | 3 | 3.2-review-fix | Sheet outlives the dock's Q6 visibility rule | done | bd35f32 |
 | 3 | 3.3-review-fix | Codex latch leaks; anchor drops live agents; plan children; follow-tail | done | 73f15c7 |
-| 3 | 3.4-review-fix | Turn-granular bounded carry-over; stalled agents on terminal runs | done | pending |
+| 3 | 3.4-review-fix | Turn-granular bounded carry-over; stalled agents on terminal runs | done | 99c2fb1 |
+| 3 | 3.5-review-fix | `review` counts as terminal; head/row share one activity string | done | pending |
 
 ## Goal
 

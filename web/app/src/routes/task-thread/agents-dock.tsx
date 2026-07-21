@@ -4,7 +4,7 @@ import { useState } from 'react'
 import type { ToolStatus } from '@/protocol/ui-events'
 import { cn } from '@/lib/utils'
 
-import { activeSubagent, subagentCounts, type SubagentSummary } from './subagent-dock'
+import { activeSubagent, subagentActivityText, subagentCounts, type SubagentSummary } from './subagent-dock'
 
 /**
  * The Agents dock (spec `.ai/specs/2026-07-20-grouped-subagent-display.md` §"Agents dock",
@@ -73,7 +73,7 @@ export function AgentsDock({
         </span>
         {!open && active !== undefined ? (
           <span data-slot="agents-current" className="min-w-0 truncate text-muted-foreground">
-            — {active.activity ?? active.title}
+            — {subagentActivityText(active)}
           </span>
         ) : null}
         <ChevronDownIcon
@@ -108,9 +108,7 @@ function AgentRow({ agent, onSelect }: { agent: SubagentSummary; onSelect?: (id:
         </span>
       ) : null}
       <span data-slot="agent-activity" className="min-w-0 flex-1 truncate text-muted-foreground">
-        {/* A stalled agent is not starting — the run ended under it. Say so rather than
-            leaving a hopeful "starting…" on a transcript that will never move again. */}
-        {agent.activity ?? (agent.stalled === true ? 'never finished' : 'starting…')}
+        {subagentActivityText(agent)}
       </span>
       <span data-slot="agent-tools" className="shrink-0 text-muted-foreground tabular-nums">
         {agent.toolCalls} {agent.toolCalls === 1 ? 'tool' : 'tools'}

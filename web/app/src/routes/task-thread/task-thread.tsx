@@ -136,11 +136,18 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
   const planTally = plan !== undefined && plan.length > 0 ? planCounts(plan) : undefined
   // The Agents dock's data: the current fan-out's sub-agents, or [] when there is none to
   // show (#474). Derived from the same reduced turns the thread renders — no new subscription.
-  // A terminal run can never settle its in-flight items — nothing in the reducer rewrites a
-  // `running` item on `session.ended`, so a cancelled fan-out stays `running` in the persisted
-  // stream forever. Without this, reopening a cancelled run pulses `Agents · 0/1` above a dead
+  // The legacy session-open rule (web/app.js `updateDetail`): the composer can deliver while
+  // the engine owns a live session — running queues the message, waiting answers it.
+  const sessionOpen = run.status === 'running' || run.status === 'waiting'
+  // A closed session can never settle its in-flight items — nothing in the reducer rewrites a
+  // `running` item on `session.ended`, so an interrupted fan-out stays `running` in the
+  // persisted stream forever. Without this, reopening it pulses `Agents · 0/1` above a dead
   // transcript for good.
-  const runIsTerminal = run.status === 'done' || run.status === 'failed' || run.status === 'cancelled'
+  //
+  // Derived from `sessionOpen` rather than enumerated, so it cannot drift when a status is
+  // added: anything that is neither live nor still queued is closed. `review` matters most —
+  // it is where this pipeline's runs normally END, and `threadFooter` already calls it closed.
+  const runIsTerminal = !sessionOpen && run.status !== 'queued'
   const agents = useMemo(() => collectSubagents(thread.turns, runIsTerminal), [thread.turns, runIsTerminal])
   // The drill-down's whole state: which agent is open. Ephemeral by design (spec Q2/Q5) —
   // sub-agents have no stable identity outside their run, so there is nothing to persist.
@@ -162,9 +169,6 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
     () => (openAgentId === undefined ? [] : subagentChildren(thread.turns, openAgentId)),
     [thread.turns, openAgentId],
   )
-  // The legacy session-open rule (web/app.js `updateDetail`): the composer can deliver while
-  // the engine owns a live session — running queues the message, waiting answers it.
-  const sessionOpen = run.status === 'running' || run.status === 'waiting'
   const sendMessage = useSendMessage(run.id)
 
   const rows = useMemo(() => buildThreadRows(run, thread), [run, thread])

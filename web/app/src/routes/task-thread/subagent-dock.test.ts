@@ -6,6 +6,7 @@ import {
   activeSubagent,
   collectSubagents,
   findSubagent,
+  subagentActivityText,
   subagentChildren,
   subagentCounts,
 } from './subagent-dock'
@@ -151,6 +152,24 @@ describe('collectSubagents — Q6 visibility', () => {
   // A stranded agent (overlapping opencode subtasks can leave one `running` forever) must not
   // follow the user around for the rest of the session, pinning the dock open and hijacking
   // the collapsed head with its stale activity.
+  // Documented re-scope, pinned so it stays a decision: the odometer is monotonic WITHIN a
+  // fan-out episode, and steps back at the turn boundary when the earlier fan-out becomes
+  // history in full. `1/3` → `0/1` is intended; `1/3` → `0/2` mid-flight was the round-2 bug.
+  it('re-scopes to the current fan-out once the carried turn settles in full', () => {
+    const partway = collectSubagents([
+      turn('turn-1', [task('a', 'completed'), task('b', 'running')]),
+      turn('turn-2', [task('c', 'running')]),
+    ])
+    expect(subagentCounts(partway)).toEqual({ done: 1, total: 3 })
+
+    const settled = collectSubagents([
+      turn('turn-1', [task('a', 'completed'), task('b', 'completed')]),
+      turn('turn-2', [task('c', 'running')]),
+    ])
+    expect(settled.map((agent) => agent.id)).toEqual(['c'])
+    expect(subagentCounts(settled)).toEqual({ done: 0, total: 1 })
+  })
+
   it('does not resurrect a zombie from before the last finished fan-out', () => {
     const agents = collectSubagents([
       turn('turn-1', [task('zombie', 'running')]),
@@ -363,6 +382,23 @@ describe('activeSubagent', () => {
 
   it('is undefined with no agents', () => {
     expect(activeSubagent([])).toBeUndefined()
+  })
+
+  // The head and the expanded row must never tell different stories about one agent: the row
+  // said "never finished" while the head fell back to the title. Both now read one helper.
+  it('reads a stalled agent the same way its own row does', () => {
+    const agents = collectSubagents([turn('turn-1', [task('a', 'running')])], true)
+    const active = activeSubagent(agents)!
+    expect(active.id).toBe('a')
+    expect(active.stalled).toBe(true)
+    expect(subagentActivityText(active)).toBe('never finished')
+  })
+
+  it('prefers a real activity line over either placeholder', () => {
+    expect(subagentActivityText({ id: 'a', title: 't', status: 'running', toolCalls: 1, activity: 'Ran npm test' })).toBe(
+      'Ran npm test',
+    )
+    expect(subagentActivityText({ id: 'a', title: 't', status: 'running', toolCalls: 0 })).toBe('starting…')
   })
 })
 
