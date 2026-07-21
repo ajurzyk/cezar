@@ -263,17 +263,17 @@ describe('request-origin guard (#426)', () => {
     expect(res.status).toBe(403);
   });
 
-  it('leaves /api/health open cross-origin (the bookmarklet discovery probe) → 200', async () => {
+  it('leaves /api/health open cross-origin on a loopback Host (the bookmarklet discovery probe) → 200', async () => {
     const res = await app.request('/api/health', {
-      headers: { host: 'evil.tld', origin: 'https://github.com' },
+      headers: { host: LOOPBACK, origin: 'https://github.com' },
     });
     expect(res.status).toBe(200);
   });
 
-  it('answers the /api/health CORS preflight regardless of Host → 204', async () => {
+  it('answers the /api/health CORS preflight on a loopback Host → 204', async () => {
     const res = await app.request('/api/health', {
       method: 'OPTIONS',
-      headers: { host: 'evil.tld', origin: 'https://github.com' },
+      headers: { host: LOOPBACK, origin: 'https://github.com' },
     });
     expect(res.status).toBe(204);
     expect(res.headers.get('access-control-allow-origin')).toBe('*');

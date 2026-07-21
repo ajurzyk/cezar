@@ -867,10 +867,6 @@ export function createApp(deps: ServerDeps): Hono {
   const isHostedMode = () =>
     !resolveCapabilities(process.env, bindHost).localHandoff;
   app.use("/api/*", async (c, next) => {
-    // /api/health stays wide open: the bookmarklets probe it cross-origin from
-    // github.com to discover which local port serves which repo.
-    if (c.req.path === "/api/health") return next();
-
     const hostName = hostnameOfHost(c.req.header("host"));
     // Strict twin of `isLoopbackHost`: a *missing* Host is untrusted here (an
     // absent header is not the "we defaulted to the loopback bind" case), and
@@ -884,6 +880,10 @@ export function createApp(deps: ServerDeps): Hono {
         403,
       );
     }
+
+    // /api/health stays CORS-open for bookmarklet discovery, but its Host is
+    // still checked above: cross-origin is legitimate, DNS rebinding is not.
+    if (c.req.path === "/api/health") return next();
 
     if (MUTATING_METHODS.has(c.req.method)) {
       const origin = c.req.header("origin");
