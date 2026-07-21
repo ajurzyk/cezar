@@ -295,6 +295,7 @@ describe('POST /api/projects/checkout', () => {
   const savedHome = process.env.CEZ_HOME;
   const savedDryRun = process.env.CEZ_DRY_RUN;
   const savedProjectsDir = process.env.CEZ_PROJECTS_DIR;
+  const savedRemote = process.env.CEZ_REMOTE;
   let home: string;
   let repoRoot: string;
   let checkoutRoot: string;
@@ -307,6 +308,7 @@ describe('POST /api/projects/checkout', () => {
     process.env.CEZ_HOME = home;
     process.env.CEZ_DRY_RUN = '1';
     delete process.env.CEZ_PROJECTS_DIR;
+    delete process.env.CEZ_REMOTE;
     store = RunStore.open(join(repoRoot, '.ai/cezar'));
     clearProjectProbeCache();
   });
@@ -320,6 +322,8 @@ describe('POST /api/projects/checkout', () => {
     else process.env.CEZ_DRY_RUN = savedDryRun;
     if (savedProjectsDir === undefined) delete process.env.CEZ_PROJECTS_DIR;
     else process.env.CEZ_PROJECTS_DIR = savedProjectsDir;
+    if (savedRemote === undefined) delete process.env.CEZ_REMOTE;
+    else process.env.CEZ_REMOTE = savedRemote;
   });
 
   const makeApp = (over: Partial<ServerDeps> = {}) =>
@@ -339,10 +343,7 @@ describe('POST /api/projects/checkout', () => {
     });
     return {
       status: res.status,
-      body: (await res.json()) as Partial<RegisterProjectResponse> & {
-        error?: string;
-        reason?: string;
-      },
+      body: (await res.json()) as Partial<RegisterProjectResponse> & { error?: string; reason?: string },
     };
   };
 

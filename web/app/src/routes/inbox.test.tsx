@@ -114,6 +114,7 @@ function stubFetch(
       if (method === 'GET' && path === '/api/runs') return jsonResponse([RUN_1])
       // The runner/model pills (#401) read the host's backends and the per-runner defaults.
       if (method === 'GET' && path === '/api/health') return jsonResponse(health(backends))
+      if (method === 'GET' && path === '/api/models?runner=codex') return jsonResponse({ runner: 'codex', models: [{ id: 'gpt-future', label: 'gpt-future', description: 'Newest' }], source: 'live', stale: false })
       if (method === 'GET' && path === '/api/config') return jsonResponse({ defaultModels })
       if (method === 'DELETE' && path.startsWith('/api/todos/')) {
         const id = path.slice('/api/todos/'.length)
@@ -333,11 +334,11 @@ describe('Run — backend selection (#401)', () => {
     await waitFor(() => expect(card.querySelector('[data-slot="runner-pill"]')).not.toBeNull())
 
     await pick(card, 'runner-pill', 'codex')
-    await pick(card, 'model-pill', 'gpt-5.1-codex')
+    await pick(card, 'model-pill', 'gpt-future')
     fireEvent.click(card.querySelector('[data-action="todo-run"]')!)
 
     await waitFor(() =>
-      expect(startBody(sent, 't1')).toEqual({ runner: 'codex', model: 'gpt-5.1-codex' }),
+      expect(startBody(sent, 't1')).toEqual({ runner: 'codex', model: 'gpt-future' }),
     )
   })
 

@@ -16,6 +16,7 @@ import { apiRequest } from './loopback-request.testkit.js';
  * still passes — and the ui-state passthrough policy.
  */
 describe('request validation bounds (#429)', () => {
+  const savedRemote = process.env.CEZ_REMOTE;
   let repoRoot: string;
   let store: RunStore;
   let app: Hono;
@@ -23,6 +24,7 @@ describe('request validation bounds (#429)', () => {
   let continueText: string | undefined;
 
   beforeEach(() => {
+    delete process.env.CEZ_REMOTE;
     repoRoot = mkdtempSync(join(tmpdir(), 'cez-reqval-'));
     store = RunStore.open(join(repoRoot, '.ai/cezar'));
     captured = undefined;
@@ -45,6 +47,8 @@ describe('request validation bounds (#429)', () => {
   afterEach(() => {
     store.flush();
     rmSync(repoRoot, { recursive: true, force: true });
+    if (savedRemote === undefined) delete process.env.CEZ_REMOTE;
+    else process.env.CEZ_REMOTE = savedRemote;
   });
 
   const postJson = (path: string, body: unknown) =>

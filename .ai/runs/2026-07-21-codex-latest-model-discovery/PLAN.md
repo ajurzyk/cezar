@@ -15,8 +15,8 @@ Source spec: .ai/specs/2026-07-21-codex-latest-model-discovery.md
 | 1 | 1.4 | Expose the workspace model-catalog API | done | 00b956d |
 | 2 | 2.1 | Add the shared web model-catalog query | done | 4279637 |
 | 2 | 2.2 | Resolve dynamic models across every picker | done | 0a5362d |
-| 2 | 2.3 | Render accessible catalog status rows | done | pending |
-| 2 | 2.4 | Remove stale presets and complete UI coverage | todo | — |
+| 2 | 2.3 | Render accessible catalog status rows | done | f7688fb |
+| 2 | 2.4 | Remove stale presets and complete UI coverage | done | pending |
 
 ## Goal
 
