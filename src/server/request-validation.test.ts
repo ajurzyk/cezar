@@ -32,8 +32,10 @@ describe('request validation bounds (#429)', () => {
         captured = input;
         return store.createRun({ title: 't', workflow: '(planned)', task: input.task, steps: [] });
       },
-      continueRun: (_id: string, text?: string) => {
-        continueText = text;
+      // Options object since #401 (runner/model override rides alongside the resume text);
+      // these bounds tests still only care about `text`.
+      continueRun: (_id: string, opts: { text?: string } = {}) => {
+        continueText = opts.text;
         return { ok: true };
       },
     } as unknown as RunManager;

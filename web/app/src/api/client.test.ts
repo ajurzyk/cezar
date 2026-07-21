@@ -18,6 +18,7 @@ import {
   getRunHandoff,
   getRuns,
   getSkills,
+  getSkillsWhenReady,
   getTodos,
   getUiState,
   getWorkflows,
@@ -27,9 +28,11 @@ import {
   putUiState,
   refreshSkills,
   removeTodo,
+  runFileRawUrl,
   sendMessage,
   startTodo,
 } from './client'
+import { setApiScope } from './project-scope'
 
 /** The one seam under test: every call must go through `fetch` and nothing else. */
 const fetchMock = vi.fn<typeof fetch>()
@@ -82,6 +85,12 @@ describe('request shapes', () => {
     { name: 'getUiState', call: () => getUiState(), path: '/api/ui-state', method: 'GET' },
     { name: 'getWorkflows', call: () => getWorkflows(), path: '/api/workflows', method: 'GET' },
     { name: 'getSkills', call: () => getSkills(), path: '/api/skills', method: 'GET' },
+    {
+      name: 'getSkillsWhenReady',
+      call: () => getSkillsWhenReady(),
+      path: '/api/skills?wait=1',
+      method: 'GET',
+    },
     { name: 'refreshSkills', call: () => refreshSkills(), path: '/api/skills/refresh', method: 'POST' },
     { name: 'getTodos', call: () => getTodos(), path: '/api/todos', method: 'GET' },
     { name: 'getRepo', call: () => getRepo(), path: '/api/repo', method: 'GET' },
@@ -148,10 +157,17 @@ describe('request shapes', () => {
     },
     {
       name: 'continueRun (with text)',
-      call: () => continueRun('run-1', 'keep going'),
+      call: () => continueRun('run-1', { text: 'keep going' }),
       path: '/api/runs/run-1/continue',
       method: 'POST',
       body: { text: 'keep going' },
+    },
+    {
+      name: 'continueRun (runner + model override, #401)',
+      call: () => continueRun('run-1', { runner: 'codex', model: 'gpt-5.1-codex' }),
+      path: '/api/runs/run-1/continue',
+      method: 'POST',
+      body: { runner: 'codex', model: 'gpt-5.1-codex' },
     },
     { name: 'deleteRun', call: () => deleteRun('run-1'), path: '/api/runs/run-1', method: 'DELETE' },
     // Inbox actions (R6 1.2): the exact legacy endpoints, ids URL-encoded like every other path.
@@ -161,10 +177,27 @@ describe('request shapes', () => {
     // omitted (the case above) sends none at all — the pre-#413 call shape.
     {
       name: 'startTodo (with prompt)',
-      call: () => startTodo('todo/1', 'Also add tests.'),
+      call: () => startTodo('todo/1', { prompt: 'Also add tests.' }),
       path: '/api/todos/todo%2F1/start',
       method: 'POST',
       body: { prompt: 'Also add tests.' },
+    },
+    {
+      // #401: an Inbox card that picked a backend. No pick → the bodyless POST above, unchanged.
+      name: 'startTodo (runner + model override, #401)',
+      call: () => startTodo('todo/1', { runner: 'codex', model: 'gpt-5.1-codex' }),
+      path: '/api/todos/todo%2F1/start',
+      method: 'POST',
+      body: { runner: 'codex', model: 'gpt-5.1-codex' },
+    },
+    {
+      // Auto ('') and a single-backend host are filtered out by the caller, so a body that
+      // reaches the wire never carries an empty model or a redundant runner.
+      name: 'startTodo (model only, #401)',
+      call: () => startTodo('todo/1', { model: 'opus' }),
+      path: '/api/todos/todo%2F1/start',
+      method: 'POST',
+      body: { model: 'opus' },
     },
     {
       name: 'openRunInCli',
@@ -214,11 +247,53 @@ describe('request shapes', () => {
     expect(lastCall().path).toBe('/api/runs/a%20b%2F..%2Fc/cancel')
   })
 
+  it('hands out the byte-identical legacy raw-image URL when unscoped', () => {
+    // The one URL this module builds without fetching it (an <img> loads it) — same invariant
+    // as every case above: unscoped means exactly the pre-multi-project path.
+    expect(runFileRawUrl('run-1', 'shots/final.png')).toBe('/api/runs/run-1/files?path=shots%2Ffinal.png&raw=1')
+  })
+
   it('forwards an abort signal to fetch', async () => {
     reply([])
     const controller = new AbortController()
     await getRuns({ signal: controller.signal })
     expect((fetchMock.mock.calls.at(-1)?.[1] as RequestInit).signal).toBe(controller.signal)
+  })
+})
+
+describe('project scope (multi-project spec, step 3.1)', () => {
+  // NB the WHOLE unscoped table above is this feature's other half: the critical assertion is
+  // that with no scope set, every path stays byte-identical — those cases prove it by never
+  // touching the scope at all.
+  afterEach(() => {
+    setApiScope(null)
+  })
+
+  it('prefixes every request path with /api/p/<id> once a scope is active', async () => {
+    setApiScope('proj-a')
+
+    reply({ ok: true })
+    await getRuns()
+    expect(lastCall().path).toBe('/api/p/proj-a/runs')
+
+    reply({ ok: true })
+    await cancelRun('run-1')
+    expect(lastCall().path).toBe('/api/p/proj-a/runs/run-1/cancel')
+
+    reply({ ok: true })
+    await getGithub({ limit: 5 })
+    expect(lastCall().path).toBe('/api/p/proj-a/github?limit=5')
+
+    // The non-send() site scopes the same way — the <img> URL it hands out must hit the
+    // scoped route or another project's cockpit would render this project's bytes as a 404.
+    expect(runFileRawUrl('run-1', 'x.png')).toBe('/api/p/proj-a/runs/run-1/files?path=x.png&raw=1')
+  })
+
+  it('keeps workspace-level routes unprefixed under a scope — health is single-mount', async () => {
+    setApiScope('proj-a')
+    reply({ version: '0.0.0' })
+    await getHealth()
+    expect(lastCall().path).toBe('/api/health')
   })
 })
 

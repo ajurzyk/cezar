@@ -2,10 +2,17 @@ import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { parseAskMarker, stripAskMarker, type AskRequest } from '../core/ask.js';
 import { type AgentSession } from '../core/claude-cli-runner.js';
 import { onUsage, registerRunProcess, unregisterRunProcess, type ProcessUsage } from '../core/process-usage.js';
 import { createRunner } from '../core/runner-factory.js';
 import type { RunnerId } from '../core/agent-runner.js';
+import { modelConflictsWithRunner } from '../core/model-presets.js';
+import {
+  ModelIdentityError,
+  formatModelIdentity,
+  normalizeModelForBackend,
+} from '../core/model-identity.js';
 import {
   HANDOFF_ONLY_INSTRUCTIONS,
   HANDOFF_INSTRUCTIONS,
@@ -18,7 +25,8 @@ import { todosPath } from '../todos.js';
 import type { AgentEvent, ContentBlock } from '../core/agent-runner.js';
 import { discoverSkills, type Skill } from '../skills.js';
 import { materializeSkillDir } from '../skills-remote.js';
-import { loadConfig } from '../config.js';
+import { seedAgentConfigLocalLayer } from '../agent-config/seed.js';
+import { loadConfig, resolveWorktreeRetention } from '../config.js';
 import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff, worktreeShortstat } from '../git-worktree.js';
 import { getRepoInfo } from '../server/git.js';
 import { loadWorkflows } from './load.js';
@@ -28,6 +36,7 @@ import { extractTaskRefs, refineTaskRefs, titleRefNumber } from '../runs/task-re
 import { parseTaskMarkers, stripTaskMarkers } from '../runs/task-markers.js';
 import { autoNamingActive, generateRunName, liveTitleUpdatesEnabled, postValidateTitle } from '../runs/auto-name.js';
 import { reviewGateEnabled } from '../runs/review-gate.js';
+import { WorkspaceSemaphore } from '../workspace/semaphore.js';
 import { UiEventSink } from '../runs/ui-event-sink.js';
 import { chainStepNote, DEFAULT_ALLOWED_TOOLS, stepKind, type WorkflowDef, type WorkflowStepDef } from './types.js';
 
@@ -63,6 +72,13 @@ function stripDoneMarker(text: string): string {
  *  `stripDoneMarker`; same delta-backend caveat). */
 function stripMonitoringMarker(text: string): string {
   return text.replace(/\s*CEZ:MONITORING\s*$/, '');
+}
+/** Emit the v2 `ask.requested` event for a parsed marker (the cockpit renders
+ *  it as an ask card, #473). Returns the minted request id. */
+function emitAskRequested(sink: UiEventSink, ask: AskRequest): string {
+  const requestId = randomUUID();
+  sink.handle({ type: 'ask.requested', requestId, questions: ask.questions });
+  return requestId;
 }
 /** Periodic "cezar autosave" commit in the task worktree (spec 006). */
 export const AUTOSAVE_INTERVAL_MS = 90_000;
@@ -208,10 +224,13 @@ const VARIANT_HINTS: Record<string, string | undefined> = {
  * relay live to the GUI). No GitHub choreography — agent steps and shell
  * checks with bounded retry loops, plus live sessions: the last agent step
  * stays open for follow-ups (`waiting`) until "finish", idle timeout, or
- * cancel. Runs queue behind `maxParallel` slots and each run executes in its
+ * cancel. Runs queue behind the workspace-wide `maxParallel` slots (the shared
+ * `WorkspaceSemaphore`, spec 2026-07-20 step 2.5) and each run executes in its
  * own git worktree on a `cez/<id8>` branch (spec 006), autosave-committed at
  * turn end and before a draft PR — plus every 90 s when opted in via
- * CEZ_AUTOSAVE=1 (#471). The user's working tree is never touched.
+ * CEZ_AUTOSAVE=1 (#471). Each autosave records its trigger in the commit
+ * subject, so the always-on flushes are not mistaken for the opt-in timer.
+ * The user's working tree is never touched.
  */
 export class RunManager {
   private readonly active = new Map<string, ActiveRun>();
@@ -242,26 +261,81 @@ export class RunManager {
    *  triggers one pause, not a burst. Cleared in dropActive when the run leaves the registry. */
   private readonly memoryPausing = new Set<string>();
 
+  /** Unsubscribe handle for the constructor's `onUsage` subscription — released
+   *  by dispose() so a torn-down manager stops receiving sampler ticks. */
+  private readonly offUsage: () => void;
+
+  /** The workspace-wide parallel-cap semaphore + cached resource config
+   *  (spec 2026-07-20, step 2.5). Boot constructs ONE and every manager shares
+   *  it; the private fallback keeps single-manager callers and tests working. */
+  private readonly semaphore: WorkspaceSemaphore;
+
+  /** Unregister handle for this manager's semaphore membership — released by
+   *  dispose() so a torn-down project stops counting against the cap. */
+  private readonly offSemaphore: () => void;
+
   constructor(
     private readonly store: RunStore,
     private readonly repoRoot: string,
+    options: { semaphore?: WorkspaceSemaphore } = {},
   ) {
     this.dataDir = join(repoRoot, '.ai/cezar');
+    this.semaphore = options.semaphore ?? new WorkspaceSemaphore();
+    this.offSemaphore = this.semaphore.register({
+      busySlots: () => this.busySlots(),
+      pump: () => void this.pump(),
+    });
     // Memory guard (#memory-guard): the shared process-tree sampler already ticks ~every 2 s for
     // the runs table; piggyback on it to enforce the per-task memory ceiling.
-    onUsage((snapshot) => void this.enforceMemoryLimit(snapshot));
+    this.offUsage = onUsage((snapshot) => void this.enforceMemoryLimit(snapshot));
   }
 
   /**
-   * Pause any active run whose whole process tree exceeds `config.memoryLimitMb`, freeing its
-   * slot so the queue advances (#memory-guard). "Pause" closes the session — freeing the tree's
+   * Release everything this manager owns without touching run records
+   * (multi-project workspace, spec 2026-07-20: a removed project's context is
+   * torn down while the process lives on). Unsubscribes the shared usage
+   * sampler — before dispose() existed that subscription lived for the whole
+   * process — clears every per-run idle/autosave timer, releases any held
+   * repo-root locks, and empties the queued state so nothing fires later.
+   * Live sessions are NOT ended here: run lifecycle stays the caller's policy;
+   * dispose only guarantees the manager makes no further moves on its own.
+   */
+  dispose(): void {
+    this.offUsage();
+    this.offSemaphore();
+    for (const state of this.active.values()) {
+      this.clearIdleTimer(state);
+      this.clearAutosaveTimer(state);
+      state.releaseRepoRoot?.();
+      state.releaseRepoRoot = undefined;
+    }
+    this.active.clear();
+    this.waiting.clear();
+    this.starting.clear();
+    this.queue.length = 0;
+    this.pendingJobs.clear();
+    this.memoryPausing.clear();
+    this.lastNamerKey.clear();
+  }
+
+  /**
+   * Pause any active run whose whole process tree exceeds the WORKSPACE
+   * `resources.memoryLimitMb`, freeing its slot so the queue advances
+   * (#memory-guard). "Pause" closes the session — freeing the tree's
    * memory — and leaves the run resumable via Continue; a loud warning explains why. No-op when
    * no limit is set or the sampler has no data (e.g. `ps`/PowerShell unavailable).
    */
   private async enforceMemoryLimit(snapshot: Record<string, ProcessUsage>): Promise<void> {
-    const runIds = Object.keys(snapshot);
+    // The sampler is module-global (one `ps` for the whole process), so with
+    // multiple projects a snapshot carries EVERY project's runs. Act only on
+    // rows this manager owns (multi-project spec, step 2.4).
+    const runIds = Object.keys(snapshot).filter((runId) => this.active.has(runId));
     if (runIds.length === 0) return;
-    const limitMb = (await loadConfig(this.repoRoot)).memoryLimitMb;
+    // Workspace limit from the shared semaphore's in-memory cache (step 2.5:
+    // refreshed at boot and on PUT /api/workspace/config — never N per-tick
+    // file reads across N projects). Legacy per-repo `memoryLimitMb` keys are
+    // ignored post-migration.
+    const limitMb = this.semaphore.memoryLimitMb();
     if (!limitMb || limitMb <= 0) return;
     const limitBytes = limitMb * 1024 * 1024;
     for (const runId of runIds) {
@@ -371,8 +445,23 @@ export class RunManager {
   }
 
   /**
-   * Start queued runs while parallel slots are free. `maxParallel` comes from
-   * `.ai/cezar/config.json` (default 2); a non-git directory degrades to 1
+   * Slots this manager holds against the workspace-wide cap. `waiting` runs
+   * don't hold a slot (#347): an idle claude process costs memory but no
+   * tokens, queued work progressing matters more, and the idle timeout already
+   * bounds how long a session can sit open. Because the exemption lives HERE —
+   * in the count, not in any acquire path — a message into a `waiting` run
+   * (sendMessage) resumes it immediately even when that momentarily exceeds
+   * `maxParallel`, including when other projects saturate the cap.
+   */
+  private busySlots(): number {
+    return this.active.size + this.starting.size - this.waiting.size;
+  }
+
+  /**
+   * Start queued runs while parallel slots are free. The cap is the WORKSPACE
+   * `resources.maxParallel` (default 2), cached in the shared semaphore and
+   * counted across every manager (spec 2026-07-20, step 2.5) — legacy per-repo
+   * `maxParallel` keys are ignored. A non-git directory degrades to 1
    * sequential run in the repo root (spec 006 degradation rule).
    */
   private async pump(): Promise<void> {
@@ -380,12 +469,12 @@ export class RunManager {
     this.pumping = true;
     try {
       const repo = await getRepoInfo(this.repoRoot);
-      const maxParallel = repo ? (await loadConfig(this.repoRoot)).maxParallel : 1;
-      // `waiting` runs don't hold a slot (#347). A message into a waiting run
-      // resumes it even when that momentarily exceeds maxParallel — resumed
-      // conversations must never be blocked by the queue.
-      const busy = () => this.active.size + this.starting.size - this.waiting.size;
-      while (this.queue.length > 0 && busy() < maxParallel) {
+      const maxParallel = this.semaphore.maxParallel();
+      // `waiting` runs don't hold a slot (#347) — see busySlots(). The check
+      // below is the only slot gate: resumes never pass through it.
+      const capacity = () =>
+        this.semaphore.busy() < maxParallel && (repo !== null || this.busySlots() < 1);
+      while (this.queue.length > 0 && capacity()) {
         const runId = this.queue.shift();
         if (!runId) break;
         const job = this.pendingJobs.get(runId);
@@ -499,10 +588,9 @@ export class RunManager {
         finishedAt,
         currentStepId: undefined,
       });
-      const resumed = this.continueRun(
-        run.id,
-        'The cezar process restarted while you were working on this task. Read the handoff file (CEZ_HANDOFF_FILE) to recover context, then continue the task from where you left off.',
-      );
+      const resumed = this.continueRun(run.id, {
+        text: 'The cezar process restarted while you were working on this task. Read the handoff file (CEZ_HANDOFF_FILE) to recover context, then continue the task from where you left off.',
+      });
       this.store.appendEvent(run.id, {
         type: 'lifecycle',
         message: resumed.ok
@@ -545,7 +633,7 @@ export class RunManager {
    *  lifecycle. `review`/live runs are excluded by the selector. */
   private async enforceRetention(): Promise<void> {
     try {
-      const keep = (await loadConfig(this.repoRoot)).worktreeRetention;
+      const keep = await resolveWorktreeRetention(this.repoRoot);
       await reclaimWorktrees(this.repoRoot, this.store, keep);
     } catch {
       // retention is best-effort; swallow so terminal transitions never break.
@@ -708,7 +796,10 @@ export class RunManager {
    * behaves exactly like an interactive step: `waiting` after each turn,
    * messages via sendMessage, closed by finish/idle/cancel.
    */
-  continueRun(runId: string, text?: string): { ok: boolean; error?: string } {
+  continueRun(
+    runId: string,
+    opts: { text?: string; runner?: RunnerId; model?: string } = {},
+  ): { ok: boolean; error?: string } {
     if (this.active.has(runId)) return { ok: false, error: 'run is still active' };
     const run = this.store.getRun(runId);
     if (!run) return { ok: false, error: 'not found' };
@@ -716,13 +807,59 @@ export class RunManager {
     if (!['done', 'failed', 'cancelled', 'review'].includes(run.status)) {
       return { ok: false, error: `cannot continue a ${run.status} run` };
     }
-    const sessionId = [...run.steps].reverse().find((s) => s.sessionId)?.sessionId;
-    if (!sessionId) return { ok: false, error: 'no agent session to resume' };
+    const sessionStep = [...run.steps].reverse().find((s) => s.sessionId);
+    if (!sessionStep?.sessionId) return { ok: false, error: 'no agent session to resume' };
+    const targetRunner = opts.runner ?? run.runner ?? 'claude';
+    // Session ids are provider-owned opaque values. New records carry explicit
+    // affinity; for legacy records, the run's current runner is the conservative
+    // owner until a continuation emits a new, attributed session id (#562).
+    const sessionBackend = sessionStep.backend ?? run.runner ?? 'claude';
+    const resume = sessionBackend === targetRunner;
+
+    // Follow-up runner/model override (#401): the composer lets the user pick which backend and
+    // model handle this continuation. Omitted → the run's current backend/model is kept
+    // (backward compat). A provided choice is persisted BEFORE scheduling, so it becomes the
+    // run's current backend — `runContinuation` reads it off the record, later continuations
+    // default to it, and the header reflects the active engine. An empty model ('') clears the
+    // pin, letting the runner pick the model (auto).
+    if (opts.runner !== undefined || opts.model !== undefined) {
+      // Guard the pairing before persisting anything: the model override applies to the runner
+      // this continuation will actually use (`opts.runner ?? record.runner ?? 'claude'` — the
+      // same resolution `runContinuation` reads off the record). A model that is recognizably
+      // another runner's preset would corrupt the run; free-form/custom ids pass untouched.
+      if (opts.model && modelConflictsWithRunner(opts.model, targetRunner)) {
+        return { ok: false, error: `model '${opts.model}' is not a ${targetRunner} model` };
+      }
+      // A runner switch that carries NO explicit model must not leave the previous backend's pin
+      // on the record: the guard above only sees `opts.model`, so without this an inherited
+      // `opus` would survive a switch to codex and `runContinuation` would hand it to the codex
+      // runner. Clearing (not rejecting) is right — the pin belonged to the old backend and is
+      // meaningless for the new one, which is exactly what the composer already displays (auto).
+      // Only a recognizably foreign preset is cleared; a free-form/custom id is left alone.
+      const inheritedPinIsForeign =
+        opts.model === undefined &&
+        run.model !== undefined &&
+        modelConflictsWithRunner(run.model, targetRunner);
+      this.store.updateRun(runId, {
+        ...(opts.runner !== undefined ? { runner: opts.runner } : {}),
+        ...(opts.model !== undefined
+          ? { model: opts.model === '' ? undefined : opts.model }
+          : inheritedPinIsForeign
+            ? { model: undefined }
+            : {}),
+      });
+    }
 
     const continuations = run.steps.filter((s) => s.id.startsWith('continue-')).length;
     const stepId = `continue-${continuations + 1}`;
     this.store.addStep(runId, { id: stepId, name: 'Continue', kind: 'agent' });
-    void this.runContinuation(runId, stepId, sessionId, text?.trim() || 'Continue.').catch(
+    void this.runContinuation(
+      runId,
+      stepId,
+      resume ? sessionStep.sessionId : undefined,
+      targetRunner,
+      opts.text?.trim() || 'Continue.',
+    ).catch(
       (err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
         this.store.updateRun(runId, {
@@ -740,7 +877,8 @@ export class RunManager {
   private async runContinuation(
     runId: string,
     stepId: string,
-    sessionId: string,
+    sessionId: string | undefined,
+    backend: RunnerId,
     prompt: string,
   ): Promise<void> {
     // Continuation runs in the task's worktree when it still exists (spec
@@ -793,6 +931,7 @@ export class RunManager {
       iterations: 1,
       startedAt: new Date().toISOString(),
       sessionId,
+      backend,
     });
     this.store.appendEvent(runId, { type: 'step-start', stepId, name: 'Continue', kind: 'agent', iteration: 1 });
     this.store.appendEvent(runId, { type: 'user-message', stepId, text: prompt, imageCount: 0 });
@@ -808,13 +947,13 @@ export class RunManager {
       }
       if (event.type === 'text') {
         turnText += event.text;
-        const text = stripTaskMarkers(stripMonitoringMarker(stripDoneMarker(event.text)));
+        const text = stripAskMarker(stripTaskMarkers(stripMonitoringMarker(stripDoneMarker(event.text))));
         if (text) this.store.appendEvent(runId, { type: 'text', text, stepId });
         return;
       }
       this.store.appendEvent(runId, { ...event, stepId });
       if (event.type === 'session') {
-        this.store.updateStep(runId, stepId, { sessionId: event.sessionId });
+        this.store.updateStep(runId, stepId, { sessionId: event.sessionId, backend });
       }
       if (event.type === 'token-usage') {
         this.store.updateStep(runId, stepId, { tokensUsed: event.tokensUsed });
@@ -831,7 +970,11 @@ export class RunManager {
         void this.recordTurnEnd(runId, turnText); // titleSummary + diffStat (#389)
         const sessionOpen = !state.cancelled && state.session?.open;
         const done = sessionOpen && DONE_MARKER_RE.test(turnText.trimEnd());
-        const monitoring = sessionOpen && !done && MONITORING_MARKER_RE.test(turnText.trimEnd());
+        // `CEZ:ASK` → the user is genuinely blocked; wins over `CEZ:MONITORING`
+        // (a pending question is always attention), loses to `CEZ:DONE` (#473).
+        const ask = sessionOpen && !done ? parseAskMarker(turnText) : null;
+        const monitoring =
+          sessionOpen && !done && !ask && MONITORING_MARKER_RE.test(turnText.trimEnd());
         turnText = '';
         if (done) {
           // Goal achieved (agent contract, #347) — same as in runAgentStep.
@@ -858,10 +1001,12 @@ export class RunManager {
               return true;
             })();
           if (!autoContinued) {
-            // `CEZ:MONITORING` → non-attention `running`/`activity:'monitoring'`
-            // instead of `waiting` (spec 2026-07-18-subagent-monitoring-status,
-            // #490). Same lifecycle as waiting (frees the slot, keeps the idle
-            // timer). The autonomous nudge above still wins over monitoring.
+            // `CEZ:ASK` → park `waiting` (attention) AND surface the structured
+            // question as an ask card (#473). `CEZ:MONITORING` → non-attention
+            // `running`/`activity:'monitoring'` (#490). Both share the waiting
+            // lifecycle (free the slot, keep the idle timer); the autonomous
+            // nudge above still wins over either.
+            if (ask) emitAskRequested(sink, ask);
             if (monitoring) {
               this.store.updateRun(runId, { status: 'running', activity: 'monitoring' });
               this.store.updateStep(runId, stepId, { status: 'running' });
@@ -882,7 +1027,46 @@ export class RunManager {
       }
     };
 
-    const runner = createRunner(record?.runner ?? 'claude');
+    // Backend + model come off the record: the run's current backend by default, or the
+    // follow-up override that `continueRun` persisted before scheduling (#401).
+    const continueBackend = backend;
+    // Apply the SAME canonical-identity gate the first spawn applies (#405, review M1).
+    // A follow-up may switch both runner and model (#401), so without this the record keeps
+    // asserting the identity the run STARTED with while a different model serves the turn —
+    // the exact defect this PR exists to remove — and the raw record string reaches the CLI
+    // in the un-normalised wire form the first step already converted away (`anthropic/opus`
+    // instead of `opus`). Fail loud here too rather than let the backend pick a default.
+    let continueModel: string | undefined;
+    try {
+      const normalized = normalizeModelForBackend(continueBackend, record?.model);
+      continueModel = normalized?.backendModel;
+      this.store.updateRun(runId, {
+        modelIdentity: normalized ? formatModelIdentity(normalized.identity) : undefined,
+      });
+    } catch (err) {
+      if (!(err instanceof ModelIdentityError)) throw err;
+      const failedAt = new Date().toISOString();
+      sink.sessionEnded('error', err.message);
+      this.store.updateStep(runId, stepId, {
+        status: 'failed',
+        error: err.message,
+        finishedAt: failedAt,
+      });
+      this.store.updateRun(runId, {
+        status: 'failed',
+        error: `continue failed: ${err.message}`,
+        finishedAt: failedAt,
+        currentStepId: undefined,
+      });
+      this.store.appendEvent(runId, {
+        type: 'lifecycle',
+        message: `continue failed — ${err.message}`,
+      });
+      this.dropActive(runId);
+      void this.pump();
+      return;
+    }
+    const runner = createRunner(continueBackend);
     const session = runner.startSession(
       {
         // The Continue step is a fresh agent session on the same run — the
@@ -897,8 +1081,9 @@ export class RunManager {
         allowedTools: DEFAULT_ALLOWED_TOOLS,
         additionalDirectories: [join(this.dataDir, 'runs')],
         env: this.agentEnv(runId, generateFollowups),
+        model: continueModel,
         sessionId,
-        resume: true,
+        resume: sessionId !== undefined,
         timeoutMs: 0,
       },
       onEvent,
@@ -940,7 +1125,7 @@ export class RunManager {
       this.recordUsagePeaks(runId);
       this.clearIdleTimer(state);
       this.clearAutosaveTimer(state);
-      if (state.cwd !== this.repoRoot) await autosaveCommit(state.cwd);
+      if (state.cwd !== this.repoRoot) await autosaveCommit(state.cwd, 'turn end');
       this.dropActive(runId);
       void this.pump();
     }
@@ -968,11 +1153,24 @@ export class RunManager {
     // Extra system prompt (R2 2.3): POST override > config default; echoed on
     // the record so the UI/API can show what the run actually used.
     const extraSystemPrompt = resolveExtraSystemPrompt(input.systemPrompt, config.systemPrompt);
+    // Canonical provider/model identity (#405) — the normalised `provider/model`
+    // the task ran with, persisted for cost attribution / reproducible replay
+    // beside the free-text `model`. Best-effort here (a per-step `runner`/`model`
+    // can still override below); the authoritative fail-loud gate is at spawn.
+    let modelIdentity: string | undefined;
+    try {
+      const normalized = normalizeModelForBackend(taskBackend, input.model);
+      modelIdentity = normalized ? formatModelIdentity(normalized.identity) : undefined;
+    } catch {
+      // An unresolvable task-level model surfaces loudly at the step below; the
+      // metadata echo stays absent rather than guessing.
+    }
     this.store.updateRun(runId, {
       status: 'running',
       startedAt: new Date().toISOString(),
       runner: taskBackend,
       systemPrompt: extraSystemPrompt,
+      modelIdentity,
     });
     emit({ type: 'lifecycle', message: `run started — workflow "${workflow.name}" (runner: ${taskBackend})` });
 
@@ -1017,6 +1215,12 @@ export class RunManager {
           baseBranch: wt.baseBranch,
         });
         emit({ type: 'note', message: `worktree ready — branch ${wt.branch} (base ${wt.baseBranch})` });
+        // Seed from this manager's project root: each multi-project context has
+        // its own manager/repoRoot and must never copy another project's layer.
+        const seededConfig = await seedAgentConfigLocalLayer(this.repoRoot, state.cwd).catch(() => []);
+        if (seededConfig.length > 0) {
+          emit({ type: 'note', message: `seeded personal agent config: ${seededConfig.join(', ')}` });
+        }
         this.armAutosave(state);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -1163,7 +1367,7 @@ export class RunManager {
 
     // Final autosave: the branch always ends holding the finished state.
     this.clearAutosaveTimer(state);
-    if (state.cwd !== this.repoRoot) await autosaveCommit(state.cwd);
+    if (state.cwd !== this.repoRoot) await autosaveCommit(state.cwd, 'run finalize');
 
     const finishedAt = new Date().toISOString();
     if (state.cancelled) {
@@ -1257,7 +1461,8 @@ export class RunManager {
     }
 
     const sessionId = randomUUID();
-    this.store.updateStep(runId, step.id, { sessionId });
+    const backend = step.runner ?? taskBackend;
+    this.store.updateStep(runId, step.id, { sessionId, backend });
 
     const stepRecord = this.store.getRun(runId)?.steps.find((s) => s.id === step.id);
     const startTokens = stepRecord?.tokensUsed ?? 0;
@@ -1272,14 +1477,14 @@ export class RunManager {
       }
       if (event.type === 'text') {
         turnText += event.text;
-        const text = stripTaskMarkers(stripMonitoringMarker(stripDoneMarker(event.text)));
+        const text = stripAskMarker(stripTaskMarkers(stripMonitoringMarker(stripDoneMarker(event.text))));
         if (text) emit({ type: 'text', text, stepId: step.id });
         return;
       }
       emit({ ...event, stepId: step.id });
       if (event.type === 'session') {
         // Codex/OpenCode mint their own session id — persist it so resume works.
-        this.store.updateStep(runId, step.id, { sessionId: event.sessionId });
+        this.store.updateStep(runId, step.id, { sessionId: event.sessionId, backend });
       }
       if (event.type === 'token-usage') {
         this.store.updateStep(runId, step.id, { tokensUsed: startTokens + event.tokensUsed });
@@ -1295,8 +1500,15 @@ export class RunManager {
         void this.recordTurnEnd(runId, turnText); // titleSummary + diffStat (#389)
         const sessionOpen = !state.cancelled && state.session?.open;
         const done = interactive && sessionOpen && DONE_MARKER_RE.test(turnText.trimEnd());
+        // `CEZ:ASK` → the user is blocked; wins over `CEZ:MONITORING`, loses to
+        // `CEZ:DONE` (#473).
+        const ask = interactive && sessionOpen && !done ? parseAskMarker(turnText) : null;
         const monitoring =
-          interactive && sessionOpen && !done && MONITORING_MARKER_RE.test(turnText.trimEnd());
+          interactive &&
+          sessionOpen &&
+          !done &&
+          !ask &&
+          MONITORING_MARKER_RE.test(turnText.trimEnd());
         turnText = '';
         if (done) {
           // Goal achieved (agent contract, #347): close the session instead
@@ -1309,12 +1521,13 @@ export class RunManager {
         const waiting = interactive && sessionOpen;
         if (waiting) {
           // Turn over, session open. Either the ball is in the user's court
-          // (`waiting`), or the agent declared it is still working on its own
-          // downstream work with `CEZ:MONITORING` — then park as
-          // `running`/`activity:'monitoring'`, a non-attention state, instead of
-          // raising "needs you" (spec 2026-07-18-subagent-monitoring-status, #490).
-          // Lifecycle is identical either way: the run frees its slot and keeps
-          // the idle timer, so even a stalled monitoring run is reclaimed.
+          // (`waiting`) — optionally with a structured `CEZ:ASK` question the
+          // cockpit renders as an ask card (#473) — or the agent declared it is
+          // still working on its own downstream work with `CEZ:MONITORING`, which
+          // parks as `running`/`activity:'monitoring'`, a non-attention state,
+          // instead of raising "needs you" (#490). Lifecycle is identical: the
+          // run frees its slot and keeps the idle timer.
+          if (ask) emitAskRequested(sink, ask);
           if (monitoring) {
             this.store.updateRun(runId, { status: 'running', activity: 'monitoring' });
             this.store.updateStep(runId, step.id, { status: 'running' });
@@ -1336,7 +1549,27 @@ export class RunManager {
       }
     };
 
-    const runner = createRunner(step.runner ?? taskBackend);
+    const stepBackend = step.runner ?? taskBackend;
+    // Normalise the selected model to canonical `provider/model` and back to the
+    // backend's own wire form via the ONE shared mapper (#405). Fail-loud: an
+    // unresolvable model (e.g. a bare id on opencode) returns the step error
+    // instead of letting the backend silently substitute its default.
+    let backendModel: string | undefined;
+    try {
+      const normalized = normalizeModelForBackend(stepBackend, step.model ?? input.model);
+      backendModel = normalized?.backendModel;
+      // Persist the identity of what ACTUALLY runs (#405, review M1). The run-start echo
+      // (line ~993) is best-effort from `taskBackend`/`input.model`; a per-step `runner`/`model`
+      // override makes it assert a model that never ran. Re-write it here, from the resolved
+      // step identity, so the record — the product of this PR — is always one that ran.
+      this.store.updateRun(runId, {
+        modelIdentity: normalized ? formatModelIdentity(normalized.identity) : undefined,
+      });
+    } catch (err) {
+      if (err instanceof ModelIdentityError) return err.message;
+      throw err;
+    }
+    const runner = createRunner(stepBackend);
     let session: AgentSession;
     try {
       session = runner.startSession(
@@ -1358,7 +1591,7 @@ export class RunManager {
           // The handoff file lives outside the worktree — grant access.
           additionalDirectories: [join(this.dataDir, 'runs')],
           env: this.agentEnv(runId, followupsEnabled() && input.generateFollowups !== false),
-          model: step.model ?? input.model,
+          model: backendModel,
           sessionId,
           // Interactive sessions have no wall clock — the idle timer rules.
           timeoutMs: interactive ? 0 : undefined,
@@ -1650,7 +1883,7 @@ export class RunManager {
     if (!periodicAutosaveEnabled()) return;
     if (state.cwd === this.repoRoot || state.autosaveTimer) return;
     state.autosaveTimer = setInterval(() => {
-      void autosaveCommit(state.cwd);
+      void autosaveCommit(state.cwd, 'periodic');
     }, AUTOSAVE_INTERVAL_MS);
     state.autosaveTimer.unref?.();
   }

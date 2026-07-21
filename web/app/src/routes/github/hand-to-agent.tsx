@@ -10,11 +10,13 @@ import {
   ZapIcon,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
-import { Link } from 'react-router'
+import { Link } from '@/lib/project-router'
 
 import { createRun, putUiState } from '@/api/client'
 import { queryKeys, useUiState } from '@/api/queries'
 import type { GithubItem, Skill, WorkflowDef } from '@/api/types'
+import { EnginePills, engineBody, useResolvedEngine, type EnginePick } from '@/components/engine-pills'
+import { chipClass } from '@/components/picker-pill'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import {
@@ -29,14 +31,21 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { toast } from '@/components/ui/toaster'
 import { PromptTemplateMenu } from '@/components/prompt-template-menu'
 import { SkillPreviewDialog } from '@/components/skill-detail'
-import { githubRunBody } from '@/lib/github-task'
+import { githubRunBody, githubTaskRef } from '@/lib/github-task'
 import {
   autoApplyText,
   insertTemplate,
   normalizePromptTemplates,
   resolveAutoApply,
 } from '@/lib/prompt-templates'
-import { bumpSkillUsage, isProjectSkill, searchSkills, searchWorkflows, skillKeywords } from '@/lib/skills'
+import {
+  bumpSkillUsage,
+  isProjectSkill,
+  partitionSkillsForDisplay,
+  searchSkills,
+  searchWorkflows,
+  skillKeywords,
+} from '@/lib/skills'
 import { isSubmitShortcut, submitShortcutHint } from '@/lib/use-submit-shortcut'
 import { cn } from '@/lib/utils'
 
@@ -53,7 +62,8 @@ import { readFollowupPrompt, writeFollowupPrompt } from './hand-to-agent-draft'
  * survives switching between issues — it is a way of working, not a property of one item) —
  * `github.tsx` also persists it to localStorage (#408) so it survives a reload and pre-fills a
  * hand-off you have never touched (`hand-to-agent-draft.ts`). `skills` arrives already ordered
- * project-first-then-frequency (`orderSkillsByUsage`, #408) — this component just renders it.
+ * most-used → project → global (`orderSkillsByUsage`, #519) — this component just renders it.
+ * The runner/model pills (#401) are route state for the same reason.
  *
  * The selected skills render as an always-visible chip row OUTSIDE the dropdown — the legacy
  * invariant "the filter can't hide your selection", carried over: cmdk may filter the list,
@@ -72,6 +82,8 @@ export function HandToAgent({
   onWorkflowChange,
   selectedSkills,
   onSkillsChange,
+  engine,
+  onEngineChange,
   queuedRunId,
   onQueued,
 }: {
@@ -82,6 +94,9 @@ export function HandToAgent({
   onWorkflowChange: (workflow: string | null) => void
   selectedSkills: readonly string[]
   onSkillsChange: (skills: readonly string[]) => void
+  /** Which backend runs it (#401) — route state, like the pickers above. */
+  engine: EnginePick
+  onEngineChange: (engine: EnginePick) => void
   /** The run already queued from this item, if any — renders the "✓ queued" affordance. */
   queuedRunId: string | null
   onQueued: (url: string, runId: string) => void
@@ -90,15 +105,28 @@ export function HandToAgent({
   const uiState = useUiState()
   // A skill deleted since it was toggled must not reach the server (legacy rule).
   const validSkills = selectedSkills.filter((name) => skills.some((skill) => skill.name === name))
-  // Optional custom prompt (#gh-custom-prompt): empty → the default "Fix GitHub issue #N …"
-  // text. The route remounts this component per item (key={item.url}); the DRAFT — not plain
-  // component state (#408) — restores whatever was typed for THIS item, so switching away and
-  // back (or a page refresh) never loses it.
-  const [prompt, setPrompt] = useState(() => readFollowupPrompt(item.url))
+  // The box is PRE-FILLED with the item's reference (#524) rather than starting empty: what you
+  // see is what the agent gets, and it is editable — the previous "empty means the default
+  // prompt" contract made the composed text invisible, so a user typing their own instruction
+  // could not tell the item context had been dropped. Refs only, never the quoted body: a wall
+  // of issue text is unreadable in a box you are meant to edit, and the URL is right there.
+  // Captured ONCE per mount, not recomputed per render: `prompt` is seeded from it, so the two
+  // must not drift. The tab loads GitHub data twice (a fast batch, then a `limit: 1000` refetch
+  // that replaces it — github.tsx), and the component is keyed by `item.url`, not by title — so a
+  // title that differs between the two payloads would otherwise leave `prompt !== base`, which
+  // reads as "user-owned": the pre-fill would be persisted as a draft and auto-apply would stop.
+  const [base] = useState(() => githubTaskRef(item))
+  // The route remounts this component per item (key={item.url}); the DRAFT — not plain component
+  // state (#408) — restores whatever was typed for THIS item, so switching away and back (or a
+  // page refresh) never loses it. No draft stored → the pre-fill.
+  const [prompt, setPrompt] = useState(() => readFollowupPrompt(item.url) || base)
+  const resolved = useResolvedEngine(engine)
   const promptRef = useRef<HTMLTextAreaElement>(null)
   useEffect(() => {
-    writeFollowupPrompt(item.url, prompt)
-  }, [item.url, prompt])
+    // An untouched box stores NOTHING — persisting the pre-fill would leave a draft behind for
+    // every GitHub item ever opened, which is exactly what the store's "no trace" rule avoids.
+    writeFollowupPrompt(item.url, prompt === base ? '' : prompt)
+  }, [item.url, prompt, base])
 
   // Follow-up prompt templates (#413): built-in unless the user has edited them in Settings →
   // Prompt templates (`ui-state.json`'s `promptTemplates`).
@@ -108,7 +136,11 @@ export function HandToAgent({
   )
   const insertPromptTemplate = (snippet: string) => {
     const el = promptRef.current
-    const caret = el?.selectionStart ?? prompt.length
+    // An UNTOUCHED box reports `selectionStart === 0`, which since #524's pre-fill would splice
+    // the template ABOVE the item reference — so an untouched box appends instead. Once the user
+    // has edited it the caret is theirs and is honoured as before (it survives the blur onto the
+    // template menu), keeping `insertTemplate`'s mid-text case alive.
+    const caret = prompt === base ? prompt.length : (el?.selectionStart ?? prompt.length)
     const result = insertTemplate(prompt, caret, snippet)
     setPrompt(result.text)
     // Restore focus + caret after the state update repaints the textarea. The menu's Popover
@@ -130,15 +162,23 @@ export function HandToAgent({
   useEffect(() => {
     // Reads/writes go through refs, never a setState updater: StrictMode double-invokes those in
     // dev, which would double-apply the ref bookkeeping (the composer's #double-paste hazard).
-    const resolved = resolveAutoApply(promptRefValue.current, autoAppliedRef.current, autoText)
-    autoAppliedRef.current = resolved.applied
-    if (resolved.text !== promptRefValue.current) setPrompt(resolved.text)
+    // `base` is passed so the PRE-FILLED reference still reads as "untouched" and auto-applied
+    // template text stacks below it instead of wiping it (#524).
+    const autoApplied = resolveAutoApply(
+      promptRefValue.current,
+      autoAppliedRef.current,
+      autoText,
+      base,
+    )
+    autoAppliedRef.current = autoApplied.applied
+    if (autoApplied.text !== promptRefValue.current) setPrompt(autoApplied.text)
     // `autoText` is a derived STRING, so this fires only when the assigned set really changes —
     // not on every render that rebuilds the skills array.
-  }, [autoText])
+  }, [autoText, base])
 
   const start = useMutation({
-    mutationFn: () => createRun(githubRunBody(item, workflow, validSkills, prompt)),
+    mutationFn: () =>
+      createRun(githubRunBody(item, workflow, validSkills, prompt, engineBody(resolved))),
     onSuccess: (created) => {
       // The GitHub tab never starts variants, so the answer is a single record.
       const run = 'runs' in created ? created.runs[0] : created
@@ -163,7 +203,8 @@ export function HandToAgent({
       // only the store would leave the textarea showing text that no longer exists anywhere —
       // text that then vanishes on the next remount.
       writeFollowupPrompt(item.url, '')
-      setPrompt('')
+      setPrompt(base)
+      autoAppliedRef.current = ''
       void queryClient.invalidateQueries({ queryKey: queryKeys.runs.all })
     },
     onError: (error) => toast(error.message, { tone: 'danger' }),
@@ -201,7 +242,13 @@ export function HandToAgent({
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <WorkflowPicker workflows={workflows} value={workflow} onChange={onWorkflowChange} />
-        <SkillsPicker skills={skills} selected={validSkills} onToggle={toggleSkill} />
+        <SkillsPicker
+          skills={skills}
+          skillUsage={uiState.data?.skillUsage}
+          selected={validSkills}
+          onToggle={toggleSkill}
+        />
+        <EnginePills pick={engine} onChange={onEngineChange} disabled={start.isPending} />
         <PromptTemplateMenu templates={templates} onInsert={insertPromptTemplate} />
       </div>
 
@@ -235,7 +282,7 @@ export function HandToAgent({
         value={prompt}
         onChange={(event) => setPrompt(event.target.value)}
         onKeyDown={submitShortcut}
-        placeholder={`Add instructions for the agent… (empty uses the default "${item.kind === 'pr' ? 'Address' : 'Fix'} #${item.number}" prompt)`}
+        placeholder={`Instructions for the agent… (#${item.number} and its link are always sent)`}
         className="mt-3 min-h-20 text-[13px]"
       />
 
@@ -275,10 +322,6 @@ export function HandToAgent({
   )
 }
 
-/** The pickers' shared trigger chip — the /new footer's pill grammar. */
-const triggerClass =
-  'inline-flex h-[26px] items-center gap-1.5 rounded-full border border-border bg-card px-2.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground'
-
 /**
  * The workflow dropdown: single-select, and — legacy parity — selecting the chosen workflow
  * again deselects it (no workflow means the toggled skills, or quick-task, drive the run).
@@ -310,7 +353,7 @@ function WorkflowPicker({
           type="button"
           data-slot="gh-workflow-trigger"
           aria-label="Choose a workflow"
-          className={cn(triggerClass, value && 'border-foreground/60 font-mono text-[11.5px] font-semibold text-foreground')}
+          className={cn(chipClass, value && 'border-foreground/60 font-mono text-[11.5px] font-semibold text-foreground')}
         >
           <WorkflowIcon aria-hidden="true" className="size-3 shrink-0 text-violet" />
           <span className="max-w-44 truncate">{value ?? 'workflow'}</span>
@@ -364,16 +407,18 @@ function WorkflowPicker({
 
 /**
  * The skills dropdown: multi-select — toggling keeps it open, because picking a chain is
- * several toggles — grouped Project skills (bold) before Global, per #377. Every row carries
- * a read-only "View skill" eye (spec §Skills): it opens the SAME detail component the
- * Settings catalog renders, as a dialog, without toggling the row.
+ * several toggles — grouped Most used (#519), then Project skills (bold) before Global, per
+ * #377. Every row carries a read-only "View skill" eye (spec §Skills): it opens the SAME
+ * detail component the Settings catalog renders, as a dialog, without toggling the row.
  */
 function SkillsPicker({
   skills,
+  skillUsage,
   selected,
   onToggle,
 }: {
   skills: readonly Skill[]
+  skillUsage: Readonly<Record<string, number>> | undefined
   selected: readonly string[]
   onToggle: (name: string) => void
 }) {
@@ -381,10 +426,9 @@ function SkillsPicker({
   const [search, setSearch] = useState('')
   const [preview, setPreview] = useState<Skill | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
-  // #484: rank matches in JS, then split into Project/Global groups (cmdk's own sort is unreliable here).
-  const matched = searchSkills(skills, search)
-  const project = matched.filter(isProjectSkill)
-  const global = matched.filter((skill) => !isProjectSkill(skill))
+  // #484: rank matches in JS, then split into the #519 tiers (cmdk's own sort is unreliable here).
+  const matched = searchSkills(skills, search, skillUsage)
+  const { mostUsed, project, global } = partitionSkillsForDisplay(matched, skillUsage)
 
   const skillItem = (skill: Skill, emphasized: boolean) => {
     const isSelected = selected.includes(skill.name)
@@ -439,7 +483,7 @@ function SkillsPicker({
             type="button"
             data-slot="gh-skills-trigger"
             aria-label="Choose skills"
-            className={cn(triggerClass, selected.length > 0 && 'border-foreground/60 font-semibold text-foreground')}
+            className={cn(chipClass, selected.length > 0 && 'border-foreground/60 font-semibold text-foreground')}
           >
             <SparklesIcon aria-hidden="true" className="size-3 shrink-0 text-violet" />
             skills{selected.length > 0 ? ` · ${selected.length}` : ''}
@@ -455,7 +499,14 @@ function SkillsPicker({
               onInput={() => listRef.current?.scrollTo(0, 0)}
             />
             <CommandList ref={listRef} data-slot="gh-skill-menu" className="max-h-[min(16rem,calc(var(--radix-popover-content-available-height)-3rem))]">
-              {project.length === 0 && global.length === 0 ? <CommandEmpty>Nothing matches.</CommandEmpty> : null}
+              {mostUsed.length === 0 && project.length === 0 && global.length === 0 ? (
+                <CommandEmpty>Nothing matches.</CommandEmpty>
+              ) : null}
+              {mostUsed.length > 0 ? (
+                <CommandGroup heading="Most used">
+                  {mostUsed.map((skill) => skillItem(skill, isProjectSkill(skill)))}
+                </CommandGroup>
+              ) : null}
               {project.length > 0 ? (
                 <CommandGroup heading="Project skills">{project.map((skill) => skillItem(skill, true))}</CommandGroup>
               ) : null}

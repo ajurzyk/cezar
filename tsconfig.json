@@ -4,6 +4,9 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "lib": ["ES2022"],
+    // TypeScript 7 defaults `types` to `[]` rather than "every package under @types",
+    // so this Node CLI has to ask for the Node globals by name.
+    "types": ["node"],
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,

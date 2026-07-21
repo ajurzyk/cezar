@@ -1,8 +1,7 @@
 import { MoonIcon, PlusIcon } from 'lucide-react'
 import * as React from 'react'
-import { useNavigate } from 'react-router'
-
-import { useHealth, useRuns, useSkills } from '@/api/queries'
+import { useHealth, useRuns, useSkills, useUiState } from '@/api/queries'
+import { useNavigate } from '@/lib/project-router'
 import type { RunRecord } from '@/api/types'
 import { visibleNavItems } from '@/components/nav-items'
 import { StatusDot } from '@/components/status-dot'
@@ -19,7 +18,7 @@ import {
 } from '@/components/ui/command'
 import { deriveAttention } from '@/lib/attention'
 import { shortAge } from '@/lib/format'
-import { orderSkills } from '@/lib/skills'
+import { orderSkillsByUsage } from '@/lib/skills'
 import { runTitle } from '@/lib/task-groups'
 import { useCommandShortcut, useKeyShortcut } from '@/lib/use-command-shortcut'
 
@@ -89,13 +88,19 @@ function PaletteContent({ close }: { close: () => void }) {
   // Runs are already cached by the sidebar's quick-list; skills fetch here, on first open.
   const runs = useRuns()
   const skills = useSkills()
+  // Skills list most-used → project → global (#519) — the same order every picker renders.
+  const uiState = useUiState()
   // Health is cached by the shell's chips; here it gates the forge-gated Views row (R6 1.1) —
   // the palette must not offer a GitHub view the sidebar honestly hides.
   const health = useHealth()
   const now = Date.now()
 
   const orderedRuns = React.useMemo(() => orderRuns(runs.data ?? []), [runs.data])
-  const orderedSkills = React.useMemo(() => orderSkills(skills.data ?? []), [skills.data])
+  const skillUsage = uiState.data?.skillUsage
+  const orderedSkills = React.useMemo(
+    () => orderSkillsByUsage(skills.data ?? [], skillUsage),
+    [skills.data, skillUsage],
+  )
 
   const go = (to: string) => {
     close()

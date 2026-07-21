@@ -400,27 +400,45 @@ async function excludeFromGit(repoRoot: string, pattern: string): Promise<void> 
 // DNS/TCP), so each source gets one implicit attempt per process. "Refresh"
 // always retries.
 const cloneAttempted = new Set<string>();
-let teamSkills: Skill[] = [];
-let firstLoadStarted = false;
+// Both maps are keyed by `repoRoot` (multi-project workspace, step 2.6): each
+// project resolves its own `.ai/cezar/config.json` → `skillsRepos`, so one
+// project's team-skill list must never be served under another project's scope.
+const teamSkillsByRoot = new Map<string, Skill[]>();
+const firstLoadByRoot = new Map<string, Promise<Skill[]>>();
+
+function initialTeamSkillsLoad(repoRoot: string): Promise<Skill[]> {
+  const existing = firstLoadByRoot.get(repoRoot);
+  if (existing) return existing;
+  const load = loadTeamSkills(repoRoot, false).catch(() => teamSkillsByRoot.get(repoRoot) ?? []);
+  firstLoadByRoot.set(repoRoot, load);
+  return load;
+}
 
 /**
- * The current team-skill list, straight from memory. The first call kicks off
- * an async background load (clone + list) and returns immediately — the GUI
- * refetches, so remote skills appear moments later instead of blocking the
- * first `GET /api/skills`.
+ * The current team-skill list for this project, straight from memory. The
+ * first call per `repoRoot` kicks off an async background load (clone + list)
+ * and returns immediately — the GUI refetches, so remote skills appear moments
+ * later instead of blocking the first `GET /api/skills`.
  */
 export function getTeamSkillsCached(repoRoot: string): Skill[] {
-  if (!firstLoadStarted) {
-    firstLoadStarted = true;
-    void loadTeamSkills(repoRoot, false).catch(() => undefined);
-  }
-  return teamSkills;
+  void initialTeamSkillsLoad(repoRoot);
+  return teamSkillsByRoot.get(repoRoot) ?? [];
+}
+
+/**
+ * Wait for the same non-refreshing load kicked off by `getTeamSkillsCached`.
+ * The normal catalog read stays immediate; callers use this only for a
+ * background convergence read after they have already rendered local skills.
+ */
+export function waitForTeamSkills(repoRoot: string): Promise<Skill[]> {
+  return initialTeamSkillsLoad(repoRoot);
 }
 
 /** Refresh: clone missing sources, `git fetch` existing ones, reload the list. */
 export async function refreshTeamSkills(repoRoot: string): Promise<Skill[]> {
-  firstLoadStarted = true;
-  return loadTeamSkills(repoRoot, true);
+  const load = loadTeamSkills(repoRoot, true).catch(() => teamSkillsByRoot.get(repoRoot) ?? []);
+  firstLoadByRoot.set(repoRoot, load);
+  return load;
 }
 
 async function loadTeamSkills(repoRoot: string, refresh: boolean): Promise<Skill[]> {
@@ -450,6 +468,6 @@ async function loadTeamSkills(repoRoot: string, refresh: boolean): Promise<Skill
       // degrade: this source contributes nothing
     }
   }
-  teamSkills = out;
+  teamSkillsByRoot.set(repoRoot, out);
   return out;
 }

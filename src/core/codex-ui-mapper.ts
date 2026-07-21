@@ -38,6 +38,15 @@ import type {
 } from './ui-events.js';
 import { toolDisplay } from './tool-display.js';
 
+/** The two reasoning delta channels, accumulated separately — see
+ *  `CodexUiMapperState.reasonings`. */
+export interface ReasoningAccumulator {
+  /** `item/reasoning/textDelta` — the raw chain of thought. */
+  readonly text: string;
+  /** `item/reasoning/summaryDelta` + `summaryTextDelta` — the condensed summary. */
+  readonly summary: string;
+}
+
 export interface CodexUiMapperState {
   /** True once `session.started` was emitted (thread/started notification or
    *  the runner's `codexSessionStarted` after the thread/start result —
@@ -52,6 +61,21 @@ export interface CodexUiMapperState {
   /** Accumulated `outputDelta` text per commandExecution item, attached to
    *  the final snapshot when the wire `item/completed` carries no output. */
   readonly outputs: ReadonlyMap<string, string>;
+  /** Accumulated reasoning deltas per reasoning item, attached to the final
+   *  snapshot when the wire `item/completed` carries no `content`. Deltas are
+   *  live-only (never persisted), so without this the reasoning text is
+   *  unrecoverable on replay and the row reads back empty (#528).
+   *
+   *  Kept PER CHANNEL: `item/reasoning/textDelta` streams the raw chain of
+   *  thought while `summaryDelta`/`summaryTextDelta` stream the condensed
+   *  summary, and codex emits both when raw reasoning is enabled. One shared
+   *  bucket would concatenate the two into `"<raw CoT><summary>"` and persist
+   *  that garble over the clean wire `summary`.
+   *
+   *  Turn-scoped, and reset by `turn/started`: an interrupted item is never
+   *  completed, so without the reset its text would both leak into a later
+   *  turn that reuses the id and pin whole chains of thought in memory. */
+  readonly reasonings: ReadonlyMap<string, ReasoningAccumulator>;
   /** True once `turn/plan/updated` has spoken IN THE CURRENT TURN. Both that
    *  notification and the `plan`/`todoList` item arm write `plan.updated`, so
    *  without a precedence rule the last frame wins and a prose plan item would
@@ -62,6 +86,18 @@ export interface CodexUiMapperState {
    *  `turn/plan/updated`), so a latch that outlived its turn would gag the item
    *  arm for the rest of the session and strand the dock on a stale checklist. */
   readonly planFromNotification: boolean;
+  /** The open review-mode item's id, or `null` when review mode is not active.
+   *
+   *  Codex announces review mode as two disjoint frames (`enteredReviewMode`,
+   *  `exitedReviewMode`) with different ids. Mapped literally that is two
+   *  childless `task` items — which the Agents dock would read as two separate
+   *  sub-agents that each did nothing (spec
+   *  `.ai/specs/2026-07-20-grouped-subagent-display.md` §"Codex-mapper fix",
+   *  #474). This latch folds the pair into ONE item with a running→completed
+   *  lifecycle: the entered frame opens it, the exited frame completes that
+   *  same id. An unpaired exit falls back to its own item, so a stream that
+   *  starts mid-review still renders. */
+  readonly reviewItemId: string | null;
 }
 
 export interface CodexUiMapping {
@@ -76,7 +112,9 @@ export function createCodexUiState(): CodexUiMapperState {
     currentTurnId: null,
     knownItems: new Set(),
     outputs: new Map(),
+    reasonings: new Map(),
     planFromNotification: false,
+    reviewItemId: null,
   };
 }
 
@@ -121,9 +159,10 @@ export function mapCodexNotification(frame: unknown, state: CodexUiMapperState):
     case 'item/agentMessage/delta':
       return mapDelta(params, state, 'text');
     case 'item/reasoning/textDelta':
+      return mapDelta(params, state, 'reasoning', 'text');
     case 'item/reasoning/summaryDelta':
     case 'item/reasoning/summaryTextDelta':
-      return mapDelta(params, state, 'reasoning');
+      return mapDelta(params, state, 'reasoning', 'summary');
     case 'item/commandExecution/outputDelta':
       return mapDelta(params, state, 'output');
     case 'thread/tokenUsage/updated':
@@ -142,7 +181,10 @@ function mapTurnStarted(params: Record<string, unknown>, state: CodexUiMapperSta
   return {
     events: [{ type: 'turn.started', turnId }],
     // planFromNotification is turn-scoped — a new turn re-opens the item arm.
-    state: { ...state, turnSeq, currentTurnId: turnId, planFromNotification: false },
+    // So are the reasoning accumulators: an interrupted item never completes,
+    // so its text would otherwise leak into a later turn that reuses the id
+    // and pin whole chains of thought in memory for the session (#528).
+    state: { ...state, turnSeq, currentTurnId: turnId, planFromNotification: false, reasonings: new Map() },
   };
 }
 
@@ -153,9 +195,28 @@ function mapTurnEnd(
 ): CodexUiMapping {
   let turnSeq = state.turnSeq;
   const turnId = turnIdOf(params) ?? state.currentTurnId ?? `turn_${++turnSeq}`;
+  // A review span still open when the turn ends never gets its `exitedReviewMode` — an
+  // interrupted, cancelled or failed turn simply stops. Close it here, or the item stays
+  // `running` forever and the Agents dock reads a finished run as a live fan-out (#474).
+  // The status follows the turn: a turn that failed did not complete its review.
+  const events: UiEvent[] = [];
+  if (state.reviewItemId !== null) {
+    events.push({
+      type: 'item.completed',
+      item: {
+        kind: 'tool',
+        id: state.reviewItemId,
+        name: 'enteredReviewMode',
+        toolKind: 'task',
+        title: 'Review',
+        status: failed ? 'failed' : 'completed',
+      },
+    });
+  }
+  events.push({ type: 'turn.completed', turnId, stopReason: turnStopReason(params, failed) });
   return {
-    events: [{ type: 'turn.completed', turnId, stopReason: turnStopReason(params, failed) }],
-    state: { ...state, turnSeq, currentTurnId: null },
+    events,
+    state: { ...state, turnSeq, currentTurnId: null, reviewItemId: null },
   };
 }
 
@@ -269,25 +330,103 @@ function mapItemLifecycle(
   const id = str(raw.id);
   if (id === undefined) return { events: [], state };
 
+  // Review mode is a PAIR of frames describing one span of work — folded into a
+  // single lifecycle before the generic arm, which knows only one frame at a time.
+  if (type === 'enteredReviewMode' || type === 'exitedReviewMode') {
+    return mapReviewMode(raw, id, type, eventType, state);
+  }
+
   const item =
     type === 'agentMessage'
       ? messageItem(raw, id)
       : type === 'reasoning'
-        ? reasoningItem(raw, id)
+        ? reasoningItem(raw, id, state)
         : toolItem(raw, id, type, eventType, state);
   const events: UiEvent[] = [{ type: eventType, item }];
 
   // Track live ids (for delta synthesis) and drop bookkeeping on completion.
   if (eventType === 'item.completed') {
-    if (!state.knownItems.has(id) && !state.outputs.has(id)) return { events, state };
+    if (!state.knownItems.has(id) && !state.outputs.has(id) && !state.reasonings.has(id)) {
+      return { events, state };
+    }
     const knownItems = new Set(state.knownItems);
     knownItems.delete(id);
     const outputs = new Map(state.outputs);
     outputs.delete(id);
-    return { events, state: { ...state, knownItems, outputs } };
+    const reasonings = new Map(state.reasonings);
+    reasonings.delete(id);
+    return { events, state: { ...state, knownItems, outputs, reasonings } };
   }
   if (state.knownItems.has(id)) return { events, state };
   return { events, state: { ...state, knownItems: new Set(state.knownItems).add(id) } };
+}
+
+/**
+ * §7.1: review-mode items → tool(kind task) — but ONE item for the pair, not two.
+ *
+ * `enteredReviewMode` opens the item (`running`); `exitedReviewMode` completes
+ * **that same id**, so the cockpit sees one "Review" span with a lifecycle instead
+ * of two childless task items that would read as two sub-agents (spec
+ * `.ai/specs/2026-07-20-grouped-subagent-display.md` §"Codex-mapper fix", #474).
+ *
+ * The fallback matters: an exit with no open item — a resumed thread, a replay that
+ * starts mid-review — still maps to its own completed item, so no frame is dropped.
+ */
+function mapReviewMode(
+  raw: Record<string, unknown>,
+  id: string,
+  type: 'enteredReviewMode' | 'exitedReviewMode',
+  eventType: ItemEventType,
+  state: CodexUiMapperState,
+): CodexUiMapping {
+  const reviewItem = (itemId: string, name: string, status: ToolStatus): UiToolItem => ({
+    kind: 'tool',
+    id: itemId,
+    name,
+    toolKind: 'task',
+    // One stable title across the lifecycle: the row must not rename itself on exit.
+    title: 'Review',
+    status,
+  });
+
+  if (type === 'enteredReviewMode') {
+    const status = toolStatus(raw, eventType);
+    const events: UiEvent[] = [];
+    // A second entered frame with no intervening exit displaces the open span. Settle the
+    // displaced item rather than leaking a permanently `running` row — the same rule the
+    // opencode mapper's subtask slot follows.
+    if (state.reviewItemId !== null && state.reviewItemId !== id) {
+      events.push({
+        type: 'item.completed',
+        item: reviewItem(state.reviewItemId, 'enteredReviewMode', 'completed'),
+      });
+    }
+    events.push({ type: eventType, item: reviewItem(id, type, status) });
+    // Latch on the RESOLVED status, not the event phase: an entered frame that already
+    // carries a terminal wire status closes the span whichever lifecycle phase it arrived in,
+    // and one that is still in progress stays open even on an `item/completed` frame.
+    const settled = status !== 'running' && status !== 'pending';
+    return { events, state: { ...state, reviewItemId: settled ? null : id } };
+  }
+
+  const openId = state.reviewItemId;
+  if (openId === null) {
+    // Unpaired exit — today's shape, under the exit frame's own id.
+    return {
+      events: [{ type: 'item.completed', item: reviewItem(id, type, toolStatus(raw, 'item.completed')) }],
+      state,
+    };
+  }
+  return {
+    events: [
+      {
+        type: 'item.completed',
+        // The item was introduced by the entered frame, so it keeps that identity.
+        item: reviewItem(openId, 'enteredReviewMode', toolStatus(raw, 'item.completed')),
+      },
+    ],
+    state: { ...state, reviewItemId: null },
+  };
 }
 
 /** `agentMessage` → message item; `phase` commentary|final_answer→'commentary'|'final'. */
@@ -303,9 +442,35 @@ function messageItem(raw: Record<string, unknown>, id: string): UiMessageItem {
   return item;
 }
 
-/** `reasoning` → reasoning item — full `content` when present, else the summary. */
-function reasoningItem(raw: Record<string, unknown>, id: string): UiReasoningItem {
-  return { kind: 'reasoning', id, text: str(raw.content) ?? str(raw.summary) ?? '' };
+/** `reasoning` → reasoning item. Precedence, most authoritative first:
+ *  wire `content` → streamed raw chain of thought → the fuller of the wire
+ *  `summary` and the streamed summary.
+ *
+ *  The accumulators matter on `item.completed`: deltas never reach disk, so a
+ *  completed snapshot without `content` would otherwise persist the short
+ *  summary (or nothing) and the row would read back empty after a reload
+ *  (#528). They are consulted on `item.started` too — a delta can outrun its
+ *  `item/started`, and re-emitting an empty snapshot would blank the row the
+ *  synthesized item already filled.
+ *
+ *  Summary picks the LONGER of the two sources rather than preferring the
+ *  stream: a mapper attached mid-turn, or any dropped frame, leaves a partial
+ *  accumulator that must not overwrite a complete `summary` from the wire. */
+function reasoningItem(
+  raw: Record<string, unknown>,
+  id: string,
+  state: CodexUiMapperState,
+): UiReasoningItem {
+  const streamed = state.reasonings.get(id);
+  const summary = longer(str(raw.summary), str(streamed?.summary));
+  return { kind: 'reasoning', id, text: str(raw.content) ?? str(streamed?.text) ?? summary ?? '' };
+}
+
+/** The longer of two optional strings — neither present yields undefined. */
+function longer(a: string | undefined, b: string | undefined): string | undefined {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  return b.length > a.length ? b : a;
 }
 
 /** The §7.1 status map — the wire word wins; an item without one derives its
@@ -381,18 +546,6 @@ function toolItem(
       item = { kind: 'tool', id, name: type, toolKind: display.toolKind, title: display.title, status };
       break;
     }
-    case 'enteredReviewMode':
-    case 'exitedReviewMode':
-      // §7.1: review-mode items → tool(kind task).
-      item = {
-        kind: 'tool',
-        id,
-        name: type,
-        toolKind: 'task',
-        title: type === 'enteredReviewMode' ? 'Entered review mode' : 'Exited review mode',
-        status,
-      };
-      break;
     default: {
       // Unknown item types stay visible as generic tool cards (v1 parity —
       // a future codex tool must not silently vanish from the thread).
@@ -466,6 +619,8 @@ function mapDelta(
   params: Record<string, unknown>,
   state: CodexUiMapperState,
   field: 'text' | 'reasoning' | 'output',
+  /** Which reasoning stream fed this delta — see `ReasoningAccumulator`. */
+  reasoningChannel: 'text' | 'summary' = 'text',
 ): CodexUiMapping {
   const itemId = str(params.itemId);
   const delta = typeof params.delta === 'string' ? params.delta : '';
@@ -485,7 +640,19 @@ function mapDelta(
     next.set(itemId, (next.get(itemId) ?? '') + delta);
     outputs = next;
   }
-  return { events, state: { ...state, knownItems, outputs } };
+  let reasonings: ReadonlyMap<string, ReasoningAccumulator> = state.reasonings;
+  if (field === 'reasoning') {
+    const next = new Map(state.reasonings);
+    const prev = next.get(itemId) ?? { text: '', summary: '' };
+    next.set(
+      itemId,
+      reasoningChannel === 'text'
+        ? { ...prev, text: prev.text + delta }
+        : { ...prev, summary: prev.summary + delta },
+    );
+    reasonings = next;
+  }
+  return { events, state: { ...state, knownItems, outputs, reasonings } };
 }
 
 // ---- telemetry ---------------------------------------------------------------

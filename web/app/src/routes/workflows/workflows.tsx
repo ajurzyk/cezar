@@ -143,8 +143,8 @@ function WorkflowsBuilder({ routeName }: { routeName: string | undefined }) {
 
   const workflows = workflowsQuery.data?.workflows ?? []
   const skills = skillsQuery.data ?? []
-  // The palette lists skills the way every other picker does (#408/#414): project skills first,
-  // then most-used within each locality — so what you reach for floats to the top.
+  // The palette lists skills the way every other picker does (#519): most-used first, then
+  // project, then global — so what you reach for floats to the top.
   const paletteSkills = orderSkillsByUsage(skills, uiStateQuery.data?.skillUsage)
 
   // First visit seeds the canvas with the deep-linked workflow when the URL names one, else

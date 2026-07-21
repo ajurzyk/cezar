@@ -1,7 +1,7 @@
 import { resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { AgentBrowser, readTestEnv } from './agent-browser'
+import { AgentBrowser, bootProjectId, readTestEnv } from './agent-browser'
 
 /**
  * The GitHub tab (R6 Step 1.1) end-to-end against the shared dry-run environment.
@@ -43,10 +43,16 @@ interface GithubPayload {
 }
 
 let forgeAvailable = false
+let bootProject: string
+
+/** A flat route target under this server's own project prefix (multi-project spec, step 3.2):
+ *  every cockpit link is scoped, and every legacy flat URL redirects onto its scoped twin. */
+const scoped = (path: string) => `/p/${bootProject}${path}`
 
 beforeAll(async () => {
   baseUrl = readTestEnv().baseUrl
   forgeAvailable = (await api<HealthPayload>('/api/health')).forge?.available === true
+  bootProject = await bootProjectId(baseUrl)
   browser = AgentBrowser.open(sessionId)
   browser.setViewport(DESKTOP.width, DESKTOP.height)
 })
@@ -57,15 +63,15 @@ afterAll(() => {
 
 describe('the GitHub tab against the live dry-run server', () => {
   it('the nav gates on the live forge payload — item present iff the driver is available', () => {
-    browser.goto(`${baseUrl}/`)
+    browser.goto(`${baseUrl}${scoped('/')}`)
     browser.waitForFunction(`document.querySelector('[data-slot="sidebar"] nav') !== null`)
     if (forgeAvailable) {
       // The item waits on the health answer — poll rather than sample.
-      browser.waitForFunction(`document.querySelector('nav a[href="/github"]') !== null`)
+      browser.waitForFunction(`document.querySelector('nav a[href="${scoped('/github')}"]') !== null`)
     } else {
       // Health has answered (other chips render from it) and still no GitHub item.
       browser.waitForFunction(`document.querySelector('[data-slot="version-chip"]') !== null`)
-      expect(browser.count('nav a[href="/github"]')).toBe(0)
+      expect(browser.count(`nav a[href="${scoped('/github')}"]`)).toBe(0)
     }
   })
 
@@ -74,8 +80,11 @@ describe('the GitHub tab against the live dry-run server', () => {
     const gh = await api<GithubPayload>('/api/github')
     expect(gh.available).toBe(true)
 
-    browser.goto(`${baseUrl}/github`)
+    browser.goto(`${baseUrl}${scoped('/github')}`)
     browser.waitForFunction(`document.querySelector('[data-slot="gh-header"]') !== null`)
+    // The bare `/github` restores the LAST-selected tab (#417), which a previous suite run may
+    // have left on PRs — so ask for Issues explicitly rather than assuming the stored default.
+    browser.click(`[data-slot="gh-tabs"] a[href="${scoped('/github')}"]`)
     browser.waitForFunction(
       `document.querySelectorAll('[data-slot="gh-row"]').length === ${gh.issues.length}`,
     )
@@ -85,15 +94,15 @@ describe('the GitHub tab against the live dry-run server', () => {
     if (gh.repo) expect(browser.text('[data-slot="gh-repo"]')).toBe(gh.repo)
 
     // The PR tab is a URL of its own.
-    browser.click('[data-slot="gh-tabs"] a[href="/github/prs"]')
+    browser.click(`[data-slot="gh-tabs"] a[href="${scoped('/github/prs')}"]`)
     browser.waitForFunction(
       `document.querySelectorAll('[data-slot="gh-row"]').length === ${gh.prs.length}`,
     )
-    expect(browser.url()).toBe(`${baseUrl}/github/prs`)
+    expect(browser.url()).toBe(`${baseUrl}${scoped('/github/prs')}`)
 
     // Health answers after the github payload on this box — settle the forge-gated nav item
     // (an assertion of the gate on the tab's own page, and an honest screenshot).
-    browser.waitForFunction(`document.querySelector('nav a[href="/github"]') !== null`)
+    browser.waitForFunction(`document.querySelector('nav a[href="${scoped('/github')}"]') !== null`)
     browser.screenshot(`${artifactsDir}/github-desktop.png`)
   })
 
@@ -104,15 +113,24 @@ describe('the GitHub tab against the live dry-run server', () => {
     expect(first).toBeDefined()
     if (!first) return
 
-    browser.goto(`${baseUrl}/github`)
+    browser.goto(`${baseUrl}${scoped('/github')}`)
     browser.waitForFunction(`document.querySelector('[data-slot="gh-row"]') !== null`)
+    // Bare `/github` restores the last-selected tab (#417) — pin it to Issues before picking one.
+    browser.click(`[data-slot="gh-tabs"] a[href="${scoped('/github')}"]`)
+    browser.waitForFunction(
+      `document.querySelector('[data-slot="gh-row"][data-number="${first.number}"]') !== null`,
+    )
     browser.click(`[data-slot="gh-row"][data-number="${first.number}"]`)
 
     browser.waitForFunction(`document.querySelector('[data-slot="gh-detail-inner"]') !== null`)
-    expect(browser.url()).toBe(`${baseUrl}/github/issues/${first.number}`)
+    expect(browser.url()).toBe(`${baseUrl}${scoped(`/github/issues/${first.number}`)}`)
     expect(browser.text('[data-slot="gh-meta"]')).toContain(`#${first.number}`)
     expect(browser.text('[data-slot="gh-detail-inner"] h2')).toBe(first.title)
-    expect(browser.count('[data-slot="gh-label"]')).toBe(first.labels.length)
+    // Scoped to the DETAIL pane: the list rows carry their own label chips, so a page-wide
+    // count would be every issue's labels summed rather than this issue's.
+    expect(browser.count('[data-slot="gh-detail-inner"] [data-slot="gh-label"]')).toBe(
+      first.labels.length,
+    )
     // The body rendered through the markdown pipeline — non-empty prose, not raw JSON.
     browser.waitForFunction(
       `(document.querySelector('[data-slot="gh-body"]')?.textContent ?? '').length > 0`,
@@ -130,7 +148,7 @@ describe('the GitHub tab against the live dry-run server', () => {
     )
 
     // Same settle rule as above: the screenshot must show the whole truth, nav item included.
-    browser.waitForFunction(`document.querySelector('nav a[href="/github"]') !== null`)
+    browser.waitForFunction(`document.querySelector('nav a[href="${scoped('/github')}"]') !== null`)
     browser.screenshot(`${artifactsDir}/github-detail.png`)
     browser.press('Escape')
   })
@@ -143,7 +161,7 @@ describe('the GitHub tab against the live dry-run server', () => {
 
     browser.setViewport(IPHONE.width, IPHONE.height)
     try {
-      browser.goto(`${baseUrl}/github`)
+      browser.goto(`${baseUrl}${scoped('/github')}`)
       browser.waitForFunction(`document.querySelector('[data-slot="gh-row"]') !== null`)
       // List visible, detail pane hidden below md.
       browser.waitForFunction(
@@ -151,7 +169,7 @@ describe('the GitHub tab against the live dry-run server', () => {
       )
       expect(browser.evaluate(`document.documentElement.scrollWidth <= window.innerWidth`)).toBe(true)
 
-      browser.goto(`${baseUrl}/github/issues/${first.number}`)
+      browser.goto(`${baseUrl}${scoped(`/github/issues/${first.number}`)}`)
       browser.waitForFunction(`document.querySelector('[data-slot="gh-detail-inner"]') !== null`)
       // Now the detail is the page and the list yields; the back affordance is a link.
       browser.waitForFunction(
@@ -159,7 +177,7 @@ describe('the GitHub tab against the live dry-run server', () => {
       )
       expect(
         browser.evaluate(`document.querySelector('[data-slot="gh-back"]').getAttribute('href')`),
-      ).toBe('/github')
+      ).toBe(scoped('/github'))
 
       browser.screenshot(`${artifactsDir}/github-iphone.png`)
     } finally {

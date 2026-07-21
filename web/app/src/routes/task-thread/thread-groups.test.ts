@@ -237,3 +237,23 @@ describe('splitToolTitle', () => {
     expect(splitToolTitle(title)).toEqual({ verb: title })
   })
 })
+
+/** #528 — a reasoning item with no text renders as a dead row. It is dropped
+ *  during grouping (like plan tools) so it never reaches the always-rendered
+ *  `thread-row` wrapper, which would otherwise leave a blank gap. */
+describe('groupThreadItems — blank reasoning items (#528)', () => {
+  const reasoning = (id: string, text: string): ThreadEntry => ({ kind: 'reasoning', id, text })
+
+  it.each([['', 'empty'], ['   ', 'spaces'], ['\n\t ', 'whitespace']])(
+    'drops a %s reasoning entry (%s)',
+    (text) => {
+      expect(groupThreadItems([reasoning('r1', text)])).toEqual([])
+    },
+  )
+
+  it('keeps reasoning that has text, and drops only the blank sibling', () => {
+    const blocks = groupThreadItems([reasoning('r1', ''), reasoning('r2', 'Real thinking.')])
+    expect(blocks).toHaveLength(1)
+    expect(blocks[0]).toMatchObject({ kind: 'entry', entry: { id: 'r2', text: 'Real thinking.' } })
+  })
+})

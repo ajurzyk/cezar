@@ -1,6 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useEffect } from 'react'
 
 import {
+  browseFs,
+  checkoutProject,
+  getAgentConfig,
+  getAgentConfigFile,
   getConfig,
   getGithub,
   getGithubComments,
@@ -8,6 +13,8 @@ import {
   getHealth,
   getLaunchKey,
   getOpenTargets,
+  getProjectRuns,
+  getProjects,
   getRepo,
   getRunCommit,
   getRunCommits,
@@ -20,14 +27,21 @@ import {
   getRunHandoff,
   getRuns,
   getSkills,
+  getSkillsWhenReady,
   getTodos,
   getUiState,
   getWorkflows,
+  getWorkspaceConfig,
+  getWorkspaceUiState,
   getWorktrees,
   patchRun,
+  registerProject,
+  removeProject,
   sendMessage,
+  putAgentConfigFile,
 } from './client'
-import type { MessageInput, PatchRunInput } from './types'
+import { queryScope } from './project-scope'
+import type { CheckoutProjectInput, MessageInput, PatchRunInput, SetAgentConfigInput } from './types'
 
 /**
  * Query keys, in one place and exported, because they are a contract rather than an
@@ -37,41 +51,180 @@ import type { MessageInput, PatchRunInput } from './types'
  *
  * Hierarchical on purpose — `queryKeys.runs.all` invalidates the list and every single-run
  * query under it in one call.
+ *
+ * Every key leads with the ACTIVE project scope (multi-project spec, step 3.1): the registered
+ * project id, or the stable `'default'` sentinel when unscoped — read at access time via
+ * `queryScope()`, which is why the constant keys are getters. One cache, never bleeding across
+ * projects: project A's `['a','runs','list']` and project B's `['b','runs','list']` are simply
+ * different entries, and a scoped invalidation (`queryKeys.runs.all` under scope A) can only
+ * ever reach A's data. Call sites are unchanged — they keep writing `queryKeys.runs.list()`.
  */
 export const queryKeys = {
-  health: ['health'] as const,
+  get health() {
+    return [queryScope(), 'health'] as const
+  },
   runs: {
-    all: ['runs'] as const,
-    list: () => ['runs', 'list'] as const,
-    detail: (id: string) => ['runs', 'detail', id] as const,
-    diff: (id: string) => ['runs', 'diff', id] as const,
-    changes: (id: string) => ['runs', 'changes', id] as const,
-    file: (id: string, path: string) => ['runs', 'files', id, path] as const,
-    handoff: (id: string) => ['runs', 'handoff', id] as const,
-    commits: (id: string) => ['runs', 'commits', id] as const,
-    commit: (id: string, sha: string) => ['runs', 'commit', id, sha] as const,
+    get all() {
+      return [queryScope(), 'runs'] as const
+    },
+    list: () => [queryScope(), 'runs', 'list'] as const,
+    detail: (id: string) => [queryScope(), 'runs', 'detail', id] as const,
+    diff: (id: string) => [queryScope(), 'runs', 'diff', id] as const,
+    changes: (id: string) => [queryScope(), 'runs', 'changes', id] as const,
+    file: (id: string, path: string) => [queryScope(), 'runs', 'files', id, path] as const,
+    handoff: (id: string) => [queryScope(), 'runs', 'handoff', id] as const,
+    commits: (id: string) => [queryScope(), 'runs', 'commits', id] as const,
+    commit: (id: string, sha: string) => [queryScope(), 'runs', 'commit', id, sha] as const,
   },
   groups: {
-    detail: (groupId: string) => ['groups', groupId] as const,
+    detail: (groupId: string) => [queryScope(), 'groups', groupId] as const,
   },
-  todos: ['todos'] as const,
-  workflows: ['workflows'] as const,
-  skills: ['skills'] as const,
-  launchKey: ['launch-key'] as const,
-  repo: ['repo'] as const,
+  get todos() {
+    return [queryScope(), 'todos'] as const
+  },
+  get workflows() {
+    return [queryScope(), 'workflows'] as const
+  },
+  get skills() {
+    return [queryScope(), 'skills'] as const
+  },
+  get skillsReady() {
+    return [queryScope(), 'skills', 'ready'] as const
+  },
+  get launchKey() {
+    return [queryScope(), 'launch-key'] as const
+  },
+  get repo() {
+    return [queryScope(), 'repo'] as const
+  },
   /** Children of `repo` on purpose: invalidating `queryKeys.repo` (a branch switch, a new
    *  commit) prefix-matches the working-tree diff and every cached commit diff too. */
-  repoChanges: ['repo', 'changes'] as const,
-  repoCommit: (sha: string) => ['repo', 'commit', sha] as const,
-  uiState: ['ui-state'] as const,
+  get repoChanges() {
+    return [queryScope(), 'repo', 'changes'] as const
+  },
+  repoCommit: (sha: string) => [queryScope(), 'repo', 'commit', sha] as const,
+  get uiState() {
+    return [queryScope(), 'ui-state'] as const
+  },
   /** The Settings → Agents knobs (`GET /api/config`, R6 1.5). */
-  config: ['config'] as const,
+  get config() {
+    return [queryScope(), 'config'] as const
+  },
+  get agentConfig() {
+    return [queryScope(), 'agent-config'] as const
+  },
+  agentConfigFile: (id: string) => [queryScope(), 'agent-config', 'file', id] as const,
   /** The worktree management panel (`GET /api/worktrees`, #483). */
-  worktrees: ['worktrees'] as const,
-  github: (params: { limit?: number } = {}) => ['github', params.limit ?? null] as const,
-  githubComments: (kind: 'issue' | 'pr', number: number) => ['github', 'comments', kind, number] as const,
-  openTargets: ['open-targets'] as const,
-} as const
+  get worktrees() {
+    return [queryScope(), 'worktrees'] as const
+  },
+  github: (params: { limit?: number } = {}) => [queryScope(), 'github', params.limit ?? null] as const,
+  githubComments: (kind: 'issue' | 'pr', number: number) =>
+    [queryScope(), 'github', 'comments', kind, number] as const,
+  get openTargets() {
+    return [queryScope(), 'open-targets'] as const
+  },
+}
+
+/**
+ * Workspace-level keys — deliberately NOT scope-led: there is one project registry no matter
+ * which project is active, and the `/p/:projectId` route gate reads it while the scope is
+ * still being decided, so a scope-dependent key would chase its own tail (mount provider →
+ * scope changes → key changes → data gone → provider unmounts).
+ */
+export const workspaceQueryKeys = {
+  projects: ['workspace', 'projects'] as const,
+  /** `~/.cezar/ui-state.json` via `GET/PUT /api/workspace/ui-state` (step 2.7) — cross-project
+   *  GUI prefs, e.g. the sidebar's per-project collapse map (step 3.3), and — since step 3.5 —
+   *  appearance + notifications, which describe the user rather than a repo. */
+  uiState: ['workspace', 'ui-state'] as const,
+  /** `~/.cezar/config.json`'s settings slice via `GET/PUT /api/workspace/config` (step 2.7):
+   *  the global Resources knobs and the checkout root. */
+  config: ['workspace', 'config'] as const,
+  /** One directory listing from `GET /api/fs/browse` (step 4.2's folder picker). Keyed by the
+   *  browsed path — `null` is the browse root, whose absolute location only the server knows.
+   *  Not scope-led: there is one filesystem behind the workspace, not one per project. */
+  fsBrowse: (path: string | null) => ['workspace', 'fs-browse', path] as const,
+}
+
+/** The workspace project registry (`GET /api/projects`): the `/p/:projectId` route gate's
+ *  known/unknown answer, the boot slug behind the `/p/default` alias, and the list the
+ *  unknown-project screen offers. Step 3.3's sidebar reads it too. */
+export function useProjects() {
+  return useQuery({
+    queryKey: workspaceQueryKeys.projects,
+    queryFn: ({ signal }) => getProjects({ signal }),
+  })
+}
+
+/** One directory listing for the add-project folder picker (step 4.2). `path: null` asks for
+ *  the browse root. Retries are off: the interesting failures here are the deliberate 400/404s
+ *  (outside the root, no such directory) — re-asking cannot change those answers, and the
+ *  dialog shows the server's own words instead. */
+export function useFsBrowse(path: string | null) {
+  return useQuery({
+    queryKey: workspaceQueryKeys.fsBrowse(path),
+    queryFn: ({ signal }) => browseFs(path ?? undefined, { signal }),
+    retry: false,
+  })
+}
+
+/**
+ * Register a browsed folder (`POST /api/projects`, step 4.2).
+ *
+ * Invalidates the registry so the sidebar grows the new project WITHOUT a reload — the caller
+ * navigates to `/p/<id>/` on success, and the `/p/:projectId` route gate reads that same query
+ * to decide the id is known, so a stale list would bounce a just-added project to the
+ * unknown-project screen.
+ *
+ * A 409 (already registered) resolves rather than rejects — see `registerProject` in client.ts;
+ * the caller navigates to the existing entry either way.
+ */
+export function useRegisterProject() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (root: string) => registerProject(root),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.projects }),
+  })
+}
+
+/**
+ * Clone a GitHub repo into the checkout root and register it (`POST /api/projects/checkout`,
+ * step 4.3). Same registry invalidation as `useRegisterProject` and for the same reason — the
+ * caller navigates to `/p/<id>/`, and the route gate reads that query to decide the id is known.
+ *
+ * No retry: a clone is a long, side-effecting call. Re-running it after a failure would race
+ * the server's own cleanup of the partial directory and land on the 409 instead of the real
+ * error, which is precisely the confusing outcome the cleanup exists to prevent.
+ */
+/**
+ * Deregister a project (`DELETE /api/projects/:projectId`, step 4.4 — Settings → Projects).
+ *
+ * Same registry invalidation as the two add paths, for the mirror reason: the sidebar must
+ * LOSE the group without a reload. The server also emits `project-removed` on the workspace
+ * stream, which invalidates the same key for every OTHER open tab (global-events.tsx) — this
+ * one is for the tab that pressed the button, whose own answer arrives before the event.
+ *
+ * No retry: the interesting failures are the deliberate 409s (running tasks, the boot
+ * project), and re-asking cannot change those answers.
+ */
+export function useRemoveProject() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (projectId: string) => removeProject(projectId),
+    retry: false,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.projects }),
+  })
+}
+
+export function useCheckoutProject() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (input: CheckoutProjectInput) => checkoutProject(input),
+    retry: false,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.projects }),
+  })
+}
 
 /** Version + update check + repo/branch + tool probes. Feeds the sidebar's repo and version
  *  chips and (Step 4.2) the Tools menu.
@@ -106,6 +259,31 @@ export function useRuns() {
   return useQuery({
     queryKey: queryKeys.runs.list(),
     queryFn: ({ signal }) => getRuns({ signal }),
+  })
+}
+
+/**
+ * One project's run list by EXPLICIT id — the sidebar's per-group task lists (step 3.3), which
+ * must read projects the mounted scope cannot reach. Keyed `[projectId, 'runs', 'list']`: for
+ * the ACTIVE project that is the very entry `useRuns()` fills and the stream patches, so the
+ * two views share one cache; for any other project it is that project's own entry, kept fresh
+ * by refetch-on-expand rather than by the stream (the stream filter applies only the active
+ * scope's events). `enabled: false` parks the fetch — a COLLAPSED group costs one registry
+ * row, never a runs request (spec, "40 registered projects" row) — while still reading any
+ * cached answer, which is what lets a collapsed group keep its attention badge.
+ *
+ * `boot: true` aliases the key scope to `'default'`: the boot project mounts UNSCOPED
+ * (routes.tsx keeps its legacy `/api/*` surface), so its main view and the SSE patcher both
+ * live under the `'default'`-led keys — the boot group must read that SAME entry, or its list
+ * and needs-you badge freeze at whatever the expand-time fetch answered. The fetch itself
+ * still goes to `/api/p/<bootId>/runs`, which the server answers byte-identically (the
+ * route-parity contract).
+ */
+export function useProjectRuns(projectId: string, enabled = true, boot = false) {
+  return useQuery({
+    queryKey: [boot ? 'default' : projectId, 'runs', 'list'] as const,
+    queryFn: ({ signal }) => getProjectRuns(projectId, { signal }),
+    enabled,
   })
 }
 
@@ -229,11 +407,29 @@ export function useWorkflows() {
  *  composer's `/` autocomplete fetches on first trigger, never on every thread visit. (The
  *  palette gets the same laziness structurally: its content mounts only while open.) */
 export function useSkills(enabled = true) {
-  return useQuery({
-    queryKey: queryKeys.skills,
+  const queryClient = useQueryClient()
+  const skillsKey = queryKeys.skills
+  const skillsScope = skillsKey[0]
+  const skills = useQuery({
+    queryKey: skillsKey,
     queryFn: ({ signal }) => getSkills({ signal }),
     enabled,
   })
+  const ready = useQuery({
+    queryKey: queryKeys.skillsReady,
+    queryFn: ({ signal }) => getSkillsWhenReady({ signal }),
+    enabled: enabled && skills.isSuccess,
+    staleTime: Infinity,
+    retry: false,
+  })
+
+  useEffect(() => {
+    // Treat the follow-up as best-effort. The fast catalog remains authoritative
+    // if an older server/proxy answers this additive request unexpectedly.
+    if (Array.isArray(ready.data)) queryClient.setQueryData([skillsScope, 'skills'], ready.data)
+  }, [queryClient, ready.data, skillsScope])
+
+  return skills
 }
 
 /** The bookmarklet auto-start secret (spec 011). Mounted ONLY by the Settings → Skills
@@ -298,6 +494,56 @@ export function useUiState() {
   return useQuery({
     queryKey: queryKeys.uiState,
     queryFn: ({ signal }) => getUiState({ signal }),
+  })
+}
+
+/** The selected project's agent-owned config files and precedence metadata. */
+export function useAgentConfig() {
+  return useQuery({
+    queryKey: queryKeys.agentConfig,
+    queryFn: ({ signal }) => getAgentConfig({ signal }),
+  })
+}
+
+export function useAgentConfigFile(id: string | null) {
+  return useQuery({
+    queryKey: queryKeys.agentConfigFile(id ?? ''),
+    queryFn: ({ signal }) => getAgentConfigFile(id as string, { signal }),
+    enabled: id !== null,
+  })
+}
+
+export function usePutAgentConfigFile(id: string) {
+  const queryClient = useQueryClient()
+  // Capture the scope at hook render time. A save may finish after the user has
+  // switched projects; recomputing these getters in onSuccess would otherwise
+  // write the previous project's response into the newly active cache.
+  const listingKey = queryKeys.agentConfig
+  const fileKey = queryKeys.agentConfigFile(id)
+  return useMutation({
+    mutationFn: (body: SetAgentConfigInput) => putAgentConfigFile(id, body),
+    onSuccess: (result) => {
+      queryClient.setQueryData(fileKey, result)
+      void queryClient.invalidateQueries({ queryKey: listingKey })
+    },
+  })
+}
+
+/** The cross-project GUI state (`~/.cezar/ui-state.json`). Read once and cached — the sidebar
+ *  applies its own writes optimistically and PUTs behind a debounce, so nothing polls this. */
+export function useWorkspaceUiState() {
+  return useQuery({
+    queryKey: workspaceQueryKeys.uiState,
+    queryFn: ({ signal }) => getWorkspaceUiState({ signal }),
+  })
+}
+
+/** The global settings slice of `~/.cezar/config.json` — Settings → Resources (step 3.5) and
+ *  the Projects pane's checkout root (step 4.4). Not scope-led: one workspace, one answer. */
+export function useWorkspaceConfig() {
+  return useQuery({
+    queryKey: workspaceQueryKeys.config,
+    queryFn: ({ signal }) => getWorkspaceConfig({ signal }),
   })
 }
 

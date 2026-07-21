@@ -1,17 +1,17 @@
-import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { MessageSquareTextIcon, PlayIcon, SearchXIcon } from 'lucide-react'
-import { useMemo } from 'react'
-import { Link, useLocation, useParams } from 'react-router'
+import { MessageSquareTextIcon, SearchXIcon } from 'lucide-react'
+import { useMemo, useState } from 'react'
+import { useLocation, useParams } from 'react-router'
 
-import { ApiError, continueRun } from '@/api/client'
-import { queryKeys, useRun, useRuns, useSendMessage } from '@/api/queries'
+import { Link } from '@/lib/project-router'
+
+import { ApiError } from '@/api/client'
+import { useRun, useRuns, useSendMessage } from '@/api/queries'
 import { useRunEvents } from '@/api/run-events'
 import type { ApiRun } from '@/api/types'
 import { CenteredState } from '@/components/centered-state'
 import { Composer } from '@/components/composer/composer'
 import { StatusDot } from '@/components/status-dot'
 import { Button } from '@/components/ui/button'
-import { toast } from '@/components/ui/toaster'
 import { useKeyboardInsetVar } from '@/lib/keyboard-inset'
 import { taskPrUrl } from '@/lib/tasks-table'
 import { cn, isHttpUrl } from '@/lib/utils'
@@ -26,10 +26,15 @@ import {
   ToolStreak,
   UserBubble,
 } from './thread-items'
+import { ContinueAction } from './follow-up-engine'
+import { AgentsDock } from './agents-dock'
 import { PlanDock, planCounts } from './plan-dock'
+import { collectSubagents, findSubagent, subagentChildren } from './subagent-dock'
+import { SubagentSheet } from './subagent-sheet'
 import { AcceptCelebration, ReviewPanel } from './review-panel'
-import { queuePosition, runActionFlags } from './run-actions'
+import { queuePosition } from './run-actions'
 import { RunHeader } from './run-header'
+import { AskCard } from './ask-card'
 import { groupThreadItems, type ThreadBlock } from './thread-groups'
 import { ThreadLoading } from './thread-loading'
 import { ThreadCardCache } from './thread-open-cards'
@@ -114,7 +119,10 @@ export function buildThreadRows(run: ApiRun, thread: ThreadState): ThreadRow[] {
       })
     }
     for (const block of groupThreadItems(turn.items)) {
-      rows.push({ key: `${turn.id}:${block.id}`, node: <ThreadBlockView block={block} scope={turn.id} /> })
+      rows.push({
+        key: `${turn.id}:${block.id}`,
+        node: <ThreadBlockView block={block} scope={turn.id} runId={run.id} />,
+      })
     }
   }
   return rows
@@ -128,9 +136,41 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
   // plan hides the dock and the header mirror alike).
   const plan = latestPlanEntries(thread)
   const planTally = plan !== undefined && plan.length > 0 ? planCounts(plan) : undefined
+  // The Agents dock's data: the current fan-out's sub-agents, or [] when there is none to
+  // show (#474). Derived from the same reduced turns the thread renders — no new subscription.
   // The legacy session-open rule (web/app.js `updateDetail`): the composer can deliver while
   // the engine owns a live session — running queues the message, waiting answers it.
   const sessionOpen = run.status === 'running' || run.status === 'waiting'
+  // A closed session can never settle its in-flight items — nothing in the reducer rewrites a
+  // `running` item on `session.ended`, so an interrupted fan-out stays `running` in the
+  // persisted stream forever. Without this, reopening it pulses `Agents · 0/1` above a dead
+  // transcript for good.
+  //
+  // Derived from `sessionOpen` rather than enumerated, so it cannot drift when a status is
+  // added: anything that is neither live nor still queued is closed. `review` matters most —
+  // it is where this pipeline's runs normally END, and `threadFooter` already calls it closed.
+  const runIsTerminal = !sessionOpen && run.status !== 'queued'
+  const agents = useMemo(() => collectSubagents(thread.turns, runIsTerminal), [thread.turns, runIsTerminal])
+  // The drill-down's whole state: which agent is open. Ephemeral by design (spec Q2/Q5) —
+  // sub-agents have no stable identity outside their run, so there is nothing to persist.
+  const [openAgentId, setOpenAgentId] = useState<string | undefined>(undefined)
+  // Item ids repeat across runs (codex mints `item_1`, `item_rv_1` per session), so a
+  // selection carried across a route change could pop the sheet open on an unrelated item.
+  const [selectionRunId, setSelectionRunId] = useState(run.id)
+  if (selectionRunId !== run.id) {
+    setSelectionRunId(run.id)
+    setOpenAgentId(undefined)
+  }
+  // Resolved from the turns, NOT from `agents`: the dock can yield to the transcript (Q6)
+  // while a sheet is open, and that must not slam the panel shut mid-read.
+  const openAgent = useMemo(
+    () => (openAgentId === undefined ? undefined : findSubagent(thread.turns, openAgentId, runIsTerminal)),
+    [thread.turns, openAgentId, runIsTerminal],
+  )
+  const openAgentChildren = useMemo(
+    () => (openAgentId === undefined ? [] : subagentChildren(thread.turns, openAgentId)),
+    [thread.turns, openAgentId],
+  )
   const sendMessage = useSendMessage(run.id)
 
   const rows = useMemo(() => buildThreadRows(run, thread), [run, thread])
@@ -198,6 +238,18 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
 
       <AcceptCelebration status={run.status} />
 
+      {/* The drill-down for whichever Agents-dock row was clicked. Rendered outside the dock
+          so the sheet's portal is not affected by the dock's collapse state — but inside its
+          own card cache (module-level and run-keyed, so this is the SAME store the thread
+          uses), or tool cards expanded in the sheet would forget that on reopen. */}
+      <ThreadCardCache runId={run.id}>
+        <SubagentSheet
+          agent={openAgent}
+          entries={openAgentChildren}
+          onClose={() => setOpenAgentId(undefined)}
+        />
+      </ThreadCardCache>
+
       {/* The dock region (mockup `.dock`): plan dock, paused hint, then the composer.
           `bottom: var(--kb)` is the iOS keyboard lift — 0 until the visualViewport watcher
           publishes an inset. */}
@@ -212,6 +264,10 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
           </div>
         ) : null}
         <div className="mx-auto flex w-full max-w-[820px] flex-col gap-2.5">
+          {/* Agents above the plan: the fan-out is the more urgent "what is happening now",
+              and it is transient — the plan outlives it. Keyed by run id like the plan dock. */}
+          <AgentsDock key={`agents:${run.id}`} runId={run.id} agents={agents} onSelect={setOpenAgentId} />
+
           {plan !== undefined && plan.length > 0 ? (
             // Keyed by run id: the collapse default re-derives per task (see PlanDock).
             <PlanDock key={run.id} runId={run.id} entries={plan} />
@@ -247,31 +303,6 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
   )
 }
 
-/** The closed composer's way out (legacy "Session closed — Continue to reopen."): reopens the
- *  last agent session, exactly like the header's Continue — hidden when the run has no session
- *  to resume (the flags rule in run-actions.ts). */
-function ContinueAction({ run }: { run: ApiRun }) {
-  const queryClient = useQueryClient()
-  const mutation = useMutation({
-    mutationFn: () => continueRun(run.id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.runs.all }),
-    onError: (error: Error) => toast(error.message, { tone: 'danger' }),
-  })
-  if (!runActionFlags(run).continueRun) return null
-  return (
-    <Button
-      type="button"
-      variant="outline"
-      size="sm"
-      disabled={mutation.isPending}
-      onClick={() => mutation.mutate()}
-    >
-      <PlayIcon aria-hidden="true" className="size-3.5" />
-      Continue
-    </Button>
-  )
-}
-
 /** The queued run's honest empty state (legacy #351): a queued run has emitted nothing, so
  *  instead of a blank thread the placeholder names the parked state and its live position in
  *  the FIFO queue (from the runs list — the same feed the sidebar uses). */
@@ -294,10 +325,10 @@ function QueuedPlaceholder({ run }: { run: ApiRun }) {
 /** One grouped block → its surface. Grouping (context groups, streaks, sub-agent nesting) is
  *  `groupThreadItems`'s — this only maps block kinds to components. `scope` (the turn's render
  *  key) namespaces the open-card cache keys, because item ids repeat across sessions. */
-function ThreadBlockView({ block, scope }: { block: ThreadBlock; scope: string }) {
+function ThreadBlockView({ block, scope, runId }: { block: ThreadBlock; scope: string; runId: string }) {
   switch (block.kind) {
     case 'entry':
-      return <ThreadEntryView entry={block.entry} scope={scope} />
+      return <ThreadEntryView entry={block.entry} scope={scope} runId={runId} />
     case 'tool-card':
       return <ToolCard item={block.item} nested={block.children} cacheKey={`${scope}:${block.id}`} />
     case 'context-group':
@@ -306,7 +337,7 @@ function ThreadBlockView({ block, scope }: { block: ThreadBlock; scope: string }
       return (
         <ToolStreak count={block.count}>
           {block.blocks.map((inner) => (
-            <ThreadBlockView key={inner.id} block={inner} scope={scope} />
+            <ThreadBlockView key={inner.id} block={inner} scope={scope} runId={runId} />
           ))}
         </ToolStreak>
       )
@@ -314,7 +345,7 @@ function ThreadBlockView({ block, scope }: { block: ThreadBlock; scope: string }
 }
 
 /** One reducer entry → its block (non-tool entries; tools always arrive as tool-card blocks). */
-function ThreadEntryView({ entry, scope }: { entry: ThreadEntry; scope: string }) {
+function ThreadEntryView({ entry, scope, runId }: { entry: ThreadEntry; scope: string; runId: string }) {
   switch (entry.kind) {
     case 'message':
       // Agent-side user echoes (some backends emit them) read as user bubbles too.
@@ -331,5 +362,7 @@ function ThreadEntryView({ entry, scope }: { entry: ThreadEntry; scope: string }
       return <NoteLine note={entry} />
     case 'image':
       return <ImageItem image={entry} />
+    case 'ask':
+      return <AskCard ask={entry} runId={runId} />
   }
 }

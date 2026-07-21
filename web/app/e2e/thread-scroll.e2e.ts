@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { AgentBrowser } from './agent-browser'
+import { AgentBrowser, bootProjectId, fixtureServeEnv } from './agent-browser'
 import { expectedRowCount, largeThreadEvents } from './fixtures/make-large-thread'
 import record from './fixtures/thread-run.record.json'
 
@@ -74,6 +74,11 @@ let browser: AgentBrowser
 let server: ChildProcess
 let dataRoot: string
 let baseUrl: string
+let bootProject: string
+
+/** A flat route target under this server's own project prefix (multi-project spec, step 3.2):
+ *  every cockpit link is scoped, and every legacy flat URL redirects onto its scoped twin. */
+const scoped = (path: string) => `/p/${bootProject}${path}`
 
 const MAIN = `document.querySelector('[data-slot="main"]')`
 const nearBottom = `(() => { const m = ${MAIN}; return m.scrollHeight - m.scrollTop - m.clientHeight < 80 })()`
@@ -104,7 +109,7 @@ function parkAt(target: string) {
 /** Load the thread and wait until the SSE replay has finished growing it (the last turn's
  *  note is rendered) — every measurement below is over the complete transcript. */
 function openThread(query = '') {
-  browser.goto(`${baseUrl}/tasks/${RUN_ID}${query}`)
+  browser.goto(`${baseUrl}${scoped(`/tasks/${RUN_ID}`)}${query}`)
   browser.waitForFunction(
     `document.querySelector('[data-slot="thread-rows"]') !== null && document.body.textContent.includes('goal achieved — session closed')`,
   )
@@ -127,9 +132,10 @@ beforeAll(async () => {
   server = spawn(
     process.execPath,
     [join(repoRoot, 'dist/index.js'), 'serve', '--repo', dataRoot, '--port', String(port), '--no-open'],
-    { env: { ...process.env, CEZ_DRY_RUN: '1' }, stdio: 'ignore' },
+    { env: fixtureServeEnv(dataRoot), stdio: 'ignore' },
   )
   await waitForHealth(baseUrl)
+  bootProject = await bootProjectId(baseUrl)
 
   browser = AgentBrowser.open(sessionId)
   browser.setViewport(1440, 900)
@@ -207,11 +213,11 @@ describe('thread virtualization on a 1,000-row transcript', () => {
     expect(maxTop - parked).toBeGreaterThan(1000) // genuinely mid-thread, not a near-tail park
 
     // …leave through the sidebar (a client-side <Link> — a reload would drop the caches)…
-    browser.click('[data-slot="sidebar"] a[href="/"]')
+    browser.click(`[data-slot="sidebar"] a[href="${scoped('/')}"]`)
     browser.waitForFunction(`document.querySelector('[data-route="task-thread"]') === null`)
 
     // …and come back through the quick list.
-    browser.click(`a[href="/tasks/${RUN_ID}"]`)
+    browser.click(`a[href="${scoped(`/tasks/${RUN_ID}`)}"]`)
     browser.waitForFunction(`document.querySelector('[data-slot="thread-rows"]') !== null`)
     // The replay re-grows the thread; the cached offset is re-applied until reachable.
     browser.waitForFunction(`Math.abs(${MAIN}.scrollTop - ${parked}) < 200`)

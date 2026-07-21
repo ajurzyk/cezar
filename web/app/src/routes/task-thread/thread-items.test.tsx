@@ -186,6 +186,16 @@ describe('ReasoningItem', () => {
     render(<ReasoningItem text={text} />)
     expect(screen.getByRole('button').textContent).toBe(`Thinking — ${text}`)
   })
+
+  // #528 — an empty item must not leave a bare, un-expandable "Thinking —" row.
+  it.each([['', 'empty'], ['   ', 'spaces'], ['\n\t ', 'whitespace']])(
+    'renders nothing for %s text (%s)',
+    (empty) => {
+      const { container } = render(<ReasoningItem text={empty} />)
+      expect(container.innerHTML).toBe('')
+      expect(screen.queryByRole('button')).toBeNull()
+    },
+  )
 })
 
 describe('ContextGroup + ToolStreak', () => {

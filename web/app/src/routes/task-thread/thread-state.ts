@@ -1,5 +1,12 @@
 import type { RunEvent, RunStatus } from '@/api/types'
-import type { PlanEntry, PlanStatus, StopReason, UiItem, UiToolItem } from '@/protocol/ui-events'
+import type {
+  PlanEntry,
+  PlanStatus,
+  StopReason,
+  UiAskQuestion,
+  UiItem,
+  UiToolItem,
+} from '@/protocol/ui-events'
 import { toolDisplay } from '@/protocol/tool-display'
 
 /**
@@ -43,7 +50,22 @@ export interface ThreadImage {
   name?: string
 }
 
-export type ThreadEntry = UiItem | ThreadNote | ThreadImage
+/**
+ * A structured AskUser question the agent posed via `CEZ:ASK` (#473, v2
+ * `ask.requested`). The cockpit renders it as clickable option chips. Resolution
+ * is client-side: the next `user-message` for the run flips `resolved` and
+ * records the reply as `answer`, so a reloaded thread reconstructs the same
+ * resolved/pending state from the persisted stream.
+ */
+export interface ThreadAsk {
+  kind: 'ask'
+  id: string
+  questions: UiAskQuestion[]
+  resolved: boolean
+  answer?: string
+}
+
+export type ThreadEntry = UiItem | ThreadNote | ThreadImage | ThreadAsk
 
 export interface ThreadTurn {
   /** Stable render key, assigned in arrival order (`turn-1`, `turn-2`, …). Not the protocol
@@ -162,7 +184,10 @@ function str(value: unknown): string | undefined {
  *  continuity — it now strips every protocol marker. Mirrors `stripTaskMarkers` in
  *  `src/runs/task-markers.ts`. */
 function stripDoneMarker(text: string): string {
-  const trailing = text.replace(/\s*CEZ:DONE\s*$/, '').replace(/\s*CEZ:MONITORING\s*$/, '')
+  const trailing = text
+    .replace(/\s*CEZ:DONE\s*$/, '')
+    .replace(/\s*CEZ:MONITORING\s*$/, '')
+    .replace(/\s*CEZ:ASK[ \t]+\{[\s\S]*\}\s*$/, '')
   if (!trailing.includes('CEZ:')) return trailing
   return trailing
     .split('\n')
@@ -211,11 +236,16 @@ function planFromTodos(input: unknown): PlanEntry[] | undefined {
 
 export function reduceThread(events: RunEvent[]): ThreadState {
   const turns: DraftTurn[] = []
-  /** itemId → live item. Rebound on every `item.started`, so per-session id reuse (each step
-   *  restarts `item_1`) always resolves to the newest incarnation. */
+  /** stepId:itemId → live item. Runner sessions restart ids at `item_1`, while every current
+   *  persisted event is stamped with its workflow step. Old recordings without a step id keep
+   *  the historical bare-id lookup semantics. */
   const itemsById = new Map<string, { turn: DraftTurn; entry: DraftEntry }>()
   let sessionEnded: ThreadState['sessionEnded']
   let turnSeq = 0
+  /** The latest unresolved AskUser card (#473). The next `user-message` resolves
+   *  it client-side (only one ask is ever pending — the agent asks once, then
+   *  parks `waiting` until the user answers). */
+  let pendingAsk: ThreadAsk | undefined
 
   const newTurn = (): DraftTurn => {
     turnSeq += 1
@@ -225,7 +255,12 @@ export function reduceThread(events: RunEvent[]): ThreadState {
   }
   const currentTurn = (): DraftTurn => turns.at(-1) ?? newTurn()
 
-  const upsertV2 = (turn: DraftTurn, raw: UiItem) => {
+  const itemKey = (event: RunEvent, itemId: string) => {
+    const stepId = str(event.stepId)
+    return stepId === undefined ? itemId : `${stepId}:${itemId}`
+  }
+
+  const upsertV2 = (turn: DraftTurn, raw: UiItem, key: string) => {
     // Clone: deltas append in place, and the event object off the wire must stay untouched.
     const item = { ...raw }
     if (!turn.v2Items) {
@@ -237,24 +272,32 @@ export function reduceThread(events: RunEvent[]): ThreadState {
       }
       turn.entries = turn.entries.filter((e) => !(e.origin === 'v1' && isUiItem(e.entry)))
     }
-    const existing = itemsById.get(item.id)
+    const existing = itemsById.get(key)
     if (existing && existing.turn === turn) {
       existing.entry.entry = item
-      itemsById.set(item.id, existing)
+      itemsById.set(key, existing)
       return
     }
     const draft: DraftEntry = { origin: 'v2', entry: item }
     turn.entries.push(draft)
-    itemsById.set(item.id, { turn, entry: draft })
+    itemsById.set(key, { turn, entry: draft })
   }
 
   for (const event of events) {
     switch (event.type) {
       // ---- turn boundaries ------------------------------------------------------------
       case 'user-message': {
+        const text = str(event.text) ?? ''
+        // Client-side resolution of the pending AskUser card (#473): the reply
+        // that follows an ask closes it and records the answer.
+        if (pendingAsk && !pendingAsk.resolved) {
+          pendingAsk.resolved = true
+          if (text !== '') pendingAsk.answer = text
+          pendingAsk = undefined
+        }
         const turn = newTurn()
         turn.userMessage = {
-          text: str(event.text) ?? '',
+          text,
           imageCount: typeof event.imageCount === 'number' ? event.imageCount : 0,
           images: Array.isArray(event.images) ? event.images.filter((u): u is string => typeof u === 'string') : [],
         }
@@ -309,12 +352,14 @@ export function reduceThread(events: RunEvent[]): ThreadState {
           break
         }
         const item = event.item as unknown as UiItem
-        const located = itemsById.get(item.id)
-        upsertV2(located?.turn ?? currentTurn(), item)
+        const key = itemKey(event, item.id)
+        const located = itemsById.get(key)
+        upsertV2(located?.turn ?? currentTurn(), item, key)
         break
       }
       case 'item.delta': {
-        const located = itemsById.get(str(event.itemId) ?? '')
+        const itemId = str(event.itemId) ?? ''
+        const located = itemsById.get(itemKey(event, itemId))
         const delta = str(event.delta) ?? ''
         if (!located || delta === '' || !isUiItem(located.entry.entry)) break
         const item = located.entry.entry
@@ -456,6 +501,21 @@ export function reduceThread(events: RunEvent[]): ThreadState {
           reason: (str(event.reason) ?? 'end_turn') as StopReason,
           ...(str(event.message) !== undefined ? { message: str(event.message) } : {}),
         }
+        break
+      }
+      case 'ask.requested': {
+        // A structured question (#473) — render it as an ask card in the current
+        // turn. Guard the payload (a bad line costs one event, never a throw).
+        const requestId = str(event.requestId)
+        if (requestId === undefined || !Array.isArray(event.questions)) break
+        const questions = (event.questions as unknown[]).filter(
+          (q): q is UiAskQuestion =>
+            isRecord(q) && typeof q.header === 'string' && Array.isArray(q.options),
+        )
+        if (questions.length === 0) break
+        const ask: ThreadAsk = { kind: 'ask', id: requestId, questions, resolved: false }
+        currentTurn().entries.push({ origin: 'meta', entry: ask })
+        pendingAsk = ask
         break
       }
 

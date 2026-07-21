@@ -606,4 +606,83 @@ describe('ClaudeCliRunner v2 wiring (against the bundled mock CLI)', () => {
       await rm(cwd, { recursive: true, force: true });
     }
   }, 30_000);
+
+  // The `mock:subagents` trigger is the dry-run testability hook for the Agents
+  // dock (spec `.ai/specs/2026-07-20-grouped-subagent-display.md`, #474): without
+  // it the dock is unreachable offline, so QA, screenshots and the e2e smoke all
+  // depend on this wire shape staying correct.
+  it('mock:subagents fans out two parented Task agents', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'cez-ui-mapper-sub-'));
+    try {
+      const runner = new ClaudeCliRunner({ bin: mockBin, timeoutMs: 60_000 });
+      const v2: UiEvent[] = [];
+      const session = runner.startSession(
+        { userPrompt: 'mock:subagents', cwd, sessionId: 'sess-mock-sub' },
+        () => {},
+        { autoEndAfterFirstTurn: true, onUiEvent: (e) => v2.push(e) },
+      );
+      await session.result;
+
+      const started = v2.filter(
+        (e): e is Extract<UiEvent, { type: 'item.started' }> => e.type === 'item.started',
+      );
+      // Exactly two parent-less task items — the dock's two rows, and the "N/2" denominator.
+      const spawns = started.filter(
+        (e) => e.item.kind === 'tool' && e.item.toolKind === 'task' && e.item.parentItemId === undefined,
+      );
+      expect(spawns).toHaveLength(2);
+      expect(spawns.map((e) => e.item.kind === 'tool' && e.item.title)).toEqual([
+        'Task: Audit the auth flow',
+        'Task: Review the store layer',
+      ]);
+      // `subagent_type` reaches the item input — the row's type badge reads it.
+      expect(spawns[0]!.item).toMatchObject({ input: { subagent_type: 'general-purpose' } });
+      expect(spawns[1]!.item).toMatchObject({ input: { subagent_type: 'code-reviewer' } });
+
+      // Every agent owns children, attributed via parentItemId — no orphans.
+      const parentIds = new Set(spawns.map((e) => e.item.id));
+      for (const parentId of parentIds) {
+        const children = started.filter((e) => e.item.parentItemId === parentId);
+        expect(children.length).toBeGreaterThan(0);
+      }
+      // Both spawns settle, so a finished run docks them as completed.
+      const completedSpawns = v2.filter(
+        (e) => e.type === 'item.completed' && e.item.kind === 'tool' && parentIds.has(e.item.id),
+      );
+      expect(completedSpawns).toHaveLength(2);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  }, 30_000);
+});
+
+/**
+ * #528 — a blank `thinking` block carries no information; minting an item for
+ * it only produces a dead "Thinking —" row in the session view.
+ */
+describe('claude blank thinking blocks (#528)', () => {
+  function reasoningItems(msg: unknown): UiEvent[] {
+    const mapped = mapClaudeMessage(msg, createClaudeUiState());
+    return mapped.events.filter((e) => 'item' in e && e.item.kind === 'reasoning');
+  }
+
+  function assistant(thinking: string): unknown {
+    return {
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'thinking', thinking }] },
+    };
+  }
+
+  it.each([['', 'empty'], ['   ', 'spaces'], ['\n\t ', 'whitespace']])(
+    'mints no reasoning item for a %s thinking block (%s)',
+    (thinking) => {
+      expect(reasoningItems(assistant(thinking))).toEqual([]);
+    },
+  );
+
+  it('still mints an item for real thinking text', () => {
+    const events = reasoningItems(assistant('Checking the auth path.'));
+    expect(events).toHaveLength(2); // started + completed
+    expect(events.every((e) => 'item' in e && e.item.kind === 'reasoning' && e.item.text === 'Checking the auth path.')).toBe(true);
+  });
 });

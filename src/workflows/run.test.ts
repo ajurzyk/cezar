@@ -144,6 +144,161 @@ describe('RunManager.recordTurnEnd', () => {
 });
 
 /**
+ * `continueRun` runner/model override (#401): the follow-up composer can pick which backend and
+ * model reopen the session. The override is persisted as the run's current backend BEFORE the
+ * continuation is scheduled (so `runContinuation` reads it off the record); omitted fields
+ * preserve the run's current choice. We stub the private continuation so no live session
+ * starts — the assertion is only the synchronous record persistence.
+ */
+describe('RunManager.continueRun override', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  let manager: RunManager;
+
+  beforeEach(() => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-continue-'));
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot);
+    // No live agent — we only assert the synchronous persistence continueRun does before it
+    // hands off to the (stubbed) continuation.
+    (manager as unknown as { runContinuation: () => Promise<void> }).runContinuation = async () => {};
+  });
+
+  afterEach(() => {
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  /** A finished run with a resumable session on the `claude`/`sonnet` backend. */
+  function resumableRun(): string {
+    const record = store.createRun({
+      title: 't',
+      workflow: 'quick-task',
+      task: 't',
+      runner: 'claude',
+      model: 'sonnet',
+      steps: [{ id: 's1', name: 'Work', kind: 'agent' }],
+    });
+    store.updateRun(record.id, { status: 'done', finishedAt: new Date().toISOString() });
+    store.updateStep(record.id, 's1', { sessionId: 'sess-1' });
+    return record.id;
+  }
+
+  it('persists a runner + model override as the run current backend', () => {
+    const id = resumableRun();
+    expect(manager.continueRun(id, { runner: 'codex', model: 'gpt-5.1-codex' })).toEqual({ ok: true });
+    const after = store.getRun(id);
+    expect(after?.runner).toBe('codex');
+    expect(after?.model).toBe('gpt-5.1-codex');
+  });
+
+  it('starts fresh when Continue switches to a backend that does not own the session', () => {
+    const id = resumableRun();
+    const calls: unknown[][] = [];
+    (manager as unknown as { runContinuation: (...args: unknown[]) => Promise<void> }).runContinuation = async (...args) => {
+      calls.push(args);
+    };
+
+    expect(manager.continueRun(id, { runner: 'codex' })).toEqual({ ok: true });
+    expect(calls[0]?.[2]).toBeUndefined();
+    expect(calls[0]?.[3]).toBe('codex');
+  });
+
+  it('resumes when Continue stays on the backend that owns the session', () => {
+    const id = resumableRun();
+    store.updateStep(id, 's1', { backend: 'claude' });
+    const calls: unknown[][] = [];
+    (manager as unknown as { runContinuation: (...args: unknown[]) => Promise<void> }).runContinuation = async (...args) => {
+      calls.push(args);
+    };
+
+    expect(manager.continueRun(id, { runner: 'claude' })).toEqual({ ok: true });
+    expect(calls[0]?.[2]).toBe('sess-1');
+    expect(calls[0]?.[3]).toBe('claude');
+  });
+
+  it('an omitted override preserves the run current backend/model (backward compat)', () => {
+    const id = resumableRun();
+    expect(manager.continueRun(id, { text: 'keep going' })).toEqual({ ok: true });
+    const after = store.getRun(id);
+    expect(after?.runner).toBe('claude');
+    expect(after?.model).toBe('sonnet');
+  });
+
+  it("an empty model clears the pin so the runner picks the model (auto)", () => {
+    const id = resumableRun();
+    manager.continueRun(id, { model: '' });
+    expect(store.getRun(id)?.model).toBeUndefined();
+    // Runner untouched → the run keeps its backend.
+    expect(store.getRun(id)?.runner).toBe('claude');
+  });
+
+  it("rejects a model that is recognizably another runner's preset (no corruption persisted)", () => {
+    const id = resumableRun();
+    // The review's corruption case (#401): a codex preset landing on a claude continuation.
+    const result = manager.continueRun(id, { model: 'gpt-5.1-codex' });
+    expect(result).toEqual({ ok: false, error: "model 'gpt-5.1-codex' is not a claude model" });
+    expect(store.getRun(id)?.model).toBe('sonnet');
+    expect(store.getRun(id)?.runner).toBe('claude');
+  });
+
+  it('a runner-only switch clears the previous backend model pin instead of carrying it over', () => {
+    const id = resumableRun(); // claude/sonnet
+    // The composer sends only `runner` when the user switches backend without touching the
+    // model pill (it displays `auto` at that point). The inherited `sonnet` pin belongs to
+    // claude and must not reach the codex runner via `runContinuation`'s `model: record.model`.
+    expect(manager.continueRun(id, { runner: 'codex' })).toEqual({ ok: true });
+    const after = store.getRun(id);
+    expect(after?.runner).toBe('codex');
+    expect(after?.model).toBeUndefined();
+  });
+
+  it('a runner-only switch keeps a free-form model id — only known foreign presets are cleared', () => {
+    const record = store.createRun({
+      title: 't',
+      workflow: 'quick-task',
+      task: 't',
+      runner: 'claude',
+      model: 'my-org/custom-tune',
+      steps: [{ id: 's1', name: 'Work', kind: 'agent' }],
+    });
+    store.updateRun(record.id, { status: 'done', finishedAt: new Date().toISOString() });
+    store.updateStep(record.id, 's1', { sessionId: 'sess-1' });
+    expect(manager.continueRun(record.id, { runner: 'codex' })).toEqual({ ok: true });
+    expect(store.getRun(record.id)?.model).toBe('my-org/custom-tune');
+  });
+
+  it('a runner-only continue on the SAME backend keeps the pin (no spurious clear)', () => {
+    const id = resumableRun(); // claude/sonnet
+    expect(manager.continueRun(id, { runner: 'claude' })).toEqual({ ok: true });
+    expect(store.getRun(id)?.model).toBe('sonnet');
+  });
+
+  it('guards legacy records too — no persisted runner resolves to claude, like runContinuation', () => {
+    const record = store.createRun({ title: 't', workflow: 'quick-task', task: 't', steps: [{ id: 's1', name: 'Work', kind: 'agent' }] });
+    store.updateRun(record.id, { status: 'done', finishedAt: new Date().toISOString() });
+    store.updateStep(record.id, 's1', { sessionId: 'sess-1' });
+    const result = manager.continueRun(record.id, { model: 'gpt-5.1-codex' });
+    expect(result.ok).toBe(false);
+    expect(store.getRun(record.id)?.model).toBeUndefined();
+  });
+
+  it('keeps free-form model ids working — only cross-runner presets are rejected', () => {
+    const id = resumableRun();
+    expect(manager.continueRun(id, { model: 'my-custom-alias' })).toEqual({ ok: true });
+    expect(store.getRun(id)?.model).toBe('my-custom-alias');
+  });
+
+  it('refuses to continue a run with no resumable session (no override persisted)', () => {
+    const record = store.createRun({ title: 't', workflow: 'quick-task', task: 't', runner: 'claude', steps: [] });
+    store.updateRun(record.id, { status: 'done' });
+    const result = manager.continueRun(record.id, { runner: 'codex' });
+    expect(result.ok).toBe(false);
+    expect(store.getRun(record.id)?.runner).toBe('claude');
+  });
+});
+
+/**
  * Optional review gate (#489, spec 2026-07-18-optional-review-gate): the
  * terminal `settleSuccess` transition parks a changed run at `review` ONLY when
  * the gate is enabled (config toggle over `CEZ_REVIEW_GATE`, default off) and the
@@ -493,5 +648,103 @@ describe('CEZ:MONITORING parks as running/monitoring, not waiting (#490)', () =>
     expect(manager.sendMessage(record.id, [{ type: 'text', text: 'thanks, carry on' }])).toBe(true);
     await waitFor(record.id, (r) => r?.status === 'waiting');
     expect(store.getRun(record.id)?.activity).toBeUndefined();
+  }, 30_000);
+});
+
+/**
+ * #473 — the `CEZ:ASK` marker parks a turn-end as `waiting` (attention, NOT
+ * monitoring) AND emits an `ask.requested` v2 event so the cockpit renders a
+ * structured question as clickable chips. The marker is stripped from the v1
+ * text; a markerless turn raises no ask. Driven dry through the mock
+ * (`mock:ask`).
+ */
+describe('CEZ:ASK parks as waiting and emits ask.requested (#473)', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  let manager: RunManager;
+  let currentId: string | undefined;
+  const savedEnv: Record<string, string | undefined> = {};
+  const SINGLE_STEP: WorkflowDef = {
+    name: 'quick-task',
+    source: 'built-in',
+    steps: [{ id: 'task', name: 'Task', prompt: '{{task}}' }],
+  };
+
+  beforeEach(async () => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-473-'));
+    savedEnv.CEZ_DRY_RUN = process.env.CEZ_DRY_RUN;
+    process.env.CEZ_DRY_RUN = '1';
+    await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
+    writeFileSync(join(repoRoot, 'a.txt'), 'one\n');
+    await run('git', ['add', '-A'], { cwd: repoRoot });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repoRoot });
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot);
+    currentId = undefined;
+  });
+
+  afterEach(() => {
+    if (currentId) manager.cancel(currentId);
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  const waitFor = async (id: string, pred: (r: RunRecord | undefined) => boolean, ms = 15_000) => {
+    const deadline = Date.now() + ms;
+    while (!pred(store.getRun(id))) {
+      if (Date.now() > deadline) throw new Error('condition not met in time');
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  };
+
+  const readEvents = (id: string): Array<Record<string, unknown>> =>
+    readFileSync(join(repoRoot, '.ai/cezar/runs', `${id}.ndjson`), 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l));
+
+  it('a CEZ:ASK turn-end parks the run as waiting (attention) and emits ask.requested', async () => {
+    const record = manager.startRun(SINGLE_STEP, { task: 'mock:ask which library?', worktree: false });
+    currentId = record.id;
+    await waitFor(record.id, (r) => r?.status === 'waiting');
+    const parked = store.getRun(record.id);
+    expect(parked?.status).toBe('waiting'); // attention — NOT running/monitoring
+    expect(parked?.activity).toBeUndefined();
+    const asks = readEvents(record.id).filter((e) => e.type === 'ask.requested');
+    expect(asks).toHaveLength(1);
+    expect(typeof asks[0]!.requestId).toBe('string');
+    const questions = asks[0]!.questions as Array<{ header: string; options: unknown[] }>;
+    expect(questions[0]!.header).toBe('Library');
+    expect(questions[0]!.options).toHaveLength(2);
+  }, 30_000);
+
+  it('strips the CEZ:ASK marker from server-emitted v1 text events', async () => {
+    const record = manager.startRun(SINGLE_STEP, { task: 'mock:ask pick one', worktree: false });
+    currentId = record.id;
+    await waitFor(record.id, (r) => r?.status === 'waiting');
+    const v1Text = readEvents(record.id).filter((e) => e.type === 'text');
+    expect(v1Text.length).toBeGreaterThan(0);
+    expect(v1Text.some((e) => String(e.text).includes('CEZ:ASK'))).toBe(false);
+  }, 30_000);
+
+  it('a markerless turn-end raises no ask.requested', async () => {
+    const record = manager.startRun(SINGLE_STEP, { task: 'just do the thing', worktree: false });
+    currentId = record.id;
+    await waitFor(record.id, (r) => r?.status === 'waiting');
+    expect(readEvents(record.id).some((e) => e.type === 'ask.requested')).toBe(false);
+  }, 30_000);
+
+  it('a malformed CEZ:ASK degrades gracefully: parks waiting, no ask card', async () => {
+    const record = manager.startRun(SINGLE_STEP, { task: 'mock:ask-bad choose', worktree: false });
+    currentId = record.id;
+    await waitFor(record.id, (r) => r?.status === 'waiting');
+    const parked = store.getRun(record.id);
+    expect(parked?.status).toBe('waiting'); // still parks — never worse than the prose fallback
+    expect(parked?.activity).toBeUndefined();
+    expect(readEvents(record.id).some((e) => e.type === 'ask.requested')).toBe(false);
   }, 30_000);
 });

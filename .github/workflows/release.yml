@@ -19,8 +19,9 @@ on:
           - existing
 
 permissions:
-  contents: write # commit the version bump + push the tag
+  contents: write # create the release tag + GitHub Release via the API
   id-token: write # npm provenance attestation
+  pull-requests: write # open the version-bump PR for patch/minor/major releases
 
 concurrency:
   group: release-${{ github.ref }}
@@ -69,23 +70,31 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: node scripts/release.mjs "${{ inputs.bump }}"
 
-      - name: Commit version bump, tag, and push
-        if: steps.release.outputs.published == 'true'
+      # `main` is a protected branch (PR-only, signed commits required), so a
+      # release never pushes a commit to it directly — that push is rejected with
+      # GH013 "Cannot update this protected ref". Instead:
+      #   - `existing` (the version is already on main via its own PR) records
+      #     nothing new here; the tag + Release below capture the release point.
+      #   - patch/minor/major bump the manifests to a version that is NOT yet on
+      #     main, so they open a follow-up PR with the bump instead of pushing.
+      # The release tag itself is created from the released commit by the
+      # `Create GitHub Release` step via the API, which branch protection allows.
+      - name: Open version-bump PR (patch/minor/major only)
+        if: steps.release.outputs.published == 'true' && inputs.bump != 'existing'
         env:
           VERSION: ${{ steps.release.outputs.version }}
-          BUMP: ${{ inputs.bump }}
+          GH_TOKEN: ${{ github.token }}
         run: |
+          BRANCH="release/v${VERSION}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
           git add package.json alias-cezar/package.json
-          if [ "$BUMP" = "existing" ] && git diff --cached --quiet; then
-            echo "existing release: version already committed, nothing to commit"
-          else
-            git commit -m "chore(release): v${VERSION}"
-            git push
-          fi
-          git tag "v${VERSION}"
-          git push origin "v${VERSION}"
+          git commit -m "chore(release): v${VERSION}"
+          git push origin "$BRANCH"
+          gh pr create --base main --head "$BRANCH" \
+            --title "chore(release): v${VERSION}" \
+            --body "Record the \`v${VERSION}\` version bump that the Release workflow published to npm \`latest\`. Merge to keep \`main\`'s manifests in sync with the published version."
 
       - name: Create GitHub Release
         if: steps.release.outputs.published == 'true'
@@ -113,10 +122,14 @@ jobs:
               `npx ${alias}@${version}`,
               '```',
             ].join('\n');
+            // Creates the tag at the released commit if it doesn't exist yet —
+            // this is the release's only write to the repo, and one the branch
+            // protection ruleset permits (unlike a direct push to main).
             await github.rest.repos.createRelease({
               owner: context.repo.owner,
               repo: context.repo.repo,
               tag_name: `v${version}`,
+              target_commitish: context.sha,
               name: `v${version}`,
               body,
               draft: false,
