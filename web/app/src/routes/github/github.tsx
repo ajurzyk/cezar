@@ -677,11 +677,16 @@ function GithubThread({ item, colors }: { item: GithubItem; colors: Record<strin
         Activity · {data.comments.length} comment{data.comments.length === 1 ? '' : 's'}
       </h3>
       <ul className="flex flex-col gap-5">
-        {entries.map((entry) =>
-          entry.row === 'comment' ? (
-            <ThreadEntry key={`${entry.comment.kind}-${entry.comment.id}`} comment={entry.comment} />
+        {groupCommitRuns(entries).map((grouped) =>
+          grouped.group === 'commits' ? (
+            <CommitGroup key={grouped.commits[0]!.id} commits={grouped.commits} colors={colors} />
+          ) : grouped.entry.row === 'comment' ? (
+            <ThreadEntry
+              key={`${grouped.entry.comment.kind}-${grouped.entry.comment.id}`}
+              comment={grouped.entry.comment}
+            />
           ) : (
-            <EventRow key={entry.event.id} event={entry.event} colors={colors} />
+            <EventRow key={grouped.entry.event.id} event={grouped.entry.event} colors={colors} />
           ),
         )}
       </ul>
@@ -704,13 +709,102 @@ function GithubThread({ item, colors }: { item: GithubItem; colors: Record<strin
 /** One row in the interleaved thread (#525) — a conversation comment/review, or a timeline event.
  *  A discriminated union rather than a widened `GithubComment['kind']`, so each branch keeps its
  *  own narrowing. */
-type ThreadRow =
+export type ThreadRow =
   | { row: 'comment'; comment: GithubComment }
   | { row: 'event'; event: GithubTimelineEvent }
 
 /** Sort key for either row shape. */
 const at = (entry: ThreadRow): string =>
   entry.row === 'comment' ? entry.comment.createdAt : entry.event.createdAt
+
+/** A rendered row after commit-run grouping: either a single row, or a run of consecutive commits
+ *  by one author that collapses behind an expander. */
+export type GroupedRow =
+  | { group: 'single'; entry: ThreadRow }
+  | { group: 'commits'; commits: GithubTimelineEvent[] }
+
+/**
+ * Collapse runs of consecutive `committed` events by the same author (#525), the way github.com
+ * does — otherwise a 40-commit PR buries the discussion.
+ *
+ * Entirely client-side and purely presentational: the wire stays a flat list where every commit
+ * keeps its own message and CI glyph, so nothing is lost to a collapse and the heuristic can
+ * change without a §2 conversation.
+ *
+ * A run ends at an author change or at any non-commit row. A run of one is not a group — a lone
+ * commit should render as a plain row, not a "1 commit" expander. Exported for unit tests.
+ */
+export function groupCommitRuns(entries: ThreadRow[]): GroupedRow[] {
+  const out: GroupedRow[] = []
+  let run: GithubTimelineEvent[] = []
+
+  const flush = () => {
+    if (run.length === 0) return
+    // A single commit is not a group.
+    if (run.length === 1) out.push({ group: 'single', entry: { row: 'event', event: run[0]! } })
+    else out.push({ group: 'commits', commits: run })
+    run = []
+  }
+
+  for (const entry of entries) {
+    const isCommit = entry.row === 'event' && entry.event.kind === 'committed'
+    if (isCommit && entry.row === 'event') {
+      const prev = run[run.length - 1]
+      if (prev && prev.actor !== entry.event.actor) flush() // author change ends the run
+      run.push(entry.event)
+      continue
+    }
+    flush() // any non-commit row interrupts the run
+    out.push({ group: 'single', entry })
+  }
+  flush()
+  return out
+}
+
+/** A collapsed run of consecutive commits — `{actor} added {n} commits`, expanding to the
+ *  individual rows, each of which keeps its own message and CI glyph. */
+function CommitGroup({ commits, colors }: { commits: GithubTimelineEvent[]; colors: Record<string, string> }) {
+  const [open, setOpen] = useState(false)
+  const actor = commits[0]?.actor ?? '?'
+
+  if (open) {
+    return (
+      <>
+        <li data-slot="gh-commit-group" data-open="true" className="min-w-0">
+          <button
+            type="button"
+            aria-expanded={true}
+            onClick={() => setOpen(false)}
+            className="flex items-center gap-1.5 font-mono text-[11px] text-soft-foreground hover:text-foreground"
+          >
+            <span aria-hidden="true">{EVENT_GLYPH.committed}</span>
+            <span className="font-sans font-medium text-foreground">{actor}</span>
+            <span>added {commits.length} commits</span>
+          </button>
+        </li>
+        {commits.map((commit) => (
+          <EventRow key={commit.id} event={commit} colors={colors} />
+        ))}
+      </>
+    )
+  }
+
+  return (
+    <li data-slot="gh-commit-group" data-open="false" className="min-w-0">
+      <button
+        type="button"
+        aria-expanded={false}
+        onClick={() => setOpen(true)}
+        className="flex items-center gap-1.5 font-mono text-[11px] text-soft-foreground hover:text-foreground"
+      >
+        <span aria-hidden="true">{EVENT_GLYPH.committed}</span>
+        <span className="font-sans font-medium text-foreground">{actor}</span>
+        <span>added {commits.length} commits</span>
+        <span className="shrink-0">{shortAge(commits[commits.length - 1]!.createdAt)}</span>
+      </button>
+    </li>
+  )
+}
 
 /** Per-kind glyph. Deliberately text glyphs rather than icon components: `EventRow` is a single
  *  muted line and an icon set would pull it visually level with the comment cards it sits

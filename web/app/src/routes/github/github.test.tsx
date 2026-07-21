@@ -16,7 +16,7 @@ import type {
 } from '@/api/types'
 import { Toaster, resetToasts } from '@/components/ui/toaster'
 
-import { GithubIndexRoute, GithubRoute } from './github'
+import { GithubIndexRoute, GithubRoute, groupCommitRuns, type ThreadRow } from './github'
 import { readFollowupPrompt, readFollowupSelection, writeFollowupSelection } from './hand-to-agent-draft'
 
 beforeAll(() => {
@@ -657,14 +657,56 @@ describe('the comment thread', () => {
     stubFetch(thread('pr', 137, {
       available: true, comments: [],
       events: [
-        { ...EVT.committed, id: 'evt-null', checks: null },
-        { ...EVT.committed, id: 'evt-absent' }, // no `checks` key at all
+        // Distinct authors so the Phase-2 commit-run grouping does not collapse them — this case
+        // is about glyph rendering, not grouping.
+        { ...EVT.committed, id: 'evt-null', actor: 'Ada Lovelace', checks: null },
+        { ...EVT.committed, id: 'evt-absent', actor: 'Grace Hopper' }, // no `checks` key at all
       ],
     }))
     renderAt('/github/prs/137')
 
     await waitFor(() => expect(events()).toHaveLength(2))
     expect(document.querySelectorAll('[data-slot="gh-commit-checks"]')).toHaveLength(0)
+  })
+
+  it('collapses a run of consecutive commits by one author, and expands on click', async () => {
+    const commit = (n: number, actor = 'Ada Lovelace') => ({
+      id: `evt-c${n}`, kind: 'committed' as const, actor,
+      createdAt: `2026-01-0${n}T00:00:00Z`, sha: String(n).repeat(40).slice(0, 40),
+      message: `commit number ${n}`, checks: 'passing' as const,
+    })
+    stubFetch(thread('pr', 137, {
+      available: true, comments: [],
+      events: [commit(1), commit(2), commit(3)],
+    }))
+    renderAt('/github/prs/137')
+
+    const group = () => document.querySelector<HTMLElement>('[data-slot="gh-commit-group"]')
+    await waitFor(() => expect(group()).not.toBeNull())
+
+    // Collapsed: one summary row, no individual commit rows.
+    expect(group()?.dataset.open).toBe('false')
+    expect(group()?.textContent).toContain('added 3 commits')
+    expect(group()?.querySelector('button')?.getAttribute('aria-expanded')).toBe('false')
+    expect(events()).toHaveLength(0)
+
+    fireEvent.click(group()!.querySelector('button')!)
+
+    // Expanded: each commit keeps its own message AND its own glyph — nothing is lost to the
+    // collapse, which is why grouping is client-side and the wire stays flat.
+    await waitFor(() => expect(events()).toHaveLength(3))
+    expect(group()?.querySelector('button')?.getAttribute('aria-expanded')).toBe('true')
+    expect(events()[0]?.textContent).toContain('commit number 1')
+    expect(events()[2]?.textContent).toContain('commit number 3')
+    expect(document.querySelectorAll('[data-slot="gh-commit-checks"]')).toHaveLength(3)
+  })
+
+  it('does not group a lone commit into a "1 commit" expander', async () => {
+    stubFetch(thread('pr', 137, { available: true, comments: [], events: [EVT.committed] }))
+    renderAt('/github/prs/137')
+
+    await waitFor(() => expect(events()).toHaveLength(1))
+    expect(document.querySelector('[data-slot="gh-commit-group"]')).toBeNull()
   })
 
   it('shows a truncation row linking to GitHub when the thread was trimmed', async () => {
@@ -1556,5 +1598,56 @@ describe('templates assigned to a skill auto-apply when a skill is picked', () =
       expect(document.querySelector('[data-slot="gh-skill-chip"][data-skill="g-review"]')).not.toBeNull(),
     )
     expect(screen.getByLabelText('Custom prompt')).toHaveProperty('value', '')
+  })
+})
+
+/** The commit-run grouping helper (#525 Phase 2) — pure, so it is tested directly rather than
+ *  only through the rendered thread. Grouping is deliberately client-side: the wire stays a flat
+ *  list where each commit keeps its own message and CI glyph, so nothing is lost to a collapse
+ *  and the heuristic can change without a backward-compatibility conversation. */
+describe('groupCommitRuns', () => {
+  const commit = (id: string, actor: string): ThreadRow => ({
+    row: 'event',
+    event: { id, kind: 'committed', actor, createdAt: '2026-01-01T00:00:00Z', sha: 'a'.repeat(40) },
+  })
+  const label = (id: string): ThreadRow => ({
+    row: 'event',
+    event: { id, kind: 'labeled', actor: 'octocat', createdAt: '2026-01-01T00:00:00Z' },
+  })
+  const comment = (id: number): ThreadRow => ({
+    row: 'comment',
+    comment: { id, author: 'maya', createdAt: '2026-01-01T00:00:00Z', body: 'hi', kind: 'comment', url: 'u' },
+  })
+
+  it('groups consecutive commits by the same author', () => {
+    const out = groupCommitRuns([commit('a', 'Ada'), commit('b', 'Ada'), commit('c', 'Ada')])
+    expect(out).toHaveLength(1)
+    expect(out[0]).toMatchObject({ group: 'commits' })
+    expect((out[0] as { commits: unknown[] }).commits).toHaveLength(3)
+  })
+
+  it('ends a run at an author change', () => {
+    const out = groupCommitRuns([commit('a', 'Ada'), commit('b', 'Ada'), commit('c', 'Grace'), commit('d', 'Grace')])
+    expect(out).toHaveLength(2)
+    expect(out.every((g) => g.group === 'commits')).toBe(true)
+  })
+
+  it('ends a run at any non-commit row', () => {
+    const out = groupCommitRuns([commit('a', 'Ada'), commit('b', 'Ada'), label('l'), commit('c', 'Ada'), commit('d', 'Ada')])
+    expect(out.map((g) => g.group)).toEqual(['commits', 'single', 'commits'])
+  })
+
+  it('does not group a single commit', () => {
+    const out = groupCommitRuns([commit('a', 'Ada')])
+    expect(out).toEqual([{ group: 'single', entry: commit('a', 'Ada') }])
+  })
+
+  it('leaves a comment-only thread completely untouched', () => {
+    const entries = [comment(1), comment(2)]
+    expect(groupCommitRuns(entries)).toEqual(entries.map((entry) => ({ group: 'single', entry })))
+  })
+
+  it('handles an empty list', () => {
+    expect(groupCommitRuns([])).toEqual([])
   })
 })
