@@ -72,8 +72,10 @@ pretty distinguished"):
 - Sessions running **older** skill versions keep working via the legacy
   `PR_URL=`/`PR_NUMBER=` parsing; sessions running the new skills work with
   **older** cezars through the URL janitor (the report line contains the URL).
-- The cockpit does not yet render `referencedIssueUrl`; surfacing an issue
-  chip in the tasks table is a UI follow-up.
+- The cockpit renders the strongest known task reference in the tasks table:
+  PR first, otherwise issue. Issue URLs are seeded from the prompt at run
+  creation, so an issue-driven run has its linked issue chip while queued
+  (#554), before the first agent event.
 
 ## Test plan
 
