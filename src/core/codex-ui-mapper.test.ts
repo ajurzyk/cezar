@@ -12,7 +12,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { AgentEvent } from './agent-runner.js';
 import type { UiEvent, UiItem } from './ui-events.js';
@@ -709,6 +709,33 @@ describe('CodexAppServerRunner v2 wiring (against the bundled mock app-server)',
     });
     expect(v2).toContainEqual({ type: 'usage.updated', usage: { input: 1200, output: 300, total: 1500 } });
     expect(v2).toContainEqual({ type: 'turn.completed', turnId: 'turn_mock_1', stopReason: 'end_turn' });
+  }, 30_000);
+
+  it('keeps autonomous full-access permissions when resuming a thread', async () => {
+    const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 60_000 });
+    const session = runner.startSession(
+      { userPrompt: 'continue', cwd: process.cwd(), resume: true, sessionId: 'th_mock_1' },
+      undefined,
+      { autoEndAfterFirstTurn: true },
+    );
+
+    await expect(session.result).resolves.toMatchObject({ sessionId: 'th_mock_1' });
+  }, 30_000);
+
+  it('retains CEZ_CODEX_NETWORK=0 as an explicit restricted-sandbox opt-out', async () => {
+    vi.stubEnv('CEZ_CODEX_NETWORK', '0');
+    try {
+      const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 60_000 });
+      const session = runner.startSession(
+        { userPrompt: 'check without network', cwd: process.cwd() },
+        undefined,
+        { autoEndAfterFirstTurn: true },
+      );
+
+      await expect(session.result).resolves.toMatchObject({ sessionId: 'th_mock_1' });
+    } finally {
+      vi.unstubAllEnvs();
+    }
   }, 30_000);
 
   it('rejects a failed resume through session.result without an unhandled rejection', async () => {

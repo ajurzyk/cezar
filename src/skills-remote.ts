@@ -404,7 +404,15 @@ const cloneAttempted = new Set<string>();
 // project resolves its own `.ai/cezar/config.json` → `skillsRepos`, so one
 // project's team-skill list must never be served under another project's scope.
 const teamSkillsByRoot = new Map<string, Skill[]>();
-const firstLoadStarted = new Set<string>();
+const firstLoadByRoot = new Map<string, Promise<Skill[]>>();
+
+function initialTeamSkillsLoad(repoRoot: string): Promise<Skill[]> {
+  const existing = firstLoadByRoot.get(repoRoot);
+  if (existing) return existing;
+  const load = loadTeamSkills(repoRoot, false).catch(() => teamSkillsByRoot.get(repoRoot) ?? []);
+  firstLoadByRoot.set(repoRoot, load);
+  return load;
+}
 
 /**
  * The current team-skill list for this project, straight from memory. The
@@ -413,17 +421,24 @@ const firstLoadStarted = new Set<string>();
  * later instead of blocking the first `GET /api/skills`.
  */
 export function getTeamSkillsCached(repoRoot: string): Skill[] {
-  if (!firstLoadStarted.has(repoRoot)) {
-    firstLoadStarted.add(repoRoot);
-    void loadTeamSkills(repoRoot, false).catch(() => undefined);
-  }
+  void initialTeamSkillsLoad(repoRoot);
   return teamSkillsByRoot.get(repoRoot) ?? [];
+}
+
+/**
+ * Wait for the same non-refreshing load kicked off by `getTeamSkillsCached`.
+ * The normal catalog read stays immediate; callers use this only for a
+ * background convergence read after they have already rendered local skills.
+ */
+export function waitForTeamSkills(repoRoot: string): Promise<Skill[]> {
+  return initialTeamSkillsLoad(repoRoot);
 }
 
 /** Refresh: clone missing sources, `git fetch` existing ones, reload the list. */
 export async function refreshTeamSkills(repoRoot: string): Promise<Skill[]> {
-  firstLoadStarted.add(repoRoot);
-  return loadTeamSkills(repoRoot, true);
+  const load = loadTeamSkills(repoRoot, true).catch(() => teamSkillsByRoot.get(repoRoot) ?? []);
+  firstLoadByRoot.set(repoRoot, load);
+  return load;
 }
 
 async function loadTeamSkills(repoRoot: string, refresh: boolean): Promise<Skill[]> {

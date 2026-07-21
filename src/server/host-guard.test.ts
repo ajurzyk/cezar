@@ -16,8 +16,8 @@ import { createApp, type ServerDeps } from './server.js';
  *
  * Hosted mode (`CEZ_REMOTE=1` or a non-loopback bind) is exempt: the operator
  * deliberately exposed the server behind a hostname or proxy this code cannot
- * enumerate. A missing Host header passes — browsers (the rebinding vector)
- * always send one, and requiring it would break non-browser scripts.
+ * enumerate. A missing Host header fails closed in local mode; real HTTP/1.1
+ * clients always send one, while the in-process test harness must add it.
  */
 describe('host-header guard (DNS rebinding)', () => {
   const savedHome = process.env.CEZ_HOME;
@@ -58,9 +58,9 @@ describe('host-header guard (DNS rebinding)', () => {
     },
   );
 
-  it('allows a request without a Host header (non-browser callers)', async () => {
+  it('rejects a request without a Host header in local mode', async () => {
     const res = await request(null);
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(403);
   });
 
   it.each(['attacker.example', 'attacker.example:4321', 'cezar.attacker.example', '192.168.1.10:4321'])(
@@ -69,7 +69,9 @@ describe('host-header guard (DNS rebinding)', () => {
       for (const path of ['/api/health', '/api/projects', '/api/fs/browse?path=', '/api/runs']) {
         const res = await request(host, path);
         expect(res.status).toBe(403);
-        expect(await res.json()).toEqual({ error: 'forbidden host' });
+        expect(await res.json()).toEqual({
+          error: 'forbidden: unexpected Host header — this request did not originate from this machine (see #426)',
+        });
       }
     },
   );

@@ -5,6 +5,7 @@ import type { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { RunStore, type QueuedMessage, type RunRecord } from '../runs/store.js';
 import type { RunManager } from '../workflows/run.js';
+import { apiRequest } from './loopback-request.testkit.js';
 import { createApp } from './server.js';
 
 /**
@@ -83,7 +84,7 @@ describe('queued prompt stack routes (#472)', () => {
   });
 
   const send = (path: string, method: string, body?: unknown) =>
-    app.request(path, {
+    apiRequest(app, path, {
       method,
       headers: { 'content-type': 'application/json' },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
