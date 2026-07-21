@@ -1346,6 +1346,25 @@ describe('the follow-up prompt template menu (#413)', () => {
     )
   })
 
+  it('an EDITED box honours the caret — a template lands mid-text, not appended (#524)', async () => {
+    // The pre-fill (#524) means an untouched box must append rather than splice above the
+    // reference, but that must not cost `insertTemplate`'s documented mid-text case: the user
+    // clicked back into the box to fix a typo, then picked a template.
+    stubFetch()
+    await openDetail()
+
+    fireEvent.change(promptField(), { target: { value: 'ALPHA OMEGA' } })
+    await waitFor(() => expect(promptValue()).toBe('ALPHA OMEGA'))
+    promptField().setSelectionRange(5, 5)
+
+    await chooseTemplate('add-tests')
+    await waitFor(() =>
+      expect(promptValue()).toBe(
+        'ALPHA\n\nAlso add or update tests covering this change.\n\nOMEGA',
+      ),
+    )
+  })
+
   it('the menu is searchable — typing narrows it to the matching template', async () => {
     stubFetch()
     await openDetail()

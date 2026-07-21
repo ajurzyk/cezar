@@ -1,5 +1,5 @@
 import { memo } from 'react'
-import { Streamdown, type CodeHighlighterPlugin } from 'streamdown'
+import { Streamdown, defaultRemarkPlugins, type CodeHighlighterPlugin } from 'streamdown'
 
 import { SYN_THEME, highlight, highlightSync, supportedLanguages } from '@/lib/highlighter'
 
@@ -58,8 +58,11 @@ function remarkHardBreaks() {
     const out: MdastNode[] = []
     for (const child of node.children) {
       if (child.type === 'text' && child.value?.includes('\n')) {
-        child.value.split(/\r?\n/).forEach((part, index) => {
-          if (index > 0) out.push({ type: 'break' })
+        const parts = child.value.split(/\r?\n/)
+        parts.forEach((part, index) => {
+          // A trailing newline would otherwise emit a dangling `break`, padding every message
+          // that ends in Enter with a blank line.
+          if (index > 0 && !(part === '' && index === parts.length - 1)) out.push({ type: 'break' })
           if (part) out.push({ type: 'text', value: part })
         })
       } else {
@@ -72,7 +75,13 @@ function remarkHardBreaks() {
   return walk
 }
 
-const HARD_BREAKS = [remarkHardBreaks]
+/**
+ * Streamdown's `remarkPlugins` prop REPLACES its defaults rather than extending them, so passing
+ * a bare `[remarkHardBreaks]` would silently drop remark-gfm (links, tables, strikethrough, task
+ * lists) and its code-meta plugin — user text would lose the very autolinking this whole change
+ * exists to make consistent between the two sides. Compose onto the defaults instead.
+ */
+const HARD_BREAKS = [...Object.values(defaultRemarkPlugins), remarkHardBreaks]
 
 /**
  * Memoized per message (Streamdown additionally memoizes per block): during streaming only the

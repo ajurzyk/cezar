@@ -63,12 +63,25 @@ export function applyItemTokens(text: string, item: GithubItem): string {
 }
 
 /**
- * Does this text already carry the item's reference? The URL, or `#N` as a whole token — `#142`
- * must not be satisfied by `#1420`, hence the trailing `\b` (digits are word characters, so
- * "#1420" yields no boundary after "142" and correctly fails to match).
+ * Does this text already carry the item's reference in a form that survives round-tripping?
+ *
+ * The bar is deliberately what `src/runs/task-refs.ts` keys on, not merely "the number appears":
+ * either the item URL (its tier-1 match) or the KIND-qualified wording — "issue 142", "PR #142",
+ * "pull request 142" (its tier-2 match). A bare `#142` is explicitly NOT enough: `extractTaskRefs`
+ * degrades it to `ambiguousNumber`, so the run would still lose its issue/PR chip. Trimming the
+ * pre-filled box down to "fix #142 on develop" is an ordinary edit, and it must still get the ref
+ * block attached.
+ *
+ * `\b` after the digits keeps `#142` from being satisfied by `#1420` (digits are word characters,
+ * so there is no boundary between "142" and "0").
  */
 export function mentionsItem(text: string, item: GithubItem): boolean {
-  return text.includes(item.url) || new RegExp(`#${item.number}\\b`).test(text)
+  if (text.includes(item.url)) return true
+  const worded =
+    item.kind === 'pr'
+      ? String.raw`(?:pull\s+request|pr)`
+      : String.raw`issue`
+  return new RegExp(String.raw`\b${worded}\s*#?\s*${item.number}\b`, 'i').test(text)
 }
 
 /**
@@ -88,9 +101,16 @@ export function composeGithubTask(
   skillNames: readonly string[],
   customPrompt?: string,
 ): string {
-  const custom = applyItemTokens((customPrompt ?? '').trim(), item)
-  if (!custom) return githubTaskPrompt(item, skillNames)
-  const task = mentionsItem(custom, item) ? custom : `${githubTaskRef(item)}\n\n${custom}`
+  const raw = (customPrompt ?? '').trim()
+  if (!raw) return githubTaskPrompt(item, skillNames)
+  const ref = githubTaskRef(item)
+  // Substitute tokens only in what the USER contributed. The box is pre-filled with `ref`, which
+  // embeds `item.title` — and a title may itself contain a token ("Support {{url}} in prompt
+  // templates"), which would otherwise be rewritten inside our own reference block.
+  const custom = raw.startsWith(ref)
+    ? ref + applyItemTokens(raw.slice(ref.length), item)
+    : applyItemTokens(raw, item)
+  const task = mentionsItem(custom, item) ? custom : `${ref}\n\n${custom}`
   return skillNames.length ? task + skillsHint(skillNames) : task
 }
 

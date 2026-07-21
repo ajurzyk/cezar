@@ -110,7 +110,12 @@ export function HandToAgent({
   // prompt" contract made the composed text invisible, so a user typing their own instruction
   // could not tell the item context had been dropped. Refs only, never the quoted body: a wall
   // of issue text is unreadable in a box you are meant to edit, and the URL is right there.
-  const base = githubTaskRef(item)
+  // Captured ONCE per mount, not recomputed per render: `prompt` is seeded from it, so the two
+  // must not drift. The tab loads GitHub data twice (a fast batch, then a `limit: 1000` refetch
+  // that replaces it — github.tsx), and the component is keyed by `item.url`, not by title — so a
+  // title that differs between the two payloads would otherwise leave `prompt !== base`, which
+  // reads as "user-owned": the pre-fill would be persisted as a draft and auto-apply would stop.
+  const [base] = useState(() => githubTaskRef(item))
   // The route remounts this component per item (key={item.url}); the DRAFT — not plain component
   // state (#408) — restores whatever was typed for THIS item, so switching away and back (or a
   // page refresh) never loses it. No draft stored → the pre-fill.
@@ -131,11 +136,11 @@ export function HandToAgent({
   )
   const insertPromptTemplate = (snippet: string) => {
     const el = promptRef.current
-    // Honour the caret only when the box actually HAS one — i.e. it is focused. An untouched
-    // textarea reports `selectionStart === 0`, which since #524's pre-fill would splice the
-    // template ABOVE the item reference; appending is what "add an instruction" means when the
-    // user never put a caret anywhere.
-    const caret = el && document.activeElement === el ? el.selectionStart : prompt.length
+    // An UNTOUCHED box reports `selectionStart === 0`, which since #524's pre-fill would splice
+    // the template ABOVE the item reference — so an untouched box appends instead. Once the user
+    // has edited it the caret is theirs and is honoured as before (it survives the blur onto the
+    // template menu), keeping `insertTemplate`'s mid-text case alive.
+    const caret = prompt === base ? prompt.length : (el?.selectionStart ?? prompt.length)
     const result = insertTemplate(prompt, caret, snippet)
     setPrompt(result.text)
     // Restore focus + caret after the state update repaints the textarea. The menu's Popover

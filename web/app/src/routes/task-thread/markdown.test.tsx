@@ -88,6 +88,51 @@ describe('Markdown', () => {
       expect(document.querySelector('[data-streamdown="inline-code"]')?.textContent).toBe('code')
     })
 
+    it('on: GFM survives — remarkPlugins must EXTEND streamdown’s defaults, not replace them', () => {
+      // Streamdown's `remarkPlugins` prop replaces its defaults, so a bare [remarkHardBreaks]
+      // would silently drop remark-gfm: bare links would stop autolinking and tables/strike
+      // would render as literal text — on the USER side only, which is the exact inconsistency
+      // #524 set out to remove.
+      const { container } = render(
+        <Markdown breaks>{'see https://github.com/acme/demo/issues/142 and ~~gone~~'}</Markdown>,
+      )
+      expect(container.querySelector('[data-streamdown="link"]')).not.toBeNull()
+      expect(container.querySelector('del')).not.toBeNull()
+    })
+
+    it('on: a trailing newline adds no dangling break', () => {
+      const { container } = render(<Markdown breaks>{'ends in enter\n'}</Markdown>)
+      expect(container.querySelector('br')).toBeNull()
+    })
+
+    it('on: CRLF is treated as one break, not two', () => {
+      const { container } = render(<Markdown breaks>{'one\r\ntwo'}</Markdown>)
+      expect(container.querySelectorAll('br')).toHaveLength(1)
+    })
+
+    it('sanitizes hostile markup rather than trusting it', () => {
+      const { container } = render(
+        <Markdown breaks>{'<script>pwn(1)</script>\n\n<img src=x onerror="pwn(2)">'}</Markdown>,
+      )
+      expect(container.querySelector('script')).toBeNull()
+      expect(container.innerHTML).not.toContain('onerror')
+    })
+
+    it('never emits a javascript: href', () => {
+      const { container } = render(<Markdown breaks>{'[x](javascript:pwn(1))'}</Markdown>)
+      const hrefs = [...container.querySelectorAll('a, button')].map((el) => el.getAttribute('href'))
+      expect(hrefs.some((href) => href?.startsWith('javascript:'))).toBe(false)
+    })
+
+    it('an unknown bare tag is dropped — the accepted cost of parsing user text as markdown', () => {
+      // Pinned deliberately: rendering user messages as markdown (#524) means the sanitizer
+      // strips unknown tags, so `Array<string>` loses its `<string>`. This matches the assistant
+      // side and every markdown chat surface; it is a trade-off, not an oversight. If it ever
+      // needs to change, escape bare `<` in USER text — do not disable sanitization.
+      const { container } = render(<Markdown breaks>{'use Array<string> here'}</Markdown>)
+      expect(container.textContent).toBe('use Array here')
+    })
+
     it('on: a fenced block keeps its own newlines, blank lines and all', () => {
       render(<Markdown breaks>{'```js\na\n\nb\n```'}</Markdown>)
       const body = document.querySelector('[data-streamdown="code-block-body"]')

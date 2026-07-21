@@ -142,14 +142,27 @@ describe('githubTaskRef', () => {
 })
 
 describe('mentionsItem', () => {
-  it('matches the URL or #N as a whole token', () => {
+  it('matches the URL, or the KIND-qualified wording task-refs keys on', () => {
     expect(mentionsItem('see https://github.com/acme/demo/issues/142 first', item())).toBe(true)
-    expect(mentionsItem('port #142 to develop', item())).toBe(true)
+    expect(mentionsItem('port issue #142 to develop', item())).toBe(true)
+    expect(mentionsItem('port ISSUE 142 to develop', item())).toBe(true)
+    const pr = item({ kind: 'pr', number: 77, url: 'https://github.com/acme/demo/pull/77' })
+    expect(mentionsItem('rebase PR #77', pr)).toBe(true)
+    expect(mentionsItem('rebase pull request 77', pr)).toBe(true)
+  })
+
+  it('a BARE #N is not enough — extractTaskRefs could only call it ambiguous', () => {
+    expect(mentionsItem('port #142 to develop', item())).toBe(false)
+  })
+
+  it('the wrong kind does not count either', () => {
+    // "PR 142" on an ISSUE hand-off would make task-refs record a prNumber, not an issueNumber.
+    expect(mentionsItem('port PR 142 to develop', item())).toBe(false)
   })
 
   it('a longer number that merely starts with N does not count', () => {
-    expect(mentionsItem('port #1420 to develop', item())).toBe(false)
-    expect(mentionsItem('port #14 to develop', item())).toBe(false)
+    expect(mentionsItem('port issue #1420 to develop', item())).toBe(false)
+    expect(mentionsItem('port issue #14 to develop', item())).toBe(false)
   })
 
   it('the exact prompt from the bug report mentions nothing', () => {
@@ -194,9 +207,19 @@ describe('composeGithubTask', () => {
     expect(composeGithubTask(item(), [], `${base}\n\nAlso add tests.`)).toBe(
       `${base}\n\nAlso add tests.`,
     )
-    // A token-substituted reference counts as carrying it, so substitution never double-prints.
+  })
+
+  it('a token-substituted BARE #N still gets the ref block — it is not a durable reference', () => {
     expect(composeGithubTask(item(), [], 'rebase {{number}} onto develop')).toBe(
-      'rebase #142 onto develop',
+      `${githubTaskRef(item())}\n\nrebase #142 onto develop`,
+    )
+  })
+
+  it('a token inside the ITEM TITLE is never rewritten inside our own ref block', () => {
+    const tokenTitle = item({ title: 'Support {{url}} in prompt templates' })
+    const base = githubTaskRef(tokenTitle)
+    expect(composeGithubTask(tokenTitle, [], `${base}\n\nUse {{url}} please.`)).toBe(
+      `${base}\n\nUse ${tokenTitle.url} please.`,
     )
   })
 
@@ -226,45 +249,54 @@ describe('extractTaskRefs over composed hand-off text', () => {
     expect(extractTaskRefs(githubTaskRef(item())).issueNumber).toBe(142)
   })
 
-  // #401 — the backend pair arrives pre-shaped from engineBody (components/engine-pills),
-  // which owns the omit rules; this builder's only job is to spread it onto every route.
-  describe('backend (#401)', () => {
-    it('omitted → no runner/model at all (the pre-#401 body)', () => {
-      const body = githubRunBody(item(), null, [])
-      expect(body.runner).toBeUndefined()
-      expect(body.model).toBeUndefined()
-    })
+  it('a prompt keeping only a bare #N still recovers the KIND, not just an ambiguous number', () => {
+    // The regression F2 guards: `mentionsItem` must not accept a bare `#142` as a durable
+    // reference, because `extractTaskRefs` can only call it `ambiguousNumber` — no chip, no
+    // `#N` title prefix. Trimming the pre-filled box to this is an ordinary edit.
+    const task = composeGithubTask(item(), [], 'port #142 to develop')
+    expect(extractTaskRefs(task).issueNumber).toBe(142)
+    expect(extractTaskRefs(task).ambiguousNumber).toBeUndefined()
+  })
+})
 
-    it('rides the workflow route', () => {
-      const body = githubRunBody(item(), 'ship-it', [], undefined, {
-        runner: 'codex',
-        model: 'gpt-5.1-codex',
-      })
-      expect(body).toMatchObject({ workflow: 'ship-it', runner: 'codex', model: 'gpt-5.1-codex' })
-    })
+// #401 — the backend pair arrives pre-shaped from engineBody (components/engine-pills),
+// which owns the omit rules; this builder's only job is to spread it onto every route.
+describe('githubRunBody backend (#401)', () => {
+  it('omitted → no runner/model at all (the pre-#401 body)', () => {
+    const body = githubRunBody(item(), null, [])
+    expect(body.runner).toBeUndefined()
+    expect(body.model).toBeUndefined()
+  })
 
-    it('rides the skills-as-chain route without disturbing the steps', () => {
-      const body = githubRunBody(item(), null, ['om-fix', 'om-review'], undefined, {
-        runner: 'opencode',
-        model: 'anthropic/claude-sonnet-5',
-      })
-      expect(body.steps?.map((step) => step.skill)).toEqual(['om-fix', 'om-review'])
-      expect(body).toMatchObject({ runner: 'opencode', model: 'anthropic/claude-sonnet-5' })
+  it('rides the workflow route', () => {
+    const body = githubRunBody(item(), 'ship-it', [], undefined, {
+      runner: 'codex',
+      model: 'gpt-5.1-codex',
     })
+    expect(body).toMatchObject({ workflow: 'ship-it', runner: 'codex', model: 'gpt-5.1-codex' })
+  })
 
-    it('rides the quick-task route, and an all-undefined pair leaves the body clean', () => {
-      expect(githubRunBody(item(), null, [], undefined, { runner: 'codex' })).toMatchObject({
-        workflow: 'quick-task',
-        runner: 'codex',
-      })
-      // engineBody returns explicit undefineds for "send nothing" — they must not become keys
-      // with values, and JSON.stringify drops them on the wire.
-      const clean = githubRunBody(item(), null, [], undefined, {
-        runner: undefined,
-        model: undefined,
-      })
-      expect(JSON.parse(JSON.stringify(clean))).not.toHaveProperty('runner')
-      expect(JSON.parse(JSON.stringify(clean))).not.toHaveProperty('model')
+  it('rides the skills-as-chain route without disturbing the steps', () => {
+    const body = githubRunBody(item(), null, ['om-fix', 'om-review'], undefined, {
+      runner: 'opencode',
+      model: 'anthropic/claude-sonnet-5',
     })
+    expect(body.steps?.map((step) => step.skill)).toEqual(['om-fix', 'om-review'])
+    expect(body).toMatchObject({ runner: 'opencode', model: 'anthropic/claude-sonnet-5' })
+  })
+
+  it('rides the quick-task route, and an all-undefined pair leaves the body clean', () => {
+    expect(githubRunBody(item(), null, [], undefined, { runner: 'codex' })).toMatchObject({
+      workflow: 'quick-task',
+      runner: 'codex',
+    })
+    // engineBody returns explicit undefineds for "send nothing" — they must not become keys
+    // with values, and JSON.stringify drops them on the wire.
+    const clean = githubRunBody(item(), null, [], undefined, {
+      runner: undefined,
+      model: undefined,
+    })
+    expect(JSON.parse(JSON.stringify(clean))).not.toHaveProperty('runner')
+    expect(JSON.parse(JSON.stringify(clean))).not.toHaveProperty('model')
   })
 })

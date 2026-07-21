@@ -155,9 +155,13 @@ export function autoApplyText(
  * back out (rather than having the caller track it) keeps the whole rule pure and testable.
  *
  * `base` is text the box is PRE-FILLED with and that auto-apply must preserve rather than
- * overwrite — the GitHub hand-off's item reference (#524). "Untouched" widens to "still exactly
- * the base", and auto-applied text stacks below it, blank-line separated like `insertTemplate`.
- * The Inbox passes no base, where `base === ''` reduces this to the original rule exactly.
+ * overwrite — the GitHub hand-off's item reference (#524). "Untouched" widens to "empty OR still
+ * exactly the base", and auto-applied text stacks below the base, blank-line separated like
+ * `insertTemplate`. A caller that passes no base (`new-task.tsx`) gets the original rule exactly.
+ *
+ * `applied` reports only genuinely auto-applied text, never the bare base — otherwise clearing
+ * the box by hand would leave `current` matching neither `base` nor `previousAuto`, and the box
+ * would be stuck "user-owned" forever, silently killing auto-apply for that item.
  */
 export function resolveAutoApply(
   current: string,
@@ -165,9 +169,9 @@ export function resolveAutoApply(
   nextAuto: string,
   base = '',
 ): { text: string; applied: string } {
-  if (current === base || current === previousAuto) {
+  if (current === '' || current === base || current === previousAuto) {
     const text = base && nextAuto ? `${base}\n\n${nextAuto}` : base || nextAuto
-    return { text, applied: text }
+    return { text, applied: nextAuto ? text : '' }
   }
   // The user owns the box now — leave it alone, and keep remembering the auto text we wrote, so
   // that clearing it back to empty later re-opens the door above.
