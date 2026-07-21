@@ -633,6 +633,40 @@ describe('the comment thread', () => {
     expect(threadSection()).not.toBeNull()
   })
 
+  it.each([
+    ['passing', '✓', 'text-success'],
+    ['failing', '✗', 'text-danger'],
+    ['pending', '○', 'text-muted-foreground'],
+  ])('renders the %s CI glyph on a commit row', async (state, glyph, tone) => {
+    stubFetch(thread('pr', 137, {
+      available: true, comments: [],
+      events: [{ ...EVT.committed, checks: state as 'passing' | 'failing' | 'pending' }],
+    }))
+    renderAt('/github/prs/137')
+
+    await waitFor(() => expect(events()).toHaveLength(1))
+    const badge = document.querySelector<HTMLElement>('[data-slot="gh-commit-checks"]')
+    expect(badge?.getAttribute('data-checks')).toBe(state)
+    expect(badge?.textContent).toBe(glyph)
+    expect(badge?.className).toContain(tone)
+  })
+
+  it('renders no glyph when checks is null AND when it is absent', async () => {
+    // null = the commit has no CI configured; absent = the rollup query failed or was skipped.
+    // They look identical here on purpose, but stay distinct on the wire.
+    stubFetch(thread('pr', 137, {
+      available: true, comments: [],
+      events: [
+        { ...EVT.committed, id: 'evt-null', checks: null },
+        { ...EVT.committed, id: 'evt-absent' }, // no `checks` key at all
+      ],
+    }))
+    renderAt('/github/prs/137')
+
+    await waitFor(() => expect(events()).toHaveLength(2))
+    expect(document.querySelectorAll('[data-slot="gh-commit-checks"]')).toHaveLength(0)
+  })
+
   it('shows a truncation row linking to GitHub when the thread was trimmed', async () => {
     stubFetch(thread('issue', 142, { available: true, comments: [COMMENT_TEXT], truncated: true }))
     renderAt('/github/issues/142')

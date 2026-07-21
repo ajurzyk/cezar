@@ -777,6 +777,7 @@ function EventPhrase({ event, colors }: { event: GithubTimelineEvent; colors: Re
           {event.message ? (
             <span className="truncate font-sans text-foreground">{event.message}</span>
           ) : null}
+          <CommitChecks checks={event.checks} />
         </span>
       )
     case 'labeled':
@@ -821,6 +822,26 @@ function EventPhrase({ event, colors }: { event: GithubTimelineEvent; colors: Re
         </span>
       )
   }
+}
+
+/** The rolled-up CI glyph on a commit row (#525) — reuses `CHECKS_GLYPH`/`CHECKS_TONE`, the same
+ *  source of truth as the list row's indicator and the detail pane's badge.
+ *
+ *  Renders nothing for BOTH `null` (the commit has no CI configured) and `undefined` (the rollup
+ *  query failed or was skipped). The two are deliberately distinct values on the wire even though
+ *  they look identical here — absence of a glyph should not have to mean "we know there is no CI". */
+function CommitChecks({ checks }: { checks: GithubTimelineEvent['checks'] }) {
+  if (!checks) return null
+  return (
+    <span
+      data-slot="gh-commit-checks"
+      data-checks={checks}
+      aria-label={`checks ${checks}`}
+      className={cn('shrink-0', CHECKS_TONE[checks])}
+    >
+      {CHECKS_GLYPH[checks]}
+    </span>
+  )
 }
 
 /** Review-state chip tones — the same success/danger/muted vocabulary the checks badge uses, so
