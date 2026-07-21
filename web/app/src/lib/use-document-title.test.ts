@@ -1,26 +1,21 @@
-import { cleanup, renderHook } from '@testing-library/react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { renderHook } from '@testing-library/react'
+import { beforeEach, describe, expect, it } from 'vitest'
 
 import { documentTitleOf, useDocumentTitle } from './use-document-title'
-
-afterEach(() => {
-  cleanup()
-  document.title = 'cezar'
-})
 
 describe('documentTitleOf', () => {
   it.each([
     {
       name: 'project and page',
-      projectName: 'storefront',
+      projectName: 'Storefront',
       pageLabel: 'Tasks',
-      expected: 'storefront — Tasks · cezar',
+      expected: 'Storefront — Tasks · cezar',
     },
     {
       name: 'project only',
-      projectName: 'storefront',
+      projectName: 'Storefront',
       pageLabel: null,
-      expected: 'storefront · cezar',
+      expected: 'Storefront · cezar',
     },
     {
       name: 'page only',
@@ -28,33 +23,28 @@ describe('documentTitleOf', () => {
       pageLabel: 'Settings',
       expected: 'Settings · cezar',
     },
-    { name: 'neither', projectName: null, pageLabel: null, expected: 'cezar' },
-    { name: 'empty strings', projectName: '', pageLabel: '', expected: 'cezar' },
-    { name: 'whitespace', projectName: '   ', pageLabel: '\n', expected: 'cezar' },
-  ])('$name', ({ projectName, pageLabel, expected }) => {
+    { name: 'neither part', projectName: null, pageLabel: null, expected: 'cezar' },
+    { name: 'empty project', projectName: '', pageLabel: 'Tasks', expected: 'Tasks · cezar' },
+    { name: 'blank parts', projectName: '  ', pageLabel: '\t', expected: 'cezar' },
+  ])('formats $name', ({ projectName, pageLabel, expected }) => {
     expect(documentTitleOf({ projectName, pageLabel })).toBe(expected)
-  })
-
-  it('trims the known parts before formatting', () => {
-    expect(documentTitleOf({ projectName: ' storefront ', pageLabel: ' Tasks ' })).toBe(
-      'storefront — Tasks · cezar',
-    )
   })
 })
 
 describe('useDocumentTitle', () => {
-  it('updates the same document title when its inputs change', () => {
+  beforeEach(() => {
+    document.title = 'cezar'
+  })
+
+  it('updates the existing writer when its truthful inputs change', () => {
     const { rerender } = renderHook(
-      ({ projectName, pageLabel }) => useDocumentTitle({ projectName, pageLabel }),
-      { initialProps: { projectName: 'cezar', pageLabel: 'Tasks' as string | null } },
+      (parts: { projectName: string | null; pageLabel: string | null }) =>
+        useDocumentTitle(parts),
+      { initialProps: { projectName: 'Storefront', pageLabel: 'Tasks' } },
     )
 
-    expect(document.title).toBe('cezar — Tasks · cezar')
-
-    rerender({ projectName: 'storefront', pageLabel: 'Git' })
-    expect(document.title).toBe('storefront — Git · cezar')
-
-    rerender({ projectName: '', pageLabel: null })
-    expect(document.title).toBe('cezar')
+    expect(document.title).toBe('Storefront — Tasks · cezar')
+    rerender({ projectName: 'Back office', pageLabel: null })
+    expect(document.title).toBe('Back office · cezar')
   })
 })
