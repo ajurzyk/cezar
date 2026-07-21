@@ -18,6 +18,7 @@ import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { toast } from '@/components/ui/toaster'
 import { isSubmitShortcut } from '@/lib/use-submit-shortcut'
+import { isHttpUrl } from '@/lib/utils'
 
 import { finishTitle } from './run-actions'
 import { useFinishRun } from './use-finish-run'
@@ -67,7 +68,7 @@ function ReviewActions({ run }: { run: ApiRun }) {
   // back into the SAME session via continue, prefixed `Review feedback:` — the run leaves
   // `review`, works, and gates again. On success the status flip unmounts this panel.
   const sendBack = useMutation({
-    mutationFn: (text: string) => continueRun(run.id, `Review feedback:\n${text}`),
+    mutationFn: (text: string) => continueRun(run.id, { text: `Review feedback:\n${text}` }),
     onSuccess: () => {
       setNotes('')
       invalidate()
@@ -140,9 +141,11 @@ function ReviewActions({ run }: { run: ApiRun }) {
           <CornerUpLeftIcon aria-hidden="true" />
           Send back
         </Button>
-        {run.pullRequestUrl !== undefined ? (
+        {isHttpUrl(run.pullRequestUrl) ? (
           // A PR already exists (agent-opened, spotted in the transcript) — a second Draft PR
           // click would open a duplicate. Legacy parity: the link replaces the button.
+          // href protocol guard (#431): the URL is scraped from the agent transcript, so link
+          // only for http(s) — a non-http value falls through to the Draft PR button.
           <Button asChild variant="outline" size="sm">
             <a
               data-slot="pr-link"

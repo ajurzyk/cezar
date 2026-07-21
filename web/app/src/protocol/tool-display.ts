@@ -136,18 +136,40 @@ export function toolDisplay(name: string, input?: unknown): ToolDisplay {
     case 'websearch':
       return { toolKind: 'fetch', title: titled('Web search', field(input, 'query')) }
 
-    case 'task': {
-      const description = field(input, 'description', 'prompt')
+    // Sub-agent spawns. claude dispatches these through `Agent` today and
+    // `Task` historically (opencode uses `task`) — both spellings resolve, and
+    // the row says which agent, falling back to the subagent type when the
+    // call carried no description.
+    case 'task':
+    case 'agent': {
+      const verb = key === 'agent' ? 'Agent' : 'Task'
+      const subagent = field(input, 'subagent_type', 'subagentType')
+      const label = field(input, 'description', 'prompt') ?? subagent
       return {
         toolKind: 'task',
-        title: description ? `Task: ${description}` : 'Task',
-        subtitle: field(input, 'subagent_type', 'subagentType'),
+        title: label ? `${verb}: ${label}` : verb,
+        // Don't repeat the subagent type when it is already the title.
+        subtitle: label === subagent ? undefined : subagent,
+      }
+    }
+
+    // claude's `Skill` invocation: `{skill, args?}` — the skill name is the
+    // whole point of the row, so it goes in the title.
+    case 'skill': {
+      const skill = field(input, 'skill', 'name', 'command')
+      return {
+        toolKind: 'task',
+        title: skill ? `Skill: ${skill}` : 'Skill',
+        subtitle: field(input, 'args', 'description'),
       }
     }
 
     case 'todowrite':
     case 'todolist':
     case 'plan':
+    case 'taskcreate':
+    case 'taskupdate':
+    case 'tasklist':
       return { toolKind: 'plan', title: 'Update plan' }
 
     case 'mcptoolcall': {

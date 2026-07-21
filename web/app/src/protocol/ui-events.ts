@@ -38,8 +38,10 @@ export type ToolKind =
 /** Why a turn (or the session) stopped. */
 export type StopReason = 'end_turn' | 'max_tokens' | 'refusal' | 'cancelled' | 'timeout' | 'error'
 
-/** Status of one plan/todo entry. */
-export type PlanStatus = 'pending' | 'in_progress' | 'completed'
+/** Status of one plan/todo entry. `cancelled` ("no longer needed") is
+ *  opencode-only today — it renders struck through and drops out of the
+ *  odometer's denominator rather than reading as unfinished work. */
+export type PlanStatus = 'pending' | 'in_progress' | 'completed' | 'cancelled'
 
 /** One entry of the session plan — full-replacement semantics (ACP style). */
 export interface PlanEntry {
@@ -228,6 +230,33 @@ export interface UiPermissionResolvedEvent {
   optionId: string
 }
 
+/** One option in an AskUser question — see the server `src/core/ask.ts`. */
+export interface UiAskOption {
+  label: string
+  description?: string
+}
+
+/** One structured multiple-choice question (modeled on `AskUserQuestion`). */
+export interface UiAskQuestion {
+  id?: string
+  header: string
+  question: string
+  options: UiAskOption[]
+  multiSelect?: boolean
+}
+
+/**
+ * The agent asked the user a structured multiple-choice question via a
+ * `CEZ:ASK` marker. The run parks `waiting`; the cockpit renders clickable
+ * option chips. Resolution is client-side (the next user message closes the
+ * card) — there is no `ask.resolved` event.
+ */
+export interface UiAskRequestedEvent {
+  type: 'ask.requested'
+  requestId: string
+  questions: UiAskQuestion[]
+}
+
 /** Cumulative-for-session raw telemetry. */
 export interface UiUsageUpdatedEvent {
   type: 'usage.updated'
@@ -256,6 +285,7 @@ export type UiEvent =
   | UiPlanUpdatedEvent
   | UiPermissionRequestedEvent
   | UiPermissionResolvedEvent
+  | UiAskRequestedEvent
   | UiUsageUpdatedEvent
   | UiImageEvent
 

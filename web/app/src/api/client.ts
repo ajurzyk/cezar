@@ -1,9 +1,15 @@
 import type {
+  AgentConfigFileContent,
+  AgentConfigListing,
   ApiRun,
   ArchiveFinishedResponse,
   CancelResponse,
   ChangesPayload,
+  CheckoutProjectInput,
   ConfigResponse,
+  ReclaimWorktreesResponse,
+  RemoveWorktreeResponse,
+  WorktreesResponse,
   ContinueResponse,
   CreatePrResponse,
   CreateRunInput,
@@ -11,8 +17,10 @@ import type {
   DeleteRunResponse,
   DeleteWorkflowResponse,
   FinishResponse,
+  FsBrowseResponse,
   GitCommitResponse,
   GitPushResponse,
+  GithubCommentsData,
   GithubData,
   GroupResponse,
   HealthResponse,
@@ -25,26 +33,32 @@ import type {
   PatchRunInput,
   PickVariantResponse,
   PlanResponse,
+  ProjectsResponse,
+  RegisterProjectResponse,
+  RemoveProjectResponse,
   RemoveTodoResponse,
   RepoBranchResponse,
   RepoCommitPayload,
   RunCommitsResponse,
   RepoResponse,
+  Runner,
   RunRecord,
   WorktreeEntry,
   SaveWorkflowInput,
   SaveWorkflowResponse,
   SetConfigInput,
   SetConfigResponse,
-  AgentConfigListing,
-  AgentConfigFileContent,
   SetAgentConfigInput,
+  SetWorkspaceConfigInput,
   Skill,
   StartTodoResponse,
   TodoItem,
   UiState,
   WorkflowsResponse,
+  WorkspaceConfigResponse,
+  WorkspaceUiState,
 } from './types'
+import { scopeApiPath } from './project-scope'
 
 /**
  * The typed client for the cockpit's own HTTP API.
@@ -52,6 +66,12 @@ import type {
  * Same-origin by construction: the Hono server serves this bundle and owns `/api/*`, and the
  * Vite dev server proxies `/api` to it. So every path here is root-relative — there is no base
  * URL to configure and no cross-origin case to get wrong.
+ *
+ * Multi-project (spec, step 3.1): every path below is spelled in the legacy unscoped form and
+ * prefixed to `/api/p/<id>` at request time by `send()` (via `scopeApiPath`) when a project
+ * scope is active. Unscoped, `scopeApiPath` is the identity — the request paths stay
+ * byte-identical to the single-project cockpit. `runFileRawUrl` is the one URL this module
+ * hands out instead of fetching itself, so it applies the scope at build time.
  *
  * This module is the boundary. It parses responses, turns every non-2xx into an `ApiError`
  * carrying the server's own words, and does nothing else: no caching, no retries, no
@@ -129,7 +149,7 @@ function errorFor(status: number, statusText: string, body: string): ApiError {
 
 async function send(path: string, init: RequestInit): Promise<Response> {
   try {
-    return await fetch(path, init)
+    return await fetch(scopeApiPath(path), init)
   } catch (cause) {
     // The request never got an answer. Not an HTTP failure — hence status 0 — but callers get
     // one error type either way instead of two.
@@ -185,9 +205,31 @@ export function getLaunchKey(opts?: ReadOptions): Promise<LaunchKeyResponse> {
   return get<LaunchKeyResponse>('/api/launch-key', opts)
 }
 
+/** The workspace project registry (multi-project spec). Workspace-level, so `scopeApiPath`
+ *  never prefixes it — one registry no matter which project is active. */
+export function getProjects(opts?: ReadOptions): Promise<ProjectsResponse> {
+  return get<ProjectsResponse>('/api/projects', opts)
+}
+
+/** One directory listing for the folder picker (`GET /api/fs/browse`, step 4.1). `path`
+ *  omitted means the browse root — the server decides where that is (home locally, the
+ *  checkout root when hosted), so the dialog never has to know. */
+export function browseFs(path?: string, opts?: ReadOptions): Promise<FsBrowseResponse> {
+  const query = path === undefined || path === '' ? '' : `?path=${encodeURIComponent(path)}`
+  return get<FsBrowseResponse>(`/api/fs/browse${query}`, opts)
+}
+
 /** The authoritative run list — sorted newest-first by the server. */
 export function getRuns(opts?: ReadOptions): Promise<ApiRun[]> {
   return get<ApiRun[]>('/api/runs', opts)
+}
+
+/** One project's run list by EXPLICIT id (`GET /api/p/:projectId/runs`, step 3.3): the sidebar
+ *  reads non-active projects' tasks, which the active-scope `send()` prefix cannot reach. An
+ *  already-`/api/p/`-prefixed path passes through `scopeApiPath` untouched, so this stays
+ *  correct whatever scope is mounted. */
+export function getProjectRuns(projectId: string, opts?: ReadOptions): Promise<ApiRun[]> {
+  return get<ApiRun[]>(`/api/p/${encodeURIComponent(projectId)}/runs`, opts)
 }
 
 export function getRun(id: string, opts?: ReadOptions): Promise<ApiRun> {
@@ -225,6 +267,24 @@ export function getConfig(opts?: ReadOptions): Promise<ConfigResponse> {
   return get<ConfigResponse>('/api/config', opts)
 }
 
+/** The selected project's agent-owned config catalog and current file state. */
+export function getAgentConfig(opts: ReadOptions = {}): Promise<AgentConfigListing> {
+  return get<AgentConfigListing>('/api/agent-config', opts)
+}
+
+/** One selected-project config file's raw contents and optimistic version. */
+export function getAgentConfigFile(id: string, opts: ReadOptions = {}): Promise<AgentConfigFileContent> {
+  return get<AgentConfigFileContent>(`/api/agent-config/${encodeURIComponent(id)}`, opts)
+}
+
+/** Save inside the selected project scope; send() adds /api/p/:projectId. */
+export function putAgentConfigFile(
+  id: string,
+  body: SetAgentConfigInput,
+): Promise<AgentConfigFileContent> {
+  return mutate<AgentConfigFileContent>('PUT', `/api/agent-config/${encodeURIComponent(id)}`, body)
+}
+
 /** The main working tree's structured uncommitted diff vs HEAD (R5 repo view). 409 (as an
  *  ApiError with the reason) when the server runs outside a git repository. */
 export function getRepoChanges(opts?: ReadOptions): Promise<ChangesPayload> {
@@ -260,6 +320,16 @@ export function getGithub(
   return get<GithubData>(`/api/github${search ? `?${search}` : ''}`, opts)
 }
 
+/** The full comment thread for one issue/PR (#499). Degrades to `{ available: false, reason }`
+ *  server-side — an unreachable thread is a one-line hint in the detail view, not an ApiError. */
+export function getGithubComments(
+  kind: 'issue' | 'pr',
+  number: number,
+  opts?: ReadOptions,
+): Promise<GithubCommentsData> {
+  return get<GithubCommentsData>(`/api/github/comments/${kind}/${number}`, opts)
+}
+
 /** The run's worktree diff against its base, as unified-diff text. Also the plain-text
  *  "(no worktree — …)" sentence for runs that executed in the repo working tree. */
 export function getRunDiff(id: string, opts?: ReadOptions): Promise<string> {
@@ -285,15 +355,72 @@ export function getRunFile(id: string, path: string, opts?: ReadOptions): Promis
 }
 
 /** The same-origin URL an `<img>` can load an image file's bytes from (R5 Files tab). The
- *  server serves raw ONLY for image extensions within the size cap — everything else 409s. */
+ *  server serves raw ONLY for image extensions within the size cap — everything else 409s.
+ *  Scoped here rather than in send() — this URL is handed to an `<img>`, never fetched. */
 export function runFileRawUrl(id: string, path: string): string {
-  return runPath(id, `/files?path=${encodeURIComponent(path)}&raw=1`)
+  return scopeApiPath(runPath(id, `/files?path=${encodeURIComponent(path)}&raw=1`))
 }
 
 /** The variant-compare data (spec 010): one entry per variant of the group, with the legacy
  *  `git diff --stat` text and the handoff Progress excerpt. 404 for an unknown group. */
 export function getGroup(groupId: string, opts?: ReadOptions): Promise<GroupResponse> {
   return get<GroupResponse>(`/api/groups/${encodeURIComponent(groupId)}`, opts)
+}
+
+// ---- workspace mutations ------------------------------------------------------------------
+
+/**
+ * Register an existing folder (`POST /api/projects`, step 4.2).
+ *
+ * The one call in this module that does not funnel through `request()`: a 409 (already
+ * registered) is NOT a failure for the add-project flow — the server answers it with the
+ * EXISTING entry, which is exactly what the dialog needs to navigate to. Every other non-2xx
+ * still becomes the same ApiError as anywhere else.
+ */
+export async function registerProject(root: string): Promise<RegisterProjectResponse> {
+  const path = '/api/projects'
+  const res = await send(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ root }),
+  })
+  const body = await res.text()
+  const parsed = parseJson(body)
+  const project = (parsed as { project?: unknown } | undefined)?.project
+  if ((res.ok || res.status === 409) && project !== undefined && project !== null) {
+    return parsed as RegisterProjectResponse
+  }
+  if (!res.ok) throw errorFor(res.status, res.statusText, body)
+  throw new ApiError(res.status, `the cezar server answered ${path} without a project`)
+}
+
+/**
+ * Clone a GitHub repo into the checkout root and register it (`POST /api/projects/checkout`,
+ * step 4.3).
+ *
+ * Ordinary `mutate()`, unlike `registerProject` above: every non-2xx here IS a failure the
+ * dialog must show (a 409 means the target folder exists, and there is no entry to navigate
+ * to). `mutate` already surfaces the server's `{ error }` string as the ApiError message, which
+ * is exactly what the dialog renders — a clone fails for reasons only the server can name.
+ *
+ * No timeout of our own: cloning a large repo legitimately takes minutes, and the request is
+ * what the dialog waits on. Progress meanwhile comes from `checkout-progress` on the workspace
+ * stream, keyed by `input.checkoutId`.
+ */
+export function checkoutProject(input: CheckoutProjectInput): Promise<RegisterProjectResponse> {
+  return mutate<RegisterProjectResponse>('POST', '/api/projects/checkout', input)
+}
+
+/**
+ * Deregister a project (`DELETE /api/projects/:projectId`, step 4.4).
+ *
+ * Registry-only by contract — the server deletes NOTHING under the project root — so this
+ * never needs an "are you sure you have a backup" ceremony beyond the pane's own confirm.
+ * Ordinary `mutate()`: the 409s (running tasks, the boot project) are real failures whose
+ * `{ error }` message is what the pane shows, and `errorFor` already surfaces it.
+ */
+export function removeProject(projectId: string): Promise<RemoveProjectResponse> {
+  return mutate<RemoveProjectResponse>('DELETE', `/api/projects/${encodeURIComponent(projectId)}`)
 }
 
 // ---- run mutations ------------------------------------------------------------------------
@@ -323,9 +450,23 @@ export function finishRun(id: string): Promise<FinishResponse> {
   return mutate<FinishResponse>('POST', runPath(id, '/finish'))
 }
 
-/** Reopen a finished run's session. 409 (with the reason) when it cannot be resumed. */
-export function continueRun(id: string, text?: string): Promise<ContinueResponse> {
-  return mutate<ContinueResponse>('POST', runPath(id, '/continue'), text === undefined ? {} : { text })
+/** The follow-up composer's optional overrides for a Continue (#401): pick which backend and
+ *  model handle the reopened session. Omitted fields keep the run's current backend/model. */
+export interface ContinueOptions {
+  text?: string
+  runner?: Runner
+  model?: string
+}
+
+/** Reopen a finished run's session. 409 (with the reason) when it cannot be resumed. An optional
+ *  runner/model override lets the follow-up choose the engine; omitted keeps the run's current
+ *  backend (backward compat). */
+export function continueRun(id: string, opts: ContinueOptions = {}): Promise<ContinueResponse> {
+  const body: Record<string, unknown> = {}
+  if (opts.text !== undefined) body.text = opts.text
+  if (opts.runner !== undefined) body.runner = opts.runner
+  if (opts.model !== undefined) body.model = opts.model
+  return mutate<ContinueResponse>('POST', runPath(id, '/continue'), body)
 }
 
 /** Draft PR from the review gate (spec 009): push the branch, `gh pr create --draft`; the run
@@ -350,11 +491,33 @@ export function removeTodo(id: string): Promise<RemoveTodoResponse> {
   return mutate<RemoveTodoResponse>('DELETE', `/api/todos/${encodeURIComponent(id)}`)
 }
 
+/** The Inbox card's optional backend choice + extra instructions for a Run. Unlike
+ *  `ContinueOptions` these start a NEW run, so an omitted `runner`/`model` means the host's
+ *  `defaultRunner`, not "keep the run's". `prompt` (#413) is extra instructions appended to the
+ *  suggested/summary task text — e.g. a template inserted in the Inbox composer. */
+export interface StartTodoOptions {
+  runner?: Runner
+  model?: string
+  prompt?: string
+}
+
 /** Inbox "Run" (spec 007): the server turns the entry into a task — a one-off single-step
  *  workflow around the suggested skill when it exists, plain quick-task otherwise — and
- *  answers 201 with the new run. 409 when the entry was already started. */
-export function startTodo(id: string): Promise<StartTodoResponse> {
-  return mutate<StartTodoResponse>('POST', `/api/todos/${encodeURIComponent(id)}/start`)
+ *  answers 201 with the new run. 409 when the entry was already started. An optional
+ *  runner/model (#401) picks the engine and an optional `prompt` (#413) appends instructions;
+ *  with neither, sends no body at all — the pre-#401/#413 bodyless POST, kept for compat. */
+export function startTodo(id: string, opts: StartTodoOptions = {}): Promise<StartTodoResponse> {
+  const body: Record<string, unknown> = {}
+  if (opts.runner !== undefined) body.runner = opts.runner
+  if (opts.model !== undefined) body.model = opts.model
+  if (opts.prompt !== undefined) body.prompt = opts.prompt
+  // No override → no body at all, exactly the bodyless POST this endpoint has always sent
+  // (`continueRun` posts `{}` because it always carried one). The server tolerates either.
+  return mutate<StartTodoResponse>(
+    'POST',
+    `/api/todos/${encodeURIComponent(id)}/start`,
+    Object.keys(body).length > 0 ? body : undefined,
+  )
 }
 
 /** "Pick this one" (spec 010): the winner rests at `review` for the gate; the losers are
@@ -379,6 +542,13 @@ export function getOpenTargets(opts?: ReadOptions): Promise<OpenTargetsResponse>
 /** Open the run's worktree in the chosen local app. 409 with `path` when it could not launch. */
 export function openRunIn(id: string, target: string): Promise<{ opened: boolean; path: string }> {
   return mutate<{ opened: boolean; path: string }>('POST', runPath(id, '/open-in'), { target })
+}
+
+/** Diff pane "open in default app" (#365, LOCAL MODE ONLY): opens one worktree file with the
+ *  OS's default handler for its type — not the file manager, a specific file. 409 (server's own
+ *  words) in hosted mode, for a path outside the worktree, or when no app could be launched. */
+export function openRunFileInApp(id: string, path: string): Promise<{ opened: boolean; path: string }> {
+  return mutate<{ opened: boolean; path: string }>('POST', runPath(id, '/open-in'), { target: 'default', path })
 }
 
 /** `git add -A && git commit` in the run's worktree (R5). Every predictable git failure —
@@ -441,6 +611,31 @@ export function putUiState(patch: UiState): Promise<UiState> {
   return mutate<UiState>('PUT', '/api/ui-state', patch)
 }
 
+/** The cross-project GUI state (`~/.cezar/ui-state.json`, step 2.7). Workspace-level:
+ *  `scopeApiPath` never prefixes `/api/workspace/*`. */
+export function getWorkspaceUiState(opts?: ReadOptions): Promise<WorkspaceUiState> {
+  return get<WorkspaceUiState>('/api/workspace/ui-state', opts)
+}
+
+/** Shallow top-level merge server-side, same as its per-repo twin — send whole top-level
+ *  objects (`{ sidebar: {...} }`), never a nested leaf alone. Answers the merged state. */
+export function putWorkspaceUiState(patch: WorkspaceUiState): Promise<WorkspaceUiState> {
+  return mutate<WorkspaceUiState>('PUT', '/api/workspace/ui-state', patch)
+}
+
+/** The global settings slice of `~/.cezar/config.json` (step 2.7) — Settings → Resources and
+ *  (step 4.4) the checkout-root field. Workspace-level, so never scope-prefixed. */
+export function getWorkspaceConfig(opts?: ReadOptions): Promise<WorkspaceConfigResponse> {
+  return get<WorkspaceConfigResponse>('/api/workspace/config', opts)
+}
+
+/** Partial update — absent keys stay untouched; answers the merged config. A `projectsDir`
+ *  the server cannot write to comes back as a 400 `ApiError` whose message is the reason,
+ *  which is exactly what the Projects pane renders inline (step 4.4). */
+export function putWorkspaceConfig(patch: SetWorkspaceConfigInput): Promise<WorkspaceConfigResponse> {
+  return mutate<WorkspaceConfigResponse>('PUT', '/api/workspace/config', patch)
+}
+
 /** Set/clear the agents' config knobs — base branch, default runner, system prompt, per-runner
  *  model presets (Settings → Agents, R6 1.5). Merged into the raw config.json server-side so
  *  unrelated user keys survive; `null` clears a knob back to its default. */
@@ -448,19 +643,20 @@ export function putConfig(patch: SetConfigInput): Promise<SetConfigResponse> {
   return mutate<SetConfigResponse>('PUT', '/api/config', patch)
 }
 
-// ---- agent config files (spec #404) -----------------------------------------------------------
-
-/** The coding agents' own config files, per scope, with vendor precedence. `editable:false` in hosted mode. */
-export function getAgentConfig(opts: ReadOptions = {}): Promise<AgentConfigListing> {
-  return get<AgentConfigListing>('/api/agent-config', opts)
+/** The worktree management panel (#483): every materialized task worktree with disk usage,
+ *  retention state, the total, and the current keep-limit. */
+export function getWorktrees(opts?: ReadOptions): Promise<WorktreesResponse> {
+  return get<WorktreesResponse>('/api/worktrees', opts)
 }
 
-/** One config file's raw contents + version token (addressed by catalog id). */
-export function getAgentConfigFile(id: string, opts: ReadOptions = {}): Promise<AgentConfigFileContent> {
-  return get<AgentConfigFileContent>(`/api/agent-config/${encodeURIComponent(id)}`, opts)
+/** "Reclaim now": force the retention enforcer to reclaim over-limit finished worktrees
+ *  (directory only — branch kept). Returns the reclaimed run ids. Always 200. */
+export function reclaimWorktrees(): Promise<ReclaimWorktreesResponse> {
+  return mutate<ReclaimWorktreesResponse>('POST', '/api/worktrees/reclaim', {})
 }
 
-/** Save a config file raw. Validated + stale-guarded server-side; 409s in hosted mode. */
-export function putAgentConfigFile(id: string, body: SetAgentConfigInput): Promise<AgentConfigFileContent> {
-  return mutate<AgentConfigFileContent>('PUT', `/api/agent-config/${encodeURIComponent(id)}`, body)
+/** Per-row "Delete" in the worktrees panel: reclaim one run's worktree AND its branch
+ *  (the existing spec-006 route). 409 while the run is active. */
+export function removeRunWorktree(id: string): Promise<RemoveWorktreeResponse> {
+  return mutate<RemoveWorktreeResponse>('POST', runPath(id, '/remove-worktree'))
 }

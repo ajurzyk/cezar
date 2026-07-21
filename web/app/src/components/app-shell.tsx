@@ -1,12 +1,31 @@
-import { MenuIcon, PlusIcon, SearchIcon, XIcon } from 'lucide-react'
+import {
+  FolderIcon,
+  FolderOpenIcon,
+  MenuIcon,
+  PlusIcon,
+  SearchIcon,
+  SettingsIcon,
+  XIcon,
+} from 'lucide-react'
 import * as React from 'react'
 import type { ReactNode } from 'react'
-import { Link, useLocation } from 'react-router'
+import { Link as RouterLink, useLocation } from 'react-router'
 
+import { AddProjectDialog } from '@/components/add-project-dialog'
+import { CloneProjectDialog } from '@/components/clone-project-dialog'
 import { openCommandPalette } from '@/components/command-palette'
+import { GithubIcon } from '@/components/icons'
+import { Link, stripProjectPrefix } from '@/lib/project-router'
 import { StatusDot } from '@/components/status-dot'
 import { ThemeToggle } from '@/components/theme-toggle'
 import { Button } from '@/components/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { Sheet, SheetClose, SheetContent, SheetTitle, SheetTrigger } from '@/components/ui/sheet'
 import { activeNavItem, activeNavPath, visibleNavItems, type NavItem } from '@/components/nav-items'
 import { cn } from '@/lib/utils'
@@ -45,9 +64,31 @@ export type AppShellProps = {
    *  Defaults to shown so the presentational shell stays renderable alone; the container
    *  passes the health payload's truth. */
   forgeAvailable?: boolean
+  /** Inbox gating (#471): `false` drops the Inbox nav item and its badge — the global inbox is
+   *  opt-in via `CEZ_FOLLOWUPS=1`. Defaults to shown for the same reason as `forgeAvailable`. */
+  inboxAvailable?: boolean
   /** Global chrome banner (#391's `SkillsBanner`), rendered in its own row above the scroller.
    *  Absent renders nothing — the slot is generic, not skills-specific. */
   banner?: ReactNode
+  /** Step 3.3's multi-project sidebar: one collapsible group per registered project, each
+   *  carrying its own nav + task list. When present it REPLACES the flat nav and the
+   *  `taskQuickList` slot (each group brings its own copies of both); absent — the registry
+   *  still loading, or unreachable — the shell renders the single-project sidebar it always
+   *  did, which is the honest degradation, not a special case. */
+  projectGroups?: ReactNode
+}
+
+/**
+ * The drawer's close-on-navigate callback, published to whatever renders inside the sidebar's
+ * slots (`projectGroups`, `taskQuickList`). The route-change effect already closes the drawer
+ * for every *changed* route; this covers re-clicking a link to the CURRENT route (per the spec,
+ * Tasks navigates home even when already active), which changes no pathname at all. Undefined
+ * on desktop, where there is nothing to close.
+ */
+const SidebarNavigateContext = React.createContext<(() => void) | undefined>(undefined)
+
+export function useSidebarNavigate(): (() => void) | undefined {
+  return React.useContext(SidebarNavigateContext)
 }
 
 /**
@@ -80,12 +121,28 @@ export function AppShell({
   taskQuickList,
   toolsMenu,
   forgeAvailable = true,
+  inboxAvailable = true,
   banner,
+  projectGroups,
 }: AppShellProps) {
   const { pathname } = useLocation()
-  const activeTo = activeNavPath(pathname)
-  const current = activeNavItem(pathname)
+  // The nav's area rules reason about the flat route map — strip any `/p/:projectId` prefix
+  // (multi-project spec, step 3.2) so `/p/cezar/git/commits` still lights Git.
+  const areaPathname = stripProjectPrefix(pathname)
+  const activeTo = activeNavPath(areaPathname)
+  const current = activeNavItem(areaPathname)
   const [menuOpen, setMenuOpen] = React.useState(false)
+  const mainRef = React.useRef<HTMLElement>(null)
+
+  // The scroller PERSISTS across routes (it is the shell's, not the view's), so without this
+  // a deep scroll on one page carries into the next — most visibly on mobile, where Tasks or
+  // GitHub opened mid-list. Layout effect: the reset lands before the new view paints. Routes
+  // that own their arrival position (the task thread's cached-restore / stick-to-bottom) set
+  // it later, in their own effects once their content ref lands, so they still win.
+  React.useLayoutEffect(() => {
+    const main = mainRef.current
+    if (main) main.scrollTop = 0
+  }, [pathname])
 
   // Close on route change. Without this the drawer survives the navigation it triggered and sits
   // on top of the view the user just asked for — and back/forward and the ⌘K palette (Step 4.3)
@@ -109,13 +166,15 @@ export function AppShell({
 
   const nav = {
     activeTo,
-    items: visibleNavItems(forgeAvailable),
+    items: visibleNavItems({ forge: forgeAvailable, inbox: inboxAvailable }),
     repo,
-    inboxCount,
+    // The badge belongs to the Inbox item — with the item gone there is nothing to badge.
+    inboxCount: inboxAvailable ? inboxCount : null,
     version,
     latestVersion,
     taskQuickList,
     toolsMenu,
+    projectGroups,
   }
 
   return (
@@ -138,7 +197,11 @@ export function AppShell({
             </div>
           ) : null}
 
-          <main data-slot="main" className="row-start-3 min-h-0 overflow-y-auto overscroll-contain">
+          <main
+            ref={mainRef}
+            data-slot="main"
+            className="row-start-3 min-h-0 overflow-y-auto overscroll-contain"
+          >
             {children}
           </main>
 
@@ -163,6 +226,7 @@ type NavProps = {
   latestVersion: string | null
   taskQuickList?: ReactNode
   toolsMenu?: ReactNode
+  projectGroups?: ReactNode
 }
 
 /** The desktop frame: a fixed 264px column, from `md` up. */
@@ -233,6 +297,7 @@ function SidebarContent({
   latestVersion,
   taskQuickList,
   toolsMenu,
+  projectGroups,
   onNavigate,
   headerAction,
 }: NavProps & {
@@ -251,7 +316,9 @@ function SidebarContent({
       <div className="flex items-center gap-[9px] px-3.5 pt-3.5 pb-2.5">
         <BrandTile />
         <span className="text-[15px] font-semibold">cezar</span>
-        {repo ? (
+        {/* With project groups mounted the boot repo/branch is one group header among many —
+            a chip repeating it up here would just be the first group's header said twice. */}
+        {repo && !projectGroups ? (
           <span
             data-slot="repo-chip"
             className="ml-auto truncate font-mono text-[11px] font-medium text-soft-foreground"
@@ -259,11 +326,13 @@ function SidebarContent({
             {repo.name} / {repo.branch}
           </span>
         ) : null}
-        {headerAction ? <div className={cn('shrink-0', !repo && 'ml-auto')}>{headerAction}</div> : null}
+        {headerAction ? (
+          <div className={cn('shrink-0', (!repo || projectGroups) && 'ml-auto')}>{headerAction}</div>
+        ) : null}
       </div>
 
-      <div className="px-2.5 pt-1 pb-2">
-        <Button asChild variant="contrast" className="relative w-full justify-center">
+      <div className="flex gap-1.5 px-2.5 pt-1 pb-2">
+        <Button asChild variant="contrast" className="relative min-w-0 flex-1 justify-center">
           {/* A Router Link since R4 Step 1.1: the React /new composer is real, so deliberate
               New task affordances stay inside the SPA. Full document loads of /new (the
               bookmarklet contract) land on the shell like any route (static-ui.ts) — the
@@ -282,51 +351,67 @@ function SidebarContent({
             </kbd>
           </Link>
         </Button>
+        <AddProjectMenu />
       </div>
 
-      <nav aria-label="Main" className="px-2.5 py-1.5">
-        {items.map((item) => {
-          const isActive = item.to === activeTo
-          const Icon = item.icon
-          // Link, not NavLink, on purpose. NavLink derives `aria-current` from its own prefix
-          // match against `to`, and that rule is wrong here: it would *not* light Tasks on
-          // /tasks/:id — which the spec requires. `aria-current` cannot be forced past NavLink's
-          // own matching, so the area rule lives in `activeNavPath` and this is a plain Link.
-          return (
-            <Link
-              key={item.to}
-              to={item.to}
-              onClick={onNavigate}
-              aria-current={isActive ? 'page' : undefined}
-              className={cn(
-                // h-[34px] is the mockup's desktop row. In the drawer these are touch targets, so
-                // they relax to 44px — the one place the two framings legitimately differ.
-                'flex h-11 w-full items-center gap-2.5 rounded-md px-2.5 text-[13.5px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground md:h-[34px]',
-                isActive && 'bg-muted font-semibold text-foreground'
-              )}
-            >
-              <Icon className="size-4 shrink-0" aria-hidden="true" />
-              {item.label}
-              {item.badge && inboxCount ? (
-                <span
-                  data-slot="nav-badge"
-                  className="ml-auto rounded-full bg-violet px-1.5 py-px text-[10.5px] font-semibold text-violet-foreground"
+      {projectGroups ? (
+        // Step 3.3: one collapsible group per registered project — nav + task list per group.
+        // The whole area scrolls as one (per the sidebar mockup); collapsed groups are one row.
+        <div
+          data-slot="project-groups"
+          className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-1.5 pb-2"
+        >
+          <SidebarNavigateContext.Provider value={onNavigate}>
+            {projectGroups}
+          </SidebarNavigateContext.Provider>
+        </div>
+      ) : (
+        <>
+          <nav aria-label="Main" className="px-2.5 py-1.5">
+            {items.map((item) => {
+              const isActive = item.to === activeTo
+              const Icon = item.icon
+              // Link, not NavLink, on purpose. NavLink derives `aria-current` from its own prefix
+              // match against `to`, and that rule is wrong here: it would *not* light Tasks on
+              // /tasks/:id — which the spec requires. `aria-current` cannot be forced past NavLink's
+              // own matching, so the area rule lives in `activeNavPath` and this is a plain Link.
+              return (
+                <Link
+                  key={item.to}
+                  to={item.to}
+                  onClick={onNavigate}
+                  aria-current={isActive ? 'page' : undefined}
+                  className={cn(
+                    // h-[34px] is the mockup's desktop row. In the drawer these are touch targets, so
+                    // they relax to 44px — the one place the two framings legitimately differ.
+                    'flex h-11 w-full items-center gap-2.5 rounded-md px-2.5 text-[13.5px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground md:h-[34px]',
+                    isActive && 'bg-muted font-semibold text-foreground'
+                  )}
                 >
-                  {inboxCount}
-                </span>
-              ) : null}
-            </Link>
-          )
-        })}
-      </nav>
+                  <Icon className="size-4 shrink-0" aria-hidden="true" />
+                  {item.label}
+                  {item.badge && inboxCount ? (
+                    <span
+                      data-slot="nav-badge"
+                      className="ml-auto rounded-full bg-violet px-1.5 py-px text-[10.5px] font-semibold text-violet-foreground"
+                    >
+                      {inboxCount}
+                    </span>
+                  ) : null}
+                </Link>
+              )
+            })}
+          </nav>
 
-      {/* Step 3.3 renders the grouped quick-list (Needs you / Working / Recent) in here. */}
-      <div
-        data-slot="task-quick-list"
-        className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2.5 pb-2"
-      >
-        {taskQuickList}
-      </div>
+          {/* The single-project quick-list (Needs you / Working / Recent). */}
+          <div
+            data-slot="task-quick-list"
+            className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2.5 pb-2"
+          >
+            {taskQuickList}
+          </div>
+        </>
+      )}
 
       <div
         data-slot="sidebar-footer"
@@ -336,9 +421,92 @@ function SidebarContent({
         <div data-slot="tools-menu">{toolsMenu}</div>
         {version ? <VersionChip version={version} latestVersion={latestVersion} /> : null}
         <CommandPaletteHint />
-        <ThemeToggle className="ml-auto" />
+        <GlobalSettingsLink onNavigate={onNavigate} className="ml-auto" />
+        <ThemeToggle />
       </div>
     </div>
+  )
+}
+
+/**
+ * The footer's way into `/settings/global/*` (multi-project spec, "Sidebar → Footer").
+ *
+ * A PLAIN router Link, deliberately: global settings sit outside every project, and the scoped
+ * `Link` this file otherwise uses would prefix the target with the active `/p/<id>` — a path
+ * that is not a route. Icon-only to keep the footer's one row intact; the accessible name and
+ * the tooltip both carry the label.
+ */
+function GlobalSettingsLink({
+  className,
+  onNavigate,
+}: {
+  className?: string
+  onNavigate?: () => void
+}) {
+  return (
+    <Button asChild variant="ghost" size="icon" className={cn('size-7', className)}>
+      <RouterLink
+        to="/settings/global"
+        data-slot="global-settings-link"
+        aria-label="Global settings"
+        title="Global settings"
+        onClick={onNavigate}
+      >
+        <SettingsIcon className="size-4" aria-hidden="true" />
+      </RouterLink>
+    </Button>
+  )
+}
+
+/**
+ * The "Add project" dropdown beside the New task CTA (multi-project spec, "Sidebar → Header").
+ *
+ * "Open local folder…" opens the folder-browser dialog (step 4.2); "Clone from GitHub…" opens
+ * the checkout dialog (step 4.3).
+ *
+ * Neither item is gh-gated here, deliberately. The spec's "disabled with a reason when `gh` is
+ * unavailable" would mean reading `GET /api/health` from this component — and the dialogs are
+ * mounted only while open precisely BECAUSE this shell must keep rendering where no QueryClient
+ * is provided. So the degradation lands one click later instead, in the dialog, which shows the
+ * server's own `gh CLI not found — install it and run 'gh auth login'` verbatim: the same
+ * information, at the moment it is actionable, without a query in the shell.
+ *
+ * The dialogs are mounted only while open, ON PURPOSE: they are the one part of this shell that
+ * talks to the API (queries + a mutation), and the shell itself must keep rendering in the
+ * places that mount it without a QueryClient. The cost is no close animation, which is the
+ * cheaper half of the trade.
+ */
+function AddProjectMenu() {
+  const [browsing, setBrowsing] = React.useState(false)
+  const [cloning, setCloning] = React.useState(false)
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        {/* size-11 in the drawer (touch target), the CTA's height on desktop. */}
+        <Button
+          variant="outline"
+          size="icon"
+          aria-label="Add project"
+          title="Add project"
+          className="size-11 shrink-0 md:size-9"
+        >
+          <FolderOpenIcon className="size-4" aria-hidden="true" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-56">
+        <DropdownMenuLabel className="text-xs text-soft-foreground">Add project</DropdownMenuLabel>
+        <DropdownMenuItem data-slot="add-project-local" onSelect={() => setBrowsing(true)}>
+          <FolderIcon aria-hidden="true" />
+          Open local folder…
+        </DropdownMenuItem>
+        <DropdownMenuItem data-slot="add-project-clone" onSelect={() => setCloning(true)}>
+          <GithubIcon aria-hidden="true" />
+          Clone from GitHub…
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+      {browsing ? <AddProjectDialog open onOpenChange={setBrowsing} /> : null}
+      {cloning ? <CloneProjectDialog open onOpenChange={setCloning} /> : null}
+    </DropdownMenu>
   )
 }
 

@@ -1,15 +1,26 @@
 /**
- * Deployment-mode capabilities (cockpit-ui redesign spec §"Deployment modes —
- * local vs hosted"). The default deployment is `npx cezar-cli` on localhost,
- * where handing a session off to a local terminal/editor makes sense. On a
- * VPS/remote box it doesn't: `CEZ_REMOTE=1` (or binding a non-loopback host)
- * switches to hosted mode — `/api/health` reports `localHandoff:false`, the UI
- * hides every local-machine affordance, and the open-in-* endpoints 409 as
- * defense in depth.
+ * Server capabilities reported by `/api/health` — the UI hides what the server
+ * says isn't there, and the matching endpoints refuse as defense in depth.
+ *
+ * `localHandoff` (cockpit-ui redesign spec §"Deployment modes — local vs
+ * hosted"): the default deployment is `npx cezar-cli` on localhost, where
+ * handing a session off to a local terminal/editor makes sense. On a VPS/remote
+ * box it doesn't: `CEZ_REMOTE=1` (or binding a non-loopback host) switches to
+ * hosted mode — the UI hides every local-machine affordance and the open-in-*
+ * endpoints 409.
+ *
+ * `followups` (spec 007, #444, #471): the global follow-up inbox is **opt-in**
+ * via `CEZ_FOLLOWUPS=1` and off by default. Off, agents are never told to write
+ * `todos.json` (they get `HANDOFF_ONLY_INSTRUCTIONS` and an empty
+ * `CEZ_TODOS_FILE`), the Inbox nav item is gone and the inbox endpoints refuse.
+ * The per-task handoff journal is independent and runs either way.
  */
+
+import { followupsEnabled } from '../handoff.js';
 
 export interface Capabilities {
   localHandoff: boolean;
+  followups: boolean;
 }
 
 /** True for hosts that only the local machine can reach. Undefined = the
@@ -21,7 +32,18 @@ export function isLoopbackHost(host: string | undefined): boolean {
 }
 
 /** `CEZ_REMOTE=1` or a non-loopback bind host ⇒ hosted mode (no local handoff).
- *  Read per request — cheap, and tests/ops can flip the env live. */
+ *  `CEZ_FOLLOWUPS=1` ⇒ the follow-up inbox exists (#471).
+ *
+ *  Read per request — cheap, and tests/ops can flip `CEZ_REMOTE` live. `followups` is honest
+ *  per request too, but flipping it ON at runtime is only half a switch: the per-dataDir
+ *  todos watch (step 2.3) is created by an SSE subscription, so connections opened while the
+ *  flag was off never subscribed and get no live inbox updates until they reconnect. Hence
+ *  the UI's "set CEZ_FOLLOWUPS=1 and restart cezar" wording — treat it as a boot-time flag. */
 export function resolveCapabilities(env: NodeJS.ProcessEnv = process.env, bindHost?: string): Capabilities {
-  return { localHandoff: env.CEZ_REMOTE !== '1' && isLoopbackHost(bindHost) };
+  return {
+    localHandoff: env.CEZ_REMOTE !== '1' && isLoopbackHost(bindHost),
+    // Deliberately not re-derived here: RunManager enforces the same predicate,
+    // and two spellings of "is the inbox on" would eventually disagree.
+    followups: followupsEnabled(env),
+  };
 }

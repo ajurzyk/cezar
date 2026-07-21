@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { MemoryRouter } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { queryKeys, workspaceQueryKeys } from '@/api/queries'
 import { createQueryClient } from '@/api/query-client'
 import type { ConfigResponse, RepoResponse, Runner } from '@/api/types'
 import { Toaster, resetToasts } from '@/components/ui/toaster'
@@ -39,6 +40,9 @@ function serve({
     defaultModels: {},
     maxParallel: 2,
     memoryLimitMb: null,
+    worktreeRetention: 10,
+    liveTitleUpdates: null,
+    reviewGate: null,
     ...config,
   }
   const json = (payload: unknown, status = 200) =>
@@ -59,6 +63,12 @@ function serve({
         if (body?.systemPrompt !== undefined) {
           state.systemPrompt = (body.systemPrompt as string | null) || null
         }
+        if (body?.liveTitleUpdates !== undefined) {
+          state.liveTitleUpdates = body.liveTitleUpdates as boolean | null
+        }
+        if (body?.reviewGate !== undefined) {
+          state.reviewGate = body.reviewGate as boolean | null
+        }
         if (body?.defaultModels !== undefined) {
           for (const [runner, model] of Object.entries(body.defaultModels as Record<string, string | null>)) {
             if (model === null || model === '') delete state.defaultModels[runner as Runner]
@@ -73,9 +83,23 @@ function serve({
   )
 }
 
+/** Seeds the step-3.2 route gates — boot id (legacy redirect) + registry (known-check) — so a
+ *  flat entry URL lands scoped immediately. The boot project mounts UNSCOPED, so the exact
+ *  `/api/*` paths this file's fetch stub matches stay byte-identical. */
+function gateSeededClient() {
+  const client = createQueryClient()
+  client.setQueryData(queryKeys.health, { bootProject: 'boot' })
+  client.setQueryData(workspaceQueryKeys.projects, {
+    projects: [],
+    bootProject: 'boot',
+    projectsDir: '~/cezar/projects',
+  })
+  return client
+}
+
 function renderAt(entry: string) {
   render(
-    <QueryClientProvider client={createQueryClient()}>
+    <QueryClientProvider client={gateSeededClient()}>
       <MemoryRouter initialEntries={[entry]}>
         <AppRoutes />
         <Toaster />
@@ -114,6 +138,33 @@ describe('the agents form', () => {
     await waitFor(() =>
       expect(screen.getByLabelText<HTMLSelectElement>('Base branch').value).toBe('develop'),
     )
+  })
+
+
+  it('live title updates: the switch defaults ON and PUTs the toggle', async () => {
+    serve()
+    renderAt('/settings/agents')
+    await waitFor(() => expect(form()).not.toBeNull())
+
+    const toggle = screen.getByLabelText('Live title updates')
+    expect(toggle.getAttribute('aria-checked') ?? toggle.getAttribute('data-state')).toBeTruthy()
+    fireEvent.click(toggle)
+    await waitFor(() => expect(puts()).toHaveLength(1))
+    expect(puts()[0]?.body).toEqual({ liveTitleUpdates: false })
+    await waitFor(() => expect(screen.getByText('Off')).toBeTruthy())
+  })
+
+  it('review gate: the switch defaults OFF and PUTs the toggle (#489)', async () => {
+    serve()
+    renderAt('/settings/agents')
+    await waitFor(() => expect(form()).not.toBeNull())
+
+    const toggle = screen.getByLabelText('Review changes before finishing')
+    // Default off — the mirror image of live-title-updates.
+    expect(toggle.getAttribute('aria-checked') ?? toggle.getAttribute('data-state')).toMatch(/false|unchecked/)
+    fireEvent.click(toggle)
+    await waitFor(() => expect(puts()).toHaveLength(1))
+    expect(puts()[0]?.body).toEqual({ reviewGate: true })
   })
 
   it('default runner round-trips: click PUTs the patch and the control follows the answer', async () => {

@@ -1,8 +1,10 @@
 /**
  * Golden tests for the codex app-server → v2 mapper: each fixture in
- * `__fixtures__/codex/` is a wire-faithful JSONL frame transcript (shapes
- * from `.ai/analysis/cockpit-ui-redesign/agent-event-protocols.md` §3); its
+ * `__fixtures__/codex/` is a JSONL frame transcript (shapes from
+ * `.ai/analysis/cockpit-ui-redesign/agent-event-protocols.md` §3); its
  * `.expected.json` is the EXACT `UiEvent` sequence the mapper must produce.
+ * All are wire-faithful except `todo-list`, which pins the tolerance arm for
+ * codex's non-app-server transports — see the note on GOLDEN_FIXTURES.
  * Plus edge cases (never-throw, status map, state carry-over, no fabricated
  * cost) and a live wiring test through the real runner against the bundled
  * mock app-server.
@@ -13,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import type { AgentEvent } from './agent-runner.js';
-import type { UiEvent } from './ui-events.js';
+import type { UiEvent, UiItem } from './ui-events.js';
 import { codexSessionStarted, createCodexUiState, mapCodexNotification } from './codex-ui-mapper.js';
 import { CodexAppServerRunner } from './codex-app-server-runner.js';
 
@@ -49,9 +51,16 @@ function expectedEvents(fixture: string): unknown {
 
 const GOLDEN_FIXTURES = [
   'text-turn',
+  // Reasoning streamed as textDelta and closed with a summary-only
+  // `item/completed` — the wire shape #528 was reported against.
+  'reasoning-stream',
   'command-lifecycle',
   'file-change-and-mcp',
+  // NOT app-server wire truth: codex has no `todoList` item and no `item/updated`
+  // method. It pins the mapper's tolerance arm for codex's other transports only.
+  // `turn-plan-updated` is the real app-server plan channel.
   'todo-list',
+  'turn-plan-updated',
   'turn-failed',
   'review-mode',
 ] as const;
@@ -92,6 +101,11 @@ describe('mapCodexNotification edge cases', () => {
       { method: 'item/agentMessage/delta', params: { itemId: 'a', delta: '' } }, // empty delta
       { method: 'thread/tokenUsage/updated', params: {} }, // no tokenUsage.total
       { method: 'thread/started', params: {} }, // no thread id
+      // A garbled plan frame must not wipe a good plan — no `plan` array at all,
+      // or one that is not an array, maps to zero events (not an empty plan).
+      { method: 'turn/plan/updated', params: {} },
+      { method: 'turn/plan/updated', params: { plan: 'oops' } },
+      { method: 'turn/plan/updated', params: { plan: null } },
     ];
     for (const frame of frames) {
       const mapped = mapCodexNotification(frame, state);
@@ -337,7 +351,7 @@ describe('mapCodexNotification edge cases', () => {
     ).events;
     expect(review).toEqual({
       type: 'item.started',
-      item: { kind: 'tool', id: 'item_rv', name: 'enteredReviewMode', toolKind: 'task', title: 'Entered review mode', status: 'running' },
+      item: { kind: 'tool', id: 'item_rv', name: 'enteredReviewMode', toolKind: 'task', title: 'Review', status: 'running' },
     });
 
     const [unknown] = mapCodexNotification(
@@ -350,12 +364,305 @@ describe('mapCodexNotification edge cases', () => {
     });
   });
 
+  // The pair is ONE span of work: mapped literally it would be two childless task
+  // items, which the Agents dock reads as two sub-agents that each did nothing (#474).
+  describe('review mode folds into one task item', () => {
+    it('completes the ENTERED item when the exit frame arrives, not a second item', () => {
+      const entered = mapCodexNotification(
+        { method: 'item/started', params: { item: { type: 'enteredReviewMode', id: 'item_rv_1' } } },
+        state,
+      );
+      const exited = mapCodexNotification(
+        { method: 'item/completed', params: { item: { type: 'exitedReviewMode', id: 'item_rv_2', status: 'completed' } } },
+        entered.state,
+      );
+      expect(exited.events).toEqual([
+        {
+          type: 'item.completed',
+          item: { kind: 'tool', id: 'item_rv_1', name: 'enteredReviewMode', toolKind: 'task', title: 'Review', status: 'completed' },
+        },
+      ]);
+      expect(exited.state.reviewItemId).toBeNull();
+    });
+
+    it('falls back to its own item for an unpaired exit (a stream that starts mid-review)', () => {
+      const mapped = mapCodexNotification(
+        { method: 'item/completed', params: { item: { type: 'exitedReviewMode', id: 'item_rv_2', status: 'completed' } } },
+        state,
+      );
+      expect(mapped.events).toEqual([
+        {
+          type: 'item.completed',
+          item: { kind: 'tool', id: 'item_rv_2', name: 'exitedReviewMode', toolKind: 'task', title: 'Review', status: 'completed' },
+        },
+      ]);
+    });
+
+    it('closes the span when the entered frame itself arrives already completed', () => {
+      const mapped = mapCodexNotification(
+        { method: 'item/completed', params: { item: { type: 'enteredReviewMode', id: 'item_rv_1', status: 'completed' } } },
+        state,
+      );
+      expect(mapped.state.reviewItemId).toBeNull()
+      // The next exit has nothing to pair with, so it maps under its own id.
+      const exited = mapCodexNotification(
+        { method: 'item/completed', params: { item: { type: 'exitedReviewMode', id: 'item_rv_2' } } },
+        mapped.state,
+      );
+      expect(exited.events[0]).toMatchObject({ type: 'item.completed', item: { id: 'item_rv_2' } });
+    });
+
+    // Without this, an interrupted review leaves a `running` task item forever — and the
+    // Agents dock reads a FINISHED run as a live fan-out (`Agents · 0/1 — starting…`).
+    it('closes an open span when the turn ends, so nothing is left running', () => {
+      const entered = mapCodexNotification(
+        { method: 'item/started', params: { item: { type: 'enteredReviewMode', id: 'item_rv_1' } } },
+        state,
+      );
+      const ended = mapCodexNotification(
+        { method: 'turn/completed', params: { turn: { id: 'turn_1', status: 'completed' } } },
+        entered.state,
+      );
+      expect(ended.events[0]).toEqual({
+        type: 'item.completed',
+        item: { kind: 'tool', id: 'item_rv_1', name: 'enteredReviewMode', toolKind: 'task', title: 'Review', status: 'completed' },
+      });
+      expect(ended.events[1]).toMatchObject({ type: 'turn.completed' });
+      expect(ended.state.reviewItemId).toBeNull();
+    });
+
+    it('marks the span failed when the turn itself failed', () => {
+      const entered = mapCodexNotification(
+        { method: 'item/started', params: { item: { type: 'enteredReviewMode', id: 'item_rv_1' } } },
+        state,
+      );
+      const ended = mapCodexNotification(
+        { method: 'turn/failed', params: { turn: { id: 'turn_1' }, error: { message: 'boom' } } },
+        entered.state,
+      );
+      expect(ended.events[0]).toMatchObject({ type: 'item.completed', item: { id: 'item_rv_1', status: 'failed' } });
+    });
+
+    it('emits no review completion for a turn that had no open span', () => {
+      const ended = mapCodexNotification(
+        { method: 'turn/completed', params: { turn: { id: 'turn_1', status: 'completed' } } },
+        state,
+      );
+      expect(ended.events).toEqual([{ type: 'turn.completed', turnId: 'turn_1', stopReason: 'end_turn' }]);
+    });
+
+    // The same displacement rule the opencode subtask slot would need: never leak a row.
+    it('settles the previous span when a second entered frame displaces it', () => {
+      const first = mapCodexNotification(
+        { method: 'item/started', params: { item: { type: 'enteredReviewMode', id: 'rv_1' } } },
+        state,
+      );
+      const second = mapCodexNotification(
+        { method: 'item/started', params: { item: { type: 'enteredReviewMode', id: 'rv_2' } } },
+        first.state,
+      );
+      expect(second.events).toEqual([
+        {
+          type: 'item.completed',
+          item: { kind: 'tool', id: 'rv_1', name: 'enteredReviewMode', toolKind: 'task', title: 'Review', status: 'completed' },
+        },
+        {
+          type: 'item.started',
+          item: { kind: 'tool', id: 'rv_2', name: 'enteredReviewMode', toolKind: 'task', title: 'Review', status: 'running' },
+        },
+      ]);
+      expect(second.state.reviewItemId).toBe('rv_2');
+    });
+
+    // The latch must follow the RESOLVED status, not the lifecycle phase the frame arrived in.
+    it('keeps the span open for an item/completed frame that is still in progress', () => {
+      const mapped = mapCodexNotification(
+        { method: 'item/completed', params: { item: { type: 'enteredReviewMode', id: 'rv_1', status: 'inProgress' } } },
+        state,
+      );
+      expect(mapped.events[0]).toMatchObject({ item: { status: 'running' } });
+      expect(mapped.state.reviewItemId).toBe('rv_1');
+    });
+
+    it('closes the span for an item/started frame that already carries a terminal status', () => {
+      const mapped = mapCodexNotification(
+        { method: 'item/started', params: { item: { type: 'enteredReviewMode', id: 'rv_1', status: 'completed' } } },
+        state,
+      );
+      expect(mapped.events[0]).toMatchObject({ item: { status: 'completed' } });
+      expect(mapped.state.reviewItemId).toBeNull();
+    });
+
+    it('re-arms across consecutive review spans in one session', () => {
+      let next = mapCodexNotification(
+        { method: 'item/started', params: { item: { type: 'enteredReviewMode', id: 'rv_a' } } },
+        state,
+      ).state;
+      next = mapCodexNotification(
+        { method: 'item/completed', params: { item: { type: 'exitedReviewMode', id: 'rv_a_end' } } },
+        next,
+      ).state;
+      const second = mapCodexNotification(
+        { method: 'item/started', params: { item: { type: 'enteredReviewMode', id: 'rv_b' } } },
+        next,
+      );
+      expect(second.state.reviewItemId).toBe('rv_b');
+      expect(
+        mapCodexNotification(
+          { method: 'item/completed', params: { item: { type: 'exitedReviewMode', id: 'rv_b_end' } } },
+          second.state,
+        ).events[0],
+      ).toMatchObject({ item: { id: 'rv_b' } });
+    });
+  });
+
   it("the user's own echoed message maps to zero events", () => {
     const mapped = mapCodexNotification(
       { method: 'item/started', params: { item: { type: 'userMessage', id: 'item_u', content: [{ type: 'text', text: 'hi' }] } } },
       state,
     );
     expect(mapped.events).toEqual([]);
+  });
+
+  // `turn/plan/updated` is the ONLY channel codex's `update_plan` reaches the
+  // client on: the app-server v2 `ThreadItem` union has no todo variant, so a
+  // plan that is not read off this notification never renders at all.
+  describe('turn/plan/updated (the real update_plan channel)', () => {
+    const planFrame = (plan: unknown) => ({
+      method: 'turn/plan/updated',
+      params: { threadId: 'th_1', turnId: 'turn_1', explanation: null, plan },
+    });
+
+    it('normalizes the wire status vocabulary, which is camelCase on app-server', () => {
+      // `inProgress` is what the app-server layer re-serializes to, even though
+      // codex's core protocol type spells it `in_progress` — accept both.
+      const events = mapCodexNotification(
+        planFrame([
+          { step: 'a', status: 'pending' },
+          { step: 'b', status: 'inProgress' },
+          { step: 'c', status: 'in_progress' },
+          { step: 'd', status: 'completed' },
+        ]),
+        state,
+      ).events;
+      expect(events).toEqual([
+        {
+          type: 'plan.updated',
+          entries: [
+            { content: 'a', status: 'pending' },
+            { content: 'b', status: 'in_progress' },
+            { content: 'c', status: 'in_progress' },
+            { content: 'd', status: 'completed' },
+          ],
+        },
+      ]);
+    });
+
+    it('treats an unknown or missing status as pending rather than dropping the step', () => {
+      const events = mapCodexNotification(
+        planFrame([{ step: 'a', status: 'sideways' }, { step: 'b' }]),
+        state,
+      ).events;
+      expect(events).toEqual([
+        { type: 'plan.updated', entries: [{ content: 'a', status: 'pending' }, { content: 'b', status: 'pending' }] },
+      ]);
+    });
+
+    it('filters malformed steps but keeps the good ones', () => {
+      const events = mapCodexNotification(
+        planFrame(['oops', null, 42, { status: 'pending' }, { step: 5 }, { step: 'real', status: 'pending' }]),
+        state,
+      ).events;
+      expect(events).toEqual([{ type: 'plan.updated', entries: [{ content: 'real', status: 'pending' }] }]);
+    });
+
+    it('emits an empty plan for an empty list — a cleared plan is a real snapshot', () => {
+      expect(mapCodexNotification(planFrame([]), state).events).toEqual([{ type: 'plan.updated', entries: [] }]);
+    });
+
+    // "the agent cleared its plan" and "we could not parse the steps" both end up
+    // as `[]` downstream, where the dock unmounts — so only the former may emit.
+    it('a list whose every row is unreadable emits nothing rather than wiping the plan', () => {
+      // e.g. a wire revision that renamed `step`, which would otherwise blank the dock.
+      for (const plan of [[{ text: 'a' }, { text: 'b' }], ['junk'], [null], [{ step: 5 }], [{}]]) {
+        expect(mapCodexNotification(planFrame(plan), state).events).toEqual([]);
+      }
+    });
+
+    it('is full-replacement: the frame is the whole plan, with no entries accumulated', () => {
+      // Contrast claude's id-keyed task map: nothing from the first frame may
+      // survive into the second. The only state kept is the precedence latch.
+      const first = mapCodexNotification(planFrame([{ step: 'a', status: 'completed' }]), state);
+      const second = mapCodexNotification(planFrame([{ step: 'b', status: 'pending' }]), first.state);
+      expect(second.events).toEqual([{ type: 'plan.updated', entries: [{ content: 'b', status: 'pending' }] }]);
+      expect({ ...second.state, planFromNotification: false }).toEqual(state);
+
+      // The latch settles after the first frame rather than churning state.
+      const third = mapCodexNotification(planFrame([{ step: 'c', status: 'pending' }]), second.state);
+      expect(third.state).toBe(second.state);
+    });
+
+    // Both this notification and the `plan`/`todoList` item arm write plan.updated.
+    // Without precedence the last frame wins, flattening a real checklist into the
+    // single prose entry the plan-MODE item carries.
+    it('outranks the prose plan item: once it has spoken, the item arm stands down', () => {
+      const afterPlan = mapCodexNotification(
+        planFrame([{ step: 'one', status: 'completed' }, { step: 'two', status: 'inProgress' }]),
+        state,
+      );
+      expect(afterPlan.state.planFromNotification).toBe(true);
+
+      const prose = mapCodexNotification(
+        { method: 'item/completed', params: { item: { type: 'plan', id: 'item_p', text: 'Here is my prose plan…' } } },
+        afterPlan.state,
+      );
+      expect(prose.events).toEqual([]);
+
+      // …and a stray todoList snapshot is ignored for the same reason.
+      const stray = mapCodexNotification(
+        { method: 'item/started', params: { item: { type: 'todoList', id: 'item_t', items: [{ text: 'x', completed: false }] } } },
+        afterPlan.state,
+      );
+      expect(stray.events).toEqual([]);
+    });
+
+    // The latch is turn-scoped. If it outlived its turn it would gag the item arm
+    // for the rest of the session, stranding the dock on the previous turn's plan.
+    it('re-opens the item arm on the next turn', () => {
+      const latched = mapCodexNotification(planFrame([{ step: 'turn one', status: 'completed' }]), state);
+      expect(latched.state.planFromNotification).toBe(true);
+
+      const nextTurn = mapCodexNotification(
+        { method: 'turn/started', params: { turn: { id: 'turn_2', status: 'inProgress' } } },
+        latched.state,
+      );
+      expect(nextTurn.state.planFromNotification).toBe(false);
+
+      const prose = mapCodexNotification(
+        { method: 'item/completed', params: { item: { type: 'plan', id: 'item_p', text: 'Turn two plan' } } },
+        nextTurn.state,
+      );
+      expect(prose.events).toEqual([
+        { type: 'plan.updated', entries: [{ content: 'Turn two plan', status: 'in_progress' }] },
+      ]);
+    });
+
+    it('leaves the item arm alone until the notification actually arrives', () => {
+      // The tolerance arm still works for transports that never send the notification.
+      const prose = mapCodexNotification(
+        { method: 'item/completed', params: { item: { type: 'plan', id: 'item_p', text: 'Prose plan' } } },
+        state,
+      );
+      expect(prose.events).toEqual([{ type: 'plan.updated', entries: [{ content: 'Prose plan', status: 'in_progress' }] }]);
+    });
+
+    it('ignores the explanation prose (the dock renders entries only)', () => {
+      const events = mapCodexNotification(
+        { method: 'turn/plan/updated', params: { threadId: 'th_1', turnId: 'turn_1', explanation: 'why', plan: [{ step: 'a', status: 'pending' }] } },
+        state,
+      ).events;
+      expect(events).toEqual([{ type: 'plan.updated', entries: [{ content: 'a', status: 'pending' }] }]);
+    });
   });
 });
 
@@ -403,4 +710,167 @@ describe('CodexAppServerRunner v2 wiring (against the bundled mock app-server)',
     expect(v2).toContainEqual({ type: 'usage.updated', usage: { input: 1200, output: 300, total: 1500 } });
     expect(v2).toContainEqual({ type: 'turn.completed', turnId: 'turn_mock_1', stopReason: 'end_turn' });
   }, 30_000);
+});
+
+/**
+ * #528 — reasoning text must survive into the persisted `item.completed`
+ * snapshot. `item.delta`s are live-only (`UiEventSink` never writes them), so
+ * a completed reasoning item that carries no `content` would replay empty.
+ */
+describe('codex reasoning text survives replay (#528)', () => {
+  const THREAD = 'th_1';
+  const TURN = 'turn_1';
+  const ID = 'item_rsn_1';
+
+  function fold(frames: unknown[]): UiEvent[] {
+    let state = createCodexUiState();
+    const events: UiEvent[] = [];
+    for (const frame of frames) {
+      const mapped = mapCodexNotification(frame, state);
+      state = mapped.state;
+      events.push(...mapped.events);
+    }
+    return events;
+  }
+
+  function reasoningAt(events: UiEvent[], type: 'item.started' | 'item.completed', id = ID): UiItem | undefined {
+    return events.find(
+      (e): e is Extract<UiEvent, { type: 'item.started' | 'item.completed' }> =>
+        e.type === type && 'item' in e && e.item.kind === 'reasoning' && e.item.id === id,
+    )?.item;
+  }
+
+  /** The last reasoning text a reload would reconstruct: snapshots only. */
+  function replayedText(events: UiEvent[], id = ID): string | undefined {
+    let text: string | undefined;
+    for (const e of events) {
+      if ((e.type === 'item.started' || e.type === 'item.updated' || e.type === 'item.completed') &&
+          e.item.kind === 'reasoning' && e.item.id === id) {
+        text = e.item.text;
+      }
+    }
+    return text;
+  }
+
+  const turnStarted = { method: 'turn/started', params: { turn: { id: TURN, status: 'inProgress', items: [] } } };
+  const started = (item: Record<string, unknown> = { summary: 'Tracing it' }) => ({
+    method: 'item/started',
+    params: { threadId: THREAD, turnId: TURN, item: { type: 'reasoning', id: ID, ...item } },
+  });
+  const completed = (item: Record<string, unknown> = {}) => ({
+    method: 'item/completed',
+    params: { threadId: THREAD, turnId: TURN, item: { type: 'reasoning', id: ID, ...item } },
+  });
+  const delta = (method: string, d: string, itemId = ID) => ({
+    method: `item/reasoning/${method}`,
+    params: { threadId: THREAD, turnId: TURN, itemId, delta: d },
+  });
+  const textDelta = (d: string) => delta('textDelta', d);
+
+  it('falls back to the accumulated deltas when item/completed carries no content', () => {
+    const events = fold([
+      started(),
+      textDelta('The session cookie '),
+      textDelta('is dropped on refresh.'),
+      // The real app-server may close a reasoning item with the summary only.
+      completed({ summary: 'Tracing it' }),
+    ]);
+    expect(reasoningAt(events, 'item.completed')).toEqual({
+      kind: 'reasoning',
+      id: ID,
+      text: 'The session cookie is dropped on refresh.',
+    });
+  });
+
+  it('wire content still wins over the accumulator', () => {
+    const events = fold([started(), textDelta('streamed'), completed({ content: 'authoritative' })]);
+    expect(reasoningAt(events, 'item.completed')).toMatchObject({ text: 'authoritative' });
+  });
+
+  it('accumulates both summary delta methods into the summary channel', () => {
+    const events = fold([
+      started({}),
+      delta('summaryDelta', 'Checking '),
+      delta('summaryTextDelta', 'the auth path.'),
+      completed(),
+    ]);
+    expect(reasoningAt(events, 'item.completed')).toMatchObject({ text: 'Checking the auth path.' });
+  });
+
+  // The two channels are distinct streams — codex emits both when raw reasoning
+  // is on. One shared bucket would persist "<raw CoT><summary>" over the summary.
+  it('never concatenates the raw-thought channel with the summary channel', () => {
+    const events = fold([
+      started({ summary: 'Short summary.' }),
+      textDelta('RAW CHAIN OF THOUGHT.'),
+      delta('summaryDelta', 'Short summary.'),
+      completed({ summary: 'Short summary.' }),
+    ]);
+    // The raw stream is the fuller text and wins outright; the summary is not appended to it.
+    expect(reasoningAt(events, 'item.completed')).toMatchObject({ text: 'RAW CHAIN OF THOUGHT.' });
+  });
+
+  // A dropped frame or a mapper attached mid-turn leaves a partial accumulator.
+  it('a partial streamed summary never overwrites a complete wire summary', () => {
+    const events = fold([
+      started({ summary: 'Full summary of the reasoning' }),
+      delta('summaryDelta', 'Full sum'), // only part of the stream was seen
+      completed({ summary: 'Full summary of the reasoning' }),
+    ]);
+    expect(reasoningAt(events, 'item.completed')).toMatchObject({ text: 'Full summary of the reasoning' });
+  });
+
+  it('the streamed summary wins when it is the fuller of the two', () => {
+    const events = fold([
+      started({ summary: 'Full' }),
+      delta('summaryDelta', 'Full summary of the reasoning'),
+      completed({ summary: 'Full' }),
+    ]);
+    expect(reasoningAt(events, 'item.completed')).toMatchObject({ text: 'Full summary of the reasoning' });
+  });
+
+  // A delta can outrun its item/started; the real started must not blank the row.
+  it('a delta arriving before item/started is not wiped by it', () => {
+    const events = fold([turnStarted, textDelta('streamed first'), started({})]);
+    // The synthesized started is empty by design — the delta appends to it live.
+    // The REAL item/started that follows must not blank what the stream filled.
+    const starts = events.filter((e) => e.type === 'item.started');
+    expect(starts).toHaveLength(2);
+    expect(replayedText(events)).toBe('streamed first');
+  });
+
+  // The leak this guards is id REUSE after an item that never completed.
+  it('an interrupted item’s reasoning does not leak into the next turn that reuses its id', () => {
+    const events = fold([
+      turnStarted,
+      started({}),
+      textDelta('TURN-1 SECRET REASONING'),
+      // turn ends without item/completed — the item was interrupted.
+      { method: 'turn/started', params: { turn: { id: 'turn_2', status: 'inProgress', items: [] } } },
+      started({}),
+      completed(),
+    ]);
+    const second = [...events].reverse().find(
+      (e): e is Extract<UiEvent, { type: 'item.completed' }> =>
+        e.type === 'item.completed' && e.item.kind === 'reasoning',
+    );
+    expect(second?.item.kind === 'reasoning' && second.item.text).toBe('');
+  });
+
+  it('does not leak one item’s reasoning into a different id in the same turn', () => {
+    const events = fold([
+      started(),
+      textDelta('first'),
+      completed(),
+      {
+        method: 'item/started',
+        params: { threadId: THREAD, turnId: TURN, item: { type: 'reasoning', id: 'item_rsn_2', summary: 'Next' } },
+      },
+      {
+        method: 'item/completed',
+        params: { threadId: THREAD, turnId: TURN, item: { type: 'reasoning', id: 'item_rsn_2', summary: 'Next' } },
+      },
+    ]);
+    expect(reasoningAt(events, 'item.completed', 'item_rsn_2')).toMatchObject({ text: 'Next' });
+  });
 });

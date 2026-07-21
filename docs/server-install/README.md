@@ -27,6 +27,12 @@ npx cezar-cli server-uninstall --platform <id>   # reverse it
 Same engine, different steps — each strategy is a small registry entry, so new
 platforms slot in without touching the engine.
 
+> **Several domains on one box?** `ubuntu-vps` can host multiple independent
+> cockpits — add `--domain <host>` to install/deploy/uninstall a separate
+> instance (its own port, nginx site, login and service). A new `--domain` never
+> resumes the first install. See
+> [Hosting several cockpits on one box](./ubuntu-vps.md#hosting-several-cockpits-on-one-box-multiple-domains).
+
 ## How it works (all providers)
 
 1. **Dependencies** — detect the agent CLIs (`claude`/`codex`/`opencode`),
@@ -41,11 +47,39 @@ platforms slot in without touching the engine.
 5. **Verify** — confirm an anonymous request is challenged **and** an
    authenticated one reaches cezar.
 
+## One unit, every project
+
+The autostart service runs cezar as one unix user, and a cockpit serves that
+user's **whole workspace** (`~/.cezar/config.json`), not only the repo you
+installed from. Hosting several repos therefore no longer needs one unit per
+repo: install once, then add the rest — **Settings → Projects** in the cockpit,
+or straight from an ssh session:
+
+```bash
+cezar projects                     # what this host serves
+cezar projects add /srv/other-repo # register another checkout
+cezar projects remove other-repo   # registry entry only — the checkout stays
+```
+
+The CLI edits the registry file directly, so it works whether or not the
+service is running; the cockpit picks the change up on the next page load.
+
+Need **disjoint** project sets on one box — one cockpit per customer, say? Give
+each instance its own home with `CEZ_HOME` (an `Environment=CEZ_HOME=/srv/cezar-homes/shop`
+line in its systemd unit / launchd plist). Each home carries its own registry,
+global config and server state, so instances share nothing — and `--domain`
+already gives them separate ports, nginx sites and logins.
+
 ## Redeploying a new version
 
 `npx cezar-cli server-deploy --platform <id>` is the standardized, per-strategy way to
 roll out a new cezar: it restarts the service and re-verifies. See each guide's
 **Updating / redeploying** section for the checkout-vs-npx details.
+
+To test an unreleased build on a server, pin a preview version
+(see [Preview builds](../publishing.md)) — for example roll a box to a PR's
+exact snapshot with `npx cezar-cli@<version> server-deploy --platform <id>`,
+or track a branch with `npx cezar-cli@develop server-deploy --platform <id>`.
 
 ---
 

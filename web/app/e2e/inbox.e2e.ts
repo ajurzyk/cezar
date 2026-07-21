@@ -11,9 +11,10 @@ import { AgentBrowser, readTestEnv } from './agent-browser'
  * suite seeds real entries exactly like smoke.e2e.ts's SSE-badge test does (same data-dir
  * resolution, same save/restore discipline) and asserts real cards render LIVE over the
  * stream, no reload. Dismiss is honestly reachable (DELETE only rewrites todos.json, which
- * this suite restores) and is exercised below. Run is NOT: `POST /api/todos/:id/start`
- * starts a real run — the shared env's run list must not grow side effects (the github
- * suite's read-only rule), so the Run flow stays unit-pinned in routes/inbox.test.tsx.
+ * this suite restores) and is exercised below. Run is a client-side navigation to a prefilled
+ * `/new` (#374 — it no longer POSTs `/api/todos/:id/start` itself, so no run is ever created
+ * just by clicking it) but a full new-task submit is its own surface with its own coverage, so
+ * the Run flow past the navigation stays unit-pinned in routes/inbox.test.tsx.
  */
 
 const artifactsDir = resolve(import.meta.dirname, '../../../.ai/qa/artifacts_e2e')
@@ -30,9 +31,14 @@ const CARD = '[data-slot="todo-card"]'
 let browser: AgentBrowser
 let baseUrl: string
 let previousTodos: string | null = null
+let followupsAvailable = false
 
-beforeAll(() => {
+beforeAll(async () => {
   baseUrl = readTestEnv().baseUrl
+  const health = (await fetch(`${baseUrl}/api/health`).then((r) => r.json())) as {
+    capabilities: { followups: boolean }
+  }
+  followupsAvailable = health.capabilities.followups
   previousTodos = existsSync(todosFile) ? readFileSync(todosFile, 'utf8') : null
   browser = AgentBrowser.open(sessionId)
   browser.setViewport(DESKTOP.width, DESKTOP.height)
@@ -51,7 +57,32 @@ function writeTodos(items: Array<Record<string, string>>): void {
 }
 
 describe('the inbox against the live dry-run server', () => {
-  it('an empty inbox renders the shared CenteredState template', () => {
+  it('the default-off inbox stays reachable and hides entries already on disk', ({ skip }) => {
+    skip(followupsAvailable, 'the shared environment explicitly enabled the inbox')
+    writeTodos([
+      { id: 'e2e-hidden-1', summary: 'This existing follow-up must stay hidden' },
+      { id: 'e2e-hidden-2', summary: 'This one must stay hidden too' },
+    ])
+    browser.goto(`${baseUrl}/inbox`)
+    browser.waitForFunction(
+      `document.querySelector('[data-route="inbox"] [data-slot="centered-state"]') !== null`,
+    )
+
+    expect(browser.text('[data-slot="centered-state"]')).toContain('The follow-up inbox is off')
+    expect(browser.text('[data-route="inbox"] header')).toContain(
+      'Disabled for this server; per-task Notes still run.',
+    )
+    expect(browser.text('[data-route="inbox"] header')).not.toContain(
+      'Follow-ups agents suggested',
+    )
+    expect(browser.count(CARD)).toBe(0)
+  })
+
+  it('an enabled empty inbox renders the shared CenteredState template', ({ skip }) => {
+    skip(
+      !followupsAvailable,
+      'the inbox is opt-in; run CEZ_FOLLOWUPS=1 npm run test:e2e -- --force',
+    )
     writeTodos([])
     browser.goto(`${baseUrl}/inbox`)
     browser.waitForFunction(
@@ -62,7 +93,11 @@ describe('the inbox against the live dry-run server', () => {
     expect(browser.count(CARD)).toBe(0)
   })
 
-  it('real cards render LIVE from a server-side todos.json write — no reload', () => {
+  it('real cards render LIVE from a server-side todos.json write — no reload', ({ skip }) => {
+    skip(
+      !followupsAvailable,
+      'the inbox is opt-in; run CEZ_FOLLOWUPS=1 npm run test:e2e -- --force',
+    )
     // An agent files two follow-ups while the page just sits there on /inbox.
     writeTodos([
       {
@@ -102,7 +137,11 @@ describe('the inbox against the live dry-run server', () => {
     browser.screenshot(`${artifactsDir}/inbox-cards.png`)
   })
 
-  it('Dismiss checks the entry off — card gone, server inbox down to one', async () => {
+  it('Dismiss checks the entry off — card gone, server inbox down to one', async ({ skip }) => {
+    skip(
+      !followupsAvailable,
+      'the inbox is opt-in; run CEZ_FOLLOWUPS=1 npm run test:e2e -- --force',
+    )
     browser.click(`${CARD}[data-id="e2e-inbox-1"] [data-action="todo-dismiss"]`)
 
     browser.waitForFunction(`document.querySelectorAll('${CARD}').length === 1`)

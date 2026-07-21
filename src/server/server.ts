@@ -1,9 +1,12 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
+import { access, constants as fsConstants, mkdir, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Hono, type Context } from 'hono';
+import type { Next } from 'hono';
 import { serve, type ServerType } from '@hono/node-server';
+import { bodyLimit } from 'hono/body-limit';
 import { streamSSE } from 'hono/streaming';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
@@ -25,11 +28,12 @@ import { planChain, slugify } from '../planner.js';
 import { discoverSkills } from '../skills.js';
 import { refreshTeamSkills } from '../skills-remote.js';
 import { appendHandoffHeartbeat, handoffProgressExcerpt, readHandoff } from '../handoff.js';
-import { markStarted, onTodosChanged, readTodos, removeTodo, startTodosWatch, type TodoItem } from '../todos.js';
+import { markStarted, onTodosChanged, readTodos, removeTodo, todoTaskText, type TodoItem } from '../todos.js';
 import type { RunEvent, RunRecord, RunStatus, RunStore } from '../runs/store.js';
 import { isV2WireEventType } from '../runs/ui-event-sink.js';
 import type { RunManager } from '../workflows/run.js';
-import { removeWorktree, worktreeDiff, worktreeDiffStat } from '../git-worktree.js';
+import { removeWorktree, worktreeDiff, worktreeDiffStat, worktreeSizeBytes } from '../git-worktree.js';
+import { isReclaimable, reclaimWorktrees } from '../runs/retention.js';
 import { getBranches, getCommit, getDiff, getLog, getRepoInfo, getStatus } from './git.js';
 import {
   collectChanges,
@@ -38,20 +42,50 @@ import {
   commitAll,
   createOrSwitchBranch,
   imageMimeType,
+  isOsOpenableImage,
   pushCurrentBranch,
   readWorktreePath,
 } from './git-changes.js';
-import { loadConfig, type CezConfig } from '../config.js';
-import { readConfigFile, writeConfigFile } from '../agent-config/files.js';
+import { loadConfig, resolveWorktreeRetention, type CezConfig } from '../config.js';
 import { findConfigFile } from '../agent-config/catalog.js';
+import { readConfigFile, writeConfigFile } from '../agent-config/files.js';
 import { listAgentConfig } from '../agent-config/service.js';
+import {
+  PROJECT_ID_RE,
+  defaultWorkspaceConfig,
+  loadWorkspaceConfig,
+  mergeWriteWorkspaceConfig,
+  type WorkspaceConfig,
+  type WorkspaceProject,
+} from '../workspace/config.js';
+import {
+  allocateProjectSlug,
+  listProjects,
+  probeProjectStatus,
+  registerProject,
+  removeProject,
+  shouldRegisterProject,
+  type ProjectListEntry,
+} from '../workspace/projects.js';
+import { WorkspaceSemaphore } from '../workspace/semaphore.js';
+import { mergeWriteWorkspaceUiState, readWorkspaceUiState } from '../workspace/ui-state.js';
+import { checkoutRepo, type CloneRunner } from './checkout.js';
+import { ProjectContextError, ProjectContexts, type ProjectContext } from './project-context.js';
+import { reviewGateEnabled } from '../runs/review-gate.js';
 import { readUiState, uiStatePath } from '../ui-state.js';
-import { resolveCapabilities } from './capabilities.js';
+import { expandTilde } from '../paths.js';
+import { isLoopbackHost, resolveCapabilities } from './capabilities.js';
+import {
+  browseDirectory,
+  isInsideBrowseRoot,
+  isLexicallyInsideBrowseRoot,
+  resolveBrowseRoot,
+} from './fs-browse.js';
 import { resolveForge } from './forge/index.js';
-import { fetchGithub } from './github.js';
+import { fetchGithub, fetchGithubComments } from './github.js';
 import { ensureLaunchKey } from './launch-key.js';
 import { openInTerminal } from './open-in-terminal.js';
-import { agentCliRunner, detectOpenTargets, openInApp } from './open-in-app.js';
+import { agentCliRunner, detectOpenTargets, openFileInDefaultApp, openInApp } from './open-in-app.js';
 import { createDraftPr } from './pr.js';
 import { ASSET_CACHE_CONTROL, BUILD_HINT_HTML, assetContentType, isSafeAssetFilename, resolveGetRequest } from './static-ui.js';
 
@@ -66,7 +100,83 @@ export interface ServerDeps {
   /** Host the HTTP server binds (default 127.0.0.1). A non-loopback host
    *  implies hosted mode — `capabilities.localHandoff:false`. */
   bindHost?: string;
+  /** Workspace-registry id of the boot project (multi-project spec) — plumbed
+   *  from `initWorkspace` in src/index.ts. Optional: legacy callers/tests get
+   *  a lazy registry lookup by `repoRoot`, falling back to the repo's slug. */
+  bootProjectId?: string;
+  /** Per-project context map (multi-project spec, step 2.2). Non-boot
+   *  `/api/p/:projectId/*` requests resolve their `{store, manager, …}` here,
+   *  built lazily on first touch. Optional so legacy callers change nothing —
+   *  the default is a registry-backed map; tests inject their own so they can
+   *  `disposeAll()` after. The BOOT project never lives in this map: its
+   *  context is seeded from `deps.{store,manager}` (which src/index.ts already
+   *  recovered/pruned at startup) and the resolver short-circuits to it. */
+  contexts?: ProjectContexts;
+  /** Workspace-wide parallel-cap semaphore + cached resource config (spec
+   *  2026-07-20, step 2.5): the ONE instance boot created, refreshed, and gave
+   *  the boot manager — threaded into the default `ProjectContexts` so every
+   *  project's RunManager shares it. Step 2.7's `PUT /api/workspace/config`
+   *  calls `semaphore.refresh()` after a write. Optional so legacy
+   *  callers/tests change nothing. */
+  semaphore?: WorkspaceSemaphore;
+  /** Workspace-level SSE bus (spec, step 2.8): `project-added` /
+   *  `project-removed` / `checkout-progress` reach the `/api/workspace/events`
+   *  streams through this. Optional — createApp builds a private one; inject
+   *  to emit from outside the app (tests, future CLI hooks). */
+  workspaceEvents?: WorkspaceEventBus;
+  /** How `POST /api/projects/checkout` (step 4.3) actually clones. Defaults to
+   *  `gh repo clone` (or the `CEZ_DRY_RUN=1` fake) — injected by tests so the
+   *  route's guards, cleanup and error surfacing are exercised for real
+   *  against real temp dirs, without a network or a `gh` binary. */
+  cloneRunner?: CloneRunner;
 }
+
+// ---- project-scoped routing (multi-project spec, step 2.2) -----------------
+
+/** Hono env for the mirrored project-route table: the scope resolver puts the
+ *  request's `ProjectContext` on the context, handlers read `c.get('project')`. */
+type ProjectApiEnv = { Variables: { project: ProjectContext } };
+
+/** `projectId` gate at the route boundary (spec "Project identity"): the slug
+ *  shape or the reserved `default` alias — validated BEFORE touching any map
+ *  or path. (`default` matches the slug regex too; the literal keeps the
+ *  contract explicit.) */
+const projectIdSchema = z.union([z.literal('default'), z.string().regex(PROJECT_ID_RE)]);
+
+/** One row of the mirrored project-route table. */
+export interface ProjectRouteInfo {
+  method: string;
+  /** Path relative to the mount — `/runs/:id`, not `/api/runs/:id`. */
+  path: string;
+}
+
+const SCOPED_PREFIX = '/api/p/:projectId';
+
+/**
+ * The project-scoped route table of a `createApp()` app, derived from its
+ * actual registrations (so it can never drift from the code): every
+ * method+path mounted under `/api/p/:projectId/…`, minus the scope-resolver
+ * middleware (method ALL), deduped. The alias-parity suite iterates this to
+ * assert unprefixed `/api/<path>` ≡ `/api/p/<boot>/<path>` ≡
+ * `/api/p/default/<path>`.
+ */
+export function projectRouteManifest(app: Hono): ProjectRouteInfo[] {
+  const seen = new Set<string>();
+  const manifest: ProjectRouteInfo[] = [];
+  for (const route of app.routes) {
+    if (route.method === 'ALL' || !route.path.startsWith(`${SCOPED_PREFIX}/`)) continue;
+    const path = route.path.slice(SCOPED_PREFIX.length);
+    const key = `${route.method} ${path}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    manifest.push({ method: route.method, path });
+  }
+  return manifest;
+}
+
+/** 409 body for the inbox mutators while the follow-up inbox is off (#471). */
+const FOLLOWUPS_OFF =
+  'the follow-up inbox is disabled — set CEZ_FOLLOWUPS=1 to enable it';
 
 // ---- variant-compare response shapes (spec 010) ----------------------------
 // Named and exported so `api-types.test.ts` can drift-guard the cockpit's
@@ -96,13 +206,102 @@ export interface PickVariantResponse {
   winner?: RunRecord;
 }
 
+/** `GET /api/projects` (multi-project spec) — the workspace registry with
+ *  per-root status probes. Absolute `root`s belong HERE (same-origin, behind
+ *  the cockpit) and are deliberately never mirrored into the CORS-open
+ *  `/api/health` payload (#431 — see the health route). Never 404s. */
+export interface ProjectsResponse {
+  projects: ProjectListEntry[];
+  bootProject: string;
+  projectsDir: string;
+}
+
+/** `POST /api/projects` (multi-project spec, step 4.2) — the folder-browser
+ *  dialog's commit step. The entry carries the same `status`/`branch` probe
+ *  `GET /api/projects` attaches, so the cockpit sees one project shape.
+ *  `error` is present ONLY on the 409 (already registered), where `project` is
+ *  the EXISTING entry — the dialog navigates to it instead of dead-ending. */
+export interface RegisterProjectResponse {
+  project: ProjectListEntry;
+  error?: string;
+}
+
+/** `DELETE /api/projects/:projectId` (multi-project spec, step 4.4) — the
+ *  Projects settings pane's Remove. DEREGISTRATION ONLY: the entry leaves
+ *  `~/.cezar/config.json` and nothing under the project root is read, moved or
+ *  deleted. `removed` is always true on a 200 (the failure paths are 404/409). */
+export interface RemoveProjectResponse {
+  removed: true;
+  id: string;
+}
+
+/** `GET/PUT /api/workspace/config` (multi-project spec, step 2.7) — the
+ *  settings slice of `~/.cezar/config.json`: global knobs ONLY, never the
+ *  project registry (that is `GET /api/projects`' job). */
+export interface WorkspaceConfigResponse {
+  /** Checkout root for GUI-cloned projects — stored as written (`~` kept). */
+  projectsDir: string;
+  resources: {
+    maxParallel: number;
+    memoryLimitMb: number | null;
+    worktreeRetentionDefault: number;
+  };
+}
+
+// ---- workspace SSE (multi-project spec, step 2.8) --------------------------
+
+/** Workspace-level event names carried ONLY on `GET /api/workspace/events`
+ *  (never on the per-project streams): registry mutations plus the GUI-clone
+ *  progress feed (step 4.3). */
+export type WorkspaceEventName = 'project-added' | 'project-removed' | 'checkout-progress';
+
+/**
+ * The in-process bus for workspace-level SSE events. The registry-mutating
+ * routes (`POST /api/projects` — step 4.2, emits `project-added` for a
+ * genuinely new entry; `DELETE /api/projects/:projectId` — step 4.4) and the
+ * checkout flow (step 4.3) call `emit()`; every open `/api/workspace/events`
+ * stream relays the
+ * event verbatim under its name. Injectable via `ServerDeps.workspaceEvents`
+ * so tests (and any out-of-createApp emitter) can drive the stream.
+ */
+export class WorkspaceEventBus {
+  private readonly listeners = new Set<(event: WorkspaceEventName, data: unknown) => void>();
+
+  emit(event: WorkspaceEventName, data: unknown): void {
+    for (const listener of [...this.listeners]) listener(event, data);
+  }
+
+  /** Subscribe; returns an unsubscribe. */
+  on(listener: (event: WorkspaceEventName, data: unknown) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+}
+
+/** streamSSE with the anti-buffering contract (#424): hono's own header is a
+ *  bare `no-cache`, which lets an intermediary (reverse proxy, compression
+ *  middleware, corporate MITM) transform-buffer the stream — the client then
+ *  sees a silently frozen transcript while the server keeps writing. Headers
+ *  are set on the returned Response because hono's helper overwrites
+ *  `Cache-Control` set via `c.header()` before it. */
+const streamSSENoBuffer: typeof streamSSE = (c, cb, onError) => {
+  const res = streamSSE(c, cb, onError);
+  res.headers.set('Cache-Control', 'no-cache, no-transform');
+  res.headers.set('X-Accel-Buffering', 'no');
+  return res;
+};
+
 // A run starts from a named workflow OR an inline chain of steps (spec 008 —
 // the approved plan is posted as-is, never written to a file).
 const startRunSchema = z
   .object({
     workflow: z.string().min(1).optional(),
     steps: z.array(workflowStepSchema).min(1).max(8).optional(),
-    task: z.string().min(1),
+    // The primary agent prompt handed to the spawned runner. Bounded like the
+    // other prompt fields (`systemPrompt` 20k, message `text` 100k) so an
+    // unbounded body can't be piped into a spawned process (#429). 100k chars
+    // (~25k tokens) is well past any hand-written task.
+    task: z.string().min(1).max(100_000, 'task must be at most 100000 characters'),
     model: z.string().optional(),
     // Agent backend for this task (falls back to config `defaultRunner`).
     runner: z.enum(['claude', 'codex', 'opencode']).optional(),
@@ -115,8 +314,11 @@ const startRunSchema = z
     // Autonomous mode (#autonomous): the run never parks at `waiting` — it
     // auto-continues until the agent signals done. No "needs you" is raised.
     autonomous: z.boolean().optional(),
-    // Generate follow-up inbox entries (spec 007, #444). Omitted means enabled
-    // for old clients — the handoff journal is unaffected either way.
+    // Generate follow-up inbox entries (spec 007, #444). Honoured only while
+    // the `followups` capability is on (#471) — off, the server pins it to
+    // false whatever the client asked for. Omitted still means "enabled" for
+    // old clients, but only within an already-enabled server. The handoff
+    // journal is unaffected either way.
     generateFollowups: z.boolean().optional(),
     // Per-run system-prompt override (R2 2.3) — programmatic callers only
     // (bookmarklets, scripts); deliberately NOT a composer-UI control. Wins
@@ -139,6 +341,12 @@ const startRunSchema = z
       )
       .max(4)
       .optional(),
+    // Inbox follow-up (#374): the todo the composer was prefilled from
+    // (`/new?skill=&ref=&todo=t1`). On a successful start the entry is marked
+    // started — the same bookkeeping POST /api/todos/:id/start does, so the
+    // audit trail survives the composer detour. Bounded like every other
+    // string here; a todo id is a short generated key.
+    todoId: z.string().min(1).max(200, 'todoId must be at most 200 characters').optional(),
   })
   .refine((b) => Boolean(b.workflow) !== Boolean(b.steps), {
     message: 'provide either "workflow" or "steps", not both',
@@ -149,7 +357,8 @@ const pickSchema = z.object({
 });
 
 const planSchema = z.object({
-  task: z.string().trim().min(1),
+  // Same bound as `startRunSchema.task` — this flows into `planChain` (#429).
+  task: z.string().trim().min(1).max(100_000, 'task must be at most 100000 characters'),
 });
 
 // A saved workflow carries full `steps` OR the builder's `skills` stack
@@ -158,7 +367,9 @@ const planSchema = z.object({
 const saveWorkflowSchema = z
   .object({
     name: z.string().trim().min(1).max(80),
-    description: z.string().optional(),
+    // Written into a YAML file on disk (#429) — a workflow description is a
+    // short blurb, so a 2k cap is generous without allowing a file-bloat write.
+    description: z.string().max(2_000, 'description must be at most 2000 characters').optional(),
     steps: z.array(workflowStepSchema).min(1).max(8).optional(),
     skills: z.array(z.string().trim().min(1)).min(1).max(8).optional(),
     overwrite: z.boolean().optional(),
@@ -175,6 +386,52 @@ const parseWorkflowSchema = z.object({
 // DB): today just the last-used task source, so the form preselects what you
 // actually run. Unknown keys pass through — future prefs won't need a schema
 // dance.
+
+/** Entry cap on the `skillUsage` map (#408). A real skill catalog is dozens of entries; this
+ *  bounds the ui-state.json write without ever rejecting a legitimate one. */
+const SKILL_USAGE_MAX_ENTRIES = 200;
+
+// Belt-and-braces cap on the number of top-level ui-state keys so a
+// `.passthrough()` schema can't accumulate an unbounded key set (#429). Very
+// generous for GUI prefs; over-limit is a 400, never a silent strip. Shared by
+// BOTH ui-state routes (per-repo and workspace) via `parseUiStateBody`.
+const UI_STATE_MAX_KEYS = 200;
+
+/** Settings → Appearance (redesign R6): accent + density. ONE schema for both
+ *  ui-state files — per-repo (the legacy home, kept so an older cezar in the
+ *  same repo still honours it) and workspace (`~/.cezar/ui-state.json`, its
+ *  post-migration home — multi-project spec, Data Model). */
+const appearanceSchema = z.object({
+  accent: z.enum(['lime', 'violet']).optional(),
+  density: z.enum(['comfortable', 'compact', 'ultra']).optional(),
+});
+
+/** Global GUI state (`~/.cezar/ui-state.json`, step 2.7) — the workspace twin
+ *  of `uiStateSchema` below, sharing its `.passthrough()` + key-cap + shallow
+ *  merge-on-write semantics via `parseUiStateBody`. Known keys are the
+ *  cross-project prefs from the spec's Data Model; everything project-scoped
+ *  (githubView, prompt templates, dismissed banners…) stays per-repo. */
+const workspaceUiStateSchema = z
+  .object({
+    appearance: appearanceSchema.optional(),
+    notifications: z.object({ enabled: z.boolean().optional() }).passthrough().optional(),
+    // Sidebar per-project collapse map, keyed by project id (slug ≤ 64 chars).
+    // Entry-capped like `skillUsage`: the map is written straight to a file the
+    // cockpit GETs on every load, so it must stay bounded on every axis.
+    sidebar: z
+      .object({
+        collapsed: z
+          .record(z.string().min(1).max(64), z.boolean())
+          .refine((map) => Object.keys(map).length <= UI_STATE_MAX_KEYS, {
+            message: `sidebar.collapsed must have at most ${UI_STATE_MAX_KEYS} entries`,
+          })
+          .optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
 const uiStateSchema = z
   .object({
     lastTask: z
@@ -189,6 +446,24 @@ const uiStateSchema = z
     lastWorktree: z.boolean().optional(),
     lastAutonomous: z.boolean().optional(),
     lastGenerateFollowups: z.boolean().optional(),
+    // Skill selection frequency (#408): name → times chosen, incremented on a successful run
+    // start from EITHER composer (`/new`'s SourcePill and the follow-up `SkillsPicker`). Drives
+    // the shared `orderSkillsByUsage` sort (web/app/src/lib/skills.ts) so both pickers float the
+    // skills a user actually reaches for above the rest, within the existing project-first
+    // grouping. ADDITIVE, like the rest of ui-state — the client always PUTs the whole map
+    // because the top-level merge below is shallow.
+    //
+    // Bounded on all three axes (key length, value, entry count) like every neighbour here: this
+    // map is written straight to `ui-state.json`, which the cockpit GETs on every load and this
+    // route re-reads on every PUT, so an unbounded map is an unbounded file write. Keys are skill
+    // names (`.min(1).max(200)`, matching `lastTask.ref`); SKILL_USAGE_MAX_ENTRIES sits far above
+    // any real catalog while capping the file at a few tens of KB.
+    skillUsage: z
+      .record(z.string().min(1).max(200), z.number().int().min(0).max(1_000_000))
+      .refine((usage) => Object.keys(usage).length <= SKILL_USAGE_MAX_ENTRIES, {
+        message: `skillUsage must have at most ${SKILL_USAGE_MAX_ENTRIES} entries`,
+      })
+      .optional(),
     // Runs area presentation (#348): the sidebar-list + detail pane, or the
     // full-width table ("task manager") view.
     runsView: z.enum(['list', 'table']).optional(),
@@ -198,11 +473,23 @@ const uiStateSchema = z
     // Settings → Appearance (redesign R6): accent + density. ADDITIVE — the theme itself
     // stays in the browser (`cez-theme` localStorage, pre-paint). The cockpit always PUTs
     // the whole object because the top-level merge below is shallow.
-    appearance: z
-      .object({
-        accent: z.enum(['lime', 'violet']).optional(),
-        density: z.enum(['comfortable', 'compact', 'ultra']).optional(),
-      })
+    appearance: appearanceSchema.optional(),
+    // Follow-up prompt templates (#413): reusable snippets insertable into the GitHub hand-over
+    // and Inbox follow-up composers. Absent → the client's built-in defaults; present (even `[]`)
+    // is the user's own edited list, from Settings → Prompt templates. Additive, like the rest of
+    // ui-state — the cockpit is the only writer, so validation stays generous but bounded.
+    promptTemplates: z
+      .array(
+        z.object({
+          id: z.string().min(1).max(64),
+          label: z.string().trim().min(1).max(80),
+          text: z.string().trim().min(1).max(2000),
+          // Skill names this template auto-applies for. Optional and additive: templates
+          // written before this key existed keep validating, and stay manual-only.
+          skills: z.array(z.string().trim().min(1).max(200)).max(50).optional(),
+        }),
+      )
+      .max(50)
       .optional(),
     // Skills promo banner (#391): set once the cockpit banner is dismissed, never unset.
     // Server-persisted (not a cookie) so the "shown once" promise holds across browsers.
@@ -218,6 +505,16 @@ const patchRunSchema = z.object({
 // Session commit (redesign R5 — §"Git/session API additions").
 const gitCommitSchema = z.object({
   message: z.string().trim().min(1, 'commit message must not be empty').max(5_000),
+});
+
+// "Open in…" (#open-in / #365): `target` selects the app; `path` (optional, worktree-relative)
+// narrows the target's own worktree/repo-root default to one file — used by the diff pane's
+// "open in default app" action for images. Containment is re-checked server-side via
+// `readWorktreePath`; this schema only shapes the request.
+const openInSchema = z.object({
+  // A short bound (#429): matched against a downstream allowlist, so an editor id is never long.
+  target: z.string().trim().min(1, 'target required').max(200),
+  path: z.string().max(1_000).optional(),
 });
 
 const messageSchema = z
@@ -238,15 +535,236 @@ const messageSchema = z
     message: 'message needs text or at least one image',
   });
 
+// "Continue"/"Send back" body (spec 003 / #401): every field optional, so an empty POST reopens
+// the last session on the run's current backend (backward compat). A runner/model override lets
+// the follow-up composer choose which engine handles the continuation. `text` stays bounded like
+// the live-session message `text` (#429).
+const continueSchema = z.object({
+  text: z.string().max(100_000, 'text must be at most 100000 characters').optional(),
+  runner: z.enum(['claude', 'codex', 'opencode']).optional(),
+  model: z.string().max(200).optional(),
+});
+
+// Inbox "▶ Run" body (spec 007 / #401 / #413): every field optional, and the whole body is
+// optional too, so an empty POST — every client before the pills and the composer — starts on
+// the host's `defaultRunner` with no extra instructions, exactly as before. This is a START
+// path, not a continue: there is no prior backend to preserve, so an omitted `runner`/`model`
+// means "host default" rather than "keep what the run had". `prompt` (#413) is extra
+// instructions appended to the entry's suggested/summary task text; whitespace-only degrades to
+// absent so it never touches `task`.
+const startTodoSchema = z
+  .object({
+    runner: z.enum(['claude', 'codex', 'opencode']).optional(),
+    model: z.string().max(200).optional(),
+    prompt: z
+      .string()
+      .trim()
+      .max(20_000, 'prompt must be at most 20000 characters')
+      .optional()
+      .transform((s) => (s ? s : undefined)),
+  })
+  .optional();
+
+// `POST /api/runs/:id/archive` (#429) — no body archives; `{archived:false}`
+// un-archives. A tiny schema so the route follows the safeParse convention.
+const archiveSchema = z.object({
+  archived: z.boolean().optional(),
+});
+
+// Request-body size guards (#429). A generous global cap keeps a single
+// localhost request from being unbounded (the largest legit body is 4 pasted
+// images at ~7 MB base64 each); the ui-state PUT gets a much tighter cap since
+// it only ever carries small GUI prefs.
+const GLOBAL_BODY_LIMIT = 32 * 1024 * 1024; // 32 MiB
+const UI_STATE_BODY_LIMIT = 128 * 1024; // 128 KiB
+
+/** The name half of a Host header — `localhost:4321` → `localhost`,
+ *  `[::1]:4321` → `[::1]`. A bracketed IPv6 literal keeps its brackets
+ *  (`isLoopbackHost` strips them itself); an unbracketed IPv6 spelling is
+ *  nonstandard in a Host header and simply fails the loopback test closed. */
+function stripHostPort(host: string): string {
+  const bracketed = /^(\[[^\]]+\])(?::\d+)?$/.exec(host);
+  if (bracketed?.[1]) return bracketed[1];
+  return host.replace(/:\d+$/, '');
+}
+
+/** The shared write-side half of BOTH ui-state routes (per-repo `/api/ui-state`
+ *  and workspace `/api/workspace/ui-state`) — the factored split the
+ *  multi-project spec calls for instead of a copy: parse with the route's own
+ *  schema, then cap the top-level key count so a `.passthrough()` schema can't
+ *  accumulate an unbounded key set (#429). The merge-on-write stays with each
+ *  route (they write different files) but is shallow in both. */
+function parseUiStateBody<S extends z.ZodTypeAny>(
+  schema: S,
+  body: unknown,
+): { data: z.infer<S> } | { error: string } {
+  const parsed = schema.safeParse(body);
+  if (!parsed.success) return { error: parsed.error.issues.map((i) => i.message).join('; ') };
+  if (Object.keys(parsed.data as Record<string, unknown>).length > UI_STATE_MAX_KEYS) {
+    return { error: `ui-state has too many keys (max ${UI_STATE_MAX_KEYS})` };
+  }
+  return { data: parsed.data as z.infer<S> };
+}
+
+/** The `projectsDir` writability probe (multi-project spec, "API Contracts"):
+ *  `mkdir -p`, `access W_OK`, then a real create/delete round-trip — W_OK alone
+ *  can lie (e.g. a read-only mount still reports writable permission bits).
+ *  Returns the failure message, or null when the directory is usable. */
+async function probeWritableDir(dir: string): Promise<string | null> {
+  const probe = join(dir, `.cez-write-probe-${process.pid}-${Date.now().toString(36)}`);
+  try {
+    await mkdir(dir, { recursive: true });
+    await access(dir, fsConstants.W_OK);
+    await writeFile(probe, '', 'utf8');
+    await unlink(probe);
+    return null;
+  } catch (err) {
+    await unlink(probe).catch(() => {}); // best-effort if the round-trip half-succeeded
+    return err instanceof Error ? err.message : String(err);
+  }
+}
+
 export function createApp(deps: ServerDeps): Hono {
-  const { repoRoot, store, manager, version, update, bindHost } = deps;
-  const dataDir = join(repoRoot, '.ai/cezar');
+  const { version, update, bindHost, bootProjectId } = deps;
+  // Boot singletons keep DELIBERATELY distinct names (`boot*`): every
+  // project-scoped handler must resolve its `{store, manager, root, dataDir,
+  // launchKey}` from `c.get('project')` — a bare `store`/`repoRoot` in a
+  // handler body would silently pin it to the boot project, which the rename
+  // turns into a compile error instead.
+  const bootRoot = deps.repoRoot;
+  const bootDataDir = join(bootRoot, '.ai/cezar');
+
+  // ---- workspace boot-project identity (multi-project spec) ----------------
+  // The boot flow (`initWorkspace` in src/index.ts) registers the boot repo
+  // and plumbs its registry id in via `deps.bootProjectId`. Legacy callers and
+  // tests construct the app without one — then it is derived lazily from the
+  // registry by realpath and cached on a hit. A boot repo that is legitimately
+  // unregistered (task worktree, `$HOME` itself, unreadable workspace) falls
+  // back to its would-be slug, so `bootProject` always names the repo this
+  // server was started in. Strictly non-fatal, zero-config: every failure path
+  // degrades to the slug fallback, never an error.
+  let bootProjectCache = bootProjectId;
+  const resolveBootProject = async (projects?: readonly WorkspaceProject[]): Promise<string> => {
+    if (bootProjectCache) return bootProjectCache;
+    try {
+      const registry = projects ?? (await loadWorkspaceConfig()).projects;
+      const real = await realpath(bootRoot).catch(() => bootRoot);
+      const match = registry.find((p) => p.root === real || p.root === bootRoot);
+      if (match) bootProjectCache = match.id;
+    } catch {
+      // unreadable workspace — fall through to the slug fallback below
+    }
+    return bootProjectCache ?? allocateProjectSlug(bootRoot, []);
+  };
+  // Health's workspace garnish: id+name ONLY — never `root` (#431, see the
+  // health route). Reads only the registry file; no per-root status probes,
+  // so health stays cheap enough for the bookmarklet's 800 ms port sweep.
+  const workspaceSummary = async (): Promise<{
+    projects: { id: string; name: string }[];
+    bootProject: string;
+  }> => {
+    try {
+      const registry = (await loadWorkspaceConfig()).projects;
+      return {
+        // Explicit picks, not a spread: the registry schema passes unknown
+        // keys through, and `root` must never ride along onto health.
+        projects: registry.map((p) => ({ id: p.id, name: p.name || basename(p.root) })),
+        bootProject: await resolveBootProject(registry),
+      };
+    } catch {
+      return { projects: [], bootProject: await resolveBootProject([]) };
+    }
+  };
   // Hosted-mode gate (spec §"Deployment modes") — read per request so
   // CEZ_REMOTE flips take effect live (and tests can toggle it).
   const capabilities = () => resolveCapabilities(process.env, bindHost);
-  startTodosWatch(dataDir); // inbox live updates (spec 007)
-  const launchKey = ensureLaunchKey(dataDir); // bookmarklet auto-start secret (spec 011)
+  // Inbox live updates (spec 007). Opt-in (#471): no capability, no watcher —
+  // and since step 2.3 the per-dataDir watch is created lazily by the first
+  // SSE subscription (and torn down with the last), nothing to start here.
+
+  // ---- project contexts (multi-project spec, step 2.2) ---------------------
+  // The boot project's context is SEEDED from the deps the caller already
+  // built (src/index.ts `serveCommand` did the recover/prune/launch-key work
+  // at startup — observable boot behavior unchanged); it never enters the
+  // lazy map, so its `.ai/cezar` state is never double-opened. `id` starts as
+  // the reserved alias when registration was suppressed — handlers never read
+  // it; API payloads name the boot project via `resolveBootProject` instead.
+  const bootContext: ProjectContext = {
+    id: bootProjectId ?? 'default',
+    root: bootRoot,
+    dataDir: bootDataDir,
+    store: deps.store,
+    manager: deps.manager,
+    launchKey: ensureLaunchKey(bootDataDir), // bookmarklet auto-start secret (spec 011)
+  };
+  // Non-boot projects build lazily on first scoped request; their managers
+  // count against the same workspace semaphore as the boot manager (step 2.5).
+  const contexts = deps.contexts ?? new ProjectContexts({ listProjects, semaphore: deps.semaphore });
+  // Workspace-level SSE bus (step 2.8) — the registry mutators and the
+  // checkout flow (Phase 4) emit here; /api/workspace/events relays.
+  const workspaceEvents = deps.workspaceEvents ?? new WorkspaceEventBus();
+
   const app = new Hono();
+
+  // DNS-rebinding guard, FIRST — before any route (including the CORS-open
+  // health) can answer. A browser at attacker.example whose DNS record flips
+  // to 127.0.0.1 sends requests that are same-origin to the attacker's page;
+  // the one tell left is the Host header, which still names the attacker's
+  // domain. In local mode every legitimate caller addresses the cockpit as
+  // localhost/127.x/[::1] (the bookmarklet's health probe included), so any
+  // other Host is refused outright. Hosted mode (`CEZ_REMOTE=1` or a
+  // non-loopback bind) is exempt — the operator deliberately exposed the
+  // server behind a hostname/proxy this code cannot enumerate. A missing Host
+  // header passes: browsers (the rebinding vector) always send one, and
+  // requiring it would break non-browser scripts and the test harness.
+  app.use('*', async (c, next) => {
+    if (!capabilities().localHandoff) return next();
+    const host = c.req.header('host');
+    if (host !== undefined && !isLoopbackHost(stripHostPort(host))) {
+      return c.json({ error: 'forbidden host' }, 403);
+    }
+    return next();
+  });
+
+  // Reject oversized request bodies before they reach any handler (#429). GETs
+  // and SSE carry no body, so this only ever gates the mutating routes.
+  app.use('*', bodyLimit({ maxSize: GLOBAL_BODY_LIMIT }));
+
+  // The mirrored project-route table (spec "API Contracts → Project-scoped").
+  // Every route below registers ONCE on this sub-app; `createApp` mounts it
+  // twice — under `/api/p/:projectId` (scoped) and under `/api` (the legacy
+  // aliases, protected surfaces) — so both spellings share one handler and
+  // can never drift. The resolver middleware binds `c.get('project')`:
+  // no `projectId` param (legacy mount) → the boot context, byte-identical to
+  // the pre-workspace closures; `default` or the boot project's own id → the
+  // boot context too; anything else → the lazy context map, with
+  // `ProjectContextError` mapped to 404 (unknown) / 409 (missing root).
+  const api = new Hono<ProjectApiEnv>();
+  api.use('*', async (c, next: Next) => {
+    const raw = c.req.param('projectId');
+    if (raw === undefined) {
+      c.set('project', bootContext);
+      return next();
+    }
+    if (!projectIdSchema.safeParse(raw).success) {
+      return c.json({ error: `unknown project: ${raw}` }, 404);
+    }
+    if (raw === 'default' || raw === (await resolveBootProject())) {
+      c.set('project', bootContext);
+      return next();
+    }
+    try {
+      c.set('project', await contexts.context(raw));
+    } catch (err) {
+      if (err instanceof ProjectContextError) {
+        return err.reason === 'missing-root'
+          ? c.json({ error: `project folder not found: ${err.projectId}` }, 409)
+          : c.json({ error: err.message }, 404);
+      }
+      throw err;
+    }
+    return next();
+  });
 
   // ---- static GUI ----------------------------------------------------------
   const webDir = resolveWebDir();
@@ -311,43 +829,462 @@ export function createApp(deps: ServerDeps): Hono {
     await next();
   });
   app.get('/api/health', async (c) => {
-    const [checks, repo, config] = await Promise.all([
+    const [checks, repo, config, workspace] = await Promise.all([
       detectEnvironment(),
-      getRepoInfo(repoRoot),
-      loadConfig(repoRoot),
+      getRepoInfo(bootRoot),
+      loadConfig(bootRoot),
+      workspaceSummary(),
     ]);
     // Additive fields only below — the pre-forge shape is the most
     // externally-depended-on JSON in the app (BACKWARD_COMPATIBILITY.md §2).
     const forge = resolveForge(repo);
+    const caps = capabilities();
     return c.json({
       version,
       latestVersion: update?.latest,
-      repoRoot,
+      // Health is CORS-open and, in hosted mode, reachable off the loopback —
+      // so any site/host that reads it would learn the developer's absolute
+      // checkout path and username (#431). Local mode keeps the full path (the
+      // protected bookmarklet shape); hosted/remote mode trims it to a basename.
+      // NB this narrows the VALUE of a field named in BACKWARD_COMPATIBILITY.md
+      // §2: the field is always present and a string, but under CEZ_REMOTE it is
+      // no longer an absolute path. Deliberate — a hosted cockpit's paths are on
+      // a machine the reader does not have anyway. See §2's `repoRoot` note.
+      repoRoot: caps.localHandoff ? bootRoot : basename(bootRoot),
       repo,
       checks,
       defaultRunner: config.defaultRunner,
       // Non-blocking: cached availability or null-until-warm — health must never pay a `gh`
       // shell-out (the bookmarklet aborts its port probe at 800 ms). See detectGithubCached.
       forge: forge ? { kind: forge.kind, ...(forge.detectCached() ?? {}) } : null,
-      capabilities: capabilities(),
+      capabilities: caps,
+      // Workspace enumeration (multi-project spec) — additive, id+name ONLY.
+      // NEVER `projects[].root` here: health is the one CORS-open route, and
+      // the repoRoot trim above exists precisely to keep absolute paths and
+      // usernames away from cross-origin readers (#431) — per-project roots
+      // would reintroduce that leak once per registered project. Absolute
+      // roots live on the same-origin GET /api/projects instead. An
+      // unreadable workspace degrades to `projects: []`.
+      projects: workspace.projects,
+      bootProject: workspace.bootProject,
     });
+  });
+
+  // ---- workspace projects (multi-project spec) -----------------------------
+  // The registered-project list for the cockpit sidebar. Same-origin (unlike
+  // health), so absolute `root`s are fine here. `listProjects()` TTL-caches
+  // its per-root status/branch probes, so a burst of renders never shells git
+  // N times. Never 404s: empty or unreadable registry → `projects: []`.
+  /** The configured checkout root, as WRITTEN (`~` kept — callers that touch
+   *  the filesystem expand it). An unreadable workspace degrades to the
+   *  default rather than failing the request: every caller here is a route
+   *  that must keep answering. */
+  const workspaceProjectsDir = async (): Promise<string> => {
+    try {
+      return (await loadWorkspaceConfig()).projectsDir;
+    } catch {
+      return defaultWorkspaceConfig().projectsDir;
+    }
+  };
+
+  app.get('/api/projects', async (c) => {
+    let projects: ProjectListEntry[] = [];
+    let projectsDir = defaultWorkspaceConfig().projectsDir;
+    try {
+      projectsDir = (await loadWorkspaceConfig()).projectsDir;
+      projects = await listProjects();
+    } catch {
+      // unreadable workspace — degrade to the empty registry + defaults
+    }
+    const body: ProjectsResponse = {
+      projects,
+      bootProject: await resolveBootProject(projects),
+      projectsDir,
+    };
+    return c.json(body);
+  });
+
+  // Register an existing folder (multi-project spec, "Add project" — the
+  // folder-browser dialog's commit step, step 4.2). Workspace-level like its
+  // GET twin. Everything here is a guard; the registry write itself is one
+  // idempotent `registerProject` call.
+  const registerProjectSchema = z.object({ root: z.string().trim().min(1).max(4096) });
+
+  /**
+   * The register-a-folder half of `POST /api/projects`, factored out so the
+   * checkout route (step 4.3) commits its fresh clone through the SAME guards
+   * and the same `project-added` emission rather than a second copy of them.
+   * Returns the status + body for the caller to answer with.
+   */
+  const registerFolder = async (
+    spelled: string,
+    source: 'local' | 'checkout',
+  ): Promise<{ status: 200 | 400 | 409 | 500; body: RegisterProjectResponse | { error: string } }> => {
+    // `~` is expanded for the same reason `/api/fs/browse` expands it: the
+    // dialog hands back absolute paths, but a hand-written body (curl, a
+    // future CLI) spells home the way a shell does.
+    const requested = expandTilde(spelled);
+    if (!requested.startsWith('/')) {
+      return { status: 400, body: { error: `not a folder: ${spelled} is not an absolute path` } };
+    }
+    // Hosted mode: the same root the picker is narrowed to, re-checked — see
+    // `isInsideBrowseRoot`. Local mode deliberately has NO containment: a
+    // project under `/srv/code` is a normal local setup and `cezar serve`
+    // registers it today.
+    //
+    // Containment is asked in two halves, around the stat, and the split is
+    // deliberate.
+    //
+    // The LEXICAL half runs BEFORE the stat, and that order is the security
+    // property: an out-of-root path must answer the SAME way whether or not it
+    // exists, or the route becomes the existence oracle fs-browse narrows the
+    // tree to prevent. Lexical, not realpath, because a realpath check answers
+    // `false` for a path that IS inside the root and merely absent — which
+    // would tell a hosted user who typo'd a folder under their own checkout
+    // root that it is "outside the browsable root".
+    const hostedBrowseRoot = capabilities().localHandoff
+      ? null
+      : resolveBrowseRoot(true, await workspaceProjectsDir());
+    if (hostedBrowseRoot !== null) {
+      if (!(await isLexicallyInsideBrowseRoot(hostedBrowseRoot, requested))) {
+        // No resolved path in the message (fs-browse's rule): saying where the
+        // root is would hand a remote viewer the layout the narrowing hides.
+        return { status: 400, body: { error: 'folder is outside the browsable root' } };
+      }
+    }
+    // Existence is checked HERE rather than left to `registerProject` (which
+    // degrades a failed realpath to a plain resolve): a registry full of
+    // `missing` rows the user never had is worse than a 400 they can act on.
+    const info = await stat(requested).catch(() => null);
+    if (!info?.isDirectory()) return { status: 400, body: { error: `no such folder: ${spelled}` } };
+    // The REALPATH half, now that the path is known to exist: a symlink inside
+    // the root pointing out of it spells as contained and is not. Same message
+    // as the lexical rejection, so the two halves stay indistinguishable from
+    // outside.
+    if (hostedBrowseRoot !== null && !(await isInsideBrowseRoot(hostedBrowseRoot, requested))) {
+      return { status: 400, body: { error: 'folder is outside the browsable root' } };
+    }
+    // The boot-time auto-registration guard, applied to the manual gesture
+    // too: `$HOME` and cezar's own task worktrees are exactly as wrong a
+    // project root when a human clicks "Add project" as when `cezar serve`
+    // would have registered them. Reachable from the dialog, which starts at
+    // `~` and can add the folder it is showing.
+    if (!(await shouldRegisterProject(requested))) {
+      return {
+        status: 400,
+        body: { error: `not a project folder: ${spelled} is your home directory or a cezar task worktree` },
+      };
+    }
+    // Asked BEFORE the write, because `registerProject` is idempotent and
+    // cannot tell us afterwards whether it appended or just bumped
+    // `lastOpenedAt`. Same realpath key the registry dedupes on.
+    const real = await realpath(requested).catch(() => requested);
+    let known = false;
+    try {
+      known = (await loadWorkspaceConfig()).projects.some((p) => p.root === real);
+    } catch {
+      // unreadable workspace — treat as unknown; the write below will fail loudly
+    }
+    let project: ProjectListEntry;
+    try {
+      const entry = await registerProject(requested, source);
+      project = { ...entry, ...(await probeProjectStatus(entry.root)) };
+    } catch (err) {
+      // e.g. a read-only home — nothing was persisted (atomic tmp+rename).
+      return { status: 500, body: { error: err instanceof Error ? err.message : String(err) } };
+    }
+    if (known) {
+      // 409 with the EXISTING entry (spec): the dialog treats it as "you
+      // already have this one" and navigates there rather than dead-ending.
+      return { status: 409, body: { project, error: `already registered as ${project.id}` } };
+    }
+    // Only a genuinely new project is an event — a re-add is a no-op for every
+    // open cockpit's sidebar.
+    workspaceEvents.emit('project-added', { project });
+    return { status: 200, body: { project } };
+  };
+
+  app.post('/api/projects', async (c) => {
+    const parsed = registerProjectSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: 'root must be a non-empty path' }, 400);
+    const { status, body } = await registerFolder(parsed.data.root, 'local');
+    return c.json(body, status);
+  });
+
+  // Deregister a project (multi-project spec, step 4.4 — Settings → Projects,
+  // the per-row "Remove"). READ THIS BEFORE TOUCHING THE HANDLER: the ONLY
+  // durable effect allowed here is dropping one entry from
+  // `~/.cezar/config.json`. There is deliberately no `rm`, no `rmdir`, no
+  // `RunStore.open` (which would `mkdir` `<root>/.ai/cezar/runs` and therefore
+  // WRITE into a folder the user just asked us to forget) anywhere below —
+  // `removeProject` is a registry filter and `contexts.dispose` only tears down
+  // in-process handles. Re-registering the same root later finds every task,
+  // worktree and transcript exactly where it was. The confirmation copy in the
+  // cockpit promises precisely this; the promise is kept here.
+  //
+  // A run this server is responsible for blocks the removal with a 409 (spec):
+  // deregistering mid-run would strand a live agent process under a root no
+  // route can resolve any more — the run would keep burning tokens with no
+  // cockpit able to show, message or cancel it.
+  const ACTIVE_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
+    'queued',
+    'running',
+    'waiting',
+  ]);
+
+  /**
+   * How many of `projectId`'s runs this process is actively responsible for.
+   *
+   * Counted from the ALREADY-BUILT context only (`peek`, never `context()`):
+   * a project with no context in this process has no manager, therefore no
+   * agent to strand — and building one to answer the question would recover
+   * and resume runs on a project being deleted, which is the exact opposite of
+   * what the caller asked for. Reading the run index off disk instead was
+   * rejected for the same reason as the `rm` above: `RunStore.open` creates
+   * directories, and a stale `running` row left by a crashed process would
+   * become a 409 the user could never clear.
+   */
+  const activeRunCount = (projectId: string): number => {
+    const ctx = contexts.peek(projectId);
+    if (!ctx) return 0;
+    return ctx.store.listRuns().filter((run) => ACTIVE_RUN_STATUSES.has(run.status)).length;
+  };
+
+  app.delete('/api/projects/:projectId', async (c) => {
+    const raw = c.req.param('projectId');
+    // Same gate the scoped-route resolver applies, and the same 404 wording —
+    // a malformed id is an unknown project, not a validation essay.
+    if (!projectIdSchema.safeParse(raw).success) {
+      return c.json({ error: `unknown project: ${raw}` }, 404);
+    }
+    const bootId = await resolveBootProject();
+    // `default` is the boot alias everywhere else in the API; honour it here
+    // too rather than 404ing a spelling the cockpit is allowed to use.
+    const id = raw === 'default' ? bootId : raw;
+
+    let entry: WorkspaceProject | undefined;
+    try {
+      entry = (await loadWorkspaceConfig()).projects.find((p) => p.id === id);
+    } catch {
+      // unreadable workspace — there is nothing to remove, and saying so is
+      // more useful than a 500 the user cannot act on
+    }
+    if (!entry) return c.json({ error: `unknown project: ${id}` }, 404);
+
+    // The boot project is refused, not removed: `cezar serve` re-registers the
+    // repo it was started in on every boot, so "removing" it would undo itself
+    // at the next restart while breaking this session's sidebar in the
+    // meantime. The pane disables the button and says the same thing.
+    if (id === bootId) {
+      return c.json(
+        {
+          error: `cezar is serving ${entry.name} right now — it re-registers itself at every start, so it cannot be removed from here`,
+        },
+        409,
+      );
+    }
+
+    const active = activeRunCount(id);
+    if (active > 0) {
+      return c.json(
+        {
+          error: `${entry.name} has ${active} running task${active === 1 ? '' : 's'} — cancel or finish ${active === 1 ? 'it' : 'them'} before removing the project`,
+          runningTasks: active,
+        },
+        409,
+      );
+    }
+
+    let removed: boolean;
+    try {
+      removed = await removeProject(id);
+    } catch (err) {
+      // e.g. a read-only home — nothing was persisted (atomic tmp+rename).
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+    // Lost a race with another writer (or another cezar process): the entry is
+    // gone, which is what the caller wanted, but say it honestly.
+    if (!removed) return c.json({ error: `unknown project: ${id}` }, 404);
+    // In-process handles for a project no route can reach any more: store
+    // closed (index flushed), manager's timers and usage subscription dropped.
+    contexts.dispose(id);
+    workspaceEvents.emit('project-removed', { id });
+    const body: RemoveProjectResponse = { removed: true, id };
+    return c.json(body);
+  });
+
+  // ---- GUI clone (multi-project spec, step 4.3) ----------------------------
+  // "Add project → Clone from GitHub": clone into the checkout root, then
+  // register the result through `registerFolder` above (same guards, same
+  // `project-added`). Everything dangerous — where the clone may land, and
+  // what a failed clone is allowed to delete — lives in src/server/checkout.ts.
+  //
+  // Long-running by design (the spec's contract): the response lands when the
+  // clone finishes, and the dialog's liveness comes from `checkout-progress`
+  // events on the workspace stream. `checkoutId` is the cockpit's own
+  // correlation token, echoed on every event so two tabs cloning at once never
+  // render each other's progress.
+  const checkoutSchema = z.object({
+    url: z.string().trim().min(1).max(512),
+    name: z.string().trim().max(128).optional(),
+    checkoutId: z.string().trim().max(128).optional(),
+  });
+  app.post('/api/projects/checkout', async (c) => {
+    const parsed = checkoutSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: 'url must be a GitHub repository' }, 400);
+    const { url, name, checkoutId } = parsed.data;
+    const result = await checkoutRepo({
+      url,
+      name,
+      checkoutId,
+      projectsDir: expandTilde(await workspaceProjectsDir()),
+      onProgress: (event) => workspaceEvents.emit('checkout-progress', event),
+      // A closed dialog / navigated-away tab aborts the request; the clone is
+      // killed and its partial directory removed rather than left running.
+      signal: c.req.raw.signal,
+      ...(deps.cloneRunner ? { run: deps.cloneRunner } : {}),
+    });
+    if (!result.ok) {
+      // `reason` rides along on the 503 (`gh` unavailable) — the spec's
+      // `{ error, reason }` degradation, mirroring the GitHub pane.
+      return c.json(
+        'reason' in result ? { error: result.error, reason: result.reason } : { error: result.error },
+        result.status,
+      );
+    }
+    const { status, body } = await registerFolder(result.target, 'checkout');
+    if (status !== 200) {
+      // The clone SUCCEEDED and its files are legitimately the user's, so this
+      // path deliberately does NOT clean up — an unregisterable checkout is a
+      // registry problem, not a reason to delete a repo we just fetched. Say
+      // where it is so they can register it by hand.
+      const error = 'error' in body && body.error ? body.error : 'could not register the checkout';
+      return c.json({ error: `${error} (the clone is at ${result.target})` }, status);
+    }
+    return c.json(body, 200);
+  });
+
+  // ---- workspace settings (multi-project spec, step 2.7) -------------------
+  // WORKSPACE-level routes: single-mount (never mirrored under /api/p/),
+  // same-origin. The config routes carry the settings UI's slice of
+  // `~/.cezar/config.json` — global knobs only; the registry stays on
+  // /api/projects above, and schemaVersion (a migration cursor, not a
+  // setting) is deliberately omitted.
+  const workspaceConfigBody = (config: WorkspaceConfig): WorkspaceConfigResponse => ({
+    projectsDir: config.projectsDir,
+    resources: {
+      maxParallel: config.resources.maxParallel,
+      memoryLimitMb: config.resources.memoryLimitMb,
+      worktreeRetentionDefault: config.resources.worktreeRetentionDefault,
+    },
+  });
+  app.get('/api/workspace/config', async (c) =>
+    c.json(workspaceConfigBody(await loadWorkspaceConfig())),
+  );
+
+  // Partial updates only — absent keys stay untouched. Bounds mirror the
+  // workspace schema (src/workspace/config.ts, step 1.2) exactly, so a value
+  // this route accepts can never be degraded away by the next load's `.catch`.
+  const workspaceConfigUpdateSchema = z.object({
+    projectsDir: z.string().trim().min(1).max(4096).optional(),
+    resources: z
+      .object({
+        maxParallel: z.number().int().min(1).max(16).optional(),
+        memoryLimitMb: z.number().int().min(0).max(1_048_576).nullable().optional(),
+        worktreeRetentionDefault: z.number().int().min(0).max(1000).optional(),
+      })
+      .optional(),
+  });
+  app.put('/api/workspace/config', async (c) => {
+    const parsed = workspaceConfigUpdateSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
+    }
+    const { projectsDir, resources } = parsed.data;
+    if (projectsDir !== undefined) {
+      // Validated ON CHANGE, never at load (spec): expand `~`, `mkdir -p`,
+      // probe real writability. Any failure → 400 and NO change persisted.
+      const expanded = expandTilde(projectsDir);
+      if (!expanded.startsWith('/')) {
+        return c.json({ error: `not writable: ${projectsDir} is not an absolute path` }, 400);
+      }
+      const probeError = await probeWritableDir(expanded);
+      if (probeError !== null) return c.json({ error: `not writable: ${probeError}` }, 400);
+    }
+    let written: WorkspaceConfig;
+    try {
+      written = await mergeWriteWorkspaceConfig((config) => {
+        // `projectsDir` is stored as written (`~` kept — see the schema note);
+        // only the probe above sees the expanded form.
+        if (projectsDir !== undefined) config.projectsDir = projectsDir;
+        if (resources?.maxParallel !== undefined) config.resources.maxParallel = resources.maxParallel;
+        if (resources?.memoryLimitMb !== undefined) config.resources.memoryLimitMb = resources.memoryLimitMb;
+        if (resources?.worktreeRetentionDefault !== undefined) {
+          config.resources.worktreeRetentionDefault = resources.worktreeRetentionDefault;
+        }
+      });
+    } catch (err) {
+      // e.g. a read-only home — nothing was persisted (atomic tmp+rename).
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+    // A resource change takes effect WITHOUT a restart: refresh the shared
+    // semaphore's in-memory snapshot and pump every manager (step 2.5's hook).
+    if (resources !== undefined) await deps.semaphore?.refresh();
+    return c.json(workspaceConfigBody(written));
+  });
+
+  // Global GUI state (`~/.cezar/ui-state.json`) — same parse/key-cap/shallow-
+  // merge semantics as the per-repo /api/ui-state route below (the shared half
+  // is `parseUiStateBody`), but backed by the workspace file.
+  app.get('/api/workspace/ui-state', async (c) => c.json(await readWorkspaceUiState()));
+  app.put('/api/workspace/ui-state', bodyLimit({ maxSize: UI_STATE_BODY_LIMIT }), async (c) => {
+    const parsed = parseUiStateBody(workspaceUiStateSchema, await c.req.json().catch(() => null));
+    if ('error' in parsed) return c.json({ error: parsed.error }, 400);
+    try {
+      return c.json(await mergeWriteWorkspaceUiState((state) => ({ ...state, ...parsed.data })));
+    } catch (err) {
+      // A read-only home degrades to an unsaved pref, never a crash.
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+  });
+
+  // ---- filesystem browse (multi-project spec, step 4.1) --------------------
+  // WORKSPACE-level and same-origin: the directory picker behind "Add project
+  // → open local folder". Directories only, and every answer is contained in a
+  // single root — see src/server/fs-browse.ts for the containment rule and why
+  // it is realpath-based. The root is the ONLY thing decided here: hosted mode
+  // (`CEZ_REMOTE=1` / non-loopback bind — the same `localHandoff` predicate the
+  // open-in-* endpoints use) narrows it from the operator's home to
+  // `projectsDir`, because a remote viewer has no business enumerating the
+  // host's whole home. Read per request, so a `CEZ_REMOTE` flip applies live.
+  app.get('/api/fs/browse', async (c) => {
+    const root = resolveBrowseRoot(!capabilities().localHandoff, await workspaceProjectsDir());
+    const result = await browseDirectory({
+      root,
+      path: c.req.query('path'),
+      showHidden: c.req.query('showHidden') === '1',
+    });
+    if (!result.ok) return c.json({ error: result.error }, result.status);
+    return c.json(result.body);
   });
 
   // The bookmarklet generator bakes this key into the `javascript:` URLs —
   // `/new?auto=1` is honored only with it (spec 011). Same-origin only.
-  app.get('/api/launch-key', (c) => c.json({ key: launchKey }));
+  api.get('/launch-key', (c) => c.json({ key: c.get('project').launchKey }));
 
-  app.get('/api/skills', async (c) => c.json(await discoverSkills(repoRoot)));
+  api.get('/skills', async (c) => c.json(await discoverSkills(c.get('project').root)));
 
   // ---- GUI prefs (ui-state.json) --------------------------------------------
   // The read path is shared with the CLI (`src/ui-state.ts`) so `cezar serve` can honour a
   // preference set here — #391's dismissed skills banner — from one notion of the file.
-  app.get('/api/ui-state', async (c) => c.json(await readUiState(repoRoot)));
-  app.put('/api/ui-state', async (c) => {
-    const parsed = uiStateSchema.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
-    }
+  api.get('/ui-state', async (c) => c.json(await readUiState(c.get('project').root)));
+  api.put('/ui-state', bodyLimit({ maxSize: UI_STATE_BODY_LIMIT }), async (c) => {
+    const { root: repoRoot, dataDir } = c.get('project');
+    // `.passthrough()` keeps unknown prefs (BACKWARD_COMPATIBILITY §3), but a
+    // single request may not stuff an unbounded key set (#429) — the shared
+    // parse+cap half of both ui-state routes lives in parseUiStateBody.
+    const parsed = parseUiStateBody(uiStateSchema, await c.req.json().catch(() => null));
+    if ('error' in parsed) return c.json({ error: parsed.error }, 400);
     const merged = { ...(await readUiState(repoRoot)), ...parsed.data };
     try {
       await mkdir(dataDir, { recursive: true });
@@ -361,17 +1298,19 @@ export function createApp(deps: ServerDeps): Hono {
   // Refresh team skills (spec 005): clone/fetch the configured skills repos,
   // then return the merged catalog. Degrades quietly — offline just means the
   // team entries stay as they were (or absent).
-  app.post('/api/skills/refresh', async (c) => {
+  api.post('/skills/refresh', async (c) => {
+    const { root: repoRoot } = c.get('project');
     await refreshTeamSkills(repoRoot);
     return c.json(await discoverSkills(repoRoot));
   });
 
-  app.get('/api/workflows', async (c) => c.json(await loadWorkflows(repoRoot)));
+  api.get('/workflows', async (c) => c.json(await loadWorkflows(c.get('project').root)));
 
   // Save an approved plan as a reusable chain (spec 008): YAML in
   // `.ai/cezar/workflows/<slug>.yaml` — from then on it's in the dropdown
   // like any other workflow.
-  app.post('/api/workflows', async (c) => {
+  api.post('/workflows', async (c) => {
+    const { root: repoRoot } = c.get('project');
     const parsed = saveWorkflowSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
       return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
@@ -409,7 +1348,8 @@ export function createApp(deps: ServerDeps): Hono {
 
   // Delete a saved workflow (spec 012 follow-up): file workflows only —
   // built-ins have no file and always come back.
-  app.delete('/api/workflows/:name', async (c) => {
+  api.delete('/workflows/:name', async (c) => {
+    const { root: repoRoot } = c.get('project');
     const name = c.req.param('name');
     const { workflows } = await loadWorkflows(repoRoot);
     const wf = workflows.find((w) => w.name === name);
@@ -433,7 +1373,7 @@ export function createApp(deps: ServerDeps): Hono {
   // Import support for the builder (spec 012): parse + validate a pasted
   // workflow YAML (either form) and hand back the normalized definition. The
   // server owns YAML parsing — the GUI stays dependency-free.
-  app.post('/api/workflows/parse', async (c) => {
+  api.post('/workflows/parse', async (c) => {
     const parsed = parseWorkflowSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
       return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
@@ -458,7 +1398,8 @@ export function createApp(deps: ServerDeps): Hono {
   // Chain-from-prompt (spec 008): one cheap claude call proposes a chain of
   // steps for the task. Never blocks — degraded answers come back as a
   // one-step quick-task plan with `fallback: true`.
-  app.post('/api/plan', async (c) => {
+  api.post('/plan', async (c) => {
+    const { root: repoRoot } = c.get('project');
     const parsed = planSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
       return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
@@ -476,20 +1417,49 @@ export function createApp(deps: ServerDeps): Hono {
     return usage ? { ...run, usage } : run;
   };
 
-  app.get('/api/runs', (c) => c.json(store.listRuns().map(withUsage)));
+  // The inbox half of a composer launch (#374). Since the cockpit's "▶ Run"
+  // prefills `/new` instead of calling POST /api/todos/:id/start (never launch
+  // blind — #355), the todo id rides along on the composer's POST /api/runs and
+  // lands here: `markStarted` writes `startedTaskId`, so the entry leaves the
+  // inbox (`visibleTodos()`) and stays in todos.json as the audit trail, and a
+  // second launch of the same entry no longer double-starts it.
+  //
+  // Deliberately best-effort: bookkeeping must never cost the user their task,
+  // so an unknown, stale or already-started id (markStarted → false) and any I/O
+  // failure only log. The run has already been created by the time we get here.
+  const noteTodoStarted = async (dataDir: string, todoId: string, taskId: string): Promise<void> => {
+    try {
+      if (!(await markStarted(dataDir, todoId, taskId))) {
+        console.warn(`[cezar] inbox entry ${todoId} not marked started (unknown or already started)`);
+      }
+    } catch (err) {
+      console.warn(`[cezar] could not mark inbox entry ${todoId} started: ${String(err)}`);
+    }
+  };
+
+  api.get('/runs', (c) => c.json(c.get('project').store.listRuns().map(withUsage)));
 
   // Registered before the `/:id/...` routes so "archive-finished" never
   // matches as a run id.
-  app.post('/api/runs/archive-finished', (c) => c.json({ archived: store.archiveFinished() }));
+  api.post('/runs/archive-finished', (c) =>
+    c.json({ archived: c.get('project').store.archiveFinished() }),
+  );
 
-  app.post('/api/runs/:id/archive', async (c) => {
+  api.post('/runs/:id/archive', async (c) => {
+    const { store } = c.get('project');
     const id = c.req.param('id');
-    const body = (await c.req.json().catch(() => ({}))) as { archived?: unknown };
-    const run = store.setArchived(id, body.archived !== false);
+    // An empty/absent body archives (the common case); a malformed body degrades
+    // to `{}` just as before, but a wrong-typed `archived` is now a 400 (#429).
+    const parsed = archiveSchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) {
+      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
+    }
+    const run = store.setArchived(id, parsed.data.archived !== false);
     return run ? c.json(run) : c.json({ error: 'not found' }, 404);
   });
 
-  app.post('/api/runs', async (c) => {
+  api.post('/runs', async (c) => {
+    const { root: repoRoot, dataDir, manager } = c.get('project');
     const parsed = startRunSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
       return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
@@ -519,7 +1489,12 @@ export function createApp(deps: ServerDeps): Hono {
       systemPrompt: parsed.data.systemPrompt,
       worktree: parsed.data.worktree,
       autonomous: parsed.data.autonomous,
-      generateFollowups: parsed.data.generateFollowups,
+      // Opt-in inbox (#471): the capability is the ceiling, so a client asking
+      // for follow-ups on a server that has them off gets a plain `false`
+      // rather than an error — the run is still perfectly valid without them.
+      // One decision here feeds the run record, the system prompt and
+      // CEZ_TODOS_FILE alike (RunManager.agentEnv).
+      generateFollowups: capabilities().followups ? parsed.data.generateFollowups : false,
     };
     const variants = parsed.data.variants ?? 1;
     if (variants > 1) {
@@ -533,15 +1508,20 @@ export function createApp(deps: ServerDeps): Hono {
           400,
         );
       }
-      return c.json({ runs: manager.startVariants(workflow, input, variants) }, 201);
+      const runs = manager.startVariants(workflow, input, variants);
+      // The entry points at the first variant — the thread the composer navigates to.
+      const first = runs[0];
+      if (parsed.data.todoId && first) await noteTodoStarted(dataDir, parsed.data.todoId, first.id);
+      return c.json({ runs }, 201);
     }
     const run = manager.startRun(workflow, input);
+    if (parsed.data.todoId) await noteTodoStarted(dataDir, parsed.data.todoId, run.id);
     return c.json(run, 201);
   });
 
   // ---- parallel variants (spec 010) -----------------------------------------
 
-  const groupRuns = (groupId: string): RunRecord[] =>
+  const groupRuns = (store: RunStore, groupId: string): RunRecord[] =>
     store
       .listRuns()
       .filter((r) => r.groupId === groupId)
@@ -550,8 +1530,9 @@ export function createApp(deps: ServerDeps): Hono {
   // Comparison data: per variant the status, cost, `git diff --stat` and the
   // first Progress-log lines from the handoff. The full diff is fetched per
   // variant via the existing GET /api/runs/:id/diff.
-  app.get('/api/groups/:groupId', async (c) => {
-    const runs = groupRuns(c.req.param('groupId'));
+  api.get('/groups/:groupId', async (c) => {
+    const { dataDir, store } = c.get('project');
+    const runs = groupRuns(store, c.req.param('groupId'));
     if (runs.length === 0) return c.json({ error: 'not found' }, 404);
     const detailed = await Promise.all(
       runs.map(
@@ -577,8 +1558,9 @@ export function createApp(deps: ServerDeps): Hono {
   // "Pick this one": the winner rests at `review` (spec 009 takes it from
   // there — send back / draft PR / finish); the losers are cancelled if
   // alive, archived, and their worktrees + branches removed.
-  app.post('/api/groups/:groupId/pick', async (c) => {
-    const runs = groupRuns(c.req.param('groupId'));
+  api.post('/groups/:groupId/pick', async (c) => {
+    const { root: repoRoot, dataDir, store, manager } = c.get('project');
+    const runs = groupRuns(store, c.req.param('groupId'));
     if (runs.length === 0) return c.json({ error: 'not found' }, 404);
     const parsed = pickSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
@@ -591,8 +1573,17 @@ export function createApp(deps: ServerDeps): Hono {
     }
 
     // Winner: a non-review terminal state with a non-empty diff flips to
-    // `review` (the settleSuccess rule); an empty diff (or no worktree) stays.
-    if (winner.status !== 'review' && winner.worktreePath && existsSync(winner.worktreePath)) {
+    // `review` (the settleSuccess rule) — but only when the review gate applies
+    // (#489): it is enabled (`reviewGateEnabled`, default off) AND the winner is
+    // not autonomous. An autonomous / gate-off winner keeps its `done` state with
+    // the diff left in the worktree; an empty diff (or no worktree) stays too.
+    if (
+      winner.status !== 'review' &&
+      winner.worktreePath &&
+      existsSync(winner.worktreePath) &&
+      winner.autonomous !== true &&
+      reviewGateEnabled(await loadConfig(repoRoot))
+    ) {
       const diff = await worktreeDiff(winner.worktreePath, winner.baseBranch ?? 'HEAD');
       if (diff.trim().length > 0 && !diff.startsWith('(diff failed')) {
         store.updateRun(winner.id, { status: 'review' });
@@ -618,7 +1609,8 @@ export function createApp(deps: ServerDeps): Hono {
     return c.json({ winner: store.getRun(winner.id) } satisfies PickVariantResponse);
   });
 
-  app.get('/api/runs/:id', (c) => {
+  api.get('/runs/:id', (c) => {
+    const { store } = c.get('project');
     const run = store.getRun(c.req.param('id'));
     return run ? c.json(withUsage(run)) : c.json({ error: 'not found' }, 404);
   });
@@ -629,7 +1621,8 @@ export function createApp(deps: ServerDeps): Hono {
   // actually displays). The auto-summarizer only ever fills an *unset*
   // titleSummary (RunManager.recordTurnEnd), so an edit wins over any past or
   // future auto-summary. Answers the updated record.
-  app.patch('/api/runs/:id', async (c) => {
+  api.patch('/runs/:id', async (c) => {
+    const { store } = c.get('project');
     const id = c.req.param('id');
     if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
     const parsed = patchRunSchema.safeParse(await c.req.json().catch(() => null));
@@ -637,12 +1630,15 @@ export function createApp(deps: ServerDeps): Hono {
       return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
     }
     if (parsed.data.title !== undefined) {
-      store.updateRun(id, { title: parsed.data.title, titleSummary: parsed.data.title });
+      // titleOrigin 'user' permanently stops the namer's live updates for this run
+      // (spec 2026-07-17-task-auto-naming).
+      store.updateRun(id, { title: parsed.data.title, titleSummary: parsed.data.title, titleOrigin: 'user' });
     }
     return c.json(store.getRun(id));
   });
 
-  app.post('/api/runs/:id/cancel', (c) => {
+  api.post('/runs/:id/cancel', (c) => {
+    const { store, manager } = c.get('project');
     const id = c.req.param('id');
     if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
     const cancelled = manager.cancel(id);
@@ -651,7 +1647,8 @@ export function createApp(deps: ServerDeps): Hono {
 
   // Live-session participation (spec 002): deliver a user message (text +
   // pasted screenshots) into the run's open claude session.
-  app.post('/api/runs/:id/messages', async (c) => {
+  api.post('/runs/:id/messages', async (c) => {
+    const { store, manager } = c.get('project');
     const id = c.req.param('id');
     if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
     const parsed = messageSchema.safeParse(await c.req.json().catch(() => null));
@@ -675,7 +1672,8 @@ export function createApp(deps: ServerDeps): Hono {
   });
 
   // "Finish": gracefully close a waiting session — the run completes as done.
-  app.post('/api/runs/:id/finish', (c) => {
+  api.post('/runs/:id/finish', (c) => {
+    const { store, manager } = c.get('project');
     const id = c.req.param('id');
     if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
     const finished = manager.finish(id);
@@ -684,18 +1682,29 @@ export function createApp(deps: ServerDeps): Hono {
   });
 
   // "Continue" (spec 003): reopen a finished run's session in-process.
-  app.post('/api/runs/:id/continue', async (c) => {
+  api.post('/runs/:id/continue', async (c) => {
+    const { store, manager } = c.get('project');
     const id = c.req.param('id');
     if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
-    const body = (await c.req.json().catch(() => ({}))) as { text?: unknown };
-    const result = manager.continueRun(id, typeof body.text === 'string' ? body.text : undefined);
+    // Bounded resume text (#429); an empty/absent body still just re-runs on the
+    // run's current backend, and a runner/model override reopens on that engine (#401).
+    const parsed = continueSchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) {
+      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
+    }
+    const result = manager.continueRun(id, {
+      text: parsed.data.text,
+      runner: parsed.data.runner,
+      model: parsed.data.model,
+    });
     if (!result.ok) return c.json({ error: result.error }, 409);
     return c.json({ continued: true });
   });
 
   // "Open in terminal" (spec 003): hand the session off to a real terminal —
   // in the task's worktree when it still exists (spec 006).
-  app.post('/api/runs/:id/open-in-cli', async (c) => {
+  api.post('/runs/:id/open-in-cli', async (c) => {
+    const { root: repoRoot, store } = c.get('project');
     const id = c.req.param('id');
     const run = store.getRun(id);
     if (!run) return c.json({ error: 'not found' }, 404);
@@ -711,6 +1720,8 @@ export function createApp(deps: ServerDeps): Hono {
     if (!sessionId) return c.json({ error: 'no agent session to resume' }, 409);
     const cwd = run.worktreePath && existsSync(run.worktreePath) ? run.worktreePath : repoRoot;
     const command = resumeCommand(run.runner, sessionId);
+    // Fails closed on an id we do not recognise — see resumeCommand (#431).
+    if (!command) return c.json({ error: 'the recorded session id has an unexpected shape' }, 409);
     const opened = await openInTerminal(cwd, command);
     if (!opened) {
       return c.json({ error: 'no terminal emulator found', command: `cd '${cwd}' && ${command}` }, 409);
@@ -720,12 +1731,13 @@ export function createApp(deps: ServerDeps): Hono {
 
   // "Open in…" session takeover (#open-in): the editors/file-manager/terminal
   // detected on THIS machine. Empty in hosted mode (no local desktop to open).
-  app.get('/api/open-targets', (c) =>
+  api.get('/open-targets', (c) =>
     c.json({ targets: capabilities().localHandoff ? detectOpenTargets() : [] }),
   );
 
   // Open a run's worktree (or the repo root) in the chosen local app.
-  app.post('/api/runs/:id/open-in', async (c) => {
+  api.post('/runs/:id/open-in', async (c) => {
+    const { root: repoRoot, store } = c.get('project');
     const id = c.req.param('id');
     const run = store.getRun(id);
     if (!run) return c.json({ error: 'not found' }, 404);
@@ -735,19 +1747,83 @@ export function createApp(deps: ServerDeps): Hono {
         409,
       );
     }
-    const body = (await c.req.json().catch(() => ({}))) as { target?: unknown };
-    const target = typeof body.target === 'string' ? body.target : '';
-    if (!target) return c.json({ error: 'target required' }, 400);
+    // Follows the safeParse convention (#429); the downstream allowlist match is the real
+    // injection guard, this just validates the shape.
+    const parsedBody = openInSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsedBody.success) {
+      return c.json({ error: parsedBody.error.issues.map((i) => i.message).join('; ') }, 400);
+    }
+    const { target, path: relPath } = parsedBody.data;
     const dir = run.worktreePath && existsSync(run.worktreePath) ? run.worktreePath : repoRoot;
 
-    // Coding-agent CLI handoff (#cli-handoff): open a terminal in the worktree that resumes THIS
-    // run's session when the chosen CLI is the run's own runner (and a session exists), or starts
-    // a fresh CLI there otherwise. Same terminal launcher the Terminal button uses.
+    // Diff pane "open in OS default app" (#365): one worktree file, opened with the platform's
+    // default handler for its type — not a directory in the file manager (that's `finder`
+    // above) and not a session takeover (editors/CLIs above). `path` is re-validated against
+    // the worktree here regardless of what the schema allowed, so a stale/forged path can never
+    // escape it.
+    if (target === 'default') {
+      if (!run.worktreePath || !existsSync(run.worktreePath)) {
+        return c.json({ error: NO_WORKTREE }, 409);
+      }
+      if (!relPath) return c.json({ error: 'path required for the default-app target' }, 400);
+      const result = await readWorktreePath(run.worktreePath, relPath);
+      if (result.kind !== 'file') {
+        return c.json(
+          { error: result.kind === 'dir' ? `not a file: ${relPath}` : result.error },
+          409,
+        );
+      }
+      // This route's whole contract is "preview an image in its default app", and containment
+      // alone does not enforce it. Without this gate any regular file in the worktree — a
+      // `.command`/`.desktop` an agent just wrote, an `.exe` — would be handed to the OS
+      // launcher, which EXECUTES it. Not remotely reachable (random run ids, same-origin, local
+      // mode), so: defense in depth.
+      //
+      // Deliberately `isOsOpenableImage`, NOT the raw route's `imageMimeType`: that list allows
+      // SVG on the strength of an `<img>` + no-script CSP the OS launcher never applies (the
+      // default `.svg` handler is usually a browser, which would run the file's `<script>`).
+      if (!isOsOpenableImage(result.path)) {
+        // Say which rule refused, in the route's own words — "limited to images" would be a lie
+        // to someone holding an SVG, which IS an image and DOES preview inline.
+        return c.json(
+          {
+            error: imageMimeType(result.path)
+              ? `SVG can carry scripts, so it previews inline but is never handed to the OS: ${result.path}`
+              : `opening in the default app is limited to images: ${result.path}`,
+          },
+          409,
+        );
+      }
+      const filePath = join(run.worktreePath, result.path);
+      const opened = await openFileInDefaultApp(filePath);
+      if (!opened) return c.json({ error: `could not open ${result.path}`, path: filePath }, 409);
+      return c.json({ opened: true, path: filePath });
+    }
+
+    // Coding-agent CLI handoff (#cli-handoff, #402): open a terminal in the worktree that resumes
+    // THIS run's session when the chosen CLI is the run's own runner (and a session exists), or
+    // starts a fresh CLI there otherwise. Same terminal launcher the Terminal button uses.
+    // Records that predate the runner choice carry no `runner` at all — they default to Claude
+    // everywhere else (resumeCommand, the client's resumeHint/cliTargetResumes), so the match
+    // check defaults the same way here; without it, a legacy run's own Claude CLI would never
+    // resume its own session, only ever launch fresh.
+    // A run the engine still owns never resumes: `sessionId` is seeded when the agent step STARTS
+    // (workflows/run.ts), so a running/queued/waiting run already carries one, and resuming it
+    // would attach a SECOND CLI process to the transcript the engine is actively writing. Those
+    // picks launch the CLI fresh in the worktree — the same degradation as a cross-runner pick,
+    // and what the client's cliTargetResumes now labels. Resume-after-finish is untouched.
     const cliRunner = agentCliRunner(target);
     if (cliRunner) {
-      const sessionId = [...run.steps].reverse().find((s) => s.sessionId)?.sessionId;
-      const command =
-        sessionId && cliRunner === run.runner ? resumeCommand(cliRunner, sessionId) : cliRunner;
+      const engineOwnsSession =
+        run.status === 'running' || run.status === 'queued' || run.status === 'waiting';
+      const sessionId = engineOwnsSession
+        ? undefined
+        : [...run.steps].reverse().find((s) => s.sessionId)?.sessionId;
+      // An id resumeCommand refuses (#431) degrades to a fresh CLI in the worktree,
+      // exactly like a run that never recorded a session.
+      const resume =
+        sessionId && cliRunner === (run.runner ?? 'claude') ? resumeCommand(cliRunner, sessionId) : null;
+      const command = resume ?? cliRunner;
       const opened = await openInTerminal(dir, command);
       if (!opened) {
         return c.json({ error: 'no terminal emulator found', command: `cd '${dir}' && ${command}` }, 409);
@@ -762,7 +1838,8 @@ export function createApp(deps: ServerDeps): Hono {
 
   // Handoff journal (spec 007): the per-task handoff.md as markdown. 404 only
   // when the task is unknown; a task without a (yet) seeded file returns ''.
-  app.get('/api/runs/:id/handoff', (c) => {
+  api.get('/runs/:id/handoff', (c) => {
+    const { dataDir, store } = c.get('project');
     const run = store.getRun(c.req.param('id'));
     if (!run) return c.json({ error: 'not found' }, 404);
     return c.text(readHandoff(dataDir, run.id), 200, {
@@ -778,7 +1855,8 @@ export function createApp(deps: ServerDeps): Hono {
     webp: 'image/webp',
     gif: 'image/gif',
   };
-  app.get('/api/runs/:id/images/:file', (c) => {
+  api.get('/runs/:id/images/:file', (c) => {
+    const { dataDir, store } = c.get('project');
     const run = store.getRun(c.req.param('id'));
     if (!run) return c.json({ error: 'not found' }, 404);
     const file = basename(c.req.param('file'));
@@ -791,7 +1869,8 @@ export function createApp(deps: ServerDeps): Hono {
   });
 
   // Task diff (spec 006): what this run changed — its worktree vs its base.
-  app.get('/api/runs/:id/diff', async (c) => {
+  api.get('/runs/:id/diff', async (c) => {
+    const { store } = c.get('project');
     const run = store.getRun(c.req.param('id'));
     if (!run) return c.json({ error: 'not found' }, 404);
     if (!run.worktreePath || !existsSync(run.worktreePath)) {
@@ -808,7 +1887,8 @@ export function createApp(deps: ServerDeps): Hono {
     run.worktreePath && existsSync(run.worktreePath) ? run.worktreePath : null;
   const NO_WORKTREE = 'no worktree — this task ran directly in the repo working tree';
 
-  app.get('/api/runs/:id/changes', async (c) => {
+  api.get('/runs/:id/changes', async (c) => {
+    const { store } = c.get('project');
     const run = store.getRun(c.req.param('id'));
     if (!run) return c.json({ error: 'not found' }, 404);
     const worktree = worktreeOf(run);
@@ -819,7 +1899,8 @@ export function createApp(deps: ServerDeps): Hono {
   });
 
   // The run's own commits (<base>..HEAD on the worktree branch) — the Commits tab.
-  app.get('/api/runs/:id/commits', async (c) => {
+  api.get('/runs/:id/commits', async (c) => {
+    const { store } = c.get('project');
     const run = store.getRun(c.req.param('id'));
     if (!run) return c.json({ error: 'not found' }, 404);
     const worktree = worktreeOf(run);
@@ -830,7 +1911,8 @@ export function createApp(deps: ServerDeps): Hono {
   });
 
   // One of the run's commits, structured like the Changes tab (reuses collectCommitChanges).
-  app.get('/api/runs/:id/commit/:sha', async (c) => {
+  api.get('/runs/:id/commit/:sha', async (c) => {
+    const { store } = c.get('project');
     const run = store.getRun(c.req.param('id'));
     if (!run) return c.json({ error: 'not found' }, 404);
     const worktree = worktreeOf(run);
@@ -846,7 +1928,8 @@ export function createApp(deps: ServerDeps): Hono {
   // image files only, for the preview's inline <img> — never HTML/JS/etc., so
   // no worktree file can become a same-origin document, and never past the
   // size cap. The no-script CSP neutralizes SVG opened as a top-level URL.
-  app.get('/api/runs/:id/files', async (c) => {
+  api.get('/runs/:id/files', async (c) => {
+    const { store } = c.get('project');
     const run = store.getRun(c.req.param('id'));
     if (!run) return c.json({ error: 'not found' }, 404);
     const worktree = worktreeOf(run);
@@ -881,7 +1964,8 @@ export function createApp(deps: ServerDeps): Hono {
     });
   });
 
-  app.post('/api/runs/:id/git/commit', async (c) => {
+  api.post('/runs/:id/git/commit', async (c) => {
+    const { store } = c.get('project');
     const run = store.getRun(c.req.param('id'));
     if (!run) return c.json({ error: 'not found' }, 404);
     const worktree = worktreeOf(run);
@@ -895,7 +1979,8 @@ export function createApp(deps: ServerDeps): Hono {
     return c.json({ committed: true, sha: result.sha });
   });
 
-  app.post('/api/runs/:id/git/push', async (c) => {
+  api.post('/runs/:id/git/push', async (c) => {
+    const { store } = c.get('project');
     const run = store.getRun(c.req.param('id'));
     if (!run) return c.json({ error: 'not found' }, 404);
     const worktree = worktreeOf(run);
@@ -909,7 +1994,8 @@ export function createApp(deps: ServerDeps): Hono {
   // `gh pr create --draft`; on success the run completes as done with the PR
   // badge. Failures come back as 409 with a `manual` merge command the GUI
   // shows next to the toast. CEZ_DRY_RUN=1 fakes the URL (no push, no gh).
-  app.post('/api/runs/:id/pr', async (c) => {
+  api.post('/runs/:id/pr', async (c) => {
+    const { root: repoRoot, dataDir, store, manager } = c.get('project');
     const id = c.req.param('id');
     const run = store.getRun(id);
     if (!run) return c.json({ error: 'not found' }, 404);
@@ -935,7 +2021,8 @@ export function createApp(deps: ServerDeps): Hono {
 
   // Archived tasks keep their worktree for inspection; this is the explicit
   // "🧹 Remove worktree" cleanup (spec 006).
-  app.post('/api/runs/:id/remove-worktree', async (c) => {
+  api.post('/runs/:id/remove-worktree', async (c) => {
+    const { root: repoRoot, store, manager } = c.get('project');
     const id = c.req.param('id');
     const run = store.getRun(id);
     if (!run) return c.json({ error: 'not found' }, 404);
@@ -945,7 +2032,8 @@ export function createApp(deps: ServerDeps): Hono {
     return c.json({ removed: true });
   });
 
-  app.delete('/api/runs/:id', async (c) => {
+  api.delete('/runs/:id', async (c) => {
+    const { root: repoRoot, store, manager } = c.get('project');
     const id = c.req.param('id');
     if (manager.isActive(id)) return c.json({ error: 'run is active — cancel it first' }, 409);
     const run = store.getRun(id);
@@ -955,25 +2043,94 @@ export function createApp(deps: ServerDeps): Hono {
     return store.deleteRun(id) ? c.json({ deleted: true }) : c.json({ error: 'not found' }, 404);
   });
 
+  // ---- worktree management panel (#483) --------------------------------------
+  // List materialized task worktrees with disk usage + retention state, and a
+  // "Reclaim now" action. Both additive; the per-row delete reuses the existing
+  // /api/runs/:id/remove-worktree route above.
+  api.get('/worktrees', async (c) => {
+    const { root: repoRoot, store } = c.get('project');
+    // The keep-limit the panel reports is the one the enforcer will actually
+    // apply — inherited from the workspace default when this repo sets none.
+    const keep = await resolveWorktreeRetention(repoRoot);
+    const runs = store.listRuns().filter((r) => r.worktreePath && existsSync(r.worktreePath));
+    const worktrees = await Promise.all(
+      runs.map(async (r) => ({
+        runId: r.id,
+        title: r.title ?? r.id,
+        status: r.status,
+        branch: r.branch ?? null,
+        // POSIX `du` — degrades to null (Windows / du missing / error); never blocks.
+        sizeBytes: await worktreeSizeBytes(r.worktreePath as string),
+        finishedAt: r.finishedAt ?? null,
+        reclaimable: isReclaimable(r),
+      })),
+    );
+    // Total is null when any size degraded, so the panel never shows a wrong sum.
+    const totalBytes = worktrees.some((w) => w.sizeBytes === null)
+      ? null
+      : worktrees.reduce((sum, w) => sum + (w.sizeBytes ?? 0), 0);
+    return c.json({ worktrees, totalBytes, keep });
+  });
+
+  const reclaimBodySchema = z.object({}).passthrough();
+  api.post('/worktrees/reclaim', async (c) => {
+    const { root: repoRoot, store } = c.get('project');
+    // Accept an empty or `{}` body; retention is best-effort, so 200 always.
+    const parsed = reclaimBodySchema.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) return c.json({ error: 'invalid body' }, 400);
+    const reclaimed = await reclaimWorktrees(repoRoot, store, await resolveWorktreeRetention(repoRoot));
+    return c.json({ reclaimed });
+  });
+
   // ---- inbox (spec 007) ------------------------------------------------------
-  app.get('/api/todos', async (c) => c.json(await readTodos(dataDir)));
+  // Opt-in via CEZ_FOLLOWUPS=1 (#471). Off, the reader degrades to an empty
+  // inbox (a 404 would make old clients surface an error for a feature that is
+  // merely switched off) and the mutators 409 as defense in depth — the shape
+  // the hosted-mode open-in-* handlers already use. Existing todos.json entries
+  // are never touched, so flipping the env back on restores them.
+  api.get('/todos', async (c) =>
+    c.json(capabilities().followups ? await readTodos(c.get('project').dataDir) : []),
+  );
 
   // Check off = delete the entry.
-  app.delete('/api/todos/:id', async (c) => {
+  api.delete('/todos/:id', async (c) => {
+    const { dataDir } = c.get('project');
+    if (!capabilities().followups) return c.json({ error: FOLLOWUPS_OFF }, 409);
     const removed = await removeTodo(dataDir, c.req.param('id'));
     return removed ? c.json({ removed: true }) : c.json({ error: 'not found' }, 404);
   });
 
   // "▶ Run": turn an inbox entry into a task — a one-off single-step workflow
   // around the suggested skill when it exists, plain quick-task otherwise.
-  app.post('/api/todos/:id/start', async (c) => {
+  api.post('/todos/:id/start', async (c) => {
+    const { root: repoRoot, dataDir, manager } = c.get('project');
+    if (!capabilities().followups) return c.json({ error: FOLLOWUPS_OFF }, 409);
     const id = c.req.param('id');
     const todo = (await readTodos(dataDir)).find((t) => t.id === id);
     if (!todo) return c.json({ error: 'not found' }, 404);
+
+    // Body is optional and read exactly once (runner/model #401 + prompt #413 share it). A
+    // request with none at all (the pre-pills/pre-composer client) stays `undefined`, same as an
+    // empty `{}`. A body that IS present but is not valid JSON becomes `null`, which the schema
+    // rejects → 400 (the `.catch(() => null)` pattern every other mutating route uses); mapping
+    // it to `undefined` too would let a broken payload pass as "no body" and silently 201.
+    const rawBody = await c.req.text().catch(() => '');
+    let body: unknown;
+    if (rawBody.trim().length > 0) {
+      try {
+        body = JSON.parse(rawBody);
+      } catch {
+        body = null;
+      }
+    }
+    const parsed = startTodoSchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
+    }
     if (todo.startedTaskId) return c.json({ error: 'already started' }, 409);
 
-    let task = (todo.suggestedPrompt ?? todo.summary).trim() || todo.summary;
-    if (todo.suggestedArgs) task += `\n\nArguments: ${todo.suggestedArgs}`;
+    let task = todoTaskText(todo);
+    if (parsed.data?.prompt) task += `\n\n${parsed.data.prompt}`;
 
     let workflow: WorkflowDef | undefined;
     if (todo.suggestedSkill) {
@@ -992,7 +2149,11 @@ export function createApp(deps: ServerDeps): Hono {
       workflow = workflows.find((w) => w.name === 'quick-task') ?? QUICK_TASK_WORKFLOW;
     }
 
-    const run = manager.startRun(workflow, { task });
+    const run = manager.startRun(workflow, {
+      task,
+      runner: parsed.data?.runner,
+      model: parsed.data?.model,
+    });
     await markStarted(dataDir, id, run.id);
     return c.json({ run }, 201);
   });
@@ -1000,10 +2161,11 @@ export function createApp(deps: ServerDeps): Hono {
   // Per-run SSE: full replay from the NDJSON file, then live events. The
   // listener attaches before the replay and buffers, so nothing emitted
   // during the replay is lost or duplicated (dedup by seq).
-  app.get('/api/runs/:id/events', (c) => {
+  api.get('/runs/:id/events', (c) => {
+    const { store } = c.get('project');
     const id = c.req.param('id');
     if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
-    return streamSSE(c, async (stream) => {
+    return streamSSENoBuffer(c, async (stream) => {
       let replaying = true;
       let maxSeq = 0;
       const buffered: RunEvent[] = [];
@@ -1054,8 +2216,13 @@ export function createApp(deps: ServerDeps): Hono {
   });
 
   // Global SSE: run-summary updates for the list view + inbox changes.
-  app.get('/api/events', (c) =>
-    streamSSE(c, async (stream) => {
+  // Scoped `/p/:projectId/events` carries that project's stream in today's
+  // shape; the legacy unprefixed alias stays bound to the boot project ONLY
+  // (spec "Legacy aliases" — widening it would be a silent behavioral break;
+  // the all-project stream arrives as `/api/workspace/events` in step 2.8).
+  api.get('/events', (c) => {
+    const { dataDir, store } = c.get('project');
+    return streamSSENoBuffer(c, async (stream) => {
       const onRun = (run: RunRecord) =>
         void stream.writeSSE({ event: 'run', data: JSON.stringify(run) });
       const onDeleted = (id: string) =>
@@ -1064,14 +2231,27 @@ export function createApp(deps: ServerDeps): Hono {
         const items: TodoItem[] = await readTodos(dataDir).catch(() => []);
         await stream.writeSSE({ event: 'todos', data: JSON.stringify(items) });
       };
-      const offTodos = onTodosChanged(() => void sendTodos());
+      // Opt-in inbox (#471): subscribing is what creates this project's
+      // watcher (step 2.3), so with the capability off we never subscribe —
+      // no watcher, no fd. Scoped to this stream's dataDir: another
+      // project's todos.json writes never reach this connection.
+      const offTodos = capabilities().followups
+        ? onTodosChanged(dataDir, () => void sendTodos())
+        : () => undefined;
       // Live resource telemetry (#348): the sampler ticks ~every 2 s only
       // while some run has a registered process; each tick is relayed as one
       // `usage` message (runId → {cpuPct, rssBytes, procCount}). Never
-      // persisted — the NDJSON transcripts stay usage-free.
-      const offUsage = onUsage(
-        (usage) => void stream.writeSSE({ event: 'usage', data: JSON.stringify(usage) }),
-      );
+      // persisted — the NDJSON transcripts stay usage-free. The sampler is
+      // module-global, so a snapshot carries EVERY project's runs — split it
+      // by ownership and relay only this project's rows, never a stamped
+      // whole (multi-project spec, step 2.4: filtered, not stamped).
+      const offUsage = onUsage((usage) => {
+        const owned: typeof usage = {};
+        for (const [runId, sample] of Object.entries(usage)) {
+          if (store.getRun(runId)) owned[runId] = sample;
+        }
+        void stream.writeSSE({ event: 'usage', data: JSON.stringify(owned) });
+      });
       store.on('run', onRun);
       store.on('deleted', onDeleted);
       stream.onAbort(() => {
@@ -1084,22 +2264,150 @@ export function createApp(deps: ServerDeps): Hono {
         await stream.writeSSE({ event: 'ping', data: '' });
         await stream.sleep(15_000);
       }
-    }),
-  );
+    });
+  });
+
+  // ---- workspace SSE (multi-project spec, step 2.8) ------------------------
+  // The cockpit's future single EventSource: one stream, every project.
+  // WORKSPACE-level (single-mount on `app`, never mirrored under /api/p/).
+  // Same event names as the per-project stream, but every payload is stamped
+  // with the owning `project` id — additively where the legacy payload is an
+  // object (`run` grows a `project` key, `run-deleted` becomes
+  // `{id, project}`), wrapped where it is not (`todos` → `{project, items}`,
+  // `usage` → `{project, usage}` — a bare array/record has nowhere to carry a
+  // stamp). The legacy `/api/events` alias above keeps its UN-stamped,
+  // boot-filtered shape — that stream is a protected surface.
+  //
+  // Subscribing NEVER force-instantiates a project: only the boot context
+  // (always live) and already-built lazy contexts are attached at connect;
+  // contexts built later join via the `onContextBuilt` hook, so a project's
+  // first API touch makes its events flow to streams already open.
+  app.get('/api/workspace/events', (c) => {
+    return streamSSENoBuffer(c, async (stream) => {
+      // One detach bundle per attached project — the id guard makes a double
+      // attach (connect-time snapshot vs. the built hook) impossible.
+      const attached = new Map<string, { store: RunStore; detach: () => void }>();
+      const attach = (project: string, ctx: Pick<ProjectContext, 'store' | 'dataDir'>): void => {
+        if (attached.has(project)) return;
+        const { store, dataDir } = ctx;
+        const onRun = (run: RunRecord) =>
+          void stream.writeSSE({ event: 'run', data: JSON.stringify({ ...run, project }) });
+        const onDeleted = (id: string) =>
+          void stream.writeSSE({ event: 'run-deleted', data: JSON.stringify({ id, project }) });
+        const sendTodos = async () => {
+          const items: TodoItem[] = await readTodos(dataDir).catch(() => []);
+          await stream.writeSSE({ event: 'todos', data: JSON.stringify({ project, items }) });
+        };
+        // Same opt-in gate as the per-project stream (#471): no capability, no
+        // watcher — and each subscription is scoped to its own dataDir (2.3).
+        const offTodos = capabilities().followups
+          ? onTodosChanged(dataDir, () => void sendTodos())
+          : () => undefined;
+        store.on('run', onRun);
+        store.on('deleted', onDeleted);
+        attached.set(project, {
+          store,
+          detach: () => {
+            store.off('run', onRun);
+            store.off('deleted', onDeleted);
+            offTodos();
+          },
+        });
+      };
+
+      // The boot context never lives in the lazy map — seed it under its
+      // registry id (`resolveBootProject`, NOT `bootContext.id`, which may be
+      // the reserved alias when registration was suppressed).
+      attach(await resolveBootProject(), bootContext);
+      // NB: snapshot + hook subscription happen in one sync block, so no
+      // context can slip between them.
+      for (const id of contexts.ids()) {
+        const ctx = contexts.peek(id);
+        if (ctx) attach(ctx.id, ctx);
+      }
+      const offBuilt = contexts.onContextBuilt((ctx) => attach(ctx.id, ctx));
+
+      // `usage` is FILTERED per project, never a stamped whole (spec "SSE
+      // streams"): the module-global sampler's snapshot is split by each
+      // attached project's owned runIds, one event per project that has live
+      // rows. No event for a row-less project — the workspace stream carries
+      // no empty-record clears (that is the per-project streams' contract).
+      const offUsage = onUsage((usage) => {
+        const rows = Object.entries(usage);
+        for (const [project, { store }] of attached) {
+          const owned: typeof usage = {};
+          for (const [runId, sample] of rows) {
+            if (store.getRun(runId)) owned[runId] = sample;
+          }
+          if (Object.keys(owned).length > 0) {
+            void stream.writeSSE({ event: 'usage', data: JSON.stringify({ project, usage: owned }) });
+          }
+        }
+      });
+
+      // Workspace-level events (project-added / project-removed /
+      // checkout-progress) — relayed verbatim under their own names. A
+      // removal also drops the project's attach entry: the id guard in
+      // `attach` would otherwise pin the DISPOSED context forever, so a
+      // project removed and re-added on the same slug would rebuild a fresh
+      // context whose events never reach this already-open stream.
+      const offWorkspace = workspaceEvents.on((event, data) => {
+        if (event === 'project-removed') {
+          const removed = (data as { id?: string }).id;
+          if (removed !== undefined && attached.has(removed)) {
+            attached.get(removed)?.detach();
+            attached.delete(removed);
+          }
+        }
+        void stream.writeSSE({ event, data: JSON.stringify(data) });
+      });
+
+      stream.onAbort(() => {
+        offBuilt();
+        offUsage();
+        offWorkspace();
+        for (const { detach } of attached.values()) detach();
+        attached.clear();
+      });
+
+      while (!stream.aborted) {
+        await stream.writeSSE({ event: 'ping', data: '' });
+        await stream.sleep(15_000);
+      }
+    });
+  });
 
   // ---- GitHub tab ------------------------------------------------------------
   // Issues + PRs of the repo's origin, read through the logged-in `gh` CLI.
   // Degrades to `{available:false, reason}` — no gh / no remote / offline all
   // just render as a hint in the tab, never an error.
-  app.get('/api/github', async (c) => {
+  api.get('/github', async (c) => {
+    const { root: repoRoot } = c.get('project');
     const limit = Number.parseInt(c.req.query('limit') ?? '', 10);
     return c.json(
       await fetchGithub(repoRoot, c.req.query('refresh') === '1', Number.isFinite(limit) ? limit : 30),
     );
   });
 
+  // The full comment thread for one issue/PR (#499). Additive sibling of /api/github — lazy
+  // (fetched only while a detail view is open), zod-validated params, 400 on garbage, and the
+  // same in-payload availability degrade (gh missing / offline / 404 all render as a hint).
+  const commentsParams = z.object({
+    kind: z.enum(['issue', 'pr']),
+    number: z.coerce.number().int().positive(),
+  });
+  api.get('/github/comments/:kind/:number', async (c) => {
+    const { root: repoRoot } = c.get('project');
+    const parsed = commentsParams.safeParse({ kind: c.req.param('kind'), number: c.req.param('number') });
+    if (!parsed.success) return c.json({ error: 'invalid kind or number' }, 400);
+    return c.json(
+      await fetchGithubComments(repoRoot, parsed.data.kind, parsed.data.number, c.req.query('refresh') === '1'),
+    );
+  });
+
   // ---- repo view -----------------------------------------------------------
-  app.get('/api/repo', async (c) => {
+  api.get('/repo', async (c) => {
+    const { root: repoRoot } = c.get('project');
     const info = await getRepoInfo(repoRoot);
     if (!info) return c.json({ info: null, status: [], log: [], branches: [], baseBranch: null });
     const [status, log, branches, config] = await Promise.all([
@@ -1120,8 +2428,17 @@ export function createApp(deps: ServerDeps): Hono {
     defaultModels: config.defaultModels ?? {},
     maxParallel: config.maxParallel,
     memoryLimitMb: config.memoryLimitMb ?? null,
+    // Count-based worktree retention (#483): keep the last N finished worktrees
+    // on disk. 0 = unlimited. Always materialized (schema default 10).
+    worktreeRetention: config.worktreeRetention,
+    // Live title updates (task auto-naming spec): tri-state — null means "no
+    // config key, the CEZ_TITLE_UPDATES env default (ON) decides".
+    liveTitleUpdates: config.liveTitleUpdates ?? null,
+    // Optional review gate (#489): tri-state — null means "no config key, the
+    // CEZ_REVIEW_GATE env default (OFF) decides".
+    reviewGate: config.reviewGate ?? null,
   });
-  app.get('/api/config', async (c) => c.json(configAnswer(await loadConfig(repoRoot))));
+  api.get('/config', async (c) => c.json(configAnswer(await loadConfig(c.get('project').root))));
 
   // Set/clear the agents' config knobs (Settings → Agents; the Repo tab's
   // base-branch picker). Merges into the RAW config.json so user keys
@@ -1145,8 +2462,19 @@ export function createApp(deps: ServerDeps): Hono {
     // the schema's 1–16; memoryLimitMb null/0 clears the ceiling.
     maxParallel: z.number().int().min(1).max(16).optional(),
     memoryLimitMb: z.number().int().min(0).max(1_048_576).nullable().optional(),
+    // Worktree retention count (Settings → Resources, #483). 0 = unlimited;
+    // null clears the key back to the schema default (10). Unlike memoryLimitMb,
+    // 0 is a meaningful value (unlimited), so it is stored, not treated as clear.
+    worktreeRetention: z.number().int().min(0).max(1000).nullable().optional(),
+    // Live title updates toggle (Settings → Agents): null clears the key back
+    // to the env-default behavior.
+    liveTitleUpdates: z.boolean().nullable().optional(),
+    // Optional review gate toggle (Settings → Agents, #489): null clears the key
+    // back to the env-default behavior (OFF).
+    reviewGate: z.boolean().nullable().optional(),
   });
-  app.put('/api/config', async (c) => {
+  api.put('/config', async (c) => {
+    const { root: repoRoot, dataDir } = c.get('project');
     const parsed = setConfigSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
       return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
@@ -1173,6 +2501,20 @@ export function createApp(deps: ServerDeps): Hono {
       }
     }
     if (parsed.data.maxParallel !== undefined) raw.maxParallel = parsed.data.maxParallel;
+    if (parsed.data.worktreeRetention !== undefined) {
+      // null clears back to the default (10); a number (including 0 = unlimited)
+      // is stored as-is.
+      if (parsed.data.worktreeRetention === null) delete raw.worktreeRetention;
+      else raw.worktreeRetention = parsed.data.worktreeRetention;
+    }
+    if (parsed.data.liveTitleUpdates !== undefined) {
+      if (parsed.data.liveTitleUpdates === null) delete raw.liveTitleUpdates;
+      else raw.liveTitleUpdates = parsed.data.liveTitleUpdates;
+    }
+    if (parsed.data.reviewGate !== undefined) {
+      if (parsed.data.reviewGate === null) delete raw.reviewGate;
+      else raw.reviewGate = parsed.data.reviewGate;
+    }
     if (parsed.data.memoryLimitMb !== undefined) {
       // null or 0 both mean "no ceiling" — drop the key back to the default.
       if (parsed.data.memoryLimitMb === null || parsed.data.memoryLimitMb === 0) {
@@ -1205,39 +2547,25 @@ export function createApp(deps: ServerDeps): Hono {
     return c.json(configAnswer(await loadConfig(repoRoot)));
   });
 
-  // Agent config files (spec 2026-07-16-agent-config-files, #404): read and
-  // edit the coding agents' OWN config files (Claude/Codex/OpenCode settings,
-  // MCP, memory), raw and per-scope. Additive sibling routes — /api/health keeps
-  // its protected shape (BACKWARD_COMPATIBILITY.md §2).
-  //
-  // Security: writing these files is a local-machine capability. Some of them
-  // (`hooks`, MCP `command`) run shell commands automatically, outside cezar's
-  // allowedTools. So EVERY write 409s in hosted mode (CEZ_REMOTE / non-loopback
-  // bind), matching the open-in-* refusals above. Reads stay open so the section
-  // stays useful for understanding what is in force; the gate is re-checked
-  // server-side on every PUT and never trusts the client.
-  app.get('/api/agent-config', async (c) => {
+  // Agent config is project-scoped (spec #404, adapted to the multi-project
+  // route seam from #521): handlers resolve the selected repo through the
+  // same ProjectContext as every other mirrored route.
+  api.get('/agent-config', async (c) => {
     const editable = capabilities().localHandoff;
-    return c.json(await listAgentConfig(repoRoot, process.env, editable));
+    return c.json(await listAgentConfig(c.get('project').root, process.env, editable));
   });
 
-  app.get('/api/agent-config/:id', async (c) => {
+  api.get('/agent-config/:id', async (c) => {
     const id = c.req.param('id');
     const def = findConfigFile(id);
     if (!def) return c.json({ error: 'unknown config file' }, 404);
-    // Home-dir files (`~/.claude/settings.json`, `~/.codex/config.toml`, …) can
-    // hold secrets. In hosted mode the section is read-only AND these outside-
-    // repo files are not served at all — same trust boundary that withholds the
-    // ~/.claude.json MCP listing. Repo files stay readable (the cockpit already
-    // serves repo diffs/contents), so precedence stays legible; only $HOME leaks
-    // are closed. The listing (metadata only, no contents) is unaffected.
     if (def.tracked === 'outside-repo' && !capabilities().localHandoff) {
       return c.json(
         { error: 'this file lives in your home directory and is not served in hosted mode (CEZ_REMOTE)' },
         409,
       );
     }
-    const read = await readConfigFile(id, repoRoot);
+    const read = await readConfigFile(id, c.get('project').root);
     if (read === null) return c.json({ error: 'unknown config file' }, 404);
     if ('error' in read) return c.json({ error: read.error }, 500);
     return c.json(read);
@@ -1247,9 +2575,9 @@ export function createApp(deps: ServerDeps): Hono {
     content: z.string().max(2_000_000),
     version: z.string().nullable(),
   });
-  app.put('/api/agent-config/:id', async (c) => {
-    // The real gate: writes are local-only, re-checked here regardless of what
-    // the client believed. This is what closes the hooks-based RCE path.
+  api.put('/agent-config/:id', async (c) => {
+    // Config files may define hooks and MCP commands, so writes remain a
+    // local-machine capability and are re-gated on every request.
     if (!capabilities().localHandoff) {
       return c.json(
         { error: 'editing agent config is disabled in hosted mode (CEZ_REMOTE) — edit it from the machine that owns the checkout' },
@@ -1258,15 +2586,21 @@ export function createApp(deps: ServerDeps): Hono {
     }
     const parsed = setAgentConfigSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
-      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
+      return c.json({ error: parsed.error.issues.map((issue) => issue.message).join('; ') }, 400);
     }
-    const out = await writeConfigFile(c.req.param('id'), parsed.data.content, parsed.data.version, repoRoot);
+    const out = await writeConfigFile(
+      c.req.param('id'),
+      parsed.data.content,
+      parsed.data.version,
+      c.get('project').root,
+    );
     if (out === null) return c.json({ error: 'unknown config file' }, 404);
     if (!out.ok) return c.json({ error: out.error }, out.status);
     return c.json(out.read);
   });
 
-  app.get('/api/repo/diff', async (c) => {
+  api.get('/repo/diff', async (c) => {
+    const { root: repoRoot } = c.get('project');
     const info = await getRepoInfo(repoRoot);
     if (!info) return c.text('not a git repository');
     return c.text(await getDiff(info.root));
@@ -1277,7 +2611,8 @@ export function createApp(deps: ServerDeps): Hono {
   // shape `{sha, subject, author, when, files, stat}` with 409 + reason on failure. The
   // legacy text answer below is a protected surface (BACKWARD_COMPATIBILITY.md §2) — its
   // shape, including the in-band failure sentences, stays exactly as it was.
-  app.get('/api/repo/commit/:sha', async (c) => {
+  api.get('/repo/commit/:sha', async (c) => {
+    const { root: repoRoot } = c.get('project');
     const info = await getRepoInfo(repoRoot);
     if (c.req.query('structured') === '1') {
       if (!info) return c.json({ error: 'not a git repository' }, 409);
@@ -1297,7 +2632,8 @@ export function createApp(deps: ServerDeps): Hono {
   // surface, untouched): the same {files, stat} shape the session /changes
   // route serves, here for the MAIN working tree's uncommitted changes vs
   // HEAD (redesign R5 Step 1.3 — §"Git/session API additions").
-  app.get('/api/repo/changes', async (c) => {
+  api.get('/repo/changes', async (c) => {
+    const { root: repoRoot } = c.get('project');
     const info = await getRepoInfo(repoRoot);
     if (!info) return c.json({ error: 'not a git repository' }, 409);
     // The user's REAL working tree — never stage into their index (a GET must not write).
@@ -1313,7 +2649,8 @@ export function createApp(deps: ServerDeps): Hono {
     name: z.string().trim().min(1).max(200),
     from: z.string().trim().min(1).max(200).optional(),
   });
-  app.post('/api/repo/branch', async (c) => {
+  api.post('/repo/branch', async (c) => {
+    const { root: repoRoot } = c.get('project');
     const info = await getRepoInfo(repoRoot);
     if (!info) return c.json({ error: 'not a git repository' }, 409);
     const parsed = repoBranchSchema.safeParse(await c.req.json().catch(() => null));
@@ -1324,6 +2661,15 @@ export function createApp(deps: ServerDeps): Hono {
     if (!result.ok) return c.json({ error: result.error }, 409);
     return c.json({ branch: result.branch, created: result.created });
   });
+
+  // ---- mount the mirrored table (multi-project spec, step 2.2) -------------
+  // Scoped first, then the legacy aliases. The paths are disjoint (no legacy
+  // route starts with `/p/`), so order between the two mounts never decides a
+  // match — but the catch-all below must still come last. `route()` re-registers
+  // the sub-app's routes under each prefix, handlers shared, internal order
+  // (e.g. `/runs/archive-finished` before `/runs/:id/archive`) preserved.
+  app.route(SCOPED_PREFIX, api);
+  app.route('/api', api);
 
   // ---- SPA catch-all -------------------------------------------------------
   // Last, so every route above still wins. Any other GET gets the cockpit shell:
@@ -1354,9 +2700,38 @@ function resolveWebDir(): string {
   return join(here, '..', '..', 'web');
 }
 
-/** The CLI command that reopens a run's session for interactive take-over,
- *  per backend. Legacy/undefined records default to Claude. */
-function resumeCommand(runner: string | undefined, sessionId: string): string {
+/**
+ * The session id shape every backend actually mints: UUIDs (claude/codex) and
+ * the CLIs' own slug-ish ids. No character here is special to bash, AppleScript
+ * OR cmd.exe, and a leading `-` is refused so the id can never be read as an
+ * option by the CLI it is passed to (same dash-guard as `isSafeGitRef`, #431).
+ * Bounded, like every other input that reaches a spawned process.
+ */
+const SAFE_SESSION_ID = /^[A-Za-z0-9._][A-Za-z0-9._-]{0,199}$/;
+
+/** True for session ids safe to splice into the take-over command (see above). */
+export function isSafeSessionId(sessionId: string): boolean {
+  return SAFE_SESSION_ID.test(sessionId);
+}
+
+/**
+ * The CLI command that reopens a run's session for interactive take-over, per
+ * backend. Legacy/undefined records default to Claude. Returns null when the id
+ * is not a shape we recognise — callers degrade (no take-over) rather than
+ * splice it into a shell.
+ *
+ * Validate, don't quote (#431): the session id is the only variable spliced
+ * into the command string, and `openInTerminal` runs that string through bash
+ * on darwin/linux but through `cmd /K` on win32. cmd.exe does not treat `'` as
+ * a quote character, so POSIX-quoting the id handed Windows users a literal
+ * `claude --resume '9f8e…'` and Claude answered "no conversation found".
+ * Constraining the charset to one with no metacharacter in ANY of those shells
+ * needs no quoting at all and fails closed on an unexpected id — a stronger
+ * guarantee than escaping, and platform-independent. Ids are UUID/CLI-minted
+ * today; this keeps a future source safe.
+ */
+export function resumeCommand(runner: string | undefined, sessionId: string): string | null {
+  if (!isSafeSessionId(sessionId)) return null;
   switch (runner) {
     case 'codex':
       return `codex resume ${sessionId}`;

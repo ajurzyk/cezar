@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
-import { mkdirSync, watch } from 'node:fs';
+import { mkdirSync, watch, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 
@@ -127,13 +127,29 @@ export async function removeTodo(dataDir: string, id: string): Promise<boolean> 
   });
 }
 
+/** The task text "▶ Run" turns an entry into: the suggested prompt (or the summary when the
+ *  entry carries none), plus the suggested args as a trailing line. The single server-side
+ *  source for `POST /api/todos/:id/start`; the cockpit's prefill copy
+ *  (`web/app/src/routes/inbox.tsx`, #374) lives in another process and cannot import this, so
+ *  the two are pinned to the shared cases in `test/fixtures/todo-task-text.json`. */
+export function todoTaskText(
+  todo: Pick<TodoItem, 'summary' | 'suggestedPrompt' | 'suggestedArgs'>,
+): string {
+  let task = (todo.suggestedPrompt ?? todo.summary).trim() || todo.summary;
+  if (todo.suggestedArgs) task += `\n\nArguments: ${todo.suggestedArgs}`;
+  return task;
+}
+
 /** Record that "▶ Run" turned the entry into task `taskId`. The entry stays
- *  in the file as an audit trail; the GUI hides started entries. */
+ *  in the file as an audit trail; the GUI hides started entries. First start wins: an entry
+ *  that already carries a `startedTaskId` is left untouched and answers false, so the
+ *  best-effort `todoId` bookkeeping on `POST /api/runs` (#374) can never overwrite the audit
+ *  trail — the check shares this lock, so two concurrent launches cannot both claim the entry. */
 export async function markStarted(dataDir: string, id: string, taskId: string): Promise<boolean> {
   return withLock(dataDir, async () => {
     const { items } = await readRaw(dataDir);
     const item = items.find((t) => t.id === id);
-    if (!item) return false;
+    if (!item || item.startedTaskId) return false;
     item.startedTaskId = taskId;
     await writeAtomic(dataDir, items);
     return true;
@@ -142,34 +158,70 @@ export async function markStarted(dataDir: string, id: string, taskId: string): 
 
 // ---- change notifications ----------------------------------------------------
 
-const emitter = new EventEmitter();
-emitter.setMaxListeners(100);
-let watching = false;
+/**
+ * One live watch per `dataDir` (multi-project spec, step 2.3): each project's
+ * inbox gets its own fs watcher + emitter, so project A's todos.json writes
+ * never fire project B's subscribers. A watch lives exactly as long as it has
+ * subscribers — created on the first `onTodosChanged(dataDir, …)`, torn down
+ * (watcher closed, debounce cleared, map entry dropped) when the last one
+ * unsubscribes, so a disposed project context stops burning an fd.
+ */
+interface TodosWatch {
+  emitter: EventEmitter;
+  /** Undefined when `fs.watch` degraded — subscribers exist but never fire
+   *  (the Inbox updates on refresh only). */
+  watcher: FSWatcher | undefined;
+  /** Per-dataDir debounce for bursty writes (tmp + rename is two events). */
+  timer: NodeJS.Timeout | undefined;
+}
 
-/** Watch `.ai/cezar/` for todos.json changes (agents write it from another
- *  process) and emit debounced change events. Degrades to no watch on error. */
-export function startTodosWatch(dataDir: string): void {
-  if (watching) return;
-  watching = true;
+const watches = new Map<string, TodosWatch>();
+
+/** Start watching `dataDir` for todos.json changes (agents write it from
+ *  another process). Degrades to a watcher-less entry on error. */
+function startWatch(dataDir: string): TodosWatch {
+  const emitter = new EventEmitter();
+  emitter.setMaxListeners(100);
+  const entry: TodosWatch = { emitter, watcher: undefined, timer: undefined };
   try {
     mkdirSync(dataDir, { recursive: true });
-    let timer: NodeJS.Timeout | undefined;
     const watcher = watch(dataDir, (_event, filename) => {
       if (filename && filename !== 'todos.json') return;
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(() => emitter.emit('changed'), 300);
-      timer.unref?.();
+      if (entry.timer) clearTimeout(entry.timer);
+      entry.timer = setTimeout(() => emitter.emit('changed'), 300);
+      entry.timer.unref?.();
     });
     watcher.on('error', () => undefined); // a dying watcher must not kill the server
     watcher.unref?.();
+    entry.watcher = watcher;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.warn(`[cez] todos watch unavailable — the Inbox updates on refresh only (${message})`);
   }
+  watches.set(dataDir, entry);
+  return entry;
 }
 
-/** Subscribe to inbox changes; returns the unsubscribe function. */
-export function onTodosChanged(cb: () => void): () => void {
-  emitter.on('changed', cb);
-  return () => emitter.off('changed', cb);
+/** Subscribe to `dataDir`'s inbox changes; the watch is created on the first
+ *  subscription and torn down when the last subscriber leaves. Returns the
+ *  unsubscribe function (idempotent — a stale double call can never tear down
+ *  a watch that later subscribers re-created). */
+export function onTodosChanged(dataDir: string, cb: () => void): () => void {
+  const entry = watches.get(dataDir) ?? startWatch(dataDir);
+  entry.emitter.on('changed', cb);
+  let unsubscribed = false;
+  return () => {
+    if (unsubscribed) return;
+    unsubscribed = true;
+    entry.emitter.off('changed', cb);
+    if (entry.emitter.listenerCount('changed') > 0) return;
+    if (entry.timer) clearTimeout(entry.timer);
+    entry.watcher?.close();
+    watches.delete(dataDir);
+  };
+}
+
+/** Test hook: is a live watch registered for `dataDir`? */
+export function todosWatchActive(dataDir: string): boolean {
+  return watches.has(dataDir);
 }

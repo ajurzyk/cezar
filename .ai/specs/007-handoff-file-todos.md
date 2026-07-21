@@ -2,6 +2,20 @@
 
 Status: ZAIMPLEMENTOWANE 2026-07-10 · Fala: 2 · Zależy od: 002 · Wzorzec: janitor `seedHandoffFile`/`appendHandoffHeartbeat` + `todos.ts` (to jest to "sprytne globalne zarządzanie")
 
+> **Aktualizacja 2026-07-17 (#471) — globalny inbox jest domyślnie WYŁĄCZONY.**
+> Agenty potrafiły zawiesić się na nieaktualnych, wcześniej zapisanych follow-upach, przez co
+> zachowanie skilli stawało się nieprzewidywalne. Cała część "globalny inbox `todos.json`" tego
+> speca jest teraz opt-in: włącza ją `CEZ_FOLLOWUPS=1` (capability `followups` w
+> `src/server/capabilities.ts` → `/api/health`). Wyłączona: agent dostaje
+> `HANDOFF_ONLY_INSTRUCTIONS` i puste `CEZ_TODOS_FILE`, zakładka Inbox i przełącznik w kompozytorze
+> znikają, endpointy `/api/todos` degradują się do `200 []` / `409`. Wpisy w `todos.json` nie są
+> kasowane — po powrocie flagi wracają w całości.
+>
+> **Część "per task `handoff.md`" (dziennik, karta „Notatki", heartbeaty, `CEZ:DONE`) zostaje bez
+> zmian i działa zawsze** — #471 wprost ją zachowuje. Poprzedni krok w tę stronę: #444
+> (per-run `generateFollowups`), które ten issue zmienia z domyślnie-włączonego na globalnie
+> wyłączone.
+
 ## Cel
 
 Ciągłość między sesjami i taskami bez żadnej bazy: każdy task prowadzi
@@ -96,3 +110,33 @@ jednego inboxa, z którego kolejny task odpala się jednym klikiem.
   inboxa — także wtedy, gdy proces cezara sam ma ustawione `CEZ_TODOS_FILE` —
   a mimo to prowadzi `handoff.md` i kończy markerem `CEZ:DONE`. Task bez tego
   pola (stary run, stary klient) zachowuje się jak dotychczas.
+
+## Aktualizacja 2026-07-17 (#374, follow-up do #355)
+
+„▶ Odpal" **nie odpala już bezpośrednio** (`POST /api/runs`/`/api/todos/:id/start`
+z automatu) — zamiast tego nawiguje do `/new` z prefillem (`skill`/`ref` z
+sugestii, ten sam kontrakt co bookmarklety, spec 011), tak żeby użytkownik mógł
+poprawić prompt przed startem zamiast dostawać „ślepo odpaloną" sugestię
+(zgłoszenie z #355). `POST /api/todos/:id/start` zostaje jako publiczny,
+udokumentowany endpoint (BACKWARD_COMPATIBILITY.md) dla każdego, kto skryptuje
+cockpit bezpośrednio — po prostu własny Inbox GUI go już nie wywołuje.
+
+Objazd przez kompozer **nie kosztuje audit traila**: link niesie też id wpisu
+(`/new?skill=&ref=&todo=t1`), kompozer oddaje je serwerowi jako `todoId` w body
+`POST /api/runs`, a serwer po starcie runa ustawia `startedTaskId` — dokładnie ta
+sama księgowość, którą robił `/api/todos/:id/start`. Efekt dla użytkownika jest
+jak wcześniej: wpis znika z Inboxa dopiero **gdy task naprawdę wystartował**
+(reguła `visibleTodos()`), a nie na samo kliknięcie „▶ Odpal" — kto klika i wraca
+bez startu, wciąż ma wpis. Powtórny start tego samego wpisu nie nadpisuje
+pierwszego runa (pierwszy start wygrywa) i nie duplikuje taska.
+
+`todoId` jest opcjonalny, zbindowany (zod, `.max(200)`) i **best-effort**: nieznane,
+nieaktualne lub już wystartowane id tylko loguje i pomija — run i tak startuje.
+Księgowość follow-upa nigdy nie może wywalić tasku użytkownika (reguła
+graceful degradation z CODE_REVIEW.md). Sam `todo` nie ma żadnej władzy: nie
+uzbraja `auto`/`key`, więc link z prefillem dalej nie potrafi odpalić nic ślepo.
+
+Przy okazji: `HANDOFF_INSTRUCTIONS` (`src/handoff.ts`) dostał ostrzejszy
+kontrakt — agent dopisuje wpis do `todos.json` tylko gdy zostaje faktycznie
+actionable follow-up, nie przy każdym zakończonym tasku (zbyt „gadatliwe"
+sugestie z #355).

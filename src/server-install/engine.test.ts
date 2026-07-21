@@ -168,6 +168,36 @@ describe('engine', () => {
     expect(res.state.installed).toBe(true); // optional skip doesn't block
   });
 
+  it('two instances install to separate records that do not resume each other', async () => {
+    // default install
+    await runInstall(strategyOf([fakeStep('a')]), opts());
+    // a second install for a different domain, keyed by its slug + its own port
+    const b = fakeStep('a');
+    const res = await runInstall(
+      strategyOf([b]),
+      opts({ instance: 'shop-example-com', domain: 'shop.example.com', port: 4322 }),
+    );
+    expect(res.status).toBe('complete');
+    // the second run actually RAN its step — it did NOT report "already done"
+    // from the default record (the "asks me to reinstall" bug being fixed)
+    expect(b.run).toHaveBeenCalledOnce();
+    expect(loadServerState('shop-example-com').domain).toBe('shop.example.com');
+    expect(loadServerState('shop-example-com').primaryPort).toBe(4322);
+    expect(loadServerState('shop-example-com').instance).toBe('shop-example-com');
+    // the default record is untouched (still port 4321, no domain)
+    expect(loadServerState().primaryPort).toBe(4321);
+    expect(loadServerState().domain).toBeUndefined();
+  });
+
+  it('a named instance uninstall removes its record; a default uninstall keeps the file', async () => {
+    await runInstall(strategyOf([fakeStep('a')]), opts({ instance: 'shop-example-com', domain: 'shop.example.com', port: 4322 }));
+    const res = await runUninstall(strategyOf([fakeStep('a')]), opts({ instance: 'shop-example-com' }));
+    expect(res.status).toBe('complete');
+    // the named record file is gone → it no longer reserves a port or lists
+    const { listServerInstances } = await import('./state.js');
+    expect(listServerInstances().some((i) => i.instance === 'shop-example-com')).toBe(false);
+  });
+
   it('--yes skips optional steps rather than running them non-interactively', async () => {
     const a = fakeStep('a');
     const opt = fakeStep('opt', { optional: true });

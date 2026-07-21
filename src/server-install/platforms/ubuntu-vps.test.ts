@@ -13,6 +13,7 @@ function ctxWith(over: { ui?: Ui; runner?: Runner; dryRun?: boolean }): InstallC
   return {
     state: { schema: 1, installed: false, primaryPort: 4321, steps: {} },
     ui: over.ui ?? createAutoUi(),
+    instance: 'default',
     runner: over.runner ?? okRunner,
     save: async () => {},
     dryRun: over.dryRun ?? false,
@@ -103,6 +104,51 @@ describe('nginxVhost', () => {
     expect(nginxVhost(4321)).toContain('server_name _;');
     // The SSL step rewrites server_name to the domain so certbot --nginx can find it.
     expect(nginxVhost(4321, 'cezar.example.com')).toContain('server_name cezar.example.com;');
+  });
+
+  it('defaults to the legacy htpasswd path but accepts an instance-scoped one', () => {
+    expect(nginxVhost(4321)).toContain('auth_basic_user_file /etc/cezar/htpasswd;');
+    expect(nginxVhost(4322, 'shop.example.com', '/etc/cezar/htpasswd-shop-example-com')).toContain(
+      'auth_basic_user_file /etc/cezar/htpasswd-shop-example-com;',
+    );
+  });
+});
+
+describe('ubuntu-vps multi-instance artifact paths', () => {
+  /** ctx for a named instance whose domain is known up front. */
+  function namedCtx(): InstallContext {
+    const c = ctxWith({ dryRun: true });
+    c.instance = 'shop-example-com';
+    c.state.domain = 'shop.example.com';
+    c.state.primaryPort = 4322;
+    return c;
+  }
+
+  it('the default instance records the legacy un-suffixed nginx/htpasswd paths', async () => {
+    const ui = { ...createAutoUi(), text: async () => 'ops', password: async () => 'longenough' } as Ui;
+    const ctx = { ...ctxWith({ ui, dryRun: true }), assumeYes: true } as InstallContext;
+    const created = await stepById('nginx-proxy').run(ctx);
+    const paths = (created?.artifacts ?? []).map((a) => a.path).filter(Boolean);
+    expect(paths).toContain('/etc/nginx/sites-available/cezar');
+    expect(paths).toContain('/etc/nginx/sites-enabled/cezar');
+    expect(paths).toContain('/etc/cezar/htpasswd');
+  });
+
+  it('a named instance suffixes the nginx site + htpasswd with its slug', async () => {
+    const ctx = namedCtx();
+    (ctx as { assumeYes: boolean }).assumeYes = true;
+    ctx.ui = { ...createAutoUi(), text: async () => 'ops', password: async () => 'longenough' } as Ui;
+    const created = await stepById('nginx-proxy').run(ctx);
+    const paths = (created?.artifacts ?? []).map((a) => a.path).filter(Boolean);
+    expect(paths).toContain('/etc/nginx/sites-available/cezar-shop-example-com');
+    expect(paths).toContain('/etc/nginx/sites-enabled/cezar-shop-example-com');
+    expect(paths).toContain('/etc/cezar/htpasswd-shop-example-com');
+  });
+
+  it("a named instance's systemd unit is cezar-<slug>.service", async () => {
+    const created = await stepById('autostart').run(namedCtx());
+    const svc = created?.artifacts.find((a) => a.type === 'service');
+    expect(svc?.name).toBe('cezar-shop-example-com.service');
   });
 });
 

@@ -52,6 +52,16 @@ describe('AppShell', () => {
     expect(within(screen.getByRole('main')).getByText('route content')).toBeTruthy()
   })
 
+  it('resets the main scroller to the top on navigation (#mobile-scroll-top)', () => {
+    renderShell('/')
+    const main = screen.getByRole('main')
+    main.scrollTop = 640
+    expect(main.scrollTop).toBe(640) // jsdom kept the write — the reset below is the effect's
+    fireEvent.click(within(nav()).getByRole('link', { name: 'GitHub' }))
+    expect(screen.getByTestId('location').textContent).toBe('/github')
+    expect(main.scrollTop).toBe(0)
+  })
+
   it('renders the whole nav as real router links', () => {
     renderShell()
     const links = within(nav()).getAllByRole('link')

@@ -63,6 +63,10 @@ const GOLDEN_FIXTURES = [
   'thinking-edit-write-todo',
   'subagent-task',
   'failed-and-denied',
+  // Wire shapes transcribed from a real `claude --output-format stream-json`
+  // capture (CLI 2.1.211) — the task tools' result text is the mapper's only
+  // source for task ids, so it is pinned here verbatim.
+  'task-tools-plan',
 ] as const;
 
 describe('claude → v2 golden fixtures', () => {
@@ -209,6 +213,329 @@ describe('mapClaudeMessage edge cases', () => {
     expect(bad.events.map((e) => e.type)).toEqual(['item.started']);
   });
 
+  // Task-tool wire shapes below are transcribed from a real `claude
+  // --output-format stream-json` capture (CLI 2.1.211): a create answers
+  // `Task #1 created successfully: <subject>`, an update `Updated task #1
+  // status`, and TaskList `#1 [in_progress] One` per line. A rejected update
+  // answers `Task not found` with `is_error` UNSET, so result text — not
+  // `is_error` — is the only outcome signal the task tools give.
+  const taskUse = (id: string, name: string, input: unknown, parentToolUseId?: string) => ({
+    type: 'assistant' as const,
+    ...(parentToolUseId === undefined ? {} : { parent_tool_use_id: parentToolUseId }),
+    message: { role: 'assistant', content: [{ type: 'tool_use', id, name, input }] },
+  });
+  const taskResult = (toolUseId: string, content: string, isError?: true) => ({
+    type: 'user' as const,
+    message: {
+      role: 'user',
+      content: [
+        { type: 'tool_result', tool_use_id: toolUseId, content, ...(isError === undefined ? {} : { is_error: isError }) },
+      ],
+    },
+  });
+  /** Create a task and land its harness-assigned id, as the real wire does. */
+  const create = (
+    state: ClaudeUiMapperState,
+    toolUseId: string,
+    subject: string,
+    id: string,
+    extra: Record<string, unknown> = {},
+  ) => {
+    const used = mapClaudeMessage(taskUse(toolUseId, 'TaskCreate', { subject, description: 'd', ...extra }), state);
+    return mapClaudeMessage(taskResult(toolUseId, `Task #${id} created successfully: ${subject}`), used.state);
+  };
+
+  it('builds a plan incrementally, keying tasks by the id the TaskCreate result reports', () => {
+    let state = createClaudeUiState();
+
+    // The id is only knowable from the result, so the create itself renders
+    // nothing — the plan lands when the harness answers.
+    const used = mapClaudeMessage(
+      taskUse('toolu_c1', 'TaskCreate', { subject: 'Wire the dock', activeForm: 'Wiring the dock' }),
+      state,
+    );
+    expect(used.events.map((event) => event.type)).toEqual(['item.started']);
+    const landed = mapClaudeMessage(taskResult('toolu_c1', 'Task #1 created successfully: Wire the dock'), used.state);
+    state = landed.state;
+    expect(landed.events.at(-1)).toEqual({
+      type: 'plan.updated',
+      entries: [{ content: 'Wire the dock', status: 'pending', activeForm: 'Wiring the dock' }],
+    });
+
+    const second = create(state, 'toolu_c2', 'Add tests', '2');
+    state = second.state;
+    expect(second.events.at(-1)).toEqual({
+      type: 'plan.updated',
+      entries: [
+        { content: 'Wire the dock', status: 'pending', activeForm: 'Wiring the dock' },
+        { content: 'Add tests', status: 'pending' },
+      ],
+    });
+
+    // An update carries the harness's own taskId, so it applies at call time.
+    const update = mapClaudeMessage(taskUse('toolu_u1', 'TaskUpdate', { taskId: '1', status: 'in_progress' }), state);
+    state = update.state;
+    expect(update.events.at(-1)).toEqual({
+      type: 'plan.updated',
+      entries: [
+        { content: 'Wire the dock', status: 'in_progress', activeForm: 'Wiring the dock' },
+        { content: 'Add tests', status: 'pending' },
+      ],
+    });
+
+    // A numeric taskId is coerced, so the update still lands on task 2.
+    const numeric = mapClaudeMessage(taskUse('toolu_u2', 'TaskUpdate', { taskId: 2, status: 'completed' }), state);
+    state = numeric.state;
+    expect(numeric.events.at(-1)).toEqual({
+      type: 'plan.updated',
+      entries: [
+        { content: 'Wire the dock', status: 'in_progress', activeForm: 'Wiring the dock' },
+        { content: 'Add tests', status: 'completed' },
+      ],
+    });
+
+    const unknown = mapClaudeMessage(taskUse('toolu_u3', 'TaskUpdate', { taskId: '9', status: 'completed' }), state);
+    expect(unknown.events.map((event) => event.type)).toEqual(['item.started']);
+    const unchanged = mapClaudeMessage(taskUse('toolu_u4', 'TaskUpdate', { taskId: '2', status: 'completed' }), state);
+    expect(unchanged.events.map((event) => event.type)).toEqual(['item.started']);
+  });
+
+  it('honors the harness id even when it does not match the number of creates', () => {
+    // A resumed session (`claude --resume`) reopens a conversation whose task
+    // list is already at 1..N while this mapper starts empty, so the id of the
+    // first create it sees is NOT '1'. Counting creates would file this task
+    // under '1' and then land task 3's updates on it — a confidently wrong plan
+    // in the dock, which is worse than an empty one. The id comes off the wire.
+    let state = createClaudeUiState();
+    const resumedUpdate = mapClaudeMessage(taskUse('toolu_u0', 'TaskUpdate', { taskId: '1', status: 'in_progress' }), state);
+    // Task 1 belongs to the pre-resume session: unknown here, so it is dropped
+    // rather than applied to whatever this mapper happens to hold.
+    expect(resumedUpdate.events.map((event) => event.type)).toEqual(['item.started']);
+    state = resumedUpdate.state;
+
+    const created = create(state, 'toolu_c1', 'New task', '3');
+    state = created.state;
+    expect(created.events.at(-1)).toEqual({
+      type: 'plan.updated',
+      entries: [{ content: 'New task', status: 'pending' }],
+    });
+
+    // The id the mapper would have guessed ('1') must not touch the new task…
+    expect(
+      mapClaudeMessage(taskUse('toolu_u1', 'TaskUpdate', { taskId: '1', status: 'completed' }), state).events.map(
+        (event) => event.type,
+      ),
+    ).toEqual(['item.started']);
+    // …and the real one must.
+    const real = mapClaudeMessage(taskUse('toolu_u2', 'TaskUpdate', { taskId: '3', status: 'completed' }), state);
+    expect(real.events.at(-1)).toEqual({
+      type: 'plan.updated',
+      entries: [{ content: 'New task', status: 'completed' }],
+    });
+  });
+
+  it('recovers a resumed session\'s pre-existing tasks from a TaskList result', () => {
+    let state = createClaudeUiState();
+    // TaskList is the only message carrying the whole list, so it is how tasks
+    // created before this mapper existed reach the dock at all.
+    const used = mapClaudeMessage(taskUse('toolu_l1', 'TaskList', {}), state);
+    const listed = mapClaudeMessage(
+      taskResult('toolu_l1', '#1 [in_progress] Alpha\n#2 [completed] Beta\n#4 [pending] Gamma'),
+      used.state,
+    );
+    state = listed.state;
+    expect(listed.events.at(-1)).toEqual({
+      type: 'plan.updated',
+      entries: [
+        { content: 'Alpha', status: 'in_progress' },
+        { content: 'Beta', status: 'completed' },
+        // Gap at #3 (deleted before the resume): ids are the harness's, not a
+        // dense index, so the mapper must key on them verbatim.
+        { content: 'Gamma', status: 'pending' },
+      ],
+    });
+
+    // Recovered ids are real ids: updates against them now land.
+    const update = mapClaudeMessage(taskUse('toolu_u1', 'TaskUpdate', { taskId: '4', status: 'completed' }), state);
+    expect(update.events.at(-1)).toEqual({
+      type: 'plan.updated',
+      entries: [
+        { content: 'Alpha', status: 'in_progress' },
+        { content: 'Beta', status: 'completed' },
+        { content: 'Gamma', status: 'completed' },
+      ],
+    });
+  });
+
+  it('keeps activeForm across a TaskList resync and stays silent when nothing changed', () => {
+    let state = createClaudeUiState();
+    state = create(state, 'toolu_c1', 'One', '1', { activeForm: 'Oneing' }).state;
+
+    // TaskList omits activeForm, so a resync must not blank the dock's label.
+    const used = mapClaudeMessage(taskUse('toolu_l1', 'TaskList', {}), state);
+    const resync = mapClaudeMessage(taskResult('toolu_l1', '#1 [pending] One'), used.state);
+    // Nothing changed, so the resync is pure churn and must not re-emit.
+    expect(resync.events.map((event) => event.type)).toEqual(['item.completed']);
+    state = resync.state;
+
+    const moved = mapClaudeMessage(taskUse('toolu_u1', 'TaskUpdate', { taskId: '1', status: 'in_progress' }), state);
+    expect(moved.events.at(-1)).toEqual({
+      type: 'plan.updated',
+      entries: [{ content: 'One', status: 'in_progress', activeForm: 'Oneing' }],
+    });
+  });
+
+  it('ignores an unparsable TaskList rather than dropping live rows', () => {
+    let state = createClaudeUiState();
+    state = create(state, 'toolu_c1', 'Real task', '1').state;
+    const used = mapClaudeMessage(taskUse('toolu_l1', 'TaskList', {}), state);
+
+    // A wording change ("No tasks yet", a header line, …) must leave the known
+    // plan alone: a half-parsed list would silently delete rows that still exist.
+    for (const body of ['No tasks yet', 'Tasks:\n#1 [pending] Real task', '#1 (pending) Real task']) {
+      const listed = mapClaudeMessage(taskResult('toolu_l1', body), used.state);
+      expect(listed.events.map((event) => event.type)).toEqual(['item.completed']);
+      expect(listed.state.tasks.get('1')).toEqual({ content: 'Real task', status: 'pending' });
+    }
+    // An errored TaskList is likewise inert.
+    const errored = mapClaudeMessage(taskResult('toolu_l1', '#1 [pending] Other', true), used.state);
+    expect(errored.events.map((event) => event.type)).toEqual(['item.completed']);
+  });
+
+  it('drops a create whose result does not confirm it, minting no id for it', () => {
+    let state = createClaudeUiState();
+    // A create that was denied/failed never becomes a task. Nothing downstream
+    // shifts, because no id was invented for it in the first place.
+    const denied = mapClaudeMessage(taskUse('toolu_c1', 'TaskCreate', { subject: 'Never created' }), state);
+    const refused = mapClaudeMessage(taskResult('toolu_c1', 'Error: permission denied', true), denied.state);
+    expect(refused.events.map((event) => event.type)).toEqual(['item.completed']);
+    expect(refused.state.tasks.size).toBe(0);
+    expect(refused.state.pendingTaskCreates.size).toBe(0);
+
+    // Same for a success-shaped result the mapper cannot read an id out of.
+    const odd = mapClaudeMessage(taskUse('toolu_c2', 'TaskCreate', { subject: 'Unreadable' }), state);
+    const unreadable = mapClaudeMessage(taskResult('toolu_c2', 'Task created successfully'), odd.state);
+    expect(unreadable.events.map((event) => event.type)).toEqual(['item.completed']);
+    expect(unreadable.state.tasks.size).toBe(0);
+
+    // The next real create still lands under the id the harness gives it.
+    state = create(state, 'toolu_c3', 'Real', '1').state;
+    expect([...state.tasks.keys()]).toEqual(['1']);
+  });
+
+  it('ignores task tools called by a subagent', () => {
+    // A subagent's tool list has no task tools at all (verified against the live
+    // harness), and if that ever changes its ids are its own — folding them in
+    // would corrupt the main agent's id space.
+    let state = createClaudeUiState();
+    state = create(state, 'toolu_c1', 'Main task', '1').state;
+
+    const sub = mapClaudeMessage(taskUse('toolu_c2', 'TaskCreate', { subject: 'Sub task' }, 'toolu_agent'), state);
+    expect(sub.events.map((event) => event.type)).toEqual(['item.started']);
+    expect(sub.state.pendingTaskCreates.size).toBe(0);
+    const subResult = mapClaudeMessage(taskResult('toolu_c2', 'Task #1 created successfully: Sub task'), sub.state);
+    expect(subResult.events.map((event) => event.type)).toEqual(['item.completed']);
+    expect([...subResult.state.tasks.values()]).toEqual([{ content: 'Main task', status: 'pending' }]);
+
+    // A subagent's TaskList describes ITS tasks, so it must not resync the main
+    // plan either — the result side needs the same guard as the call side.
+    const subList = mapClaudeMessage(taskUse('toolu_l1', 'TaskList', {}, 'toolu_agent'), state);
+    const subListed = mapClaudeMessage(taskResult('toolu_l1', '#1 [completed] Sub task'), subList.state);
+    expect(subListed.events.map((event) => event.type)).toEqual(['item.completed']);
+    expect([...subListed.state.tasks.values()]).toEqual([{ content: 'Main task', status: 'pending' }]);
+
+    // A subagent's TaskUpdate must not move a main-agent row.
+    const subUpdate = mapClaudeMessage(
+      taskUse('toolu_u1', 'TaskUpdate', { taskId: '1', status: 'completed' }, 'toolu_agent'),
+      state,
+    );
+    expect(subUpdate.events.map((event) => event.type)).toEqual(['item.started']);
+    expect([...subUpdate.state.tasks.values()]).toEqual([{ content: 'Main task', status: 'pending' }]);
+  });
+
+  it('tolerates `running` as an alias for in_progress, though the schema has no such status', () => {
+    const state = create(createClaudeUiState(), 'toolu_c1', 'A', '1').state;
+    const mapped = mapClaudeMessage(taskUse('toolu_u1', 'TaskUpdate', { taskId: '1', status: 'running' }), state);
+    expect(mapped.events.at(-1)).toEqual({
+      type: 'plan.updated',
+      entries: [{ content: 'A', status: 'in_progress' }],
+    });
+  });
+
+  it('drops a task TaskUpdate deletes, and leaves the surviving ids alone', () => {
+    let state = createClaudeUiState();
+    state = create(state, 'toolu_c1', 'Task A', '1').state;
+    state = create(state, 'toolu_c2', 'Task B', '2').state;
+
+    // `deleted` is a real TaskUpdate status: it removes the task outright.
+    const deleted = mapClaudeMessage(taskUse('toolu_u1', 'TaskUpdate', { taskId: '1', status: 'deleted' }), state);
+    state = deleted.state;
+    expect(deleted.events.at(-1)).toEqual({
+      type: 'plan.updated',
+      entries: [{ content: 'Task B', status: 'pending' }],
+    });
+
+    // The harness does not renumber after a delete — Task B stays '2' and the
+    // next create is '3'.
+    state = create(state, 'toolu_c3', 'Task C', '3').state;
+    const progressed = mapClaudeMessage(taskUse('toolu_u2', 'TaskUpdate', { taskId: '3', status: 'completed' }), state);
+    state = progressed.state;
+    expect(progressed.events.at(-1)).toEqual({
+      type: 'plan.updated',
+      entries: [
+        { content: 'Task B', status: 'pending' },
+        { content: 'Task C', status: 'completed' },
+      ],
+    });
+
+    // Deleting an unknown id changes nothing; deleting the rest empties the plan.
+    expect(
+      mapClaudeMessage(taskUse('toolu_u3', 'TaskUpdate', { taskId: '1', status: 'deleted' }), state).events.map(
+        (event) => event.type,
+      ),
+    ).toEqual(['item.started']);
+    state = mapClaudeMessage(taskUse('toolu_u4', 'TaskUpdate', { taskId: '2', status: 'deleted' }), state).state;
+    const emptied = mapClaudeMessage(taskUse('toolu_u5', 'TaskUpdate', { taskId: '3', status: 'deleted' }), state);
+    expect(emptied.events.at(-1)).toEqual({ type: 'plan.updated', entries: [] });
+  });
+
+  it('applies TaskUpdate subject and activeForm edits, and trims the subject', () => {
+    let state = createClaudeUiState();
+    const created = create(state, 'toolu_c1', '  Old name  ', '1');
+    state = created.state;
+    expect(created.events.at(-1)).toEqual({
+      type: 'plan.updated',
+      entries: [{ content: 'Old name', status: 'pending' }],
+    });
+
+    const renamed = mapClaudeMessage(
+      taskUse('toolu_u1', 'TaskUpdate', { taskId: '1', subject: 'New name', activeForm: 'Doing the new thing' }),
+      state,
+    );
+    state = renamed.state;
+    expect(renamed.events.at(-1)).toEqual({
+      type: 'plan.updated',
+      entries: [{ content: 'New name', status: 'pending', activeForm: 'Doing the new thing' }],
+    });
+
+    // A metadata-only update that changes nothing we render stays silent.
+    const noop = mapClaudeMessage(taskUse('toolu_u2', 'TaskUpdate', { taskId: '1', owner: 'someone' }), state);
+    expect(noop.events.map((event) => event.type)).toEqual(['item.started']);
+  });
+
+  it('ignores a TaskCreate with no usable subject, even once its result lands', () => {
+    let state = createClaudeUiState();
+    for (const input of [{ description: 'no subject' }, { subject: '   ', description: 'd' }]) {
+      const used = mapClaudeMessage(taskUse('toolu_c0', 'TaskCreate', input), state);
+      expect(used.events.map((event) => event.type)).toEqual(['item.started']);
+      // The harness still mints an id for a blank subject, but with ids read off
+      // the wire that no longer offsets anything — the row is simply not shown.
+      const landed = mapClaudeMessage(taskResult('toolu_c0', 'Task #1 created successfully:   '), used.state);
+      expect(landed.events.map((event) => event.type)).toEqual(['item.completed']);
+      expect(landed.state.tasks.size).toBe(0);
+    }
+  });
+
   it('init without session_id falls back to the state fallback (dry-run mock shape)', () => {
     const s = createClaudeUiState({ fallbackSessionId: 'spec-session' });
     const [event] = mapClaudeMessage({ type: 'system', subtype: 'init' }, s).events;
@@ -279,4 +606,83 @@ describe('ClaudeCliRunner v2 wiring (against the bundled mock CLI)', () => {
       await rm(cwd, { recursive: true, force: true });
     }
   }, 30_000);
+
+  // The `mock:subagents` trigger is the dry-run testability hook for the Agents
+  // dock (spec `.ai/specs/2026-07-20-grouped-subagent-display.md`, #474): without
+  // it the dock is unreachable offline, so QA, screenshots and the e2e smoke all
+  // depend on this wire shape staying correct.
+  it('mock:subagents fans out two parented Task agents', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'cez-ui-mapper-sub-'));
+    try {
+      const runner = new ClaudeCliRunner({ bin: mockBin, timeoutMs: 60_000 });
+      const v2: UiEvent[] = [];
+      const session = runner.startSession(
+        { userPrompt: 'mock:subagents', cwd, sessionId: 'sess-mock-sub' },
+        () => {},
+        { autoEndAfterFirstTurn: true, onUiEvent: (e) => v2.push(e) },
+      );
+      await session.result;
+
+      const started = v2.filter(
+        (e): e is Extract<UiEvent, { type: 'item.started' }> => e.type === 'item.started',
+      );
+      // Exactly two parent-less task items — the dock's two rows, and the "N/2" denominator.
+      const spawns = started.filter(
+        (e) => e.item.kind === 'tool' && e.item.toolKind === 'task' && e.item.parentItemId === undefined,
+      );
+      expect(spawns).toHaveLength(2);
+      expect(spawns.map((e) => e.item.kind === 'tool' && e.item.title)).toEqual([
+        'Task: Audit the auth flow',
+        'Task: Review the store layer',
+      ]);
+      // `subagent_type` reaches the item input — the row's type badge reads it.
+      expect(spawns[0]!.item).toMatchObject({ input: { subagent_type: 'general-purpose' } });
+      expect(spawns[1]!.item).toMatchObject({ input: { subagent_type: 'code-reviewer' } });
+
+      // Every agent owns children, attributed via parentItemId — no orphans.
+      const parentIds = new Set(spawns.map((e) => e.item.id));
+      for (const parentId of parentIds) {
+        const children = started.filter((e) => e.item.parentItemId === parentId);
+        expect(children.length).toBeGreaterThan(0);
+      }
+      // Both spawns settle, so a finished run docks them as completed.
+      const completedSpawns = v2.filter(
+        (e) => e.type === 'item.completed' && e.item.kind === 'tool' && parentIds.has(e.item.id),
+      );
+      expect(completedSpawns).toHaveLength(2);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  }, 30_000);
+});
+
+/**
+ * #528 — a blank `thinking` block carries no information; minting an item for
+ * it only produces a dead "Thinking —" row in the session view.
+ */
+describe('claude blank thinking blocks (#528)', () => {
+  function reasoningItems(msg: unknown): UiEvent[] {
+    const mapped = mapClaudeMessage(msg, createClaudeUiState());
+    return mapped.events.filter((e) => 'item' in e && e.item.kind === 'reasoning');
+  }
+
+  function assistant(thinking: string): unknown {
+    return {
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'thinking', thinking }] },
+    };
+  }
+
+  it.each([['', 'empty'], ['   ', 'spaces'], ['\n\t ', 'whitespace']])(
+    'mints no reasoning item for a %s thinking block (%s)',
+    (thinking) => {
+      expect(reasoningItems(assistant(thinking))).toEqual([]);
+    },
+  );
+
+  it('still mints an item for real thinking text', () => {
+    const events = reasoningItems(assistant('Checking the auth path.'));
+    expect(events).toHaveLength(2); // started + completed
+    expect(events.every((e) => 'item' in e && e.item.kind === 'reasoning' && e.item.text === 'Checking the auth path.')).toBe(true);
+  });
 });

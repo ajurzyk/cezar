@@ -1,7 +1,7 @@
 import { QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
 import type { RunRecord, TodoItem } from '@/api/types'
@@ -66,7 +66,23 @@ const STARTED_RUN: RunRecord = {
 interface SentRequest {
   path: string
   method: string
+  /** Parsed request body, or undefined for a bodyless request — a plain Run must stay bodyless. */
+  body?: unknown
 }
+
+/** Health fixture: `backends` names the runners the host reports as installed (#401). A
+ *  single-backend host is the default, which is what the pre-#401 tests assume. `followups`
+ *  is on throughout — an inbox-less server (#471) renders the "inbox is off" state and has
+ *  no cards at all, which is that feature's own test, not this file's. */
+const health = (backends: readonly string[] = ['claude']) => ({
+  version: '0.0.0-test',
+  repoRoot: '/repo',
+  repo: { root: '/repo', branch: 'main' },
+  forge: null,
+  capabilities: { localHandoff: true, followups: true },
+  defaultRunner: backends[0] ?? 'claude',
+  checks: backends.map((name) => ({ name, available: true })),
+})
 
 const jsonResponse = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
@@ -77,6 +93,8 @@ const jsonResponse = (body: unknown, status = 200) =>
 function stubFetch(
   overrides: Record<string, () => Response> = {},
   todos: TodoItem[] = TODOS,
+  backends: readonly string[] = ['claude'],
+  defaultModels: Record<string, string> = {},
 ): SentRequest[] {
   const sent: SentRequest[] = []
   let inbox = [...todos]
@@ -85,22 +103,28 @@ function stubFetch(
     vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
       const path = String(input)
       const method = init.method ?? 'GET'
-      sent.push({ path, method })
+      sent.push({
+        path,
+        method,
+        body: init.body === undefined ? undefined : JSON.parse(String(init.body)),
+      })
       const override = overrides[`${method} ${path}`]
       if (override) return override()
       if (method === 'GET' && path === '/api/todos') return jsonResponse(inbox)
       if (method === 'GET' && path === '/api/runs') return jsonResponse([RUN_1])
-      if (method === 'DELETE' && path === '/api/todos/t1') {
-        inbox = inbox.filter((item) => item.id !== 't1')
+      // The runner/model pills (#401) read the host's backends and the per-runner defaults.
+      if (method === 'GET' && path === '/api/health') return jsonResponse(health(backends))
+      if (method === 'GET' && path === '/api/config') return jsonResponse({ defaultModels })
+      if (method === 'DELETE' && path.startsWith('/api/todos/')) {
+        const id = path.slice('/api/todos/'.length)
+        inbox = inbox.filter((item) => item.id !== id)
         return jsonResponse({ removed: true })
       }
-      if (method === 'DELETE' && path === '/api/todos/t2') {
-        inbox = inbox.filter((item) => item.id !== 't2')
-        return jsonResponse({ removed: true })
-      }
-      if (method === 'POST' && path === '/api/todos/t1/start') {
+      if (method === 'POST' && path.endsWith('/start')) {
+        const id = path.slice('/api/todos/'.length, -'/start'.length)
+        if (!inbox.some((item) => item.id === id)) return jsonResponse({ error: 'not found' }, 404)
         inbox = inbox.map((item) =>
-          item.id === 't1' ? { ...item, startedTaskId: STARTED_RUN.id } : item,
+          item.id === id ? { ...item, startedTaskId: STARTED_RUN.id } : item,
         )
         return jsonResponse({ run: STARTED_RUN }, 201)
       }
@@ -108,6 +132,19 @@ function stubFetch(
     }),
   )
   return sent
+}
+
+/** The Run POST the card actually sent — the assertion the #401 tests below turn on. */
+const startBody = (sent: readonly SentRequest[], id: string): unknown =>
+  sent.find((r) => r.method === 'POST' && r.path === `/api/todos/${id}/start`)?.body
+
+/** Open a pill's dropdown and choose an option by its visible label (the house pattern:
+ *  Radix opens on pointerDown, and the menu renders in a portal outside the card). Scoped by
+ *  card, because every runnable card carries its own pair. */
+async function pick(card: HTMLElement, slot: string, label: string) {
+  fireEvent.pointerDown(card.querySelector(`[data-slot="${slot}"]`)!)
+  const options = await screen.findAllByRole('menuitemradio')
+  fireEvent.click(options.find((o) => o.textContent?.includes(label)) as HTMLElement)
 }
 
 function renderInbox() {
@@ -233,6 +270,105 @@ describe('Run', () => {
   })
 })
 
+// ---- Run: the runner/model pills (#401) -------------------------------------------------------
+
+describe('Run — backend selection (#401)', () => {
+  it('an untouched card starts on the host default: no pills touched, no body sent', async () => {
+    const sent = stubFetch()
+    renderInbox()
+
+    await waitFor(() => expect(cards()).toHaveLength(2))
+    fireEvent.click(cards()[0]!.querySelector('[data-action="todo-run"]')!)
+
+    await waitFor(() => expect(startBody(sent, 't1')).toBeUndefined())
+  })
+
+  it('an untouched card honors Settings → Agents defaultModels — the one real behavior change', async () => {
+    // Pre-#401 the Inbox ignored `defaultModels` (it is a client-side preference the server
+    // never reads), so a Run always went out bare. Now the card resolves it like the composer
+    // does: an untouched card on a host with a configured default sends that model. This is
+    // the intended consequence of "cannot drift from the composer" — pinned so it stays a
+    // decision rather than an accident.
+    const sent = stubFetch({}, TODOS, ['claude'], { claude: 'opus' })
+    renderInbox()
+
+    await waitFor(() => expect(cards()).toHaveLength(2))
+    const card = cards()[0]!
+    await waitFor(() => expect(card.querySelector('[data-slot="model-pill"]')?.textContent).toContain('opus'))
+    fireEvent.click(card.querySelector('[data-action="todo-run"]')!)
+
+    await waitFor(() => expect(startBody(sent, 't1')).toEqual({ model: 'opus' }))
+  })
+
+  it('a single-backend host hides the runner pill but still offers the model (composer rule)', async () => {
+    stubFetch()
+    renderInbox()
+
+    await waitFor(() => expect(cards()).toHaveLength(2))
+    const card = cards()[0]!
+    await waitFor(() => expect(card.querySelector('[data-slot="model-pill"]')).not.toBeNull())
+    expect(card.querySelector('[data-slot="runner-pill"]')).toBeNull()
+  })
+
+  it('a multi-backend host offers the runner pill, and the pick reaches the POST', async () => {
+    const sent = stubFetch({}, TODOS, ['claude', 'codex'])
+    renderInbox()
+
+    await waitFor(() => expect(cards()).toHaveLength(2))
+    const card = cards()[0]!
+    await waitFor(() => expect(card.querySelector('[data-slot="runner-pill"]')).not.toBeNull())
+
+    await pick(card, 'runner-pill', 'codex')
+    fireEvent.click(card.querySelector('[data-action="todo-run"]')!)
+
+    await waitFor(() => expect(startBody(sent, 't1')).toEqual({ runner: 'codex' }))
+  })
+
+  it('a model pick rides along with the runner', async () => {
+    const sent = stubFetch({}, TODOS, ['claude', 'codex'])
+    renderInbox()
+
+    await waitFor(() => expect(cards()).toHaveLength(2))
+    const card = cards()[0]!
+    await waitFor(() => expect(card.querySelector('[data-slot="runner-pill"]')).not.toBeNull())
+
+    await pick(card, 'runner-pill', 'codex')
+    await pick(card, 'model-pill', 'gpt-5.1-codex')
+    fireEvent.click(card.querySelector('[data-action="todo-run"]')!)
+
+    await waitFor(() =>
+      expect(startBody(sent, 't1')).toEqual({ runner: 'codex', model: 'gpt-5.1-codex' }),
+    )
+  })
+
+  it('the pick is per card — aiming one entry never re-aims the next', async () => {
+    const second: TodoItem = { ...TODO_FULL, id: 't9', summary: 'A second runnable follow-up' }
+    const sent = stubFetch({}, [TODO_FULL, second], ['claude', 'codex'])
+    renderInbox()
+
+    await waitFor(() => expect(cards()).toHaveLength(2))
+    const [first, next] = cards() as [HTMLElement, HTMLElement]
+    await waitFor(() => expect(first.querySelector('[data-slot="runner-pill"]')).not.toBeNull())
+
+    await pick(first, 'runner-pill', 'codex')
+    // The untouched card still shows the host default, and starts on it.
+    expect(next.querySelector('[data-slot="runner-pill"]')?.textContent).toContain('claude')
+
+    fireEvent.click(next.querySelector('[data-action="todo-run"]')!)
+    await waitFor(() => expect(startBody(sent, 't9')).toBeUndefined())
+  })
+
+  it('a non-runnable note gets no pills — there is no run to aim', async () => {
+    stubFetch()
+    renderInbox()
+
+    await waitFor(() => expect(cards()).toHaveLength(2))
+    const note = cards()[1]!
+    expect(note.querySelector('[data-slot="todo-engine"]')).toBeNull()
+    expect(note.querySelector('[data-slot="model-pill"]')).toBeNull()
+  })
+})
+
 // ---- Acknowledge ------------------------------------------------------------------------------
 
 describe('Acknowledge', () => {
@@ -322,5 +458,250 @@ describe('empty and error states', () => {
       return found!
     })
     expect(state.textContent).toContain('disk exploded')
+  })
+})
+
+// ---- Add instructions (#413) -------------------------------------------------------------------
+
+describe('Add instructions', () => {
+  beforeEach(() => {
+    // The template menu is a Popover + cmdk: floating-ui positions with a ResizeObserver, and
+    // cmdk scrolls the active item into view. jsdom has neither (same stubs as github.test.tsx).
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    )
+    Element.prototype.scrollIntoView = vi.fn()
+  })
+
+  interface CapturedRequest {
+    path: string
+    method: string
+    body?: unknown
+  }
+
+  /** A dedicated stub (rather than extending `stubFetch`/`SentRequest`) so capturing the POST
+   *  body here can't change the shape the OTHER describe blocks assert with `toContainEqual`. */
+  function stubFetchCapturingBody(uiState: Record<string, unknown> = {}): CapturedRequest[] {
+    const captured: CapturedRequest[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
+        const path = String(input)
+        const method = init.method ?? 'GET'
+        const body = typeof init.body === 'string' ? (JSON.parse(init.body) as unknown) : undefined
+        captured.push({ path, method, body })
+        if (method === 'GET' && path === '/api/todos') return jsonResponse(TODOS)
+        if (method === 'GET' && path === '/api/runs') return jsonResponse([RUN_1])
+        if (method === 'GET' && path === '/api/ui-state') return jsonResponse(uiState)
+        if (method === 'POST' && path === '/api/todos/t1/start') return jsonResponse({ run: STARTED_RUN }, 201)
+        return jsonResponse({ error: 'not found' }, 404)
+      }),
+    )
+    return captured
+  }
+
+  async function openInstructions() {
+    await waitFor(() => expect(cards()).toHaveLength(2))
+    fireEvent.click(cards()[0]!.querySelector('[data-slot="todo-instructions-toggle"]')!)
+  }
+
+  it('is collapsed by default — no textarea until "+ Add instructions" is clicked', async () => {
+    stubFetchCapturingBody()
+    renderInbox()
+
+    await waitFor(() => expect(cards()).toHaveLength(2))
+    expect(cards()[0]!.querySelector('[data-slot="todo-instructions-input"]')).toBeNull()
+    expect(cards()[0]!.querySelector('[data-slot="todo-instructions-toggle"]')?.textContent).toContain(
+      'Add instructions',
+    )
+
+    fireEvent.click(cards()[0]!.querySelector('[data-slot="todo-instructions-toggle"]')!)
+    expect(cards()[0]!.querySelector('[data-slot="todo-instructions-input"]')).not.toBeNull()
+  })
+
+  it('typed instructions are appended as `prompt` on Run', async () => {
+    const sent = stubFetchCapturingBody()
+    renderInbox()
+    await openInstructions()
+
+    const input = cards()[0]!.querySelector<HTMLTextAreaElement>('[data-slot="todo-instructions-input"]')!
+    fireEvent.change(input, { target: { value: 'Also add a regression test.' } })
+
+    fireEvent.click(cards()[0]!.querySelector('[data-action="todo-run"]')!)
+    await waitFor(() => expect(document.querySelector('[data-slot="thread-probe"]')).not.toBeNull())
+
+    const posted = sent.find((r) => r.method === 'POST' && r.path === '/api/todos/t1/start')
+    expect(posted?.body).toEqual({ prompt: 'Also add a regression test.' })
+  })
+
+  it('leaving the instructions box empty sends no body at all — the pre-#413 call shape', async () => {
+    const sent = stubFetchCapturingBody()
+    renderInbox()
+    await waitFor(() => expect(cards()).toHaveLength(2))
+
+    fireEvent.click(cards()[0]!.querySelector('[data-action="todo-run"]')!)
+    await waitFor(() => expect(document.querySelector('[data-slot="thread-probe"]')).not.toBeNull())
+
+    const posted = sent.find((r) => r.method === 'POST' && r.path === '/api/todos/t1/start')
+    expect(posted?.body).toBeUndefined()
+  })
+
+  it('an opened composer can be collapsed again, keeping the draft', async () => {
+    stubFetchCapturingBody()
+    renderInbox()
+    await openInstructions()
+
+    const input = cards()[0]!.querySelector<HTMLTextAreaElement>('[data-slot="todo-instructions-input"]')!
+    fireEvent.change(input, { target: { value: 'Keep me.' } })
+
+    fireEvent.click(cards()[0]!.querySelector('[data-slot="todo-instructions-hide"]')!)
+    expect(cards()[0]!.querySelector('[data-slot="todo-instructions-input"]')).toBeNull()
+    // A collapsed-but-non-empty composer says so — Run still carries the draft.
+    expect(cards()[0]!.querySelector('[data-slot="todo-instructions-toggle"]')?.textContent).toContain(
+      'added',
+    )
+
+    fireEvent.click(cards()[0]!.querySelector('[data-slot="todo-instructions-toggle"]')!)
+    expect(
+      cards()[0]!.querySelector<HTMLTextAreaElement>('[data-slot="todo-instructions-input"]')?.value,
+    ).toBe('Keep me.')
+  })
+
+  it('the instructions box caps at the 20k the server enforces on `prompt`', async () => {
+    stubFetchCapturingBody()
+    renderInbox()
+    await openInstructions()
+
+    expect(
+      cards()[0]!.querySelector<HTMLTextAreaElement>('[data-slot="todo-instructions-input"]')?.maxLength,
+    ).toBe(20_000)
+  })
+
+  it('the template menu inserts a built-in snippet into the instructions box', async () => {
+    stubFetchCapturingBody()
+    renderInbox()
+    await openInstructions()
+
+    // A Popover + cmdk (matching the skill pickers), so: click, not pointerdown.
+    fireEvent.click(cards()[0]!.querySelector('[data-slot="prompt-template-trigger"]')!)
+    await waitFor(() => expect(document.querySelector('[data-template="add-tests"]')).not.toBeNull())
+    fireEvent.click(document.querySelector('[data-template="add-tests"]')!)
+
+    await waitFor(() =>
+      expect(
+        cards()[0]!.querySelector<HTMLTextAreaElement>('[data-slot="todo-instructions-input"]')?.value,
+      ).toBe('Also add or update tests covering this change.'),
+    )
+  })
+
+  it('the template menu is searchable from the Inbox composer too', async () => {
+    stubFetchCapturingBody()
+    renderInbox()
+    await openInstructions()
+
+    fireEvent.click(cards()[0]!.querySelector('[data-slot="prompt-template-trigger"]')!)
+    await waitFor(() =>
+      expect(document.querySelectorAll('[data-slot="prompt-template-option"]').length).toBeGreaterThan(1),
+    )
+
+    fireEvent.change(screen.getByPlaceholderText('search templates…'), { target: { value: 'docs' } })
+    await waitFor(() =>
+      expect(document.querySelectorAll('[data-slot="prompt-template-option"]')).toHaveLength(1),
+    )
+    expect(document.querySelector('[data-template="update-docs"]')).not.toBeNull()
+  })
+})
+
+
+// ---- the inbox gate (#471) --------------------------------------------------------------------
+
+/** The health payload the route reads `capabilities.followups` from. Only the fields the route
+ *  touches — this is a fixture, not a mirror of the real response. */
+const healthResponse = (followups: boolean) =>
+  jsonResponse({
+    version: '0.0.0-test',
+    repoRoot: '/repo',
+    repo: null,
+    checks: [],
+    forge: null,
+    capabilities: { localHandoff: true, followups },
+  })
+
+describe('the inbox gate (#471)', () => {
+  it('says the inbox is off — not "empty" — when the server has it disabled', async () => {
+    const sent = stubFetch({ 'GET /api/health': () => healthResponse(false) })
+    renderInbox()
+
+    expect(await screen.findByText('The follow-up inbox is off')).toBeTruthy()
+    // The distinction matters: "Inbox empty" would blame the agents for a switched-off feature.
+    expect(screen.queryByText('Inbox empty')).toBeNull()
+    // And it tells the user how to get it back.
+    expect(screen.getByText(/CEZ_FOLLOWUPS=1/)).toBeTruthy()
+    const header = document.querySelector('[data-route="inbox"] header')
+    expect(header?.textContent).toContain('Disabled for this server; per-task Notes still run.')
+    expect(header?.textContent).not.toContain('Follow-ups agents suggested')
+    expect(cards()).toHaveLength(0)
+
+    // The query parks once health lands. It may already have fired one speculative request
+    // before that — the deliberate trade in `InboxRoute` (an enabled server must not wait on
+    // health) — but it must not keep polling an endpoint that can only answer [].
+    await waitFor(() => expect(sent.some((r) => r.path === '/api/health')).toBe(true))
+    const afterGate = sent.filter((r) => r.path === '/api/todos').length
+    expect(afterGate).toBeLessThanOrEqual(1)
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)))
+    expect(sent.filter((r) => r.path === '/api/todos')).toHaveLength(afterGate)
+  })
+
+  it('renders the real inbox once the server reports the capability', async () => {
+    stubFetch({ 'GET /api/health': () => healthResponse(true) })
+    renderInbox()
+
+    await waitFor(() => expect(cards()).toHaveLength(2))
+    expect(screen.queryByText('The follow-up inbox is off')).toBeNull()
+  })
+
+  it('never flashes "Inbox empty" before health says the inbox is off', async () => {
+    // An inbox-less server answers [] too, so the empty state must wait for health — otherwise
+    // the route flashes exactly the lie it exists to avoid, then corrects itself.
+    let releaseHealth = () => {}
+    const healthPending = new Promise<void>((resolve) => {
+      releaseHealth = resolve
+    })
+    stubFetch({
+      'GET /api/health': () => healthResponse(false),
+      'GET /api/todos': () => jsonResponse([]),
+    })
+    // Re-stub health as a deferred answer so the todos query can settle first.
+    const realFetch = globalThis.fetch as unknown as (i: RequestInfo | URL, x?: RequestInit) => Promise<Response>
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      if (String(input) === '/api/health') {
+        await healthPending
+        return healthResponse(false)
+      }
+      return realFetch(input, init)
+    })
+
+    renderInbox()
+    // Todos have answered [] and health has not: the honest answer is to render neither state.
+    await waitFor(() => expect(cards()).toHaveLength(0))
+    expect(screen.queryByText('Inbox empty')).toBeNull()
+
+    act(() => releaseHealth())
+    expect(await screen.findByText('The follow-up inbox is off')).toBeTruthy()
+    expect(screen.queryByText('Inbox empty')).toBeNull()
+  })
+
+  it('does not park the list while health is still unknown', async () => {
+    // health never answers 200 here (the stub 404s it) — an enabled server must not have its
+    // inbox held hostage by a request the list does not depend on.
+    stubFetch()
+    renderInbox()
+    await waitFor(() => expect(cards()).toHaveLength(2))
+    expect(screen.queryByText('The follow-up inbox is off')).toBeNull()
   })
 })

@@ -334,6 +334,83 @@ describe('Terminal — the copy-command 409 fallback', () => {
   })
 })
 
+describe('Open in… menu — agent CLI resume labeling (#402)', () => {
+  const CLI_LABELS: Record<string, string> = {
+    'cli:claude': 'Claude CLI',
+    'cli:codex': 'Codex CLI',
+    'cli:opencode': 'OpenCode',
+  }
+  const openTargets = (ids: string[]) => ({
+    targets: ids.map((id) => ({ id, label: CLI_LABELS[id] ?? id })),
+  })
+
+  async function openMenu(): Promise<HTMLElement> {
+    // Without a resumable Terminal item, the button itself only appears once the async
+    // worktreeTargets query resolves (empty-until-loaded) — findByRole waits it in.
+    const trigger = await actionBar().findByRole('button', { name: 'Open in…' })
+    fireEvent.pointerDown(trigger)
+    return screen.findByRole('menu')
+  }
+
+  it('labels the CLI matching the run\'s own runner "(resume)"; a foreign CLI stays plain', async () => {
+    stubFetch({ '/api/open-targets': () => jsonResponse(openTargets(['cli:claude', 'cli:codex'])) })
+    renderHeader(run('done', { runner: 'claude', worktreePath: '/tmp/wt' }))
+    const menu = await openMenu()
+    // The CLI targets load async (useOpenTargets) — findByRole waits them in, unlike the
+    // static Terminal/Copy items already asserted synchronously elsewhere in this file.
+    expect(await within(menu).findByRole('menuitem', { name: 'Claude CLI (resume)' })).not.toBeNull()
+    expect(within(menu).getByRole('menuitem', { name: 'Codex CLI' })).not.toBeNull()
+  })
+
+  it('a run with no session yet: not even the matching CLI claims to resume', async () => {
+    stubFetch({ '/api/open-targets': () => jsonResponse(openTargets(['cli:claude'])) })
+    renderHeader(run('done', { runner: 'claude', worktreePath: '/tmp/wt', steps: [step()] }))
+    const menu = await openMenu()
+    expect(await within(menu).findByRole('menuitem', { name: 'Claude CLI' })).not.toBeNull()
+  })
+
+  it('picking a CLI target POSTs /open-in with that target id, resuming or not', async () => {
+    const sent = stubFetch({ '/api/open-targets': () => jsonResponse(openTargets(['cli:codex'])) })
+    renderHeader(run('done', { runner: 'claude', worktreePath: '/tmp/wt' }))
+    const menu = await openMenu()
+    // Cross-runner (this run is Claude): Codex opens fresh, not "(resume)".
+    fireEvent.click(await within(menu).findByRole('menuitem', { name: 'Codex CLI' }))
+    await waitFor(() => {
+      expect(sent.find((r) => r.path === '/api/runs/r1/open-in')?.body).toEqual({ target: 'cli:codex' })
+    })
+  })
+})
+
+describe('Open in… menu per-target icons (#361)', () => {
+  it('renders a known target with its mapped icon, falls back for an unrecognized icon key, and POSTs the clicked id', async () => {
+    const sent = stubFetch({
+      '/api/open-targets': () =>
+        jsonResponse({
+          targets: [
+            { id: 'idea', label: 'IntelliJ IDEA', icon: 'idea' },
+            { id: 'mystery-app', label: 'Mystery App', icon: 'not-a-real-icon' },
+            { id: 'no-icon-app', label: 'No Icon App' },
+          ],
+        }),
+    })
+    renderHeader(run('done', { worktreePath: '/tmp/wt' }))
+    fireEvent.pointerDown(actionBar().getByRole('button', { name: 'Open in…' }))
+    const menu = await screen.findByRole('menu')
+
+    // The menu opens immediately; the worktree targets only appear once useOpenTargets resolves.
+    const ideaItem = await within(menu).findByRole('menuitem', { name: 'IntelliJ IDEA' })
+    expect(ideaItem.querySelector('svg')).not.toBeNull()
+    // Unknown/missing icon keys still render the generic fallback glyph — never bare text only.
+    expect(within(menu).getByRole('menuitem', { name: 'Mystery App' }).querySelector('svg')).not.toBeNull()
+    expect(within(menu).getByRole('menuitem', { name: 'No Icon App' }).querySelector('svg')).not.toBeNull()
+
+    fireEvent.click(ideaItem)
+    await waitFor(() => {
+      expect(sent.find((r) => r.path === '/api/runs/r1/open-in')?.body).toEqual({ target: 'idea' })
+    })
+  })
+})
+
 describe('notes panel', () => {
   it('toggles open, fetches the handoff and renders it as markdown', async () => {
     stubFetch({

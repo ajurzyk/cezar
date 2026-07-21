@@ -1,7 +1,9 @@
+import { useQueryClient } from '@tanstack/react-query'
 import { ArrowUpIcon, CheckIcon, MicIcon, PaperclipIcon, XIcon } from 'lucide-react'
 import {
   useCallback,
   useEffect,
+  useImperativeHandle,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -10,15 +12,18 @@ import {
   type DragEvent,
   type KeyboardEvent,
   type ReactNode,
+  type Ref,
 } from 'react'
 
-import { useSkills } from '@/api/queries'
+import { putUiState } from '@/api/client'
+import { queryKeys, useSkills, useUiState } from '@/api/queries'
 import type { ImageInput } from '@/api/types'
 import { Button } from '@/components/ui/button'
 import { Command, CommandItem, CommandList } from '@/components/ui/command'
 import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'
 import { toast } from '@/components/ui/toaster'
-import { filterSkills, fuzzyMatch, isProjectSkill } from '@/lib/skills'
+import { insertTemplate } from '@/lib/prompt-templates'
+import { bumpSkillUsage, filterSkills, fuzzyMatch, isProjectSkill } from '@/lib/skills'
 import { useNow } from '@/lib/use-now'
 import { isSubmitShortcut } from '@/lib/use-submit-shortcut'
 import { cn } from '@/lib/utils'
@@ -82,6 +87,17 @@ export interface ComposerProps {
    * plain text.
    */
   getMentionCandidates?: () => string[]
+  /** Exposes `ComposerHandle` — see there for why this exists. */
+  ref?: Ref<ComposerHandle>
+}
+
+/** The imperative seam a host needs when it wants to write INTO the draft the composer owns —
+ *  today only the /new prompt-template menu (#413 follow-up), which must land a snippet at the
+ *  caret the same way the GitHub/Inbox composers do with their own textarea refs. */
+export interface ComposerHandle {
+  /** Insert `snippet` at the caret, blank-line separated (`insertTemplate`), then refocus with
+   *  the caret parked right after it. */
+  insertAtCaret: (snippet: string) => void
 }
 
 const QUICK_REPLIES: Record<string, string> = { KeyA: 'Yes, approved.', KeyC: 'Continue.' }
@@ -102,6 +118,7 @@ export function Composer({
   autocompleteSkills = true,
   quickReplies = false,
   getMentionCandidates,
+  ref,
 }: ComposerProps) {
   // Optionally controlled: `value` (when given) shadows the internal state, and every write is
   // mirrored to both — updater functions resolve against whichever is authoritative right now.
@@ -131,12 +148,33 @@ export function Composer({
   const pendingCaretRef = useRef<number | null>(null)
 
   const skills = useSkills(autocompleteSkills && skillsWanted)
+  // The `/` list orders most-used first (#519) and a pick bumps `skillUsage`, so this — the
+  // highest-traffic skill surface — both reads and feeds the same stats as the pickers.
+  const uiState = useUiState()
+  const queryClient = useQueryClient()
   const dictation = useDictation((message) => toast(message, { tone: 'danger' }))
 
   // On-mount only, by design: re-focusing on a later `autoFocus` flip would steal focus mid-visit.
   useEffect(() => {
     if (autoFocus) textareaRef.current?.focus()
   }, []) // deliberately not [autoFocus]
+
+  // Rides the same `pendingCaretRef` + layout-effect restore the `/` autocomplete uses, rather
+  // than a rAF: the caret is set in the same paint as the text, so there is no window in which a
+  // closing dropdown can take the focus back (the QA finding on #413's first cut).
+  useImperativeHandle(
+    ref,
+    () => ({
+      insertAtCaret: (snippet: string) => {
+        const el = textareaRef.current
+        const result = insertTemplate(textRef.current, el?.selectionStart ?? textRef.current.length, snippet)
+        setText(result.text)
+        pendingCaretRef.current = result.caret
+        el?.focus()
+      },
+    }),
+    [setText],
+  )
 
   // ---- autocomplete ------------------------------------------------------------------------
 
@@ -165,7 +203,7 @@ export function Composer({
   const candidates = useMemo((): MenuCandidate[] => {
     if (trigger === null) return []
     if (trigger.trigger === '/') {
-      return filterSkills(skills.data ?? [], trigger.query).map((skill) => ({
+      return filterSkills(skills.data ?? [], trigger.query, uiState.data?.skillUsage).map((skill) => ({
         // The path suffix keeps values unique when a project skill shadows a global one.
         value: `${skill.name} ${skill.path}`,
         insert: skill.name,
@@ -178,7 +216,7 @@ export function Composer({
     return paths
       .filter((path) => fuzzyMatch(path, trigger.query))
       .map((path) => ({ value: path, insert: path, label: path, emphasized: false }))
-  }, [getMentionCandidates, skills.data, trigger])
+  }, [getMentionCandidates, skills.data, trigger, uiState.data?.skillUsage])
 
   const activeValue = candidates.some((c) => c.value === menuValue)
     ? menuValue
@@ -192,6 +230,15 @@ export function Composer({
     if (!el || trigger === null) return
     const caret = el.selectionStart ?? el.value.length
     const next = applyCompletion(el.value, trigger, caret, candidate.insert)
+    // Frequency sort (#519): a `/` completion is a skill pick, so it counts — same guard as
+    // /new's submit (#408): only bump once the CURRENT map is known. The PUT merge is shallow,
+    // so bumping off an unresolved/errored ui-state query would send a one-entry map and wipe
+    // every accumulated count. Fire-and-forget; a lost bump costs one count, nothing more.
+    if (trigger.trigger === '/' && uiState.data !== undefined) {
+      putUiState({ skillUsage: bumpSkillUsage(uiState.data.skillUsage, candidate.insert) })
+        .then(() => queryClient.invalidateQueries({ queryKey: queryKeys.uiState }))
+        .catch(() => {})
+    }
     setText(next.text)
     pendingCaretRef.current = next.caret
     setTrigger(null)
@@ -500,7 +547,9 @@ export function Composer({
           <CommandList
             data-slot="composer-menu"
             data-trigger={trigger?.trigger}
-            className="max-h-64 p-1"
+            // Clamped to the popper's reported space so the open keyboard (collisionPadding
+            // via the shared PopoverContent) shrinks the menu instead of hiding its tail.
+            className="max-h-[min(16rem,var(--radix-popover-content-available-height))] p-1"
           >
             {candidates.length === 0 ? (
               <p className="px-3 py-4 text-center text-xs text-muted-foreground">

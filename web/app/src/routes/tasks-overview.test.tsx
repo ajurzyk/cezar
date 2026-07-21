@@ -5,6 +5,7 @@ import { MemoryRouter, Route, Routes, useLocation } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { GlobalEventsProvider } from '@/api/global-events'
+import { queryKeys } from '@/api/queries'
 import { createQueryClient } from '@/api/query-client'
 import type { ProcessUsage, RunRecord } from '@/api/types'
 import { ListViewProvider } from '@/components/list-view'
@@ -339,8 +340,12 @@ describe('TasksOverview — usage cells', () => {
   })
 
   function renderWithUsage(runs: RunRecord[]) {
+    const client = createQueryClient()
+    // The workspace stream stamps every frame with its owner (step 3.1); unscoped, the filter
+    // compares stamps against health's bootProject — seed what the first fetch would establish.
+    client.setQueryData(queryKeys.health, { bootProject: 'boot' })
     render(
-      <QueryClientProvider client={createQueryClient()}>
+      <QueryClientProvider client={client}>
         <GlobalEventsProvider>
           <MemoryRouter>
             <TasksOverview
@@ -366,7 +371,7 @@ describe('TasksOverview — usage cells', () => {
     // Before the first tick: nothing to say, honestly.
     expect(usageCell('live1', 'cpu')?.textContent).toBe('—')
 
-    act(() => FakeEventSource.last?.emit('usage', JSON.stringify({ live1: SAMPLE })))
+    act(() => FakeEventSource.last?.emit('usage', JSON.stringify({ project: 'boot', usage: { live1: SAMPLE } })))
 
     expect(usageCell('live1', 'cpu')?.textContent).toBe('38%')
     expect(usageCell('live1', 'cpu')?.getAttribute('data-usage-kind')).toBe('live')
@@ -378,7 +383,7 @@ describe('TasksOverview — usage cells', () => {
     renderWithUsage([run({ id: 'done1', status: 'done', peakRssBytes: 401 * 1024 ** 2, peakProcCount: 7 })])
 
     // Even a stale tick that still names the run must not paint it live — it is done.
-    act(() => FakeEventSource.last?.emit('usage', JSON.stringify({ done1: SAMPLE })))
+    act(() => FakeEventSource.last?.emit('usage', JSON.stringify({ project: 'boot', usage: { done1: SAMPLE } })))
 
     expect(usageCell('done1', 'cpu')?.textContent).toBe('—')
     expect(usageCell('done1', 'mem')?.textContent).toBe('peak 401 MB')

@@ -20,20 +20,89 @@ export function cezarHomeDir(): string {
 }
 
 /**
- * Host-level, install-once record written by `server-install` (spec
- * 2026-07-16-server-installer). Distinct from the per-instance registry the
- * multi-project switcher keeps under `~/.cezar/instances/` — they coexist.
+ * The default server-install instance id. An install with no `--domain` (the
+ * original single-cockpit-per-host flow) is this instance, and it keeps the
+ * legacy `~/.cezar/server.json` path so existing hosts upgrade in place.
  */
-export function serverStatePath(): string {
-  return join(cezarHomeDir(), 'server.json');
+export const DEFAULT_SERVER_INSTANCE = 'default';
+
+/**
+ * Turn a public domain into a stable, filesystem- and systemd-safe instance
+ * slug — the key that lets one host run several independent cockpits, each for
+ * a different domain (nginx site `cezar-<slug>`, unit `cezar-<slug>.service`,
+ * state file `server-instances/<slug>.json`). Lowercased; every run of
+ * non-`[a-z0-9]` becomes a single `-`; leading/trailing `-` trimmed. A `.` in a
+ * systemd unit name is a type separator, so dots collapse to `-` too. Returns
+ * `default` for empty/degenerate input so a bad value can never escape the
+ * instance namespace.
+ */
+export function instanceSlug(domain: string | undefined | null): string {
+  const slug = String(domain ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return slug || DEFAULT_SERVER_INSTANCE;
+}
+
+/** The directory holding per-domain (named) server-install state files. */
+export function serverInstancesDir(): string {
+  return join(cezarHomeDir(), 'server-instances');
 }
 
 /**
- * Single-writer lock the installer/uninstaller hold for a whole run. The
- * host-level installer is not concurrency-safe with itself.
+ * Host-level record written by `server-install` (spec 2026-07-16-server-installer).
+ * The `default` instance keeps the original `~/.cezar/server.json`; a named
+ * (domain-keyed) instance lives at `~/.cezar/server-instances/<slug>.json`, so
+ * a second install for a different domain never resumes or clobbers the first.
+ * Distinct from the per-user project registry the multi-project workspace keeps
+ * inside `~/.cezar/config.json` (see `workspaceConfigPath`) — they coexist.
  */
-export function serverLockPath(): string {
-  return join(cezarHomeDir(), 'server.install.lock');
+export function serverStatePath(instance: string = DEFAULT_SERVER_INSTANCE): string {
+  if (instance === DEFAULT_SERVER_INSTANCE) return join(cezarHomeDir(), 'server.json');
+  return join(serverInstancesDir(), `${instance}.json`);
+}
+
+/**
+ * Per-user workspace config (spec 2026-07-20-multi-project-workspace): schema
+ * version, global defaults, and the project registry — every repo cezar has
+ * been booted in. Lives directly under `cezarHomeDir()`, so the `CEZ_HOME`
+ * override applies (tests/containers never touch a real home dir).
+ */
+export function workspaceConfigPath(): string {
+  return join(cezarHomeDir(), 'config.json');
+}
+
+/**
+ * Global GUI state — the workspace twin of the per-repo
+ * `.ai/cezar/ui-state.json`. Cross-project UI prefs live here; per-project
+ * state (pinned runs, templates) stays in each repo's file.
+ */
+export function workspaceUiStatePath(): string {
+  return join(cezarHomeDir(), 'ui-state.json');
+}
+
+/**
+ * Expand a leading `~` to the user's home. Lives here with the other homedir
+ * logic (see the module note above — one place owns `homedir()`): the
+ * `projectsDir` setting is stored as the user wrote it (a literal `~`), so
+ * every consumer that must touch the REAL directory — the writability probe on
+ * `PUT /api/workspace/config`, the hosted-mode browse root in
+ * `src/server/fs-browse.ts` — expands it through this one helper.
+ */
+export function expandTilde(path: string): string {
+  if (path === '~') return homedir();
+  return path.startsWith('~/') ? join(homedir(), path.slice(2)) : path;
+}
+
+/**
+ * Single-writer lock the installer/uninstaller hold for a whole run. Per
+ * instance, so installing/uninstalling one cockpit never blocks work on another
+ * on the same host. The host-level installer is not concurrency-safe with
+ * itself *for the same instance*.
+ */
+export function serverLockPath(instance: string = DEFAULT_SERVER_INSTANCE): string {
+  if (instance === DEFAULT_SERVER_INSTANCE) return join(cezarHomeDir(), 'server.install.lock');
+  return join(serverInstancesDir(), `${instance}.install.lock`);
 }
 
 /**

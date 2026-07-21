@@ -5,10 +5,13 @@ import { join } from 'node:path';
 import { serverStatePath } from '../paths.js';
 import {
   acquireLock,
+  deleteServerState,
   firstIncompleteStep,
   isResolved,
+  listServerInstances,
   loadServerState,
   LockHeldError,
+  nextFreeInstancePort,
   saveServerState,
 } from './state.js';
 import { freshServerState } from './types.js';
@@ -76,6 +79,69 @@ describe('server state', () => {
     // Simulate the race loser: the file appears (live pid) before our write.
     writeFileSync(join(home, 'server.install.lock'), `${process.pid === 1 ? 2 : 1}\n`, { flag: 'wx' });
     expect(() => acquireLock()).toThrow(LockHeldError);
+  });
+
+  it('named instances persist to their own file and never clobber the default', () => {
+    const def = freshServerState();
+    def.platform = 'ubuntu-vps';
+    def.primaryPort = 4321;
+    saveServerState(def); // default → server.json
+
+    const shop = freshServerState();
+    shop.platform = 'ubuntu-vps';
+    shop.instance = 'shop-example-com';
+    shop.domain = 'shop.example.com';
+    shop.primaryPort = 4322;
+    saveServerState(shop, 'shop-example-com'); // named → server-instances/…
+
+    // Each loads back independently — the second install did not touch the first.
+    expect(loadServerState().primaryPort).toBe(4321);
+    expect(loadServerState('shop-example-com').primaryPort).toBe(4322);
+    expect(loadServerState('shop-example-com').domain).toBe('shop.example.com');
+    // A brand-new (unknown) instance still degrades to a fresh record.
+    expect(loadServerState('nope').installed).toBe(false);
+  });
+
+  it('listServerInstances enumerates default + named; nextFreeInstancePort skips used ports', () => {
+    expect(listServerInstances()).toHaveLength(0);
+    expect(nextFreeInstancePort()).toBe(4321); // nothing recorded yet
+
+    const def = freshServerState();
+    def.primaryPort = 4321;
+    saveServerState(def);
+    const a = freshServerState();
+    a.primaryPort = 4322;
+    saveServerState(a, 'a-example-com');
+
+    const names = listServerInstances().map((i) => i.instance).sort();
+    expect(names).toEqual(['a-example-com', 'default']);
+    expect(nextFreeInstancePort()).toBe(4323); // 4321 + 4322 both taken
+  });
+
+  it('deleteServerState drops a named record but leaves the default in place', () => {
+    saveServerState(freshServerState()); // default
+    const a = freshServerState();
+    a.primaryPort = 4322;
+    saveServerState(a, 'a-example-com');
+    deleteServerState('a-example-com');
+    expect(listServerInstances().map((i) => i.instance)).toEqual(['default']);
+    // deleting the default is a no-op (legacy single-host record is kept)
+    deleteServerState('default');
+    expect(listServerInstances().map((i) => i.instance)).toEqual(['default']);
+  });
+
+  it('the install lock is per-instance — one instance never blocks another', () => {
+    const release = acquireLock('shop-example-com');
+    // a DIFFERENT instance acquires freely (independent lock file)
+    const releaseOther = acquireLock('blog-example-com');
+    releaseOther();
+    // but the SAME instance is exclusive against a live foreign pid
+    writeFileSync(
+      join(home, 'server-instances', 'shop-example-com.install.lock'),
+      `${process.pid === 1 ? 2 : 1}\n`,
+    );
+    expect(() => acquireLock('shop-example-com')).toThrow(LockHeldError);
+    release();
   });
 
   it('a newer-version server.json degrades per-field, never to a fresh record', () => {

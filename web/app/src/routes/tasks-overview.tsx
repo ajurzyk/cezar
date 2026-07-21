@@ -10,7 +10,7 @@ import {
   SearchXIcon,
 } from 'lucide-react'
 import * as React from 'react'
-import { Link, useNavigate } from 'react-router'
+import { Link, useNavigate } from '@/lib/project-router'
 
 import { archiveFinished, patchRun } from '@/api/client'
 import { useRunUsage } from '@/api/global-events'
@@ -38,7 +38,7 @@ import {
   type UsageCell,
 } from '@/lib/tasks-table'
 import { useNow } from '@/lib/use-now'
-import { cn } from '@/lib/utils'
+import { cn, isHttpUrl } from '@/lib/utils'
 
 /**
  * The Tasks overview — the table that IS the home at `/` (spec, "Task list & table", per PR
@@ -559,6 +559,20 @@ function BranchChip({ branch }: { branch: string }) {
  *  honestly split violet-open from green-merged (that is R5's forge driver). */
 function PrChip({ url, taskTitle, className }: { url: string; taskTitle: string; className?: string }) {
   const num = prNumber(url)
+  const chipClass = cn(
+    'inline-flex h-[22px] items-center gap-1 rounded-full border border-violet/35 px-2 font-mono text-[11px] font-semibold text-violet',
+    className
+  )
+  // href protocol guard (#431): render a link only for http(s) URLs; a
+  // non-http value (e.g. a `javascript:` PR URL scraped from a transcript)
+  // degrades to inert text instead of an executable link.
+  if (!isHttpUrl(url)) {
+    return (
+      <span data-slot="pr-chip" className={chipClass} title={url}>
+        {num ? `#${num}` : 'PR'}
+      </span>
+    )
+  }
   return (
     <a
       data-slot="pr-chip"
@@ -567,10 +581,7 @@ function PrChip({ url, taskTitle, className }: { url: string; taskTitle: string;
       rel="noopener noreferrer"
       title={url}
       aria-label={`Open the pull request for ${taskTitle}`}
-      className={cn(
-        'inline-flex h-[22px] items-center gap-1 rounded-full border border-violet/35 px-2 font-mono text-[11px] font-semibold text-violet hover:bg-violet/10',
-        className
-      )}
+      className={cn(chipClass, 'hover:bg-violet/10')}
     >
       {num ? `#${num}` : 'PR'}
       <ArrowUpRightIcon className="size-2.5" aria-hidden="true" />

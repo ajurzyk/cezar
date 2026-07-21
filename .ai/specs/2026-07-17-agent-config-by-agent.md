@@ -71,8 +71,10 @@ work, no new routes.
 
 ## What does NOT change
 
-- **API**: none. `GET /api/agent-config` (flat `files[]` + `userMcp`), `GET/PUT
-  /api/agent-config/:id`, hosted-mode 409s — untouched. The regrouping is pure client work.
+- **API shape**: none. After #521 these same handlers live in the project-route table, so the
+  scoped client reaches `/api/p/:projectId/agent-config*` while legacy `/api/agent-config*`
+  remains the boot-project alias. The flat `files[]` + `userMcp` payload and hosted-mode 409s
+  are unchanged. The regrouping itself is pure client work.
 - **`FileEditor`** and the editor behaviors (draft/dirty/409-conflict/400-format/save) —
   untouched.
 - **Server catalog** (`src/agent-config/catalog.ts`) — untouched; `runners[]` stays the

@@ -66,9 +66,18 @@ export type ToolKind =
  */
 export type StopReason = 'end_turn' | 'max_tokens' | 'refusal' | 'cancelled' | 'timeout' | 'error';
 
-/** Status of one plan/todo entry (claude TodoWrite uses these words verbatim;
- *  codex todoList and opencode todowrite map 1:1). */
-export type PlanStatus = 'pending' | 'in_progress' | 'completed';
+/**
+ * Status of one plan/todo entry. claude TodoWrite/TaskUpdate use the first
+ * three words verbatim; codex `turn/plan/updated` sends camelCase
+ * (`inProgress`) and is normalized here; opencode `todowrite` adds
+ * `cancelled` ("no longer needed") — its status field is a free-form string
+ * whose documented vocabulary is pending|in_progress|completed|cancelled.
+ *
+ * `cancelled` is opencode-only today. It is a first-class status rather than a
+ * dropped row: an abandoned todo must stay visible (struck through) instead of
+ * silently vanishing from the dock mid-run.
+ */
+export type PlanStatus = 'pending' | 'in_progress' | 'completed' | 'cancelled';
 
 /** One entry of the session plan — full-replacement semantics (ACP style). */
 export interface PlanEntry {
@@ -285,8 +294,13 @@ export interface UiItemCompletedEvent {
 
 /**
  * Full-replacement plan snapshot (ACP semantics).
- * claude: `TodoWrite` tool input; codex: `todoList`/`plan` items;
- * opencode: `todowrite` tool — identical semantics across all three.
+ * claude: `TodoWrite` tool input, or a snapshot folded from the incremental
+ * `TaskCreate`/`TaskUpdate`/`TaskList` calls (keyed by the task id the harness
+ * reports in each tool's RESULT — see `claude-ui-mapper`); codex: the
+ * `turn/plan/updated` notification carrying the whole `update_plan` list (it is
+ * a turn-level notification, NOT an item — the app-server `ThreadItem` union has
+ * no todo variant); opencode: `todowrite` tool input — identical
+ * full-replacement semantics across all three.
  */
 export interface UiPlanUpdatedEvent {
   type: 'plan.updated';
@@ -311,6 +325,36 @@ export interface UiPermissionResolvedEvent {
   type: 'permission.resolved';
   requestId: string;
   optionId: string;
+}
+
+/** One option in an AskUser question — see `src/core/ask.ts`. */
+export interface UiAskOption {
+  label: string;
+  description?: string;
+}
+
+/** One structured multiple-choice question — modeled on Claude Code's
+ *  `AskUserQuestion` (see `src/core/ask.ts`). */
+export interface UiAskQuestion {
+  id?: string;
+  header: string;
+  question: string;
+  options: UiAskOption[];
+  multiSelect?: boolean;
+}
+
+/**
+ * The agent asked the user a structured multiple-choice question via a
+ * `CEZ:ASK` marker (spec `2026-07-18-askuser-across-runners`). Emitted by the
+ * RunManager off the assembled turn text — uniform across claude/codex/opencode
+ * with no per-backend mapper work. The run parks `waiting`; the cockpit renders
+ * clickable option chips. Resolution is client-side — the next user message for
+ * the run closes the card — so there is no separate `ask.resolved` event.
+ */
+export interface UiAskRequestedEvent {
+  type: 'ask.requested';
+  requestId: string;
+  questions: UiAskQuestion[];
 }
 
 /**
@@ -350,6 +394,7 @@ export type UiEvent =
   | UiPlanUpdatedEvent
   | UiPermissionRequestedEvent
   | UiPermissionResolvedEvent
+  | UiAskRequestedEvent
   | UiUsageUpdatedEvent
   | UiImageEvent;
 

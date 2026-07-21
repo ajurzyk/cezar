@@ -39,21 +39,35 @@ const SKILLS: Skill[] = [
   { name: 'om-review', body: '', path: '/p/om-review.md', source: 'cezar' },
 ]
 
-/** The composer's only fetch is `/api/skills`, and only once `/` has been typed. */
-function stubSkillsFetch() {
-  const fetchMock = vi.fn((input: RequestInfo | URL) => {
+/** The composer fetches `/api/skills` (only once `/` has been typed) and `/api/ui-state`
+ *  (#519: the autocomplete's usage order + bump). `uiState: null` answers the GET with a 404
+ *  (the "ui-state unavailable" case); PUT bodies are recorded in `uiStatePuts`. */
+function stubSkillsFetch(uiState: Record<string, unknown> | null = {}) {
+  const uiStatePuts: unknown[] = []
+  const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
+    if (url.includes('/api/ui-state')) {
+      if ((init?.method ?? 'GET') === 'PUT') uiStatePuts.push(JSON.parse(String(init?.body)))
+      const status = uiState === null ? 404 : 200
+      const body = uiState === null ? JSON.stringify({ error: 'nope' }) : JSON.stringify(uiState)
+      return Promise.resolve(
+        new Response(body, { status, headers: { 'content-type': 'application/json' } }),
+      )
+    }
     const body = url.includes('/api/skills') ? JSON.stringify(SKILLS) : '[]'
     return Promise.resolve(
       new Response(body, { status: 200, headers: { 'content-type': 'application/json' } }),
     )
   })
   vi.stubGlobal('fetch', fetchMock)
-  return fetchMock
+  return { fetchMock, uiStatePuts }
 }
 
-function renderComposer(props: Partial<ComposerProps> = {}) {
-  const fetchMock = stubSkillsFetch()
+function renderComposer(
+  props: Partial<ComposerProps> = {},
+  uiState: Record<string, unknown> | null = {},
+) {
+  const { fetchMock, uiStatePuts } = stubSkillsFetch(uiState)
   const onSubmit = vi.fn(() => Promise.resolve({}))
   render(
     <QueryClientProvider client={createQueryClient()}>
@@ -61,7 +75,12 @@ function renderComposer(props: Partial<ComposerProps> = {}) {
       <Toaster />
     </QueryClientProvider>,
   )
-  return { onSubmit, fetchMock, textarea: screen.getByLabelText('Reply to the agent') as HTMLTextAreaElement }
+  return {
+    onSubmit,
+    fetchMock,
+    uiStatePuts,
+    textarea: screen.getByLabelText('Reply to the agent') as HTMLTextAreaElement,
+  }
 }
 
 const type = (textarea: HTMLTextAreaElement, value: string) =>
@@ -230,6 +249,16 @@ describe('/ skills autocomplete (#380)', () => {
     expect(rendered[2]!.textContent).toContain('global-deploy')
   })
 
+  it('the menu is clamped to the popper available height (mobile keyboard, #mobile-kb)', async () => {
+    const { textarea } = renderComposer()
+    type(textarea, '/')
+    await screen.findByText('om-fix')
+    const menu = document.querySelector('[data-slot="composer-menu"]')!
+    // The clamp keeps the list inside the visual viewport once PopoverContent's
+    // keyboard-aware collisionPadding has shrunk the popper's available space.
+    expect(menu.className).toContain('--radix-popover-content-available-height')
+  })
+
   it('mid-word slashes (URLs) never open the menu', () => {
     const { textarea } = renderComposer()
     type(textarea, 'see https://example.com/x')
@@ -299,6 +328,57 @@ describe('/ skills autocomplete (#380)', () => {
   })
 })
 
+describe('/ autocomplete usage order and pick bump (#519)', () => {
+  const menuNames = () =>
+    [...document.querySelectorAll('[data-slot="composer-menu-item"]')].map(
+      (el) => el.querySelector('span')?.textContent,
+    )
+
+  it('orders the list most-used first, across localities', async () => {
+    const { textarea } = renderComposer({}, { skillUsage: { 'global-deploy': 4, 'om-review': 1 } })
+    type(textarea, '/')
+    await screen.findByText('om-fix')
+    // Once ui-state resolves, the used skills lead regardless of locality; unused project
+    // skills follow, per the #519 tier order.
+    await waitFor(() => expect(menuNames()).toEqual(['global-deploy', 'om-review', 'om-fix']))
+  })
+
+  it('picking a skill bumps its skillUsage count (the whole map, shallow-merge safe)', async () => {
+    const { textarea, uiStatePuts } = renderComposer({}, { skillUsage: { 'global-deploy': 4 } })
+    type(textarea, '/')
+    await screen.findByText('om-fix')
+    // The visible reorder proves the ui-state query resolved — the bump guard is now open.
+    await waitFor(() => expect(menuNames()[0]).toBe('global-deploy'))
+    type(textarea, '/omf')
+    await waitFor(() => expect(menuNames()).toEqual(['om-fix']))
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    await waitFor(() => expect(uiStatePuts).toHaveLength(1))
+    // The WHOLE updated map, never one entry — the PUT merge is shallow (#408).
+    expect(uiStatePuts[0]).toEqual({ skillUsage: { 'global-deploy': 4, 'om-fix': 1 } })
+  })
+
+  it('ui-state unavailable → the pick still completes but never PUTs a wiped map', async () => {
+    const { textarea, uiStatePuts } = renderComposer({}, null)
+    type(textarea, 'run /omf')
+    await screen.findByText('om-fix')
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    expect(textarea.value).toBe('run /om-fix ')
+    expect(uiStatePuts).toHaveLength(0)
+  })
+
+  it('an @ mention pick never touches skillUsage', async () => {
+    const { textarea, uiStatePuts } = renderComposer(
+      { getMentionCandidates: () => ['src/app.ts'] },
+      { skillUsage: {} },
+    )
+    type(textarea, 'see @app')
+    await screen.findByText('src/app.ts')
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    expect(textarea.value).toBe('see @src/app.ts ')
+    expect(uiStatePuts).toHaveLength(0)
+  })
+})
+
 describe('@ file mentions — the provider seam (R5 upgrades the source, not the composer)', () => {
   it('lists and inserts the provider paths, fuzzy-filtered', async () => {
     const { textarea } = renderComposer({
@@ -328,12 +408,25 @@ describe('@ file mentions — the provider seam (R5 upgrades the source, not the
 
 describe('quick replies (legacy Alt+A / Alt+C)', () => {
   it('Alt+A sends "Yes, approved." and Alt+C sends "Continue." without touching the draft', async () => {
-    const { onSubmit, textarea } = renderComposer({ quickReplies: true })
+    let finishFirstDelivery = () => {}
+    const firstDelivery = new Promise<void>((resolve) => {
+      finishFirstDelivery = resolve
+    })
+    const onSubmit = vi
+      .fn()
+      .mockImplementationOnce(() => firstDelivery)
+      .mockResolvedValue(undefined)
+    const { textarea } = renderComposer({ quickReplies: true, onSubmit })
     type(textarea, 'draft in progress')
     fireEvent.keyDown(window, { code: 'KeyA', altKey: true })
     expect(onSubmit).toHaveBeenCalledWith('Yes, approved.', [])
     expect(textarea.value).toBe('draft in progress')
-    // One send at a time: wait until the first delivery settled (send re-enabled).
+    expect((screen.getByLabelText('Send') as HTMLButtonElement).disabled).toBe(true)
+
+    // One send at a time: settle the first delivery, then wait for send to re-enable before
+    // exercising the second shortcut. A resolved-by-default mock can make this wait pass before
+    // React ever commits the busy state, racing the second keydown against a stale closure.
+    finishFirstDelivery()
     await waitFor(() =>
       expect((screen.getByLabelText('Send') as HTMLButtonElement).disabled).toBe(false),
     )

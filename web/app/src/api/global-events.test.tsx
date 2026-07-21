@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createUsageStore, type UsageStore } from './events'
 import { GlobalEventsProvider, useGlobalEvents, useRunUsage, useUsage } from './global-events'
+import { setApiScope } from './project-scope'
 import { createQueryClient } from './query-client'
 import { queryKeys } from './queries'
 import type { ApiRun, RunRecord } from './types'
@@ -99,6 +100,16 @@ function runRecord(id: string, over: Partial<RunRecord> = {}): RunRecord {
 
 const SAMPLE = { cpuPct: 12, rssBytes: 1024, procCount: 3 }
 
+/** The boot project's id, as `GET /api/health` reports it (`bootProject`). Unscoped, the
+ *  workspace stream's filter compares every stamp against it. */
+const BOOT = 'boot'
+
+/** A `run` frame as the workspace stream sends it (step 2.8): the record with a `project`
+ *  stamp riding along, which the parser strips back off before the reducers see it. */
+function stampedRun(record: RunRecord, project = BOOT): string {
+  return JSON.stringify({ ...record, project })
+}
+
 let client: QueryClient
 let usage: UsageStore
 
@@ -128,20 +139,24 @@ beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn())
   client = createQueryClient()
   usage = createUsageStore()
+  // What the app's first health fetch establishes: which project this unscoped cockpit IS.
+  // Without it every stamped frame is dropped (see the scoping describe below).
+  client.setQueryData(queryKeys.health, { bootProject: BOOT })
   setVisibility('visible')
 })
 
 afterEach(() => {
   cleanup()
+  setApiScope(null)
   vi.unstubAllGlobals()
   vi.useRealTimers()
 })
 
 describe('useGlobalEvents — connection', () => {
-  it('opens exactly one stream, at /api/events', () => {
+  it('opens exactly one stream, at /api/workspace/events', () => {
     mount()
     expect(FakeEventSource.instances).toHaveLength(1)
-    expect(FakeEventSource.last.url).toBe('/api/events')
+    expect(FakeEventSource.last.url).toBe('/api/workspace/events')
   })
 
   it('closes the stream on unmount', () => {
@@ -197,7 +212,7 @@ describe('useGlobalEvents — back/forward cache', () => {
     firePageShow(true)
 
     expect(FakeEventSource.instances).toHaveLength(2)
-    expect(FakeEventSource.last.url).toBe('/api/events')
+    expect(FakeEventSource.last.url).toBe('/api/workspace/events')
   })
 
   it('does nothing on the pageshow of a normal load', () => {
@@ -214,7 +229,7 @@ describe('useGlobalEvents — run events', () => {
     client.setQueryData<ApiRun[]>(queryKeys.runs.list(), [])
     const { source } = mount()
 
-    source.emit('run', JSON.stringify(runRecord('r1', { status: 'queued' })))
+    source.emit('run', stampedRun(runRecord('r1', { status: 'queued' })))
 
     expect(client.getQueryData<ApiRun[]>(queryKeys.runs.list())).toEqual([
       runRecord('r1', { status: 'queued' }),
@@ -227,9 +242,9 @@ describe('useGlobalEvents — run events', () => {
     client.setQueryData<ApiRun[]>(queryKeys.runs.list(), [])
     const { source } = mount()
 
-    source.emit('run', JSON.stringify(runRecord('r1', { status: 'queued' })))
-    source.emit('run', JSON.stringify(runRecord('r1', { status: 'running', tokensUsed: 42 })))
-    source.emit('run', JSON.stringify(runRecord('r1', { status: 'done', tokensUsed: 99 })))
+    source.emit('run', stampedRun(runRecord('r1', { status: 'queued' })))
+    source.emit('run', stampedRun(runRecord('r1', { status: 'running', tokensUsed: 42 })))
+    source.emit('run', stampedRun(runRecord('r1', { status: 'done', tokensUsed: 99 })))
 
     const list = client.getQueryData<ApiRun[]>(queryKeys.runs.list())
     expect(list).toHaveLength(1)
@@ -241,8 +256,8 @@ describe('useGlobalEvents — run events', () => {
     client.setQueryData<ApiRun>(queryKeys.runs.detail('r1'), { ...runRecord('r1'), usage: SAMPLE })
     const { source } = mount()
 
-    source.emit('run', JSON.stringify(runRecord('r1', { status: 'done' })))
-    source.emit('run', JSON.stringify(runRecord('r2', { status: 'done' })))
+    source.emit('run', stampedRun(runRecord('r1', { status: 'done' })))
+    source.emit('run', stampedRun(runRecord('r2', { status: 'done' })))
 
     const detail = client.getQueryData<ApiRun>(queryKeys.runs.detail('r1'))
     expect(detail?.status).toBe('done')
@@ -250,6 +265,29 @@ describe('useGlobalEvents — run events', () => {
     expect(detail?.usage).toEqual(SAMPLE)
     // r2 was never opened: a summary must not masquerade as a fetched detail.
     expect(client.getQueryData(queryKeys.runs.detail('r2'))).toBeUndefined()
+  })
+
+  it('invalidates the changes cache on a run event so an ended run’s final writes appear (#488)', () => {
+    // The Changes tab stops polling the moment a run leaves the active set, so without this the
+    // last diff would wait for the next SSE reconnect. A cache the user opened must refresh.
+    client.setQueryData(queryKeys.runs.changes('r1'), { files: [], stat: { adds: 0, dels: 0, files: 0 } })
+    const invalidate = vi.spyOn(client, 'invalidateQueries')
+    const { source } = mount()
+
+    source.emit('run', stampedRun(runRecord('r1', { status: 'done' })))
+
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.runs.changes('r1') })
+  })
+
+  it('does not invalidate a changes cache nobody opened — no background diff fetch', () => {
+    // Mirror of the detail-cache guard: a run event for a task whose Changes tab was never viewed
+    // must not spawn a fetch for a diff no one is looking at.
+    const invalidate = vi.spyOn(client, 'invalidateQueries')
+    const { source } = mount()
+
+    source.emit('run', stampedRun(runRecord('r2', { status: 'done' })))
+
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: queryKeys.runs.changes('r2') })
   })
 
   it('ignores a malformed frame and keeps serving the next one', () => {
@@ -260,7 +298,7 @@ describe('useGlobalEvents — run events', () => {
     source.emit('run', '{"no":"id"}')
     expect(client.getQueryData<ApiRun[]>(queryKeys.runs.list())).toEqual([])
 
-    source.emit('run', JSON.stringify(runRecord('r1')))
+    source.emit('run', stampedRun(runRecord('r1')))
     expect(client.getQueryData<ApiRun[]>(queryKeys.runs.list())).toHaveLength(1)
   })
 
@@ -270,7 +308,7 @@ describe('useGlobalEvents — run events', () => {
     client.setQueryData(queryKeys.runs.diff('r1'), { files: [] })
     const { source } = mount()
 
-    source.emit('run-deleted', '{"id":"r1"}')
+    source.emit('run-deleted', JSON.stringify({ id: 'r1', project: BOOT }))
 
     expect(client.getQueryData<ApiRun[]>(queryKeys.runs.list())?.map((r) => r.id)).toEqual(['r2'])
     // Removed, not emptied: anything still mounted on them must go ask the server and get its 404.
@@ -284,11 +322,11 @@ describe('useGlobalEvents — todos', () => {
   it('replaces the inbox cache, seeding it even when nothing fetched it', () => {
     const { source } = mount()
 
-    source.emit('todos', JSON.stringify([{ id: 't1', summary: 'Review the PR' }]))
+    source.emit('todos', JSON.stringify({ project: BOOT, items: [{ id: 't1', summary: 'Review the PR' }] }))
     expect(client.getQueryData(queryKeys.todos)).toEqual([{ id: 't1', summary: 'Review the PR' }])
 
     // The payload is the whole inbox, so an emptied inbox really empties the badge.
-    source.emit('todos', '[]')
+    source.emit('todos', JSON.stringify({ project: BOOT, items: [] }))
     expect(client.getQueryData(queryKeys.todos)).toEqual([])
   })
 })
@@ -300,7 +338,7 @@ describe('useGlobalEvents — usage', () => {
     client.setQueryData(queryKeys.runs.detail('r1'), runRecord('r1'))
     const { source } = mount()
 
-    source.emit('usage', JSON.stringify({ r1: SAMPLE }))
+    source.emit('usage', JSON.stringify({ project: BOOT, usage: { r1: SAMPLE } }))
 
     expect(usage.get()).toEqual({ r1: SAMPLE })
     // Identity, not equality: a ~2 s tick that replaced the cached list would re-render every
@@ -321,6 +359,64 @@ describe('useGlobalEvents — usage', () => {
     expect(client.getQueryData<ApiRun[]>(queryKeys.runs.list())).toEqual([])
     expect(usage.get()).toEqual({})
     expect(fetch).not.toHaveBeenCalled()
+  })
+})
+
+describe('useGlobalEvents — project scoping (multi-project spec, step 3.1)', () => {
+  it('drops another project\'s stamped events when unscoped — no cross-project cache bleed', () => {
+    client.setQueryData<ApiRun[]>(queryKeys.runs.list(), [])
+    const { source } = mount()
+
+    source.emit('run', stampedRun(runRecord('theirs'), 'other-project'))
+    source.emit('todos', JSON.stringify({ project: 'other-project', items: [{ id: 't9' }] }))
+    source.emit('usage', JSON.stringify({ project: 'other-project', usage: { theirs: SAMPLE } }))
+
+    // The one stream carries every project; only the boot project's news may land here.
+    expect(client.getQueryData<ApiRun[]>(queryKeys.runs.list())).toEqual([])
+    expect(client.getQueryData(queryKeys.todos)).toBeUndefined()
+    expect(usage.get()).toEqual({})
+  })
+
+  it('drops an unstamped frame — without an owner it belongs to no one', () => {
+    client.setQueryData<ApiRun[]>(queryKeys.runs.list(), [])
+    const { source } = mount()
+
+    // The pre-workspace wire shape. Applying it unattributed is exactly the bleed the
+    // envelope exists to prevent.
+    source.emit('run', JSON.stringify(runRecord('r1')))
+
+    expect(client.getQueryData<ApiRun[]>(queryKeys.runs.list())).toEqual([])
+  })
+
+  it('drops stamped events until health has named the boot project, without crashing', () => {
+    client.removeQueries({ queryKey: queryKeys.health })
+    client.setQueryData<ApiRun[]>(queryKeys.runs.list(), [])
+    const { source } = mount()
+
+    // Harmless by the doctrine: at boot the authoritative queries are fetching right now.
+    source.emit('run', stampedRun(runRecord('r1')))
+    expect(client.getQueryData<ApiRun[]>(queryKeys.runs.list())).toEqual([])
+
+    // Health answered — from here on the boot project's events flow.
+    client.setQueryData(queryKeys.health, { bootProject: BOOT })
+    source.emit('run', stampedRun(runRecord('r1')))
+    expect(client.getQueryData<ApiRun[]>(queryKeys.runs.list())).toHaveLength(1)
+  })
+
+  it('applies the scoped project\'s events — and only those — once a scope is mounted', () => {
+    setApiScope('other-project')
+    // Scoped keys: this cache belongs to other-project (queries.ts leads every key with the scope).
+    client.setQueryData<ApiRun[]>(queryKeys.runs.list(), [])
+    const { source } = mount()
+
+    source.emit('run', stampedRun(runRecord('boot-run'), BOOT))
+    expect(client.getQueryData<ApiRun[]>(queryKeys.runs.list())).toEqual([])
+
+    source.emit('run', stampedRun(runRecord('theirs'), 'other-project'))
+    source.emit('usage', JSON.stringify({ project: 'other-project', usage: { theirs: SAMPLE } }))
+
+    expect(client.getQueryData<ApiRun[]>(queryKeys.runs.list())?.map((r) => r.id)).toEqual(['theirs'])
+    expect(usage.get()).toEqual({ theirs: SAMPLE })
   })
 })
 
@@ -353,6 +449,7 @@ describe('useGlobalEvents — reconcile doctrine', () => {
       queryKeys.runs.all, // covers the list and every detail under it
       queryKeys.todos,
       queryKeys.health, // the repo/branch chip — health is not on the stream (#369)
+      queryKeys.worktrees, // the Resources panel's list/total (#483)
     ])
   })
 
@@ -367,7 +464,12 @@ describe('useGlobalEvents — reconcile doctrine', () => {
     // A phone that slept: the tab was frozen, no error handler ever ran, and the stream may have
     // been dead for an hour. What is on screen is about to be read as true.
     setVisibility('visible')
-    expect(invalidatedKeys(invalidate)).toEqual([queryKeys.runs.all, queryKeys.todos, queryKeys.health])
+    expect(invalidatedKeys(invalidate)).toEqual([
+      queryKeys.runs.all,
+      queryKeys.todos,
+      queryKeys.health,
+      queryKeys.worktrees,
+    ])
   })
 
   it('stops listening for visibility once unmounted', () => {
@@ -464,7 +566,7 @@ describe('GlobalEventsProvider', () => {
     expect(FakeEventSource.instances).toHaveLength(1)
     expect(view.getAllByTestId('probe')[0]?.textContent).toBe('|-')
 
-    FakeEventSource.last.emit('usage', JSON.stringify({ r1: SAMPLE }))
+    FakeEventSource.last.emit('usage', JSON.stringify({ project: BOOT, usage: { r1: SAMPLE } }))
 
     for (const probe of view.getAllByTestId('probe')) {
       expect(probe.textContent).toBe('r1|12')

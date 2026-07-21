@@ -46,12 +46,13 @@ test('the release tarball installs and runs the dry-run CLI workflow', { timeout
       { cwd: consumerDir, maxBuffer: 10 * 1024 * 1024 },
     );
 
-    const packageRoot = join(consumerDir, 'node_modules', '@pat-lewczuk', 'cezar');
+    const packageRoot = join(consumerDir, 'node_modules', '@open-mercato', 'cezar');
     const manifest = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8')) as {
-      bin: { cezar: string; cez: string };
+      bin: { cezar: string; cez: string; 'cezar-cli': string };
     };
     assert.equal(manifest.bin.cezar, 'dist/index.js');
     assert.equal(manifest.bin.cez, 'dist/index.js');
+    assert.equal(manifest.bin['cezar-cli'], 'dist/index.js');
     const cliPath = join(packageRoot, manifest.bin.cezar);
 
     const help = await execFile(process.execPath, [cliPath, '--help'], {
@@ -72,9 +73,13 @@ test('the release tarball installs and runs the dry-run CLI workflow', { timeout
       { cwd: fixtureRepo },
     );
 
+    // CEZ_HOME pins every workspace write (migrations, project registry,
+    // server.json) to a temp dir — booting the real CLI must never touch the
+    // developer's real ~/.cezar.
+    const cezHome = join(root, 'cez-home');
     const run = await execFile(process.execPath, [cliPath, 'run', 'mock:done', '--repo', fixtureRepo], {
       cwd: consumerDir,
-      env: { ...process.env, CEZ_DRY_RUN: '1' },
+      env: { ...process.env, CEZ_DRY_RUN: '1', CEZ_HOME: cezHome },
       timeout: 60_000,
       maxBuffer: 10 * 1024 * 1024,
     });
@@ -86,10 +91,32 @@ test('the release tarball installs and runs the dry-run CLI workflow', { timeout
     assert.equal(runs.length, 1);
     assert.ok(['done', 'review'].includes(runs[0]?.status ?? ''), 'the dry-run workflow should finish successfully');
 
+    // Boot wiring (spec 2026-07-20-multi-project-workspace, step 1.5): the
+    // headless run migrated ~/.cezar and registered the boot repo.
+    const workspace = JSON.parse(await readFile(join(cezHome, 'config.json'), 'utf8')) as {
+      schemaVersion: number;
+      projects: Array<{ name: string; root: string }>;
+    };
+    assert.ok(workspace.schemaVersion >= 1, 'boot runs the workspace migrations');
+    assert.ok(
+      workspace.projects.some((p) => p.name === 'fixture-repo'),
+      'a headless run registers the boot repo in the workspace registry',
+    );
+
+    // `cezar projects` (step 5.2) reads the same registry with no server
+    // running — the ssh-into-the-box view of Settings → Projects.
+    const projects = await execFile(process.execPath, [cliPath, 'projects'], {
+      cwd: consumerDir,
+      env: { ...process.env, CEZ_HOME: cezHome },
+      timeout: 30_000,
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    assert.match(projects.stdout, /fixture-repo/);
+    assert.match(projects.stdout, /1 project\(s\)/);
+
     // server-install / server-uninstall dry-run round-trip. CEZ_HOME isolates
     // ~/.cezar/server.json to a temp dir; CEZ_DRY_RUN performs no real sudo.
     assert.match(help.stdout, /cezar server-install/);
-    const cezHome = join(root, 'cez-home');
     const serverEnv = { ...process.env, CEZ_DRY_RUN: '1', CEZ_HOME: cezHome };
     const serverExec = { cwd: consumerDir, env: serverEnv, timeout: 60_000, maxBuffer: 10 * 1024 * 1024 } as const;
 

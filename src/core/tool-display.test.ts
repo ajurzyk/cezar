@@ -130,6 +130,42 @@ describe('toolDisplay', () => {
         expected: { toolKind: 'task', title: 'Task', subtitle: undefined },
       },
 
+      // ---- agent (claude's current subagent spelling — #529) ----
+      {
+        name: 'Agent',
+        input: { description: 'Review the diff', prompt: 'long prompt…', subagent_type: 'code-reviewer' },
+        expected: { toolKind: 'task', title: 'Agent: Review the diff', subtitle: 'code-reviewer' },
+      },
+      // No description: the subagent type carries the row rather than repeating
+      // itself in the subtitle.
+      {
+        name: 'Agent',
+        input: { subagent_type: 'Explore' },
+        expected: { toolKind: 'task', title: 'Agent: Explore', subtitle: undefined },
+      },
+      {
+        name: 'agent',
+        input: {},
+        expected: { toolKind: 'task', title: 'Agent', subtitle: undefined },
+      },
+
+      // ---- skill (claude's Skill invocation — #529) ----
+      {
+        name: 'Skill',
+        input: { skill: 'om-auto-fix-issue', args: '529' },
+        expected: { toolKind: 'task', title: 'Skill: om-auto-fix-issue', subtitle: '529' },
+      },
+      {
+        name: 'skill',
+        input: { skill: 'om-code-review' },
+        expected: { toolKind: 'task', title: 'Skill: om-code-review', subtitle: undefined },
+      },
+      {
+        name: 'Skill',
+        input: {},
+        expected: { toolKind: 'task', title: 'Skill', subtitle: undefined },
+      },
+
       // ---- plan: claude TodoWrite, opencode todowrite, codex todoList/plan ----
       {
         name: 'TodoWrite',
@@ -139,6 +175,9 @@ describe('toolDisplay', () => {
       { name: 'todowrite', expected: { toolKind: 'plan', title: 'Update plan' } },
       { name: 'todoList', expected: { toolKind: 'plan', title: 'Update plan' } },
       { name: 'plan', expected: { toolKind: 'plan', title: 'Update plan' } },
+      { name: 'TaskCreate', input: { subject: 'x' }, expected: { toolKind: 'plan', title: 'Update plan' } },
+      { name: 'TaskUpdate', input: { taskId: '1' }, expected: { toolKind: 'plan', title: 'Update plan' } },
+      { name: 'TaskList', expected: { toolKind: 'plan', title: 'Update plan' } },
 
       // ---- MCP: codex mcpToolCall item + claude/opencode mcp__server__tool names ----
       {

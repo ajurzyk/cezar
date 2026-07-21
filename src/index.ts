@@ -8,12 +8,18 @@ import { fileURLToPath } from 'node:url';
 import { detectEnvironment } from './core/backend-detect.js';
 import { pruneOrphans } from './git-worktree.js';
 import { getRepoInfo } from './server/git.js';
+import { DEFAULT_WORKTREE_RETENTION, loadConfig, resolveWorktreeRetention } from './config.js';
+import { reclaimWorktrees } from './runs/retention.js';
 import { RunStore } from './runs/store.js';
 import { RunManager } from './workflows/run.js';
 import { loadWorkflows } from './workflows/load.js';
 import { startServer } from './server/server.js';
 import { checkForUpdate } from './update-check.js';
 import { printSkillsBanner } from './skills-banner.js';
+import { runMigrations } from './workspace/migrations.js';
+import { registerProject, shouldRegisterProject } from './workspace/projects.js';
+import { runProjectsCommand } from './workspace/projects-cli.js';
+import { WorkspaceSemaphore } from './workspace/semaphore.js';
 
 const HELP = `cezar — local cockpit for AI agent tasks in your repo
 
@@ -21,17 +27,23 @@ Usage:
   cezar                     start the cockpit (server + GUI) for the current repo
   cezar run "<task>"        run a task headless in the terminal
   cezar init                scaffold .ai/cezar/ (example workflow + skill)
+  cezar projects            list the projects this cockpit serves
+                            (also: projects add [<dir>] · projects remove <id>)
   cezar server-install      interactive wizard to host cezar on a server
   cezar server-deploy       redeploy a new version (reload the service) + verify
   cezar server-uninstall    reverse a server-install
 
 Options:
-  -p, --port <n>              cockpit port (default 4321)
+  -p, --port <n>              cockpit port (default 4321; server-install: this
+                              instance's loopback port — auto-picked per domain)
       --repo <dir>            repo to operate on (default: cwd)
       --workflow <name>       workflow for \`run\` (default: quick-task)
       --model <model>         model override for \`run\`
       --no-open               don't open the browser
       --platform <id>         server-install target (ubuntu-vps | macosx-ngrok)
+      --domain <host>         server-install (ubuntu-vps): host a SECOND, independent
+                              cockpit for this domain (own nginx site + service + port).
+                              A new domain never resumes/clobbers the first install.
       --yes                   server-install: accept safe defaults (never auto-sudo)
       --reconfigure <ids>     server-install: force re-run of step id(s), comma-separated
       --reinstall             server-install: force re-run of every step (full reinstall)
@@ -51,6 +63,7 @@ async function main(): Promise<void> {
       model: { type: 'string' },
       'no-open': { type: 'boolean', default: false },
       platform: { type: 'string' },
+      domain: { type: 'string' },
       yes: { type: 'boolean', default: false },
       reconfigure: { type: 'string' },
       reinstall: { type: 'boolean', default: false },
@@ -58,6 +71,14 @@ async function main(): Promise<void> {
     },
     allowPositionals: true,
   });
+
+  // `port` carries a default, so its presence can't tell an explicit `--port`
+  // from the fallback. server-install needs that distinction (explicit port
+  // wins; otherwise a new named instance auto-picks a free one), so detect the
+  // flag straight from argv.
+  const portExplicit = process.argv
+    .slice(2)
+    .some((a) => a === '-p' || a === '--port' || a.startsWith('--port=') || a.startsWith('-p='));
 
   if (values.help) {
     console.log(HELP);
@@ -79,18 +100,30 @@ async function main(): Promise<void> {
     case 'init':
       initCommand(repoRoot);
       return;
+    case 'projects':
+      // Registry-only (no server, no HTTP) — see workspace/projects-cli.ts.
+      process.exitCode = await runProjectsCommand(positionals.slice(1), { defaultRoot: repoRoot });
+      return;
     case 'server-install':
       await serverCommand('install', repoRoot, values.platform, {
         yes: Boolean(values.yes),
         reconfigure: values.reconfigure,
         reinstall: Boolean(values.reinstall),
+        domain: values.domain,
+        port: portExplicit ? Number(values.port) : undefined,
       });
       return;
     case 'server-deploy':
-      await serverCommand('deploy', repoRoot, values.platform, { yes: Boolean(values.yes) });
+      await serverCommand('deploy', repoRoot, values.platform, {
+        yes: Boolean(values.yes),
+        domain: values.domain,
+      });
       return;
     case 'server-uninstall':
-      await serverCommand('uninstall', repoRoot, values.platform, { yes: Boolean(values.yes) });
+      await serverCommand('uninstall', repoRoot, values.platform, {
+        yes: Boolean(values.yes),
+        domain: values.domain,
+      });
       return;
     default:
       console.error(`unknown command: ${command}\n`);
@@ -99,13 +132,48 @@ async function main(): Promise<void> {
   }
 }
 
+// ---- workspace boot ----------------------------------------------------------
+
+/**
+ * Boot-time workspace bookkeeping (spec 2026-07-20-multi-project-workspace,
+ * "Boot flow"): run pending `~/.cezar` migrations first, then register the
+ * boot repo in the per-user project registry. Registration is suppressed for
+ * task worktrees and `$HOME` itself (`shouldRegisterProject`) — the process
+ * still serves those folders normally. Strictly non-fatal: the zero-config
+ * law says a broken or read-only home degrades to a smaller cockpit, never a
+ * failed boot, so any workspace error logs one warning and boot continues.
+ *
+ * Returns the boot project's registry id when registration happened —
+ * `serveCommand` plumbs it into the server (`ServerDeps.bootProjectId`) so
+ * `/api/projects` and `/api/health` can name the boot project without a
+ * lookup. Undefined when registration was suppressed or the workspace is
+ * unavailable; the server then derives a fallback on its own.
+ */
+async function initWorkspace(repoRoot: string): Promise<string | undefined> {
+  try {
+    await runMigrations({ bootRepoRoot: repoRoot });
+    if (await shouldRegisterProject(repoRoot)) return (await registerProject(repoRoot)).id;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`[cez] workspace registry unavailable (${message}) — continuing without it`);
+  }
+  return undefined;
+}
+
 // ---- serve -----------------------------------------------------------------
 
 async function serveCommand(repoRoot: string, preferredPort: number, openBrowser: boolean): Promise<void> {
+  const bootProjectId = await initWorkspace(repoRoot);
+  // ONE workspace semaphore for the whole process (spec 2026-07-20, step 2.5):
+  // the boot manager and every lazily-built project context count their runs
+  // against the same `resources.maxParallel`. The boot refresh() below is the
+  // cache hook's first call; PUT /api/workspace/config (step 2.7) re-fires it.
+  const semaphore = new WorkspaceSemaphore();
+  await semaphore.refresh();
   // keepLive + recover() (#367): runs that were queued/running/waiting when
   // the previous process exited are re-queued or resumed instead of failed.
   const store = openStore(repoRoot, { keepLive: true });
-  const manager = new RunManager(store, repoRoot);
+  const manager = new RunManager(store, repoRoot, { semaphore });
   const version = readOwnVersion();
 
   const checks = await detectEnvironment();
@@ -118,6 +186,14 @@ async function serveCommand(repoRoot: string, preferredPort: number, openBrowser
     );
     if (orphans.length > 0) {
       console.log(`  cleaned ${orphans.length} orphaned worktree(s): ${orphans.map((id) => id.slice(0, 8)).join(', ')}`);
+    }
+    // Count-based worktree retention (#483): reclaim finished worktrees beyond
+    // the keep-limit (directory only — `cez/<id8>` branch kept, so recoverable).
+    // Best-effort; never blocks boot.
+    const keep = await resolveWorktreeRetention(repoRoot).catch(() => DEFAULT_WORKTREE_RETENTION);
+    const reclaimed = await reclaimWorktrees(repoRoot, store, keep).catch(() => [] as string[]);
+    if (reclaimed.length > 0) {
+      console.log(`  reclaimed ${reclaimed.length} old worktree(s), branch kept: ${reclaimed.map((id) => id.slice(0, 8)).join(', ')}`);
     }
   }
 
@@ -138,7 +214,7 @@ async function serveCommand(repoRoot: string, preferredPort: number, openBrowser
   });
 
   const port = await pickPort(preferredPort);
-  startServer({ repoRoot, store, manager, version, update }, port);
+  startServer({ repoRoot, store, manager, version, update, bootProjectId, semaphore }, port);
   const url = `http://localhost:${port}`;
 
   console.log(`\n  cezar v${version} — ${repoRoot}`);
@@ -212,6 +288,7 @@ async function runCommand(
     process.exitCode = 1;
     return;
   }
+  await initWorkspace(repoRoot);
   const { workflows, issues } = await loadWorkflows(repoRoot);
   for (const issue of issues) console.error(`! skipped ${issue.path}: ${issue.message}`);
   const name = workflowName ?? 'quick-task';
@@ -223,7 +300,11 @@ async function runCommand(
   }
 
   const store = openStore(repoRoot);
-  const manager = new RunManager(store, repoRoot);
+  // Headless runs enforce the same workspace-level cap/memory limit (step
+  // 2.5) — one refreshed semaphore, even with just one manager in play.
+  const semaphore = new WorkspaceSemaphore();
+  await semaphore.refresh();
+  const manager = new RunManager(store, repoRoot, { semaphore });
 
   store.on('event', ({ event }) => {
     switch (event.type) {
@@ -298,7 +379,7 @@ async function serverCommand(
   mode: 'install' | 'uninstall' | 'deploy',
   repoRoot: string,
   platform: string | undefined,
-  flags: { yes: boolean; reconfigure?: string; reinstall?: boolean },
+  flags: { yes: boolean; reconfigure?: string; reinstall?: boolean; domain?: string; port?: number },
 ): Promise<void> {
   // Detection (claude/gh/codex) and tool installs resolve executables off the
   // process PATH. When the installer is launched from a non-login shell (an
@@ -309,13 +390,35 @@ async function serverCommand(
 
   const { getStrategy, availablePlatformIds } = await import('./server-install/strategies.js');
   const { runInstall, runUninstall, runDeploy } = await import('./server-install/engine.js');
+  const { loadServerState, listServerInstances, nextFreeInstancePort } = await import('./server-install/state.js');
+  const { instanceSlug, DEFAULT_SERVER_INSTANCE } = await import('./paths.js');
 
   const ids = availablePlatformIds();
-  // Uninstall and deploy can read the platform from the recorded state when omitted.
+
+  // Resolve the instance from --domain (domain-keyed multi-instance). An
+  // interactive install with an existing cockpit and no --domain also offers to
+  // stand up a second instance — the exact "it asks me to reinstall" case.
+  let domain = (flags.domain ?? '').trim() || undefined;
+  if (mode === 'install' && !domain && !flags.yes && process.stdin.isTTY && loadServerState(DEFAULT_SERVER_INSTANCE).installed) {
+    try {
+      const { createClackUi } = await import('./server-install/ui.js');
+      const answer = await createClackUi().text({
+        message:
+          'This host already runs a cezar cockpit. Enter a NEW domain to host a second, independent instance — ' +
+          'or leave blank to manage/redeploy the existing one.',
+        placeholder: 'shop.example.com',
+      });
+      if (typeof answer === 'string' && answer.trim()) domain = answer.trim();
+    } catch {
+      // any prompt failure → fall back to managing the default instance
+    }
+  }
+  const instance = domain ? instanceSlug(domain) : DEFAULT_SERVER_INSTANCE;
+
+  // Uninstall and deploy can read the platform from THIS instance's record when omitted.
   let chosen = platform;
   if ((mode === 'uninstall' || mode === 'deploy') && !chosen) {
-    const { loadServerState } = await import('./server-install/state.js');
-    chosen = loadServerState().platform;
+    chosen = loadServerState(instance).platform;
   }
   if (!chosen) {
     console.error(`--platform is required. Valid platforms: ${ids.join(', ')}`);
@@ -328,6 +431,23 @@ async function serverCommand(
     process.exitCode = 1;
     return;
   }
+  // Domain-keyed multi-instance is an ubuntu-vps feature (shared nginx front).
+  if (instance !== DEFAULT_SERVER_INSTANCE && chosen !== 'ubuntu-vps') {
+    console.error(`--domain (multi-instance) is only supported on ubuntu-vps, not ${chosen}.`);
+    process.exitCode = 1;
+    return;
+  }
+
+  // Port: an explicit --port always wins; a brand-new named instance otherwise
+  // auto-picks the next free loopback port so it can't collide with the first.
+  let port = flags.port;
+  if (mode === 'install' && instance !== DEFAULT_SERVER_INSTANCE && port === undefined) {
+    const known = listServerInstances().some((i) => i.instance === instance);
+    if (!known) {
+      port = nextFreeInstancePort();
+      console.log(`\n  New instance "${instance}" (${domain}) → loopback port ${port} (override with --port).`);
+    }
+  }
 
   const runOpts = {
     dryRun: process.env.CEZ_DRY_RUN === '1',
@@ -336,7 +456,14 @@ async function serverCommand(
     reinstall: Boolean(flags.reinstall),
     repoRoot,
     now: new Date().toISOString(),
+    instance,
+    domain,
+    port,
   };
+
+  // e.g. "ubuntu-vps" or "ubuntu-vps, shop.example.com" for a named instance.
+  const label = instance === DEFAULT_SERVER_INSTANCE ? chosen : `${chosen}, ${domain}`;
+  const domainFlag = instance === DEFAULT_SERVER_INSTANCE ? '' : ` --domain ${domain}`;
 
   try {
     const result =
@@ -346,12 +473,12 @@ async function serverCommand(
           ? await runDeploy(strategy, runOpts)
           : await runUninstall(strategy, runOpts);
     if (mode === 'install' && result.status === 'complete') {
-      console.log(`\n  cezar server-install (${chosen}) complete.`);
-      console.log(`  Redeploy a new version any time with: cezar server-deploy --platform ${chosen}\n`);
+      console.log(`\n  cezar server-install (${label}) complete.`);
+      console.log(`  Redeploy a new version any time with: cezar server-deploy --platform ${chosen}${domainFlag}\n`);
     } else if (mode === 'deploy' && result.status === 'complete') {
-      console.log(`\n  cezar server-deploy (${chosen}) complete — the service was reloaded and verified.\n`);
+      console.log(`\n  cezar server-deploy (${label}) complete — the service was reloaded and verified.\n`);
     } else if (mode === 'uninstall' && result.status === 'complete') {
-      console.log(`\n  cezar server-uninstall (${chosen}) complete — the changes it made were reversed.\n`);
+      console.log(`\n  cezar server-uninstall (${label}) complete — the changes it made were reversed.\n`);
     }
     // complete + cancelled (resumable) exit 0; failed exits 1.
     process.exitCode = result.status === 'failed' ? 1 : 0;
@@ -445,9 +572,9 @@ function readOwnName(): string {
   try {
     const here = dirname(fileURLToPath(import.meta.url));
     const pkg = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf8')) as { name?: string };
-    return pkg.name ?? '@pat-lewczuk/cezar';
+    return pkg.name ?? '@open-mercato/cezar';
   } catch {
-    return '@pat-lewczuk/cezar';
+    return '@open-mercato/cezar';
   }
 }
 
@@ -466,7 +593,14 @@ function openUrl(url: string): void {
     process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'cmd' : 'xdg-open';
   const args = process.platform === 'win32' ? ['/c', 'start', '', url] : [url];
   try {
-    spawn(cmd, args, { stdio: 'ignore', detached: true }).unref();
+    const child = spawn(cmd, args, { stdio: 'ignore', detached: true });
+    // A missing opener (e.g. no `xdg-open` on a headless Linux VPS) surfaces
+    // asynchronously as an 'error' event, NOT a synchronous throw — without a
+    // listener Node promotes it to an unhandled error and hard-crashes the whole
+    // process, even though the cockpit is already serving. Swallow it: the URL is
+    // printed above, so a browser-less host just doesn't auto-open.
+    child.on('error', () => {});
+    child.unref();
   } catch {
     // the printed URL is enough
   }

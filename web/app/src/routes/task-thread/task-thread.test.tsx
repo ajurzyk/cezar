@@ -88,6 +88,23 @@ describe('ThreadView', () => {
     expect(document.querySelector('[data-slot="assistant-message"]')?.textContent).not.toContain('**')
   })
 
+  it('renders USER messages as markdown too, not raw text (#524)', async () => {
+    // A GitHub hand-off prompt is markdown — a `#N` line, a bare link, a `---` rule — so the
+    // bubble that echoes it back must parse it, exactly as the assistant side does. Rendering
+    // one side raw made the same document look broken going in and fine coming out.
+    const events = [
+      line(1, 'user-message', { text: 'Fix **now**: see https://github.com/acme/demo/issues/142' }),
+    ]
+    renderView(<ThreadView run={run('waiting')} thread={reduceThread(events)} />)
+
+    await waitFor(() => {
+      const strong = document.querySelector('[data-slot="user-bubble"] [data-streamdown="strong"]')
+      expect(strong?.textContent).toBe('now')
+    })
+    const bubble = [...document.querySelectorAll('[data-slot="user-bubble"]')].at(-1)
+    expect(bubble?.textContent).not.toContain('**')
+  })
+
   it('dims lifecycle lines and shows the tool card + folded reasoning', () => {
     renderView(<ThreadView run={run('waiting')} thread={reduceThread(EVENTS)} />)
     const notes = [...document.querySelectorAll('[data-slot="note-line"]')]
@@ -123,6 +140,16 @@ describe('ThreadView', () => {
   it('running → the composer stays enabled with the "message" placeholder, no paused hint', () => {
     renderView(<ThreadView run={run('running')} thread={reduceThread(EVENTS)} />)
     expect(document.querySelector('[data-slot="paused-hint"]')).toBeNull()
+    const textarea = screen.getByLabelText('Reply to the agent') as HTMLTextAreaElement
+    expect(textarea.disabled).toBe(false)
+    expect(textarea.placeholder).toBe('Message the agent — / for skills, @ for files…')
+  })
+
+  it('monitoring → no paused hint, "message" placeholder, and a "monitoring" pill (#490)', () => {
+    renderView(<ThreadView run={run('running', { activity: 'monitoring' })} thread={reduceThread(EVENTS)} />)
+    // Still working on downstream work, not on you: never the "paused, waiting for your reply" banner.
+    expect(document.querySelector('[data-slot="paused-hint"]')).toBeNull()
+    expect(document.querySelector('[data-slot="pill"]')?.textContent).toContain('monitoring')
     const textarea = screen.getByLabelText('Reply to the agent') as HTMLTextAreaElement
     expect(textarea.disabled).toBe(false)
     expect(textarea.placeholder).toBe('Message the agent — / for skills, @ for files…')

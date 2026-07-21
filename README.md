@@ -12,7 +12,7 @@ Your CLI logins, your `gh`, your files. No accounts, no database, no cloud.
 
 🔥 **Fire and forget.** Queue a stack of autonomous coding and maintenance
 tasks and let them run — cezar orchestrates them across isolated worktrees,
-in parallel, and picks up follow-ups on its own. Flip the **Autonomous** flag
+in parallel. Flip the **Autonomous** flag
 and a run never stops to ask; it just finishes. Leave it on a VPS and you get
 a dev team that's *always on* — a mobile-friendly cockpit you can check from
 your phone, working your backlog while you're away.
@@ -21,7 +21,7 @@ your phone, working your backlog while you're away.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](#license)
 ![Node 20+](https://img.shields.io/badge/Node-20%2B-339933)
-![TypeScript 5.x](https://img.shields.io/badge/TypeScript-5.x-3178c6)
+![TypeScript 7.x](https://img.shields.io/badge/TypeScript-7.x-3178c6)
 ![Zero config](https://img.shields.io/badge/config-zero-success)
 ![No database](https://img.shields.io/badge/database-none-success)
 
@@ -90,10 +90,11 @@ and an orchestrator keeps a whole queue of them moving.
   worktree**, so two (or three) agents work in parallel without stepping on
   each other — or on the branch you're editing.
 - 🗂️ **A backlog that needs babysitting.** Queue a stack of tasks and cezar
-  **orchestrates** them: it runs up to your parallel limit, holds the rest in an
-  ordered queue, and turns an agent's leftover follow-ups into the next tasks
-  from the **Inbox** — one click each. Point it at a GitHub issue and it runs
-  straight on that, so working the tracker down stops being a manual chore.
+  **orchestrates** them: it runs up to your parallel limit and holds the rest in
+  an ordered queue. Point it at a GitHub issue and it runs straight on that, so
+  working the tracker down stops being a manual chore. Turn on the opt-in
+  **Inbox** (`CEZ_FOLLOWUPS=1`) and an agent's leftover follow-ups become the
+  next tasks too — one click each.
 - 🤖 **"Autonomous" means you still have to sit there.** Flip the **Autonomous**
   flag and a run never parks to ask — it keeps going until the task is done. Pair
   it with a **skill** (a Markdown playbook) and you've got fire-and-forget
@@ -145,7 +146,7 @@ the [`codex` CLI](https://github.com/openai/codex), or
 ```bash
 cd your-repo
 npx cezar-cli              # start the cockpit for the current repo
-#   or: npx @pat-lewczuk/cezar
+#   or: npx @open-mercato/cezar
 ```
 
 The cockpit opens at `http://localhost:4321` (auto-picks the next free port if
@@ -160,9 +161,30 @@ Both the `cezar` and `cez` commands are installed, so once it's on your PATH you
 can run either. No API key is ever used — cezar shells out to whichever agent
 CLIs you are already logged into, `claude` by default.
 
+> **Contributing?** [Local development](#local-development) shows how to get a
+> global `cezar` command straight off your checkout (`npm run install-as-command`)
+> — no publish needed.
+
 > **Just kicking the tires?** Set `CEZ_DRY_RUN=1` to run against a bundled mock
 > instead of the real CLI — the whole cockpit works with no `claude` login, so
 > you can explore runs, diffs, variants and the review gate offline.
+
+### Preview builds
+
+Every green CI run publishes an installable npm snapshot
+([how it works](docs/publishing.md)), so you can try unreleased code without
+cloning anything:
+
+```bash
+npx cezar-cli@develop      # current develop head
+npx cezar-cli@main         # current main head (ahead of the latest stable release)
+```
+
+Every pull request gets its own preview too — the CI bot posts a sticky comment
+on the PR with the exact pinned version to copy-paste
+(`npx cezar-cli@<version>-pr<N>.<run>`). Previews are prerelease versions under
+their own dist-tags; a plain `npx cezar-cli` always resolves to the latest
+stable release.
 
 ---
 
@@ -229,7 +251,8 @@ Three words, no jargon — **task**, **skill**, **chain**:
 Five moves that make the cockpit worth the browser tab:
 
 - 🗃️ **Queue + orchestration.** Start as many tasks as you like: cezar runs up to
-  `maxParallel` at once (default **2**; a non-git directory always runs one) and
+  `maxParallel` at once across every project (default **2**; a non-git directory
+  always runs one) and
   holds the rest in a FIFO queue with visible positions (`#1`, `#2`, …). Cancel a
   queued task before it starts; the queue even survives a cockpit restart —
   everything still `queued` is re-enqueued in order. It's the orchestration layer
@@ -243,6 +266,12 @@ Five moves that make the cockpit worth the browser tab:
 - 🪞 **Parallel variants (×2 / ×3).** Run the same task as competing agents in
   separate worktrees, then compare their diffs side by side and **pick** one —
   the losers are archived and their worktrees cleaned up.
+- 🧹 **Bounded worktree disk.** Each task runs in its own full checkout, so a busy
+  cockpit would otherwise grow without limit. cezar keeps only the last
+  `worktreeRetention` **finished** worktrees on disk (default **10**; `0` =
+  unlimited) and reclaims the rest — directory only, the `cez/<id8>` branch is
+  always kept, so the work stays recoverable. Settings → Resources shows every
+  worktree's disk use with per-row delete and a **Reclaim now** button.
 - 🛡️ **Review gate.** A finished run with changes waits in `review`. Read the diff,
   type notes that go straight back into the agent's session, or push a
   `gh pr create --draft`. You stay the merge button.
@@ -256,12 +285,12 @@ Five moves that make the cockpit worth the browser tab:
 
 ## Cockpit tour
 
-Seven views, one browser window, all live over Server-Sent Events:
+Seven views, one browser window, all live over Server-Sent Events (six until you opt into the Inbox):
 
 | View | What's in it |
 |---|---|
 | **Tasks** | Every task with its status, live event stream (agent text · tool calls · tool results · pasted/generated screenshots), tokens and cost. Continue, cancel, open in terminal (`claude --resume`), review the diff, or push a draft PR. |
-| **Inbox** | Follow-ups an agent left behind (`todos.json`) — one click turns a suggestion into the next task, pre-wired to its suggested skill. |
+| **Inbox** | **Opt-in** (`CEZ_FOLLOWUPS=1`; hidden by default). Follow-ups an agent left behind (`todos.json`) — one click turns a suggestion into the next task, pre-wired to its suggested skill. Off, agents are never asked to leave follow-ups; each task's own **Notes** handoff journal is unaffected. |
 | **Git** | Branch, working-tree status, diff vs HEAD, recent commits (click one for its inline patch + GitHub link), and the configurable base branch that worktrees fork from and PRs target. |
 | **GitHub** | Open issues and PRs of the repo's origin, read through your logged-in `gh`. Hand an issue straight to the agent — pick a workflow and skills, one click runs it. |
 | **Skills** | Local skills plus the team skills repo, with a rendered body + prompt preview. Refresh pulls the latest from the remote. |
@@ -272,6 +301,70 @@ The cockpit is a React app served pre-built from the package — `npx cezar-cli`
 still means no build step and no dev server on your machine — with a dark/light
 theme, a ⌘K command palette, and bookmarklets that launch a task straight from
 a GitHub page.
+
+---
+
+## Multiple projects, one cockpit
+
+One `cezar serve` hosts **every repo you work in**, not just the one you started
+it in. Each repo cezar boots in registers itself in a per-user registry at
+`~/.cezar/config.json` — the workspace file that also holds the global knobs
+(the parallel cap, the memory ceiling, the checkout root). Nothing is added to
+the repo: per-project state stays exactly where it was, in that repo's
+`.ai/cezar/`.
+
+Every view is project-scoped:
+
+```
+/p/<projectId>/            tasks · git · github · skills · workflows · settings
+```
+
+`<projectId>` is a slug derived from the folder name (`my-app`, then `my-app-2`
+on a collision), and `/p/default/…` always means the project cezar was started
+in. The sidebar shows one collapsible group per project — each with its own nav
+and task list — and the new-task composer names the project it will run in.
+
+**Adding a project** — the **+** button beside *New task*:
+
+- 📂 **Open local folder…** browses your home directory in a folder picker and
+  registers the folder you pick.
+- ⬇️ **Clone from GitHub…** clones with your logged-in `gh` into the checkout
+  root (**Settings → Projects**, default `~/cezar/projects`) with live progress,
+  then registers the clone. Close the dialog and the clone is killed and its
+  partial directory removed.
+
+Removing a project (**Settings → Projects**) drops the registry entry only — the
+repo and its `.ai/cezar/` are never touched, so re-adding it later finds all its
+tasks intact. The project cezar is currently serving can't be removed: it
+re-registers itself at the next start.
+
+**From the terminal** — the same registry, no cockpit required (handy over ssh):
+
+```bash
+cezar projects                    # list: id, branch or status, path
+cezar projects add ~/code/api     # register a folder (defaults to the current repo)
+cezar projects remove api         # drop the registry entry; the repo is untouched
+```
+
+These read and write `~/.cezar/config.json` directly, so they work with the
+server stopped, and `CEZ_HOME` selects which workspace they operate on.
+
+Settings split along the same line: **Agents**, **Worktrees**, **Bookmarklets**,
+**Prompt templates** and **MCP** describe one repo and live under
+`/p/<projectId>/settings`; **Appearance**, **Notifications**, **Resources**,
+**Projects** and **Keyboard** are yours or the machine's and live at
+`/settings/global`.
+
+**Old URLs keep working.** Every unprefixed path — `/`, `/tasks/<id>`,
+`/settings`, and the whole `/api/…` surface — still answers exactly as before,
+bound to the project cezar was started in; the cockpit redirects flat paths to
+their `/p/<boot>/…` twin. Existing bookmarks, bookmarklets and scripts need no
+change.
+
+> **Hosted cockpit?** In [remote mode](#remote-access-host-cezar-on-a-server)
+> the folder picker is narrowed from your home directory to the checkout root —
+> a remote viewer has no business enumerating the host's whole home. Adding and
+> cloning projects keep working.
 
 ---
 
@@ -333,10 +426,18 @@ Useful environment variables:
 |---|---|
 | `CEZ_DRY_RUN=1` | Use the bundled mock instead of the real `claude` CLI — the entire cockpit works offline, for demos and development. |
 | `CEZ_APPROVAL_GATE=1` | Opt into Claude's interactive approval UI; by default, unapproved tools are denied without interrupting the run. |
+| `CEZ_FOLLOWUPS=1` | Turn on the global follow-up **Inbox**: agents are asked to leave follow-ups in `todos.json` when they finish, and the Inbox view appears. Off by default — each task's own **Notes** handoff journal runs either way. |
+| `CEZ_AUTOSAVE=1` | Re-enable the periodic (90 s) autosave commit in task worktrees. Off by default (#471) — turn-end and pre-PR flushes always run, so branches still end complete. Every autosave names its trigger in the commit subject (`cezar autosave (periodic)` vs `(turn end)` / `(run finalize)` / `(pre-PR)`), so the flushes you keep are distinguishable from the timer you disabled. |
 | `CEZ_CLAUDE_BIN=/path/to/claude` | Override which `claude` binary is used. |
 | `CEZ_CODEX_BIN=/path/to/codex` | Override which `codex` binary is used. |
 | `CEZ_OPENCODE_BIN=/path/to/opencode` | Override which `opencode` binary is used. |
 | `GITHUB_TOKEN` | Fallback for GitHub reads/PRs when `gh` isn't authenticated. |
+| `CEZ_ENV_PASSTHROUGH=A,B` | Forward these extra host env vars to spawned agents. By default agents get a least-privilege env (safe shell/toolchain vars + the backend's own auth + `GITHUB_TOKEN` + `CEZ_*`), not your full environment — use this to add a var an agent needs. |
+| `CEZ_AGENT_ENV_FULL=1` | Escape hatch: give spawned agents the full host environment (pre-hardening behavior). Off by default; only set it if you understand that this hands every host secret to the agent process. |
+| `CEZ_REDACT_SECRETS=0` | Disable scrubbing of credential values/token shapes from the on-disk state (the NDJSON transcript and the free-text fields of `runs.json`). On by default; leave it on. Best-effort defense-in-depth, not a guarantee: it catches known token shapes and the values of your own secret-named env vars, so a credential in neither category can still get through. |
+| `CEZ_TITLE_UPDATES=0` | Turn off the live task-title refresh (namer re-runs on each turn end). The Settings → Agents toggle overrides this default. |
+| `CEZ_AUTONAME=0` | Disable ALL LLM task naming (creation + live) — titles stay heuristic (`437: /om-auto-review-pr`). Under `CEZ_DRY_RUN=1` naming is already off unless forced with `CEZ_AUTONAME=1`. |
+| `CEZ_REVIEW_GATE=1` | Turn ON the optional diff-first review gate (#489): a successful, non-autonomous run with changes parks at `review` (Accept / Send back / Draft PR) instead of finishing. Off by default — changed runs settle to `done` with the diff left in the worktree. Only `1` enables. The Settings → Agents toggle overrides this; autonomous runs always skip it. |
 | `CEZ_NO_BANNER=1` | Skip the `open-mercato/skills` banner on `cezar serve` startup. Dismissing the same banner in the cockpit silences the terminal one too. |
 
 ---
@@ -403,7 +504,14 @@ and verified, and it ends with a real authenticated end-to-end check.
 npx cezar-cli server-install   --platform ubuntu-vps   # stand it up
 npx cezar-cli server-deploy    --platform ubuntu-vps   # roll out a new version (reload the service)
 npx cezar-cli server-uninstall --platform ubuntu-vps   # reverse it
+
+# host a SECOND cockpit for another domain on the same box (ubuntu-vps):
+npx cezar-cli server-install   --platform ubuntu-vps --domain shop.example.com
 ```
+
+On `ubuntu-vps` a single host can run several independent cockpits — add
+`--domain <host>` and each gets its own port, nginx site, login and service; a
+new domain never resumes or clobbers the first install.
 
 | Provider | `--platform` | Public front | Guide |
 |----------|--------------|--------------|-------|
@@ -424,7 +532,13 @@ never blocks startup):
 ```jsonc
 {
   "skillsRepos": [{ "repo": "open-mercato/skills", "ref": "main" }], // team skills; [] disables
-  "maxParallel": 2,          // how many tasks may run at once (non-git dirs always run 1)
+  // Team-skill repos are code-trusted: a skill body becomes an agent system prompt.
+  // Only owner/name, https/ssh URLs, or local paths (`/abs`, `./rel`, `~/dir`,
+  // `C:\dir`) are accepted — no ext::/fd:: transport helpers. Write a relative
+  // path as `./name`, not a bare `name`. Pin `ref` to a full commit SHA to freeze
+  // the source against a moving branch head — cezar verifies it resolves to
+  // exactly that commit, and reports it as `team.commit`.
+  "worktreeRetention": 10,   // keep the last N finished worktrees on disk; 0 = unlimited (branch always kept)
   "defaultRunner": "claude", // agent backend: "claude" (default) · "codex" · "opencode"
   "plannerModel": "sonnet",  // model the "Plan first" button uses to draft chains
   "baseBranch": "develop"    // branch worktrees fork from + PRs target (also settable in the Git tab)
@@ -434,35 +548,97 @@ never blocks startup):
 Run data (`runs.json`, NDJSON event logs, worktrees, `todos.json`) is
 git-ignored automatically; your workflows and skills stay committable.
 
+Settings that belong to *you* rather than to a repo — the parallel cap
+(`maxParallel`, default **2**), the per-task memory ceiling and the checkout
+root — live once in `~/.cezar/config.json`, alongside the
+[project registry](#multiple-projects-one-cockpit), and are edited from
+**Settings → Resources** and **Settings → Projects**. A `maxParallel` left over
+in a repo's `.ai/cezar/config.json` is imported into the workspace file the
+first time cezar boots there, and ignored afterwards.
+
 ### Editing the agents' own config (Settings → Agent config)
 
 cezar picks *which* agent runs; **Settings → Agent config** lets you edit *how* it
-behaves — the config files Claude, Codex and OpenCode read for themselves
-(`.claude/settings.json`, `.mcp.json`, `CLAUDE.md`, `AGENTS.md`,
-`~/.codex/config.toml`, `opencode.json`, …). Pick an agent first; its pane holds
-everything that agent reads — **Settings**, **MCP** and **Memory** together (a
-per-agent descriptor drives the layout, so new agents slot in as one entry). Each
-file is edited **raw**, in its native format, with syntax highlighting; cezar
-never rewrites a file it opened. Every scope (user / project / local) is shown
-together with the vendor's own documented precedence, so it's clear which file
-actually wins. **MCP** is a per-agent subsection over whichever file holds that
-agent's servers — only Claude has a dedicated `.mcp.json`; Codex and OpenCode
-keep servers inside their main config.
+behaves — the raw config files Claude, Codex and OpenCode read for settings,
+MCP, and memory. In the multi-project cockpit the section is project-scoped:
+repo-relative files resolve from the selected project's root, while user-scope
+files continue to resolve from the agent's home.
 
-Two things worth knowing: because a run works in a git worktree, an edit to a
-*tracked* file (`.claude/settings.json`) reaches a run only after you commit it —
-the UI says so per file; the *gitignored* personal layer
-(`.claude/settings.local.json`, `CLAUDE.local.md`) is copied into each run's
-worktree so it takes effect immediately. And editing is a **local-machine
-capability**: on a hosted cockpit (`CEZ_REMOTE=1`) the section is read-only, since
-these files can run code (hooks, MCP commands).
+Each file keeps its native format and vendor-documented precedence. Tracked
+files reach task worktrees after commit; Claude's gitignored personal layer is
+seeded into each run's worktree. Editing is a local-machine capability, so a
+hosted cockpit (`CEZ_REMOTE=1`) is read-only and never serves home-file contents.
 
 ---
 
-## Development
+## Local development
+
+End-to-end, from a fresh clone to a global `cezar` command you can run in **any**
+repo on your machine — no npm publish required.
+
+**1. Prerequisites** — Node 20+ and `git` (plus at least one logged-in agent CLI,
+as in [Quick start](#quick-start)).
+
+**2. Clone & install**
 
 ```bash
+git clone https://github.com/open-mercato/cezar.git
+cd cezar
 npm install
+```
+
+**3. Build** — compiles the server (`tsc → dist/`) and the cockpit
+(`vite build → web/dist/`), then runs the pack gate:
+
+```bash
+npm run build
+```
+
+**4. Install as a global command** — build + put `cezar` / `cez` / `cezar-cli` on
+your PATH pointing at *this checkout*:
+
+```bash
+npm run install-as-command            # live link (default) — see the change loop below
+#   or: npm run install-as-command:global   # self-contained snapshot copy
+```
+
+Now `cd` into any other repo and run it:
+
+```bash
+cd ~/some-other-project
+cezar            # cockpit for that repo, straight off your checkout
+cezar-cli --help # same binary; the name matches `npx cezar-cli`
+```
+
+**5. The change loop**
+
+- **Link mode** (default): edit source → `npm run build` → the global command
+  reflects it immediately. No relink needed. (It is a live symlink into this
+  checkout — don't move or delete the checkout while it's linked.)
+- **Snapshot mode** (`:global`): re-run `npm run install-as-command:global` to
+  refresh the installed copy. It survives moving/deleting the checkout.
+
+**6. Uninstall**
+
+```bash
+npm run uninstall-as-command    # removes cezar / cez / cezar-cli (either flavor)
+```
+
+**7. Troubleshooting**
+
+- **`cezar: command not found`** after install → your npm global bin dir isn't on
+  PATH. The script prints the exact dir; add it to your shell profile
+  (`export PATH="$(npm prefix -g)/bin:$PATH"`).
+- **`EACCES` / permission denied** → your global prefix is root-owned. Point npm
+  at a user-writable one and retry — **never** sudo:
+  `npm config set prefix ~/.npm-global`.
+- **Already installed the published `@open-mercato/cezar` globally?** The
+  link/snapshot install replaces it; `uninstall-as-command` removes ours, and
+  `npm i -g @open-mercato/cezar` brings the published one back.
+
+### In-checkout scripts
+
+```bash
 npm run dev          # server (API :4321) + Vite dev server, opens the cockpit in the browser
 npm run dev:server   # tsx src/index.ts — the API server alone
 npm run dev:web      # Vite dev server alone (proxies /api to :4321)

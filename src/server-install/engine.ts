@@ -1,7 +1,7 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { cezarHomeDir } from '../paths.js';
-import { acquireLock, isResolved, loadServerState, saveServerState } from './state.js';
+import { acquireLock, deleteServerState, isResolved, loadServerState, saveServerState } from './state.js';
 import { StepAborted, StepCancelled, StepSkipped, defaultRunner } from './steps.js';
 import { createAutoUi, createClackUi } from './ui.js';
 import {
@@ -34,6 +34,18 @@ export interface RunOptions {
   now: string;
   ui?: Ui;
   runner?: Runner;
+  /**
+   * Instance id (slug) to act on. Omit / `default` for the original
+   * single-cockpit host (legacy `~/.cezar/server.json`); a domain-derived slug
+   * targets a named instance under `~/.cezar/server-instances/`.
+   */
+  instance?: string;
+  /** Public domain for this instance — recorded up front so instance selection
+   * and the SSL step share one source of truth. */
+  domain?: string;
+  /** Loopback port for this instance. For a NEW named instance the caller
+   * passes an auto-picked free port; a resume keeps the recorded one. */
+  port?: number;
 }
 
 export type RunStatus = 'complete' | 'cancelled' | 'failed';
@@ -99,11 +111,13 @@ function buildContext(state: ServerState, opts: RunOptions): InstallContext {
     (opts.dryRun || opts.assumeYes
       ? createAutoUi({}, (m) => console.log(m), { strictValidate: !opts.dryRun })
       : createClackUi());
+  const instance = opts.instance ?? 'default';
   const ctx: InstallContext = {
     state,
     ui,
+    instance,
     runner: opts.runner ?? defaultRunner,
-    save: async () => saveServerState(state),
+    save: async () => saveServerState(state, instance),
     dryRun: opts.dryRun,
     assumeYes: opts.assumeYes,
     reconfigure: opts.reconfigure,
@@ -117,9 +131,9 @@ function buildContext(state: ServerState, opts: RunOptions): InstallContext {
 }
 
 export async function runInstall(strategy: PlatformStrategy, opts: RunOptions): Promise<RunResult> {
-  const release = acquireLock();
+  const release = acquireLock(opts.instance);
   try {
-    const state = loadServerState();
+    const state = loadServerState(opts.instance);
     // buildContext reconciles dry-run records first, so a preview of platform A
     // never blocks a real install of platform B (the reset clears `platform`).
     const ctx = buildContext(state, opts);
@@ -129,6 +143,13 @@ export async function runInstall(strategy: PlatformStrategy, opts: RunOptions): 
       );
     }
     state.platform = strategy.id;
+    // Record instance identity so the file is self-describing and later
+    // uninstall/deploy runs (and `server-instances/` listings) agree on it.
+    state.instance = opts.instance ?? state.instance ?? 'default';
+    if (opts.domain) state.domain = opts.domain;
+    // A caller-supplied port wins (a new named instance auto-picks a free one);
+    // otherwise keep whatever the resumed record already carries.
+    if (opts.port) state.primaryPort = opts.port;
     state.createdAt ??= opts.now;
     state.updatedAt = opts.now;
 
@@ -235,9 +256,9 @@ export async function runInstall(strategy: PlatformStrategy, opts: RunOptions): 
 }
 
 export async function runUninstall(strategy: PlatformStrategy, opts: RunOptions): Promise<RunResult> {
-  const release = acquireLock();
+  const release = acquireLock(opts.instance);
   try {
-    const state = loadServerState();
+    const state = loadServerState(opts.instance);
     const ctx = buildContext(state, opts);
     // Same guard as install/deploy: undoing with the wrong strategy would skip
     // the real artifacts and (before this guard existed) destroy their ledger.
@@ -301,7 +322,12 @@ export async function runUninstall(strategy: PlatformStrategy, opts: RunOptions)
     state.platform = undefined;
     state.publicUrl = undefined;
     state.ephemeral = undefined;
+    state.domain = undefined;
     await ctx.save();
+    // A named instance is fully gone now — drop its (empty) record so it no
+    // longer reserves a port or shows up as an install. The default record is
+    // kept, matching the legacy single-host behavior.
+    if (ctx.instance !== 'default') deleteServerState(ctx.instance);
     return { status: 'complete', state };
   } finally {
     release();
@@ -314,9 +340,9 @@ export async function runUninstall(strategy: PlatformStrategy, opts: RunOptions)
  * + re-verify); holds the single-writer lock for the whole run.
  */
 export async function runDeploy(strategy: PlatformStrategy, opts: RunOptions): Promise<RunResult> {
-  const release = acquireLock();
+  const release = acquireLock(opts.instance);
   try {
-    const state = loadServerState();
+    const state = loadServerState(opts.instance);
     const ctx = buildContext(state, opts);
     if (state.platform && state.platform !== strategy.id) {
       throw new PreflightError(

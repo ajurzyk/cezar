@@ -12,7 +12,10 @@ cezar picks *which* agent runs; it cannot say *how* that agent behaves. Claude, 
 
 Taken with the user before drafting:
 
-1. **Per repo.** "Project" = the repo this server is bound to (`cezar --repo <dir>`, one process one root). No project registry — that is `.ai/specs/2026-07-16-multi-project-switcher.md`.
+1. **Per project.** Originally "project" meant the one repo bound to the server. After the
+   multi-project workspace landed in #521, it means the active registered project: repo-relative
+   files resolve from that project's `ProjectContext.root`; user-scope files remain machine-wide.
+   The legacy unprefixed API remains the boot-project alias.
 2. **Not source-file routing.** No path-glob → runner mapping. The subject is only the agent's own config.
 3. **Raw file editor.** Real file bytes in a highlighted textarea. Validate on save, refuse to write a file that does not parse. cezar never re-serializes.
 4. **MCP is first-class** — the `mcp` placeholder (`registry.tsx:103-110`) ships.
@@ -186,7 +189,7 @@ This costs a hosted user the ability to *edit* agent config from the browser. Th
 | Validators | `src/agent-config/validate.ts` (new) | `json` / `jsonc` / `toml` / `markdown`. |
 | Seeding | `src/workflows/run.ts` (edit) | Copy the personal layer into the worktree + `info/exclude`. |
 | Home paths | `src/paths.ts` (**coordinate**) | `~/.claude`, `$CODEX_HOME`, `~/.config/opencode`. |
-| API | `src/server/server.ts` (edit) | `GET /api/agent-config`, `GET|PUT /api/agent-config/:id`. |
+| API | `src/server/server.ts` (edit) | Project-route entries `GET /agent-config`, `GET|PUT /agent-config/:id`, mounted as both legacy `/api/*` boot aliases and `/api/p/:projectId/*`. |
 | Editor | `web/app/src/components/code-editor.tsx` (new) | Overlay-on-textarea, Shiki singleton. |
 | Sections | `web/app/src/routes/settings/agent-config-section.tsx`, `mcp-section.tsx` (new) | The UI. |
 | Registry | `web/app/src/routes/settings/registry.tsx` (edit) | `agent-config` entry; unhide `mcp`. |
@@ -240,7 +243,9 @@ Deliberately **not** in the catalog:
 
 ### API
 
-Additive sibling routes, following the R6 precedent that added config knobs beside `/api/health` rather than extending its protected shape (BACKWARD_COMPATIBILITY.md §2).
+Additive project-scoped routes, registered once in the mirrored route table introduced by #521.
+The legacy `/api/agent-config*` spellings stay bound to the boot project and byte-identical to
+`/api/p/<boot>/agent-config*` and `/api/p/default/agent-config*`.
 
 ```
 GET /api/agent-config

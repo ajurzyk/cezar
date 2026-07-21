@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { loadConfig } from './config.js';
+import { loadConfig, resolveWorktreeRetention } from './config.js';
 
 /**
  * `config.json` schema roundtrips (R2 2.3: `systemPrompt?`). The invariants
@@ -100,5 +100,132 @@ describe('loadConfig systemPrompt', () => {
       expect(config.defaultModels).toBeUndefined();
       expect(config.maxParallel).toBe(6);
     });
+  });
+
+  /** `worktreeRetention` (#483): count-based, always materialized (default 10),
+   *  `.catch(10)` so a bad value degrades to the default. `0` = unlimited. */
+  describe('worktreeRetention', () => {
+    it('defaults to 10 when absent (old config files load unchanged)', async () => {
+      write({ maxParallel: 5 });
+      const config = await loadConfig(repoRoot);
+      expect(config.worktreeRetention).toBe(10);
+      expect(config.maxParallel).toBe(5);
+    });
+
+    it('round-trips a configured count', async () => {
+      write({ worktreeRetention: 3 });
+      expect((await loadConfig(repoRoot)).worktreeRetention).toBe(3);
+    });
+
+    it('keeps 0 as a meaningful value (unlimited)', async () => {
+      write({ worktreeRetention: 0 });
+      expect((await loadConfig(repoRoot)).worktreeRetention).toBe(0);
+    });
+
+    it('degrades a bad value to the default (10) via .catch', async () => {
+      write({ worktreeRetention: -4, maxParallel: 6 });
+      const config = await loadConfig(repoRoot);
+      expect(config.worktreeRetention).toBe(10);
+      expect(config.maxParallel).toBe(6);
+    });
+
+    it('degrades a wrong-typed value to the default (10)', async () => {
+      write({ worktreeRetention: 'lots' });
+      expect((await loadConfig(repoRoot)).worktreeRetention).toBe(10);
+    });
+  });
+});
+
+/**
+ * `resolveWorktreeRetention` — what every enforcement site (boot sweeps,
+ * terminal transitions, the reclaim route) asks instead of reading the parsed
+ * `worktreeRetention`. The workspace's `resources.worktreeRetentionDefault`
+ * only *seeds* repos that set none, which is exactly what Settings → Worktrees
+ * tells the user, so the precedence is the contract under test here.
+ */
+describe('resolveWorktreeRetention', () => {
+  let repoRoot: string;
+  let cezHome: string;
+  const savedHome = process.env.CEZ_HOME;
+
+  beforeEach(() => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-retention-'));
+    mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
+    // Pinned so the suite never reads (or writes) the developer's real ~/.cezar.
+    cezHome = mkdtempSync(join(tmpdir(), 'cez-home-'));
+    process.env.CEZ_HOME = cezHome;
+  });
+
+  afterEach(() => {
+    if (savedHome === undefined) delete process.env.CEZ_HOME;
+    else process.env.CEZ_HOME = savedHome;
+    rmSync(repoRoot, { recursive: true, force: true });
+    rmSync(cezHome, { recursive: true, force: true });
+  });
+
+  const writeRepo = (value: unknown) =>
+    writeFileSync(join(repoRoot, '.ai/cezar', 'config.json'), JSON.stringify(value), 'utf8');
+  const writeWorkspace = (value: unknown) =>
+    writeFileSync(join(cezHome, 'config.json'), JSON.stringify(value), 'utf8');
+
+  it('inherits the workspace default when the repo sets nothing', async () => {
+    writeWorkspace({ resources: { worktreeRetentionDefault: 4 } });
+    expect(await resolveWorktreeRetention(repoRoot)).toBe(4);
+  });
+
+  it('inherits it when the repo has no config file at all', async () => {
+    rmSync(join(repoRoot, '.ai/cezar'), { recursive: true, force: true });
+    writeWorkspace({ resources: { worktreeRetentionDefault: 7 } });
+    expect(await resolveWorktreeRetention(repoRoot)).toBe(7);
+  });
+
+  it('inherits 0 (unlimited) — the workspace default is a value, not a truthiness test', async () => {
+    writeWorkspace({ resources: { worktreeRetentionDefault: 0 } });
+    expect(await resolveWorktreeRetention(repoRoot)).toBe(0);
+  });
+
+  it("keeps the repo's own value, workspace default ignored", async () => {
+    writeRepo({ worktreeRetention: 3 });
+    writeWorkspace({ resources: { worktreeRetentionDefault: 99 } });
+    expect(await resolveWorktreeRetention(repoRoot)).toBe(3);
+  });
+
+  it('keeps a repo value that happens to equal the historical default (10 is not a sentinel)', async () => {
+    writeRepo({ worktreeRetention: 10 });
+    writeWorkspace({ resources: { worktreeRetentionDefault: 2 } });
+    expect(await resolveWorktreeRetention(repoRoot)).toBe(10);
+  });
+
+  it("keeps the repo's explicit 0 over the workspace default", async () => {
+    writeRepo({ worktreeRetention: 0 });
+    writeWorkspace({ resources: { worktreeRetentionDefault: 5 } });
+    expect(await resolveWorktreeRetention(repoRoot)).toBe(0);
+  });
+
+  it('falls back to 10 when the workspace config is absent', async () => {
+    writeRepo({ maxParallel: 5 });
+    expect(await resolveWorktreeRetention(repoRoot)).toBe(10);
+  });
+
+  it('falls back to 10 when the workspace config is corrupt (unreadable)', async () => {
+    writeFileSync(join(cezHome, 'config.json'), '{ not json', 'utf8');
+    expect(await resolveWorktreeRetention(repoRoot)).toBe(10);
+  });
+
+  it('falls back to 10 when the workspace default itself is out of bounds', async () => {
+    writeWorkspace({ resources: { worktreeRetentionDefault: -1 } });
+    expect(await resolveWorktreeRetention(repoRoot)).toBe(10);
+  });
+
+  it('treats a repo value the schema would refuse as unset, so the workspace seeds it', async () => {
+    writeRepo({ worktreeRetention: 'lots' });
+    writeWorkspace({ resources: { worktreeRetentionDefault: 6 } });
+    expect(await resolveWorktreeRetention(repoRoot)).toBe(6);
+  });
+
+  it('treats a malformed repo config as unset', async () => {
+    writeFileSync(join(repoRoot, '.ai/cezar', 'config.json'), '{ nope', 'utf8');
+    writeWorkspace({ resources: { worktreeRetentionDefault: 8 } });
+    expect(await resolveWorktreeRetention(repoRoot)).toBe(8);
   });
 });

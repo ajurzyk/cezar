@@ -5,32 +5,39 @@ import {
   CircleDotIcon,
   ExternalLinkIcon,
   GitPullRequestIcon,
+  MessageSquareIcon,
   RefreshCwIcon,
   SearchIcon,
   TagIcon,
   TriangleAlertIcon,
 } from 'lucide-react'
-import { useState, type DragEvent, type ReactNode } from 'react'
-import { Link, Navigate, useParams } from 'react-router'
+import { useEffect, useMemo, useState, type DragEvent, type ReactNode } from 'react'
+import { useParams } from 'react-router'
+
+import { Link, Navigate } from '@/lib/project-router'
 
 import { getGithub, putUiState } from '@/api/client'
-import { queryKeys, useGithub, useSkills, useUiState, useWorkflows } from '@/api/queries'
-import type { GithubItem, UiState } from '@/api/types'
+import { queryKeys, useGithub, useGithubComments, useSkills, useUiState, useWorkflows } from '@/api/queries'
+import type { GithubComment, GithubItem, UiState } from '@/api/types'
 import { CenteredState } from '@/components/centered-state'
+import type { EnginePick } from '@/components/engine-pills'
 import { GithubIcon } from '@/components/icons'
 import { TabLink } from '@/components/tab-link'
 import { Button } from '@/components/ui/button'
 import { Command, CommandEmpty, CommandInput, CommandItem, CommandList } from '@/components/ui/command'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Skeleton } from '@/components/ui/skeleton'
 import { toast } from '@/components/ui/toaster'
 import { shortAge } from '@/lib/format'
 import { githubTaskPrompt } from '@/lib/github-task'
-import { cn } from '@/lib/utils'
+import { orderSkillsByUsage } from '@/lib/skills'
+import { cn, isHttpUrl } from '@/lib/utils'
 
 import { Markdown } from '../task-thread/markdown'
 import { allLabels, filterGithubItems, labelChipStyle } from './github-filter'
 import { GithubLoading } from './github-loading'
 import { HandToAgent } from './hand-to-agent'
+import { readFollowupSelection, writeFollowupSelection } from './hand-to-agent-draft'
 
 /**
  * `/github` — the forge tab rebuilt in React (R6 Step 1.1, spec §"GitHub tab (forge tab)"):
@@ -116,11 +123,43 @@ export function GithubRoute({ view }: { view: GithubView }) {
   })
 
   // Pickers + queued-run bookkeeping live at the route so they survive switching items
-  // (legacy parity) — see HandToAgent's doc block.
+  // (legacy parity) — see HandToAgent's doc block. Initial value comes from the localStorage
+  // "remembered last selection" (#408): a repeat hand-off is one action, and it now survives a
+  // page reload too — previously this was plain route state, gone on refresh.
   const workflows = useWorkflows()
   const skills = useSkills()
-  const [workflow, setWorkflow] = useState<string | null>(null)
-  const [selectedSkills, setSelectedSkills] = useState<readonly string[]>([])
+  const uiState = useUiState()
+  const [workflow, setWorkflow] = useState<string | null>(() => readFollowupSelection().workflow)
+  const [selectedSkills, setSelectedSkills] = useState<readonly string[]>(
+    () => readFollowupSelection().skills,
+  )
+  // The backend choice (#401) is a way of working too, so it lives here beside the pickers —
+  // and it must, because HandToAgent is keyed by item and would otherwise reset on every hop.
+  const [engine, setEngine] = useState<EnginePick>({ runner: null, model: null })
+  useEffect(() => {
+    writeFollowupSelection({ workflow, skills: [...selectedSkills] })
+  }, [workflow, selectedSkills])
+  // A workflow that no longer exists must not reach the server — the same legacy rule
+  // `validSkills` applies to skills (hand-to-agent.tsx). Remembering the pick (#408) gave this
+  // state a lifetime beyond the `.ai/workflows/` file that justified it: rename the workflow and
+  // every reload restores a name the server 404s on, with no obvious way to clear it. Cockpits
+  // for different repos also share one `localhost:<port>` origin (`pickPort`, src/index.ts) and
+  // therefore this localStorage key, so the name can arrive from a repo where it does exist.
+  // Drop it only once the list has LOADED — an in-flight fetch is not evidence of absence.
+  const workflowDefs = workflows.data?.workflows
+  useEffect(() => {
+    if (!workflowDefs) return
+    if (workflow !== null && !workflowDefs.some((def) => def.name === workflow)) setWorkflow(null)
+  }, [workflowDefs, workflow])
+  // Frequency sort (#408, shared with /new's SourcePill): project-first, then most-selected.
+  // Memoized so the picker gets a STABLE array identity across renders that don't actually
+  // change the catalog or the usage stats (e.g. toggling a skill re-renders this route).
+  const skillsData = skills.data
+  const skillUsage = uiState.data?.skillUsage
+  const skillList = useMemo(
+    () => orderSkillsByUsage(skillsData ?? [], skillUsage),
+    [skillsData, skillUsage],
+  )
   const [queued, setQueued] = useState<ReadonlyMap<string, string>>(new Map())
   // List filtering (#gh-filter): free-text search (by #id or any text) + a label narrow.
   const [query, setQuery] = useState('')
@@ -291,11 +330,13 @@ export function GithubRoute({ view }: { view: GithubView }) {
               key={selected.url}
               item={selected}
               workflows={workflows.data?.workflows ?? []}
-              skills={skills.data ?? []}
+              skills={skillList}
               workflow={workflow}
               onWorkflowChange={setWorkflow}
               selectedSkills={selectedSkills}
               onSkillsChange={setSelectedSkills}
+              engine={engine}
+              onEngineChange={setEngine}
               queuedRunId={queued.get(selected.url) ?? null}
               onQueued={(url, runId) => setQueued((current) => new Map(current).set(url, runId))}
             />
@@ -377,6 +418,7 @@ function GithubRow({
           <span>#{item.number}</span>
           <span className="min-w-0 truncate">{item.author}</span>
           <span>{shortAge(item.createdAt)}</span>
+          <CommentCount count={item.comments} />
           {item.checks ? <ChecksGlyph checks={item.checks} /> : null}
           {queued ? (
             <span data-slot="gh-queued-flag" className="font-sans font-medium text-violet">
@@ -431,7 +473,7 @@ function LabelFilter({
       <PopoverContent align="end" sideOffset={6} className="w-60 p-0">
         <Command>
           <CommandInput placeholder="Filter labels…" />
-          <CommandList className="max-h-64">
+          <CommandList className="max-h-[min(16rem,calc(var(--radix-popover-content-available-height)-3rem))]">
             <CommandEmpty>No labels.</CommandEmpty>
             {selected.length > 0 ? (
               <CommandItem value="__clear__" onSelect={() => onChange([])} className="text-soft-foreground">
@@ -502,7 +544,7 @@ function GithubDetail({
         <span>{shortAge(item.createdAt)} ago</span>
         {item.comments ? (
           <>
-            ·<span>{item.comments} comments</span>
+            ·<CommentCount count={item.comments} />
           </>
         ) : null}
         {hasDiffStat ? (
@@ -515,16 +557,23 @@ function GithubDetail({
           </>
         ) : null}
         ·
-        <a
-          href={item.url}
-          target="_blank"
-          rel="noopener noreferrer"
-          data-slot="gh-open-link"
-          className="inline-flex items-center gap-0.5 text-muted-foreground hover:text-foreground hover:underline"
-        >
-          open on GitHub
-          <ExternalLinkIcon aria-hidden="true" className="size-2.5" />
-        </a>
+        {/* href protocol guard (#431): link only for http(s) URLs. */}
+        {isHttpUrl(item.url) ? (
+          <a
+            href={item.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            data-slot="gh-open-link"
+            className="inline-flex items-center gap-0.5 text-muted-foreground hover:text-foreground hover:underline"
+          >
+            open on GitHub
+            <ExternalLinkIcon aria-hidden="true" className="size-2.5" />
+          </a>
+        ) : (
+          <span data-slot="gh-open-link" className="text-muted-foreground">
+            open on GitHub
+          </span>
+        )}
       </p>
 
       <h2 className="mt-2 text-xl leading-snug font-semibold">{item.title}</h2>
@@ -546,8 +595,156 @@ function GithubDetail({
         )}
       </div>
 
+      <GithubThread item={item} />
+
       {children}
     </article>
+  )
+}
+
+/** The conversation thread (#499): comments (+ PR review summaries) rendered under the body, each
+ *  body through the shared `Markdown` component so images and code fences render exactly as the
+ *  issue body does. Lazy — only fetched while this detail view is mounted. Everything degrades:
+ *  loading → skeleton, unreachable → one-line reason + "open on GitHub", empty → nothing (the
+ *  count badge already said there were none). */
+function GithubThread({ item }: { item: GithubItem }) {
+  const thread = useGithubComments(item.kind, item.number)
+  const data = thread.data
+
+  if (thread.isPending) {
+    return (
+      <section data-slot="gh-thread-loading" className="mt-6 border-t border-border pt-5">
+        <Skeleton className="mb-3 h-3 w-24" />
+        <div className="flex flex-col gap-3">
+          <Skeleton className="h-14 w-full" />
+          <Skeleton className="h-14 w-full" />
+        </div>
+      </section>
+    )
+  }
+
+  if (!data || !data.available) {
+    const reason = data?.reason ?? (thread.error instanceof Error ? thread.error.message : 'could not load comments')
+    return (
+      <section data-slot="gh-thread-error" className="mt-6 border-t border-border pt-5 text-xs text-soft-foreground">
+        <span>Couldn’t load comments — {reason}. </span>
+        <a
+          href={item.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-0.5 text-muted-foreground hover:text-foreground hover:underline"
+        >
+          open on GitHub
+          <ExternalLinkIcon aria-hidden="true" className="size-2.5" />
+        </a>
+      </section>
+    )
+  }
+
+  // An empty thread renders nothing: the count badge already communicated "no discussion", and an
+  // empty "Comments · 0" section would be noise on the many quiet issues/PRs.
+  if (data.comments.length === 0) return null
+
+  return (
+    <section data-slot="gh-thread" className="mt-6 border-t border-border pt-5">
+      <h3
+        data-slot="gh-thread-header"
+        className="mb-4 text-[11px] font-semibold tracking-wide text-soft-foreground uppercase"
+      >
+        Comments · {data.comments.length}
+      </h3>
+      <ul className="flex flex-col gap-5">
+        {data.comments.map((comment) => (
+          <ThreadEntry key={`${comment.kind}-${comment.id}`} comment={comment} />
+        ))}
+      </ul>
+      {data.truncated ? (
+        <a
+          href={item.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          data-slot="gh-thread-truncated"
+          className="mt-4 inline-flex items-center gap-0.5 text-xs text-soft-foreground hover:text-foreground hover:underline"
+        >
+          thread truncated — open on GitHub
+          <ExternalLinkIcon aria-hidden="true" className="size-2.5" />
+        </a>
+      ) : null}
+    </section>
+  )
+}
+
+/** Review-state chip tones — the same success/danger/muted vocabulary the checks badge uses, so
+ *  approved reads green and changes-requested reads red without a new color system. */
+const REVIEW_CHIP: Record<NonNullable<GithubComment['reviewState']>, { label: string; tone: string }> = {
+  approved: { label: 'approved', tone: 'border-success/40 text-success' },
+  changes_requested: { label: 'changes requested', tone: 'border-danger/40 text-danger' },
+  commented: { label: 'commented', tone: 'border-border text-muted-foreground' },
+  dismissed: { label: 'dismissed', tone: 'border-border text-muted-foreground' },
+}
+
+/** One thread entry: avatar (letter fallback), author, age, an optional review-state chip, and the
+ *  body via the shared `Markdown` component (images/code fences render as in the issue body). */
+function ThreadEntry({ comment }: { comment: GithubComment }) {
+  const chip = comment.reviewState ? REVIEW_CHIP[comment.reviewState] : null
+  return (
+    <li data-slot="gh-thread-entry" data-kind={comment.kind} className="min-w-0">
+      <div className="mb-1.5 flex items-center gap-1.5 font-mono text-[11px] text-soft-foreground">
+        <Avatar url={comment.avatarUrl} login={comment.author} />
+        <span className="font-sans font-medium text-foreground">{comment.author}</span>
+        <span>{shortAge(comment.createdAt)}</span>
+        {chip ? (
+          <span
+            data-slot="gh-review-chip"
+            data-review-state={comment.reviewState}
+            className={cn('rounded-full border px-1.5 py-px font-sans text-[10px] font-medium', chip.tone)}
+          >
+            {chip.label}
+          </span>
+        ) : null}
+        <a
+          href={comment.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="open comment on GitHub"
+          className="ml-auto shrink-0 text-muted-foreground hover:text-foreground"
+        >
+          <ExternalLinkIcon aria-hidden="true" className="size-2.5" />
+        </a>
+      </div>
+      <div data-slot="gh-thread-body" className="text-sm">
+        {comment.body ? <Markdown>{comment.body}</Markdown> : <p className="text-soft-foreground">(no body)</p>}
+      </div>
+    </li>
+  )
+}
+
+/** A 16 px comment avatar. Falls back to a letter block when no URL is known or the image fails to
+ *  load (private-repo attachments, deleted avatars) — never a broken-image glyph. */
+function Avatar({ url, login }: { url?: string; login: string }) {
+  const [failed, setFailed] = useState(false)
+  if (url && !failed) {
+    return (
+      <img
+        src={url}
+        alt=""
+        width={16}
+        height={16}
+        loading="lazy"
+        onError={() => setFailed(true)}
+        data-slot="gh-avatar"
+        className="size-4 shrink-0 rounded-full"
+      />
+    )
+  }
+  return (
+    <span
+      data-slot="gh-avatar-fallback"
+      aria-hidden="true"
+      className="flex size-4 shrink-0 items-center justify-center rounded-full bg-muted text-[8px] font-semibold text-muted-foreground uppercase"
+    >
+      {login.slice(0, 1) || '?'}
+    </span>
   )
 }
 
@@ -559,6 +756,24 @@ const CHECKS_TONE: Record<Checks, string> = {
   passing: 'text-success',
   failing: 'text-danger',
   pending: 'text-muted-foreground',
+}
+
+/** The comment-count badge (#499): a muted speech-bubble glyph + count, shown on issue/PR rows
+ *  and in the detail meta line. Renders nothing for a zero (or absent) count, so quiet items look
+ *  exactly as they did before real counts arrived. Shared so the row and detail can't drift. */
+function CommentCount({ count }: { count: number }) {
+  if (!count) return null
+  return (
+    <span
+      data-slot="gh-comment-count"
+      data-count={count}
+      aria-label={`${count} comment${count === 1 ? '' : 's'}`}
+      className="inline-flex shrink-0 items-center gap-0.5"
+    >
+      <MessageSquareIcon aria-hidden="true" className="size-3" />
+      {count}
+    </span>
+  )
 }
 
 /** The checks badge — the legacy tab's three phrases, tinted by outcome. Links out

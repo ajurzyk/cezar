@@ -1,6 +1,6 @@
 import { useQueryClient } from '@tanstack/react-query'
 import { useCallback } from 'react'
-import { Link } from 'react-router'
+import { Link } from '@/lib/project-router'
 
 import { putUiState } from '@/api/client'
 import { queryKeys, useUiState } from '@/api/queries'

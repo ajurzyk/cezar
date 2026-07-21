@@ -1,6 +1,7 @@
 import { act, cleanup, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { setApiScope } from './project-scope'
 import { parseRunEvent, useRunEvents } from './run-events'
 
 /**
@@ -97,6 +98,16 @@ describe('useRunEvents — subscription', () => {
     expect(FakeEventSource.instances).toHaveLength(1)
   })
 
+  it('opens the scoped endpoint when a project scope is active (multi-project, step 3.1)', () => {
+    setApiScope('proj-a')
+    try {
+      renderHook(() => useRunEvents('run-1'))
+      expect(FakeEventSource.last.url).toBe('/api/p/proj-a/runs/run-1/events')
+    } finally {
+      setApiScope(null)
+    }
+  })
+
   it('collects BOTH wire vocabularies into one ordered list — v1 `run-event` and v2 `ui-event`', () => {
     const { result } = renderHook(() => useRunEvents('run-1'))
     const source = FakeEventSource.last
@@ -140,6 +151,75 @@ describe('useRunEvents — subscription', () => {
     second.emit('run-event', line(1, 'stdout', { text: 'a' }))
     second.emit('run-event', line(2, 'stdout', { text: 'b' }))
     expect(result.current.map((event) => event.seq)).toEqual([1, 2])
+  })
+})
+
+describe('useRunEvents — liveness watchdog (#424)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('reopens a silently-dead socket that never reached CLOSED, then dedups the replay', () => {
+    const { result } = renderHook(() => useRunEvents('run-1'))
+    const first = FakeEventSource.last
+    first.emit('run-event', line(1, 'stdout', { text: 'a' }))
+    // The socket is half-open: the browser still reports it OPEN, no `error` ever fires, and no
+    // frame (not even a ping) arrives. None of the CLOSED-gated reopen paths can catch this.
+    expect(first.readyState).toBe(0)
+
+    act(() => {
+      vi.advanceTimersByTime(55_000) // past the ~40 s stale threshold with total silence
+    })
+
+    // The watchdog rebuilt the socket; the server replays the file and live events resume.
+    expect(FakeEventSource.instances).toHaveLength(2)
+    const second = FakeEventSource.last
+    second.emit('run-event', line(1, 'stdout', { text: 'a' }))
+    second.emit('run-event', line(2, 'stdout', { text: 'b' }))
+    expect(result.current.map((event) => event.seq)).toEqual([1, 2])
+  })
+
+  it('keeps a quiet-but-alive socket open — a ping resets the staleness clock', () => {
+    renderHook(() => useRunEvents('run-1'))
+    const source = FakeEventSource.last
+
+    // A run that is thinking emits no data for a while, but the 15 s server keepalive keeps
+    // arriving — that alone must prove liveness and prevent a needless reopen.
+    act(() => vi.advanceTimersByTime(30_000))
+    source.emit('ping', '')
+    act(() => vi.advanceTimersByTime(30_000))
+    source.emit('ping', '')
+    act(() => vi.advanceTimersByTime(30_000))
+
+    expect(FakeEventSource.instances).toHaveLength(1)
+  })
+
+  it('does not reopen while the tab is hidden — a throttled tab is expected to be quiet', () => {
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden')
+    try {
+      renderHook(() => useRunEvents('run-1'))
+      expect(FakeEventSource.instances).toHaveLength(1)
+
+      act(() => vi.advanceTimersByTime(60_000))
+
+      // Hidden and silent is normal; the visibilitychange path reopens on return instead.
+      expect(FakeEventSource.instances).toHaveLength(1)
+    } finally {
+      visibility.mockRestore()
+    }
+  })
+
+  it('stops the watchdog on unmount — no reopen after the effect is torn down', () => {
+    const { unmount } = renderHook(() => useRunEvents('run-1'))
+    expect(FakeEventSource.instances).toHaveLength(1)
+
+    unmount()
+    act(() => vi.advanceTimersByTime(60_000))
+
+    expect(FakeEventSource.instances).toHaveLength(1)
   })
 })
 
