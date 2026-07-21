@@ -547,7 +547,10 @@ export function normalizeEvents(
 
     switch (kind) {
       case 'committed': {
-        if (row.sha) event.sha = row.sha;
+        // Enforce the full-40-hex invariant the rollup query depends on rather than assuming it:
+        // `oid` rejects anything else, and a malformed value embedded in the batched query would
+        // cost the whole chunk its glyphs instead of just this commit.
+        if (row.sha && /^[0-9a-f]{40}$/i.test(row.sha)) event.sha = row.sha;
         if (row.message) event.message = (row.message.split('\n')[0] ?? '').slice(0, COMMIT_MESSAGE_CAP);
         if (row.html_url) event.url = row.html_url;
         break;

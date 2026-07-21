@@ -14,7 +14,7 @@ import {
 import { useEffect, useMemo, useState, type DragEvent, type ReactNode } from 'react'
 import { Link, Navigate, useParams } from 'react-router'
 
-import { getGithub, putUiState } from '@/api/client'
+import { getGithub, getGithubComments, putUiState } from '@/api/client'
 import { queryKeys, useGithub, useGithubComments, useSkills, useUiState, useWorkflows } from '@/api/queries'
 import type {
   GithubComment,
@@ -116,17 +116,35 @@ export function GithubRoute({ view }: { view: GithubView }) {
       })
   }
 
+  // The thread the user is actually looking at, so a manual refresh can bust its SERVER cache.
+  const openNumber = n && /^\d+$/.test(n) ? Number(n) : null
+  const openKind: 'issue' | 'pr' = view === 'prs' ? 'pr' : 'issue'
+
   const refresh = useMutation({
-    mutationFn: () => getGithub({ refresh: true }),
+    mutationFn: async () => {
+      const data = await getGithub({ refresh: true })
+      // Refresh the open thread with `refresh: true` as well (#525). Invalidating its query key
+      // is NOT enough and was the bug in the first attempt at this: an invalidate re-requests
+      // `/api/github/comments/…` WITHOUT `refresh=1`, and the route only busts `commentsCache`
+      // when that param is present — so the client dutifully refetched and was handed the same
+      // ≤60 s-old object. Pressing refresh has to reach `gh`, or it is theatre.
+      if (openNumber !== null) {
+        const thread = await getGithubComments(openKind, openNumber, { refresh: true })
+        queryClient.setQueryData(queryKeys.githubComments(openKind, openNumber), thread)
+      }
+      return data
+    },
     onSuccess: (data) => {
       queryClient.setQueryData(queryKeys.github({}), data)
       // The refresh busted the server cache; the full batch must re-run against it.
       void queryClient.invalidateQueries({ queryKey: queryKeys.github({ limit: FULL_LIMIT }) })
-      // …and so must any open thread (#525). Previously only the list keys were invalidated, so
-      // a manual refresh left the open detail thread stale for up to the 60 s TTL. Pre-existing,
-      // but it now hides commits and CI state too, not just late comments. The `['github',
-      // 'comments']` prefix covers every open thread without enumerating them.
-      void queryClient.invalidateQueries({ queryKey: ['github', 'comments'] })
+      // Any OTHER cached thread is now suspect but not on screen — drop it so the next open
+      // refetches, rather than firing a request per cached thread right now.
+      void queryClient.removeQueries({
+        queryKey: ['github', 'comments'],
+        predicate: (q) =>
+          !(openNumber !== null && q.queryHash === JSON.stringify(queryKeys.githubComments(openKind, openNumber))),
+      })
     },
     onError: (error) => toast(error.message, { tone: 'danger' }),
   })
@@ -628,10 +646,12 @@ function GithubThread({ item, colors }: { item: GithubItem; colors: Record<strin
       ...(data?.comments ?? []).map((comment) => ({ row: 'comment' as const, comment })),
       ...(data?.events ?? []).map((event) => ({ row: 'event' as const, event })),
     ]
-    // Stable sort on the ISO timestamp. Both streams are UTC-normalized server-side, so a string
-    // compare is correct — `normalizeEvents` converts `author.date`'s numeric offset for exactly
-    // this reason.
-    return merged.sort((a, b) => at(a).localeCompare(at(b)))
+    // Compare parsed instants, not the raw strings. Both streams are UTC, but at DIFFERENT
+    // precisions: events go through `toISOString()` (always milliseconds, `…00.000Z`) while
+    // comments keep GitHub's second-precision `…00Z`. A string compare puts `.` (46) before `Z`
+    // (90), so an event would always sort above a comment made in the same second regardless of
+    // true order. Array.prototype.sort is stable, so equal instants keep insertion order.
+    return merged.sort((a, b) => Date.parse(at(a)) - Date.parse(at(b)))
   }, [data?.comments, data?.events])
 
   if (thread.isPending) {

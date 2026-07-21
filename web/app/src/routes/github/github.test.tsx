@@ -604,6 +604,23 @@ describe('the comment thread', () => {
     ])
   })
 
+  it('orders a comment and an event made in the SAME second by their true order', async () => {
+    // The two streams carry different precisions: events go through toISOString() (`…00.000Z`),
+    // comments keep GitHub's `…00Z`. A raw string compare puts '.' (46) before 'Z' (90), so the
+    // event would always win a same-second tie regardless of what actually happened first.
+    stubFetch(thread('pr', 137, {
+      available: true,
+      comments: [{ ...COMMENT_TEXT, createdAt: '2026-01-03T10:00:00Z' }],
+      events: [{ ...EVT.merged, createdAt: '2026-01-03T10:00:00.000Z' }],
+    }))
+    renderAt('/github/prs/137')
+
+    await waitFor(() => expect(events()).toHaveLength(1))
+    const rows = [...document.querySelectorAll('[data-slot="gh-thread-entry"], [data-slot="gh-event-row"]')]
+    // Same instant → stable sort keeps insertion order, and comments are inserted first.
+    expect(rows[0]?.getAttribute('data-slot')).toBe('gh-thread-entry')
+  })
+
   it('tints a label chip from the event colour', async () => {
     stubFetch(thread('pr', 137, { available: true, comments: [], events: [EVT.labeled] }))
     renderAt('/github/prs/137')
@@ -709,25 +726,33 @@ describe('the comment thread', () => {
     expect(document.querySelector('[data-slot="gh-commit-group"]')).toBeNull()
   })
 
-  it('refetches the OPEN THREAD too when the tab is manually refreshed', async () => {
-    // Pre-existing gap (#525 step 3.1): the refresh mutation invalidated only the list keys, so a
-    // manual refresh left the open thread stale for up to the 60 s TTL. Harmless-looking when the
-    // thread was comments-only; it now hides commits and CI state as well.
-    let threadHits = 0
-    stubFetch({
-      'GET /api/github/comments/issue/142': () => {
-        threadHits += 1
-        return jsonResponse({ available: true, comments: [COMMENT_TEXT], events: [] })
-      },
+  it('sends refresh=1 for the OPEN THREAD when the tab is manually refreshed', async () => {
+    // Asserts the PROPERTY (fresh data is actually requested), not the mechanism (a request went
+    // out). The first attempt at this fix only invalidated the query key, which made the client
+    // re-request WITHOUT `refresh=1` — and the route only busts its 60 s commentsCache when that
+    // param is present, so the user got the same stale object back and the test still passed.
+    const threadRequests: string[] = []
+    const sent = stubFetch({
       'GET /api/github?refresh=1': () => jsonResponse(GITHUB),
     })
-    renderAt('/github/issues/142')
+    const origFetch = globalThis.fetch
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path.startsWith('/api/github/comments/')) threadRequests.push(path)
+      return (origFetch as typeof fetch)(input, init as RequestInit)
+    })
 
-    await waitFor(() => expect(threadHits).toBe(1))
+    renderAt('/github/issues/142')
+    await waitFor(() => expect(threadRequests.length).toBe(1))
+    expect(threadRequests[0]).toBe('/api/github/comments/issue/142') // initial load: no refresh
 
     fireEvent.click(document.querySelector<HTMLElement>('[data-slot="gh-refresh"]')!)
 
-    await waitFor(() => expect(threadHits).toBeGreaterThan(1))
+    // The re-request MUST carry refresh=1, or the server hands back its cached thread.
+    await waitFor(() =>
+      expect(threadRequests.some((p) => p === '/api/github/comments/issue/142?refresh=1')).toBe(true),
+    )
+    expect(sent.length).toBeGreaterThan(0)
   })
 
   it('shows a truncation row linking to GitHub when the thread was trimmed', async () => {

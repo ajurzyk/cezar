@@ -448,24 +448,22 @@ describe('TIMELINE_EVENT_KINDS (#525)', () => {
 });
 
 describe('timeline fetch bounds (#525)', () => {
-  it('shares one budget across pages rather than one per page', () => {
-    // The trap this guards: gh()'s timeout is PER INVOCATION, so TIMELINE_MAX_PAGES pages at the
-    // 15 s default would put the loop's ceiling at 150 s — an order of magnitude worse than the
-    // single --paginate spawn it replaces. The budget is a total, not a per-page allowance.
-    expect(TIMELINE_BUDGET_MS).toBe(15_000);
-    expect(TIMELINE_MAX_PAGES * TIMELINE_BUDGET_MS).toBeGreaterThan(TIMELINE_BUDGET_MS);
-  });
-
-  it('keeps a floor large enough that a spawned page can actually finish', () => {
-    expect(TIMELINE_MIN_PAGE_MS).toBeGreaterThan(0);
-    expect(TIMELINE_MIN_PAGE_MS).toBeLessThan(TIMELINE_BUDGET_MS);
-  });
-
   it('caps events independently of the comment stream', () => {
-    // Not "they happen to be equal" — they must be SEPARATE knobs. A combined cap would let event
-    // volume shorten comments[], which is a §2-protected response field.
-    expect(TIMELINE_EVENT_CAP).toBe(200);
-    expect(THREAD_ENTRY_CAP).toBe(200);
+    // Not "they happen to be equal" — they must be SEPARATE knobs, so this asserts the BEHAVIOUR
+    // rather than the two constants. 250 events and 250 comments through their own paths must
+    // each yield their own 200, which a combined cap could not produce.
+    const events = Array.from({ length: 250 }, (_, i) => ({
+      event: 'labeled', id: i,
+      created_at: new Date(Date.UTC(2026, 0, 1) + i * 60_000).toISOString(),
+      actor: { login: 'a' }, label: { name: `l${i}` },
+    }));
+    const comments: ForgeComment[] = Array.from({ length: 250 }, (_, i) => ({
+      id: i, author: 'a', createdAt: new Date(Date.UTC(2026, 0, 1) + i * 60_000).toISOString(),
+      body: '', kind: 'comment', url: `u${i}`,
+    }));
+
+    expect(normalizeEvents(events).events).toHaveLength(200);
+    expect(mergeThread([comments]).comments).toHaveLength(200);
   });
 });
 
@@ -582,6 +580,21 @@ describe('normalizeEvents (#525)', () => {
     expect(events[10]!).toMatchObject({ sha: SHA, message: 'fix(forge): bound the timeline page loop' });
   });
 
+  it('drops a malformed sha rather than embedding it in the rollup query', () => {
+    // The full-40-hex shape is an invariant the batched checks query depends on: `oid` rejects
+    // anything else, and one bad value in an aliased chunk costs all 50 commits their glyphs
+    // rather than just the one. Enforced at the boundary instead of assumed.
+    const { events } = normalizeEvents([
+      commitRow({ sha: 'abc1234' }),                       // abbreviated
+      commitRow({ sha: `${'a'.repeat(39)}z`, id: 2 }),      // non-hex
+      commitRow({ sha: SHA, id: 3 }),                       // valid
+    ]);
+    expect(events).toHaveLength(3);        // the rows still render, just without a sha
+    expect(events[0]!.sha).toBeUndefined();
+    expect(events[1]!.sha).toBeUndefined();
+    expect(events[2]!.sha).toBe(SHA);
+  });
+
   it('caps the commit message at its first line and 120 chars', () => {
     const { events } = normalizeEvents([
       commitRow({ message: `${'x'.repeat(200)}\n\nA long body paragraph that must not appear.` }),
@@ -615,6 +628,27 @@ describe('normalizeEvents (#525)', () => {
     ]).events.map((e) => e.id);
     expect(after.slice(1)).toEqual(before);
     expect(new Set(after).size).toBe(after.length);
+  });
+
+  it('documents that the index fallback is NOT stable — the reason it reaches one kind only', () => {
+    // The test above uses an id-keyed and a sha-keyed row, so it would pass even if the index
+    // fallback were maximally unstable. This one exercises the fallback path itself, on
+    // `cross-referenced` — the only kind with no identity at all — and pins the honest answer:
+    // the id DOES shift when an earlier row disappears. That is precisely why the fallback is
+    // confined to one kind instead of being the general scheme; as the general scheme every row
+    // below an insertion would remount on each 60 s refetch.
+    const xref = { event: 'cross-referenced', id: null, node_id: null, created_at: '2026-01-02T00:00:00Z', source: { issue: { number: 1 } } };
+    const withLeading = normalizeEvents([
+      { event: 'closed', id: 7, created_at: '2026-01-01T00:00:00Z', actor: { login: 'a' } },
+      xref,
+    ]).events;
+    const withoutLeading = normalizeEvents([xref]).events;
+
+    expect(withLeading[1]!.id).toBe('evt-1');
+    expect(withoutLeading[0]!.id).toBe('evt-0'); // same event, different id — known and bounded
+    // It is still UNIQUE within a response, which is the property React keys actually require.
+    const many = normalizeEvents([xref, xref, xref]).events.map((e) => e.id);
+    expect(new Set(many).size).toBe(many.length);
   });
 
   it('keeps the NEWEST window when the cap fires — the opposite of mergeThread', () => {
@@ -803,6 +837,51 @@ describe('fetchGithubComments timeline integration (#525)', () => {
 
     expect(viaTimeline.comments).toEqual(expected);
     expect(viaTimeline.comments).toEqual(viaLegacy.comments);
+  });
+
+  it('normalizes a REAL timeline `commented` row — the premise the §2 guarantee rests on', async () => {
+    // The byte-identical test above compares normalizeComments against itself over a fixture that
+    // was BUILT by spreading a comments-endpoint row into {event:'commented'}. That proves the
+    // pipeline is consistent; it cannot prove the premise, which is that GitHub's timeline actually
+    // returns that shape. This fixture is a timeline `commented` row with the full key set the API
+    // really sends — including keys normalizeComments does not read.
+    //
+    // It matters because normalizeComments sits OUTSIDE the inner try/catch: if the shape differed
+    // (a missing html_url, say), the zod parse would throw past the timeline handler into the outer
+    // one and return {available:false, comments:[]} — an empty thread, the exact regression the
+    // inner-catch scoping exists to prevent.
+    const realTimelineCommentedRow = {
+      event: 'commented',
+      actor: { login: 'pkarw', id: 18116827, avatar_url: 'https://avatars.githubusercontent.com/u/18116827?v=4', type: 'User' },
+      id: 5024963753,
+      node_id: 'IC_kwDOShuET88AAAABK4LcqQ',
+      url: 'https://api.github.com/repos/open-mercato/cezar/issues/comments/5024963753',
+      html_url: 'https://github.com/open-mercato/cezar/issues/525#issuecomment-5024963753',
+      issue_url: 'https://api.github.com/repos/open-mercato/cezar/issues/525',
+      created_at: '2026-07-20T17:07:49Z',
+      updated_at: '2026-07-20T17:07:49Z',
+      author_association: 'MEMBER',
+      user: { login: 'pkarw', id: 18116827, avatar_url: 'https://avatars.githubusercontent.com/u/18116827?v=4', type: 'User' },
+      body: '## 📸 Evidence\n\nThe GitHub tab detail thread as it renders today.',
+      reactions: { url: 'https://api.github.com/…/reactions', total_count: 0 },
+      performed_via_github_app: null,
+    };
+
+    // Parses without throwing, and every field the wire type promises is populated.
+    const [normalized] = normalizeComments([realTimelineCommentedRow]);
+    expect(normalized).toEqual({
+      id: 5024963753,
+      author: 'pkarw',
+      avatarUrl: 'https://avatars.githubusercontent.com/u/18116827?v=4',
+      createdAt: '2026-07-20T17:07:49Z',
+      body: '## 📸 Evidence\n\nThe GitHub tab detail thread as it renders today.',
+      kind: 'comment',
+      url: 'https://github.com/open-mercato/cezar/issues/525#issuecomment-5024963753',
+    });
+    // The timeline-only extras must not leak onto the wire type.
+    expect(normalized).not.toHaveProperty('event');
+    expect(normalized).not.toHaveProperty('reactions');
+    expect(normalized).not.toHaveProperty('author_association');
   });
 
   it('falls back to the comments endpoint on a timeline 404, still populating comments[]', async () => {

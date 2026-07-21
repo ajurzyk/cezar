@@ -33,3 +33,13 @@ Append-only, UTC timestamps, newest at the bottom.
   pre-existing specs, the new one is the extra pass.
 - **2026-07-21T12:00Z — UI verified.** `github-thread-timeline.png` shows the Activity header, a
   tinted label event, the 4-commit grouping, and per-commit ✓/✗ CI glyphs interleaved with comments.
+- **2026-07-21T12:14Z — adversarial review found a REAL bug in my own Step 3.1.** A fresh-context
+  reviewer showed the "refresh also invalidates the thread" fix was a **no-op**: `getGithubComments`
+  had no `refresh` param at all, so the invalidate re-requested without `refresh=1` and the route
+  handed back its ≤60 s cache. The test I wrote asserted the mechanism (a request went out), not
+  the property (fresh data), so it passed with the bug fully present. Fixed both.
+- **2026-07-21T12:14Z — review fixes landed.** refresh=1 plumbed through the client; three vacuous
+  constant assertions replaced with a behavioural one; the tautological §2 test supplemented with a
+  real captured timeline row; the index-fallback instability pinned honestly; the 40-hex sha
+  invariant enforced at the boundary; same-second comment/event tie-order fixed (ms vs second
+  precision made events always win). Gate re-run: **3045/3045**.

@@ -341,7 +341,7 @@ export function useGithub(params: { limit?: number } = {}, enabled = true) {
 export function useGithubComments(kind: 'issue' | 'pr', number: number, enabled = true) {
   return useQuery({
     queryKey: queryKeys.githubComments(kind, number),
-    queryFn: ({ signal }) => getGithubComments(kind, number, { signal }),
+    queryFn: ({ signal }) => getGithubComments(kind, number, {}, { signal }),
     enabled,
     staleTime: 60_000,
   })
