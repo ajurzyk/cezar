@@ -983,3 +983,235 @@ describe('RunManager queued-stack mutators (#472)', () => {
     expect(manager.deferMessage(r.id, text('too late'))).toBe(false);
   });
 });
+
+/**
+ * #472 — `hydrateQueuedInput`. The seam that makes the RECORD the single source
+ * of truth for a queued run's prompt, and the guards that keep it from
+ * compounding on restart.
+ */
+describe('RunManager.hydrateQueuedInput (#472)', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  let manager: RunManager;
+
+  type Hydrate = (runId: string, input: { task: string }) => {
+    task: string;
+    stackedImages?: ContentBlock[];
+  };
+  const hydrate = (id: string, task: string) =>
+    (manager as unknown as { hydrateQueuedInput: Hydrate }).hydrateQueuedInput(id, { task });
+
+  const stack = (id: string, ...messages: Array<{ text: string; images?: string[] }>) =>
+    store.updateRun(id, {
+      queuedMessages: messages.map((m, i) => ({
+        id: `m${i}`,
+        text: m.text,
+        ...(m.images ? { images: m.images } : {}),
+        createdAt: `2026-07-21T10:0${i}:00.000Z`,
+      })),
+    });
+
+  beforeEach(() => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-hydrate-'));
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot);
+  });
+
+  afterEach(() => {
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  it('folds the task and every stacked message, in order, blank-line joined', () => {
+    const r = store.createRun({ title: 't', workflow: 'w', task: 'build the thing', steps: [] });
+    stack(r.id, { text: 'also update the changelog' }, { text: 'and bump the version' });
+
+    expect(hydrate(r.id, r.task).task).toBe(
+      'build the thing\n\nalso update the changelog\n\nand bump the version',
+    );
+  });
+
+  it('leaves the input untouched when nothing is stacked', () => {
+    const r = store.createRun({ title: 't', workflow: 'w', task: 'build the thing', steps: [] });
+    expect(hydrate(r.id, r.task).task).toBe('build the thing');
+  });
+
+  /**
+   * The compounding guard. Hydration composes from `run.task` + the stack and
+   * never writes the folded string back, so a restart cannot re-append. Without
+   * this rule every recovery would grow the prompt without bound.
+   */
+  it('never writes the folded prompt back to the record, and is idempotent', () => {
+    const r = store.createRun({ title: 't', workflow: 'w', task: 'build the thing', steps: [] });
+    stack(r.id, { text: 'also update the changelog' });
+
+    const once = hydrate(r.id, r.task).task;
+    const twice = hydrate(r.id, r.task).task;
+    const thrice = hydrate(r.id, hydrate(r.id, r.task).task).task;
+
+    expect(twice).toBe(once);
+    // Even feeding an already-folded string back in yields the same result —
+    // the helper reads `run.task`, not whatever `input.task` happens to hold.
+    expect(thrice).toBe(once);
+    // …and the record itself is byte-identical to what the user typed.
+    expect(store.getRun(r.id)?.task).toBe('build the thing');
+    expect(store.getRun(r.id)?.queuedMessages).toHaveLength(1);
+  });
+
+  it('re-encodes stacked attachments from disk into stackedImages', () => {
+    const r = store.createRun({ title: 't', workflow: 'w', task: 'look at this', steps: [] });
+    const dir = join(repoRoot, '.ai/cezar', 'runs', `${r.id}-images`);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'pasted-1.png'), 'the-bytes');
+    stack(r.id, { text: 'see the mock', images: [`/api/runs/${r.id}/images/pasted-1.png`] });
+
+    const images = hydrate(r.id, r.task).stackedImages;
+    expect(images).toHaveLength(1);
+    expect(images?.[0]).toMatchObject({
+      type: 'image',
+      source: { media_type: 'image/png', data: Buffer.from('the-bytes').toString('base64') },
+    });
+  });
+
+  /** Degrade, never fail the boot (AGENTS.md). */
+  it('skips an unreadable attachment, notes it, and still starts', () => {
+    const r = store.createRun({ title: 't', workflow: 'w', task: 'look at this', steps: [] });
+    stack(r.id, { text: 'see the mock', images: [`/api/runs/${r.id}/images/gone-1.png`] });
+
+    const hydrated = hydrate(r.id, r.task);
+    expect(hydrated.task).toBe('look at this\n\nsee the mock');
+    expect(hydrated.stackedImages).toBeUndefined();
+    expect(store.readEvents(r.id).some((e) => e.type === 'note' && String(e.message).includes('gone-1.png'))).toBe(true);
+  });
+});
+
+/**
+ * #472 end-to-end: the amended prompt must actually reach the backend. This is
+ * the regression the whole feature turns on — an edit that "works" in the UI but
+ * never reaches the agent. `maxParallel: 1` holds the second run in the queue
+ * long enough to stack onto it.
+ */
+describe('queued stacking reaches the backend (#472)', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  let manager: RunManager;
+  const savedEnv: Record<string, string | undefined> = {};
+
+  const WORKFLOW: WorkflowDef = {
+    name: '(planned)',
+    source: 'built-in',
+    steps: [{ id: 'task', name: 'Do the task', prompt: '{{task}}' }],
+  };
+
+  beforeAll(async () => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-472-e2e-'));
+    savedEnv.CEZ_DRY_RUN = process.env.CEZ_DRY_RUN;
+    process.env.CEZ_DRY_RUN = '1';
+    await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
+    writeFileSync(join(repoRoot, 'a.txt'), 'one\n');
+    await run('git', ['add', '-A'], { cwd: repoRoot });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repoRoot });
+    mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
+    // One slot, so the second run demonstrably waits in the queue.
+    writeFileSync(join(repoRoot, '.ai/cezar', 'config.json'), JSON.stringify({ maxParallel: 1 }));
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot);
+  });
+
+  afterAll(() => {
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  it('delivers the task plus every stacked message, with the edit applied', async () => {
+    const first = manager.startRun(WORKFLOW, { task: 'mock:done occupy the slot', worktree: false });
+    const second = manager.startRun(WORKFLOW, { task: 'mock:done original prompt', worktree: false });
+
+    // The second run is holding in the queue — amend it there.
+    expect(store.getRun(second.id)?.status).toBe('queued');
+    const typo = manager.enqueueMessage(second.id, [{ type: 'text', text: 'STACKEDONE with a typo' }]);
+    expect(typo).not.toBeNull();
+    manager.enqueueMessage(second.id, [{ type: 'text', text: 'STACKEDTWO' }]);
+    // …and fix the first one before it starts.
+    manager.editQueuedMessage(second.id, typo!.id, [{ type: 'text', text: 'STACKEDONE corrected' }]);
+
+    const terminal = new Set(['done', 'review', 'failed', 'cancelled']);
+    const deadline = Date.now() + 40_000;
+    while (!terminal.has(store.getRun(second.id)?.status ?? '')) {
+      if (Date.now() > deadline) throw new Error('queued run did not finish in time');
+      await new Promise((r) => setTimeout(r, 100));
+    }
+
+    // The mock records the head of each session's userText, one line per spawned
+    // session. The second run's line must carry the folded prompt.
+    const notes = readFileSync(join(repoRoot, 'notes.md'), 'utf8').trim().split('\n');
+    const line = notes.find((n) => n.includes('original prompt'));
+    expect(line).toBeDefined();
+    expect(line).toContain('STACKEDONE corrected');
+    expect(line).toContain('STACKEDTWO');
+    // The typo never reached the backend.
+    expect(line).not.toContain('with a typo');
+    // Order is preserved: task, then the stack.
+    expect(line!.indexOf('original prompt')).toBeLessThan(line!.indexOf('STACKEDONE corrected'));
+    expect(line!.indexOf('STACKEDONE corrected')).toBeLessThan(line!.indexOf('STACKEDTWO'));
+
+    // And the record still holds the two parts separately — never the folded string.
+    expect(store.getRun(second.id)?.task).toBe('mock:done original prompt');
+    expect(store.getRun(second.id)?.queuedMessages).toHaveLength(2);
+  }, 60_000);
+});
+
+/**
+ * #472 — the restart path. `recover()` rebuilds a queued run's input through the
+ * same helper `pump()` uses, so the stack survives a restart; and because
+ * hydration always composes from `run.task`, it lands exactly once no matter how
+ * many times the process restarts.
+ */
+describe('recover() carries the queued stack exactly once (#472)', () => {
+  let repoRoot: string;
+  let store: RunStore;
+
+  const WORKFLOW = {
+    name: '(planned)',
+    source: 'built-in',
+    steps: [{ id: 'task', name: 'Do the task', prompt: '{{task}}' }],
+  };
+
+  beforeEach(() => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-recover-'));
+    store = RunStore.open(join(repoRoot, '.ai/cezar'), { keepLive: true });
+  });
+
+  afterEach(() => {
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  it('folds once across repeated recoveries', async () => {
+    const r = store.createRun({ title: 't', workflow: '(planned)', task: 'the original task', steps: [] });
+    store.updateRun(r.id, {
+      status: 'queued',
+      workflowDef: WORKFLOW as unknown as Record<string, unknown>,
+      queuedMessages: [
+        { id: 'm1', text: 'the stacked bit', createdAt: '2026-07-21T10:00:00.000Z' },
+      ],
+    });
+
+    const expected = 'the original task\n\nthe stacked bit';
+    const jobsOf = (m: RunManager) =>
+      (m as unknown as { pendingJobs: Map<string, { input: { task: string } }> }).pendingJobs;
+
+    // Two successive restarts, each re-adopting the same record.
+    for (let restart = 0; restart < 2; restart += 1) {
+      const manager = new RunManager(store, repoRoot);
+      // Keep the run parked in the queue: recover() pushes and pumps, but with the
+      // job still pending we can read exactly what it rebuilt.
+      await manager.recover();
+      expect(jobsOf(manager).get(r.id)?.input.task).toBe(expected);
+      // The record is never rewritten — that is what stops the compounding.
+      expect(store.getRun(r.id)?.task).toBe('the original task');
+    }
+  });
+});

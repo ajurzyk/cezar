@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseAskMarker, stripAskMarker, type AskRequest } from '../core/ask.js';
 import { type AgentSession } from '../core/claude-cli-runner.js';
@@ -139,6 +139,13 @@ export interface StartRunInput {
   /** Follow-up inbox generation (spec 007, #444). Omitted means enabled for
    *  compatibility; the handoff journal runs either way. */
   generateFollowups?: boolean;
+  /** Attachments from the queued prompt stack (#472), re-encoded from disk by
+   *  `hydrateQueuedInput` at dequeue. Kept separate from `images` because those
+   *  are persisted into `taskImages` on the way through `execute()` — folding
+   *  the stack's (already-persisted) files in there would write duplicate files
+   *  and make the task bubble render the stack's images as its own. In-memory
+   *  only: rebuilt from the record on every hydration, never persisted. */
+  stackedImages?: ContentBlock[];
 }
 
 /**
@@ -177,6 +184,16 @@ export function composeSystemPrompt(...parts: Array<string | undefined>): string
  * issue/PR (#357). `path` is only ever an absolute path under
  * `.ai/cezar/runs/<runId>-images/` (see `RunManager.persistImage`).
  */
+/** Inverse of `persistImage`'s extension mapping (#472) — a persisted attachment
+ *  is re-encoded from disk at dequeue and needs its media type back. */
+export function mediaTypeFor(name: string): string {
+  const ext = name.split('.').pop()?.toLowerCase();
+  return ext === 'jpg' ? 'image/jpeg'
+    : ext === 'webp' ? 'image/webp'
+    : ext === 'gif' ? 'image/gif'
+    : 'image/png';
+}
+
 /** Highest `<prefix>-<n>.<ext>` suffix already present in a run's image dir (#472).
  *  `screenshot-*` and `pasted-*` share one numbering space, so this scans both and
  *  returns 0 for a missing/empty directory. */
@@ -429,7 +446,12 @@ export class RunManager {
         this.pendingJobs.delete(runId);
         if (!job) continue;
         this.starting.add(runId);
-        void this.execute(runId, job.workflow, job.input).catch((err: unknown) => {
+        // Rebuild the prompt from the store at the last instant (#472), so an edit
+        // or a stacked message that landed while the run waited is honored. Entered
+        // in the same synchronous tick as the `pendingJobs.delete` above, so no
+        // handler can observe a half-dequeued run.
+        const input = this.hydrateQueuedInput(runId, job.input);
+        void this.execute(runId, job.workflow, input).catch((err: unknown) => {
           const message = err instanceof Error ? err.message : String(err);
           this.store.updateRun(runId, {
             status: 'failed',
@@ -482,7 +504,11 @@ export class RunManager {
           }
           this.pendingJobs.set(run.id, {
             workflow,
-            input: {
+            // Folded through the same helper `pump()` uses (#472) so a restart
+            // carries the stack. Idempotent: hydration always composes from
+            // `run.task` + the stack, never from an already-folded `input.task`,
+            // so re-hydrating at dequeue yields the same string, not a doubled one.
+            input: this.hydrateQueuedInput(run.id, {
               task: run.task,
               model: run.model,
               runner: run.runner,
@@ -492,7 +518,7 @@ export class RunManager {
               // recovered queued autonomous run would run non-autonomously (no
               // auto-nudge) and later wrongly park at `review`.
               autonomous: run.autonomous,
-            },
+            }),
           });
           this.queue.push(run.id);
           this.store.appendEvent(run.id, { type: 'lifecycle', message: 'cezar restarted — task re-queued' });
@@ -666,6 +692,56 @@ export class RunManager {
 
   isActive(runId: string): boolean {
     return this.active.has(runId) || this.starting.has(runId) || this.queue.includes(runId);
+  }
+
+  /**
+   * Fold a queued run's persisted prompt — `run.task` plus everything stacked
+   * onto it (#472) — into the job input that is about to execute.
+   *
+   * Called from `pump()` immediately before `execute()`, which makes the RECORD
+   * the single source of truth for a queued run's prompt. Before this, the
+   * executing copy lived in `pendingJobs` (memory) while the record held a
+   * second one, so an edit that PATCHed the record silently did nothing until a
+   * restart. `recover()` rebuilds through the same helper, so both paths agree.
+   *
+   * **Read-only, and that is load-bearing.** It composes into the in-memory
+   * `input` and never writes the folded string back to `RunRecord.task`; the
+   * task and its stack stay separate on disk for the life of the run. Writing
+   * back would re-append the whole stack on every recovery and compound without
+   * bound — asserted directly by a test.
+   */
+  private hydrateQueuedInput(runId: string, input: StartRunInput): StartRunInput {
+    const run = this.store.getRun(runId);
+    if (!run) return input;
+    const stack = run.queuedMessages ?? [];
+    if (!stack.length) return { ...input, task: run.task };
+
+    const task = [run.task, ...stack.map((m) => m.text)]
+      .map((part) => part.trim())
+      .filter((part) => part.length > 0)
+      .join('\n\n');
+
+    const stackedImages: ContentBlock[] = [];
+    for (const url of stack.flatMap((m) => m.images ?? [])) {
+      const name = url.split('/').pop();
+      if (!name || name.includes('..') || name.includes('/') || name.includes('\\')) continue;
+      try {
+        const data = readFileSync(join(this.dataDir, 'runs', `${runId}-images`, name));
+        stackedImages.push({
+          type: 'image',
+          source: { type: 'base64', media_type: mediaTypeFor(name), data: data.toString('base64') },
+        });
+      } catch {
+        // Degrade, never fail the boot (AGENTS.md): the user deleted `.ai/cezar/`
+        // or the file is unreadable — start with the text and say which image went.
+        this.store.appendEvent(runId, {
+          type: 'note',
+          message: `queued attachment ${name} could not be read — starting without it`,
+        });
+      }
+    }
+
+    return { ...input, task, ...(stackedImages.length ? { stackedImages } : {}) };
   }
 
   /**
@@ -1317,8 +1393,12 @@ export class RunManager {
       }
     }
     // Task screenshots go with the FIRST agent step's opening message only —
-    // later steps and retry loops run in fresh sessions without them.
-    let startImages = input.images;
+    // later steps and retry loops run in fresh sessions without them. Stacked
+    // attachments (#472) ride along too, but are NOT re-persisted above: they
+    // already live on disk, and adding them to `taskImages` would both duplicate
+    // the files and make the task bubble claim the stack's images as its own.
+    let startImages =
+      input.stackedImages?.length ? [...(input.images ?? []), ...input.stackedImages] : input.images;
 
     const lastAgentIdx = findLastAgentStepIndex(workflow);
 
