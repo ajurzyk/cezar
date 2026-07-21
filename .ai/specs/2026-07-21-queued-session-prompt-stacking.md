@@ -272,6 +272,15 @@ stream — no new name, no new consumer.
 
 Only what is unique to this feature; standard composer behavior is inherited.
 
+| | |
+|---|---|
+| **Today** — the queued thread, composer disabled | ![current](assets/queued-session-prompt-stacking/current-02-queued-thread.png) |
+| **Proposed** — composer enabled with a queue-specific placeholder and hint | ![mockup 1](assets/queued-session-prompt-stacking/mockup-01-queued-composer.png) |
+| **Proposed** — stacked messages with edit / remove, one mid-edit | ![mockup 2](assets/queued-session-prompt-stacking/mockup-02-stack-edit-remove.png) |
+
+The mockups are static illustrative HTML in `assets/queued-session-prompt-stacking/`
+(no app code, no build step) — layout and flow only, not pixel-perfect design.
+
 **Composer, `status === 'queued'`** — enabled, with:
 
 - placeholder: `Add to the prompt — sent when the run starts…`
