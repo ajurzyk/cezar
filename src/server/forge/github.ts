@@ -12,6 +12,8 @@ import type {
   ForgeItem,
   ForgePrStatus,
   ForgeRefKind,
+  ForgeTimelineEvent,
+  ForgeTimelineEventKind,
 } from './types.js';
 
 /**
@@ -353,6 +355,86 @@ const ghReviewSchema = z.object({
   state: z.string(),
   submitted_at: z.string().nullish(),
   html_url: z.string(),
+});
+
+// ---- timeline events (#525) -------------------------------------------------
+// The thread's non-comment history — commits, label changes, assignments, merges, force-pushes,
+// cross-references. Sourced from `/issues/{n}/timeline`, which returns comments AND events in one
+// chronological stream, so the `commented` rows keep flowing through `normalizeComments` unchanged
+// and `comments[]` stays exactly what BACKWARD_COMPATIBILITY.md §2 promises.
+
+/** The event kinds rendered in v1 — an allowlist, so a new GitHub event type is dropped rather
+ *  than rendered and can never crash or clutter the thread. Real timelines carry plenty that
+ *  github.com itself doesn't surface (`subscribed`, `mentioned`, `review_requested`).
+ *
+ *  `reviewed` is deliberately absent: timeline `reviewed` rows DO carry a body and would work,
+ *  but `/pulls/{n}/reviews` is already normalized, chipped and empty-body-filtered, so sourcing
+ *  both would render every review twice. */
+export const TIMELINE_EVENT_KINDS = new Set<ForgeTimelineEventKind>([
+  'committed',
+  'labeled',
+  'unlabeled',
+  'assigned',
+  'unassigned',
+  'merged',
+  'closed',
+  'reopened',
+  'head_ref_force_pushed',
+  'cross-referenced',
+  'renamed',
+]);
+
+/** Events get their OWN cap, independent of `THREAD_ENTRY_CAP`. A combined cap would mean a
+ *  thread with 150 comments and 100 events returns ~120 comments — silently removing contents
+ *  from a §2-protected response. */
+export const TIMELINE_EVENT_CAP = 200;
+/** `gh api --paginate` has no page limit, so the timeline fetch hand-rolls a bounded loop. */
+export const TIMELINE_MAX_PAGES = 10;
+/** ONE budget shared by every page. `gh()`'s timeout is per invocation, so ten pages at the 15 s
+ *  default would put the ceiling at 150 s — an order of magnitude worse than the single
+ *  `--paginate` spawn this replaces. The loop tracks a deadline and passes what's left. */
+export const TIMELINE_BUDGET_MS = 15_000;
+/** Never spawn a page that cannot finish. A bare `remaining <= 0` guard catches only the exact
+ *  boundary; the realistic case is 300 ms left, which spawns `gh` with a 300 ms timeout, throws,
+ *  and is indistinguishable from a real endpoint failure. */
+export const TIMELINE_MIN_PAGE_MS = 2_000;
+/** `committed` messages are trimmed to their first line, then this. */
+const COMMIT_MESSAGE_CAP = 120;
+
+/** One timeline row. `event` stays a loose `z.string()` so unknown kinds parse and are dropped by
+ *  the allowlist rather than throwing the whole page. Extras are stripped by default — notably
+ *  `author.email`, which is read for nothing and must not reach the wire type. */
+export const ghTimelineEventSchema = z.object({
+  event: z.string(),
+  id: z.number().nullish(),
+  node_id: z.string().nullish(),
+  created_at: z.string().nullish(),
+  actor: z.object({ login: z.string(), avatar_url: z.string().nullish() }).nullish(),
+  url: z.string().nullish(),
+  html_url: z.string().nullish(),
+  // `committed`
+  sha: z.string().nullish(),
+  message: z.string().nullish(),
+  author: z.object({ name: z.string().nullish(), date: z.string().nullish() }).nullish(),
+  // `labeled` / `unlabeled`
+  label: z.object({ name: z.string(), color: z.string().nullish() }).nullish(),
+  // `assigned` / `unassigned`
+  assignee: z.object({ login: z.string() }).nullish(),
+  // `renamed`
+  rename: z.object({ from: z.string().nullish(), to: z.string().nullish() }).nullish(),
+  // `cross-referenced`
+  source: z
+    .object({
+      issue: z
+        .object({
+          number: z.number().nullish(),
+          title: z.string().nullish(),
+          html_url: z.string().nullish(),
+          pull_request: z.unknown().nullish(),
+        })
+        .nullish(),
+    })
+    .nullish(),
 });
 
 const REVIEW_STATE: Record<string, ForgeComment['reviewState']> = {

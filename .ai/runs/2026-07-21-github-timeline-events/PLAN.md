@@ -12,7 +12,7 @@
 | Phase | Step | Title | Status | Commit |
 |---|---|---|---|---|
 | 1 | 1.1 | `ForgeTimelineEvent` types + `events?` on `ForgeCommentsData`; re-export via `server/github.ts` | done | |
-| 1 | 1.2 | `ghTimelineEventSchema` + `TIMELINE_EVENT_KINDS` + 4 timeline constants | todo | |
+| 1 | 1.2 | `ghTimelineEventSchema` + `TIMELINE_EVENT_KINDS` + 4 timeline constants | done | |
 | 1 | 1.3 | `normalizeEvents()` — allowlist, per-type timestamp/actor, id chain, `slice(-cap)` | todo | |
 | 1 | 1.4 | `fetchGithubComments`: bounded 10-page timeline loop, shared 15s budget, inner catch, comments top-up | todo | |
 | 1 | 1.5 | Leave `mergeThread` unchanged + regression test that event volume cannot affect it | todo | |

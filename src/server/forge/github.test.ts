@@ -17,6 +17,7 @@ import {
   detectGithubCached,
   fetchCommentCounts,
   ghCheckRunSchema,
+  ghTimelineEventSchema,
   mergeThread,
   normalizeComments,
   normalizeReviews,
@@ -24,6 +25,11 @@ import {
   parseOwnerName,
   rollupToChecks,
   THREAD_ENTRY_CAP,
+  TIMELINE_BUDGET_MS,
+  TIMELINE_EVENT_CAP,
+  TIMELINE_EVENT_KINDS,
+  TIMELINE_MAX_PAGES,
+  TIMELINE_MIN_PAGE_MS,
 } from './github.js';
 import type { ForgeComment } from './types.js';
 
@@ -364,5 +370,94 @@ describe('detectGithubCached', () => {
     // …and a background revalidate was kicked off exactly once for the stale read.
     await vi.advanceTimersByTimeAsync(0);
     expect(execFileMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ---- timeline events (#525) -------------------------------------------------
+
+describe('ghTimelineEventSchema (#525)', () => {
+  it('parses an unknown event type instead of throwing, so the allowlist can drop it', () => {
+    // `event` is deliberately a loose z.string(): a new GitHub event type must never fail the
+    // parse of the whole page. It parses here and gets dropped downstream by TIMELINE_EVENT_KINDS.
+    const row = { event: 'convert_to_draft', id: 1, created_at: '2026-01-01T00:00:00Z' };
+    expect(() => ghTimelineEventSchema.parse(row)).not.toThrow();
+    expect(ghTimelineEventSchema.parse(row).event).toBe('convert_to_draft');
+  });
+
+  it('strips extras — the git author email must never reach the wire type', () => {
+    const parsed = ghTimelineEventSchema.parse({
+      event: 'committed',
+      sha: 'a'.repeat(40),
+      author: { name: 'Ada', email: 'ada@example.com', date: '2026-01-01T00:00:00Z' },
+      verification: { verified: true },
+    });
+    expect(parsed.author).toEqual({ name: 'Ada', date: '2026-01-01T00:00:00Z' });
+    expect(parsed.author).not.toHaveProperty('email');
+    expect(parsed).not.toHaveProperty('verification');
+  });
+
+  it('tolerates the null identity and timestamp fields real rows carry', () => {
+    // Verified against a real timeline: `committed` omits `id` entirely and returns
+    // `created_at: null`; `cross-referenced` returns null for BOTH `id` and `node_id`.
+    expect(() =>
+      ghTimelineEventSchema.parse({ event: 'committed', created_at: null, sha: 'b'.repeat(40) }),
+    ).not.toThrow();
+    expect(() =>
+      ghTimelineEventSchema.parse({ event: 'cross-referenced', id: null, node_id: null }),
+    ).not.toThrow();
+  });
+});
+
+describe('TIMELINE_EVENT_KINDS (#525)', () => {
+  it('excludes `reviewed` so reviews are not rendered twice', () => {
+    // Timeline `reviewed` rows do carry a body and would work — but /pulls/{n}/reviews is already
+    // normalized, chipped and empty-body-filtered, so sourcing both would duplicate every review.
+    expect(TIMELINE_EVENT_KINDS.has('reviewed' as never)).toBe(false);
+  });
+
+  it('excludes the noise github.com itself does not surface', () => {
+    for (const noise of ['subscribed', 'mentioned', 'review_requested', 'referenced']) {
+      expect(TIMELINE_EVENT_KINDS.has(noise as never)).toBe(false);
+    }
+  });
+
+  it('covers exactly the 11 kinds the wire type declares', () => {
+    expect([...TIMELINE_EVENT_KINDS].sort()).toEqual(
+      [
+        'assigned',
+        'closed',
+        'committed',
+        'cross-referenced',
+        'head_ref_force_pushed',
+        'labeled',
+        'merged',
+        'renamed',
+        'reopened',
+        'unassigned',
+        'unlabeled',
+      ],
+    );
+  });
+});
+
+describe('timeline fetch bounds (#525)', () => {
+  it('shares one budget across pages rather than one per page', () => {
+    // The trap this guards: gh()'s timeout is PER INVOCATION, so TIMELINE_MAX_PAGES pages at the
+    // 15 s default would put the loop's ceiling at 150 s — an order of magnitude worse than the
+    // single --paginate spawn it replaces. The budget is a total, not a per-page allowance.
+    expect(TIMELINE_BUDGET_MS).toBe(15_000);
+    expect(TIMELINE_MAX_PAGES * TIMELINE_BUDGET_MS).toBeGreaterThan(TIMELINE_BUDGET_MS);
+  });
+
+  it('keeps a floor large enough that a spawned page can actually finish', () => {
+    expect(TIMELINE_MIN_PAGE_MS).toBeGreaterThan(0);
+    expect(TIMELINE_MIN_PAGE_MS).toBeLessThan(TIMELINE_BUDGET_MS);
+  });
+
+  it('caps events independently of the comment stream', () => {
+    // Not "they happen to be equal" — they must be SEPARATE knobs. A combined cap would let event
+    // volume shorten comments[], which is a §2-protected response field.
+    expect(TIMELINE_EVENT_CAP).toBe(200);
+    expect(THREAD_ENTRY_CAP).toBe(200);
   });
 });
