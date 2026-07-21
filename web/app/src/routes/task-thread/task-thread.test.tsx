@@ -1,5 +1,5 @@
 import { QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { ReactElement } from 'react'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -220,6 +220,138 @@ describe('ThreadView', () => {
     expect(keys.slice(3)).toEqual(
       buildThreadRows(run('queued'), reduceThread(EVENTS)).map((r) => r.key).slice(1),
     )
+  })
+
+  /** #472 — the edit/remove affordances exist only while the run is queued. */
+  it('offers edit + remove on stacked bubbles and edit-only on the prompt, while queued', () => {
+    renderView(
+      <ThreadView
+        run={run('queued', {
+          queuedMessages: [{ id: 'm1', text: 'stacked', createdAt: '2026-07-21T10:00:00.000Z' }],
+        })}
+        thread={reduceThread([])}
+      />,
+    )
+    // The prompt is editable but never removable — a run with no prompt is not a run.
+    expect(screen.getByLabelText('Edit the prompt')).toBeTruthy()
+    expect(screen.getAllByLabelText('Edit message')).toHaveLength(1)
+    expect(screen.getAllByLabelText('Remove message')).toHaveLength(1)
+  })
+
+  it('renders the bubbles read-only once the run is running', () => {
+    renderView(
+      <ThreadView
+        run={run('running', {
+          queuedMessages: [{ id: 'm1', text: 'stacked', createdAt: '2026-07-21T10:00:00.000Z' }],
+        })}
+        thread={reduceThread([])}
+      />,
+    )
+    expect(screen.queryByLabelText('Edit the prompt')).toBeNull()
+    expect(screen.queryByLabelText('Edit message')).toBeNull()
+    expect(screen.queryByLabelText('Remove message')).toBeNull()
+  })
+
+  it('PATCHes the edited text, and Escape cancels without writing', async () => {
+    const calls: Array<{ url: string; method: string; body: unknown }> = []
+
+    renderView(
+      <ThreadView
+        run={run('queued', {
+          queuedMessages: [{ id: 'm1', text: 'typo here', createdAt: '2026-07-21T10:00:00.000Z' }],
+        })}
+        thread={reduceThread([])}
+      />,
+    )
+    // Stubbed AFTER render: renderView installs its own fetch stub, and the mutations
+    // only fire on the clicks below.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({
+          url: String(input),
+          method: init?.method ?? 'GET',
+          body: init?.body ? JSON.parse(String(init.body)) : undefined,
+        })
+        // GET answers `[]`: our own invalidateQueries refetches the runs LIST, and the
+        // header's queuePositions would choke on a non-array.
+        const body = (init?.method ?? 'GET') === 'GET' ? '[]' : '{}'
+        return Promise.resolve(
+          new Response(body, { status: 200, headers: { 'content-type': 'application/json' } }),
+        )
+      }),
+    )
+
+    // Escape first: opens the editor, changes the text, cancels — nothing is written.
+    fireEvent.click(screen.getAllByLabelText('Edit message')[0]!)
+    fireEvent.change(screen.getByLabelText('Edit the message'), { target: { value: 'discarded' } })
+    fireEvent.keyDown(screen.getByLabelText('Edit the message'), { key: 'Escape' })
+    expect(screen.queryByLabelText('Edit the message')).toBeNull()
+    expect(calls.some((c) => c.method === 'PATCH')).toBe(false)
+
+    // Then a real edit.
+    fireEvent.click(screen.getAllByLabelText('Edit message')[0]!)
+    fireEvent.change(screen.getByLabelText('Edit the message'), { target: { value: 'fixed now' } })
+    fireEvent.click(screen.getByText('Save'))
+
+    await waitFor(() => expect(calls.some((c) => c.method === 'PATCH')).toBe(true))
+    const patch = calls.find((c) => c.method === 'PATCH')!
+    expect(patch.url).toContain('/queued-messages/m1')
+    expect(patch.body).toMatchObject({ text: 'fixed now' })
+  })
+
+  it('DELETEs a removed message', async () => {
+    const calls: string[] = []
+
+    renderView(
+      <ThreadView
+        run={run('queued', {
+          queuedMessages: [{ id: 'm1', text: 'remove me', createdAt: '2026-07-21T10:00:00.000Z' }],
+        })}
+        thread={reduceThread([])}
+      />,
+    )
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        if ((init?.method ?? 'GET') === 'DELETE') calls.push(String(input))
+        // GET answers `[]`: our own invalidateQueries refetches the runs LIST, and the
+        // header's queuePositions would choke on a non-array.
+        const body = (init?.method ?? 'GET') === 'GET' ? '[]' : '{}'
+        return Promise.resolve(
+          new Response(body, { status: 200, headers: { 'content-type': 'application/json' } }),
+        )
+      }),
+    )
+    fireEvent.click(screen.getAllByLabelText('Remove message')[0]!)
+    await waitFor(() => expect(calls).toHaveLength(1))
+    expect(calls[0]).toContain('/queued-messages/m1')
+  })
+
+  it('PATCHes the run itself when the initial prompt is edited', async () => {
+    const bodies: unknown[] = []
+
+    renderView(<ThreadView run={run('queued')} thread={reduceThread([])} />)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        if ((init?.method ?? 'GET') === 'PATCH' && !String(input).includes('queued-messages')) {
+          bodies.push(init?.body ? JSON.parse(String(init.body)) : undefined)
+        }
+        // GET answers `[]`: our own invalidateQueries refetches the runs LIST, and the
+        // header's queuePositions would choke on a non-array.
+        const body = (init?.method ?? 'GET') === 'GET' ? '[]' : '{}'
+        return Promise.resolve(
+          new Response(body, { status: 200, headers: { 'content-type': 'application/json' } }),
+        )
+      }),
+    )
+    fireEvent.click(screen.getByLabelText('Edit the prompt'))
+    fireEvent.change(screen.getByLabelText('Edit the message'), { target: { value: 'a better prompt' } })
+    fireEvent.click(screen.getByText('Save'))
+
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toMatchObject({ task: 'a better prompt' })
   })
 
   /** #472 — a queued run has not started, so its prompt is still authorable. */

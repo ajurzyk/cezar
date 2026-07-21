@@ -3,7 +3,14 @@ import { useMemo } from 'react'
 import { Link, useLocation, useParams } from 'react-router'
 
 import { ApiError } from '@/api/client'
-import { useRun, useRuns, useSendMessage } from '@/api/queries'
+import {
+  useEditQueuedMessage,
+  usePatchRun,
+  useRemoveQueuedMessage,
+  useRun,
+  useRuns,
+  useSendMessage,
+} from '@/api/queries'
 import { useRunEvents } from '@/api/run-events'
 import type { ApiRun } from '@/api/types'
 import { CenteredState } from '@/components/centered-state'
@@ -94,12 +101,33 @@ export function TaskThreadRoute() {
  * (thread-scroll.ts owns the rule). Row keys are turn-scoped — the same keys the open-card
  * cache uses, because v2 item ids repeat across sessions.
  */
-export function buildThreadRows(run: ApiRun, thread: ThreadState): ThreadRow[] {
+export function buildThreadRows(
+  run: ApiRun,
+  thread: ThreadState,
+  /** Queued-run affordances (#472). Omitted (the default) renders every bubble read-only,
+   *  which is what every caller outside the live thread view wants. */
+  edit?: {
+    onEditTask: (text: string) => void
+    onEditMessage: (msgId: string, text: string) => void
+    onRemoveMessage: (msgId: string) => void
+  },
+): ThreadRow[] {
   const rows: ThreadRow[] = []
   // The initial prompt: the engine writes no v1 `user-message` line for it — the task on
   // the run record IS that message, so it renders from there, not from an invented event.
   if (run.task)
-    rows.push({ key: 'task', node: <UserBubble text={run.task} images={run.taskImages ?? []} /> })
+    rows.push({
+      key: 'task',
+      node: (
+        <UserBubble
+          text={run.task}
+          images={run.taskImages ?? []}
+          // Editable but never removable: a run with no prompt is not a run.
+          onEdit={edit ? edit.onEditTask : undefined}
+          editLabel="Edit the prompt"
+        />
+      ),
+    })
   // Messages stacked onto the run while it waits for a slot (#472). Same provenance as the
   // task bubble — they live on the record, not in the event stream, and the engine writes no
   // `user-message` line for them (they are folded into the prompt, not sent as turns). So
@@ -108,7 +136,14 @@ export function buildThreadRows(run: ApiRun, thread: ThreadState): ThreadRow[] {
   for (const message of run.queuedMessages ?? []) {
     rows.push({
       key: `queued:${message.id}`,
-      node: <UserBubble text={message.text} images={message.images ?? []} />,
+      node: (
+        <UserBubble
+          text={message.text}
+          images={message.images ?? []}
+          onEdit={edit ? (text) => edit.onEditMessage(message.id, text) : undefined}
+          onRemove={edit ? () => edit.onRemoveMessage(message.id) : undefined}
+        />
+      ),
     })
   }
   for (const turn of thread.turns) {
@@ -153,7 +188,26 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
   const queued = run.status === 'queued'
   const sendMessage = useSendMessage(run.id)
 
-  const rows = useMemo(() => buildThreadRows(run, thread), [run, thread])
+  // The queued-run affordances (#472), passed only while the run is queued — so the bubbles
+  // go read-only on the next `run` SSE frame once it starts. Errors surface through the
+  // mutations' own state; a 409 means the run started, and the affordances vanish anyway.
+  const patchRun = usePatchRun(run.id)
+  const editQueued = useEditQueuedMessage(run.id)
+  const removeQueued = useRemoveQueuedMessage(run.id)
+  const edit = useMemo(
+    () =>
+      queued ?
+        {
+          onEditTask: (text: string) => void patchRun.mutateAsync({ task: text }).catch(() => {}),
+          onEditMessage: (msgId: string, text: string) =>
+            void editQueued.mutateAsync({ msgId, message: { text } }).catch(() => {}),
+          onRemoveMessage: (msgId: string) => void removeQueued.mutateAsync(msgId).catch(() => {}),
+        }
+      : undefined,
+    [queued, patchRun, editQueued, removeQueued],
+  )
+
+  const rows = useMemo(() => buildThreadRows(run, thread, edit), [run, thread, edit])
   const { search } = useLocation()
   const mode = threadRenderMode(search, rows.length)
   const scroll = useThreadScroll(run.id)

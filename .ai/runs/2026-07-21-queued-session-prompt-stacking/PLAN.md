@@ -20,7 +20,7 @@
 | 1 | 1.6 | Client types + hooks | done | (backfilled at checkpoint) |
 | 2 | 2.1 | Composer queued branch | done | (backfilled at checkpoint) |
 | 2 | 2.2 | Stacked bubbles | done | (backfilled at checkpoint) |
-| 2 | 2.3 | Inline edit / remove | todo | — |
+| 2 | 2.3 | Inline edit / remove | done | (backfilled at checkpoint) |
 | 3 | 3.1 | E2E | todo | — |
 | 3 | 3.2 | Docs | todo | — |
 
