@@ -146,7 +146,8 @@ export const workspaceQueryKeys = {
   /** One directory listing from `GET /api/fs/browse` (step 4.2's folder picker). Keyed by the
    *  browsed path — `null` is the browse root, whose absolute location only the server knows.
    *  Not scope-led: there is one filesystem behind the workspace, not one per project. */
-  fsBrowse: (path: string | null) => ['workspace', 'fs-browse', path] as const,
+  fsBrowseRoot: ['workspace', 'fs-browse'] as const,
+  fsBrowse: (path: string | null) => [...workspaceQueryKeys.fsBrowseRoot, path] as const,
 }
 
 /** The workspace project registry (`GET /api/projects`): the `/p/:projectId` route gate's

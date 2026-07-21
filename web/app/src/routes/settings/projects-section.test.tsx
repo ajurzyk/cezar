@@ -117,14 +117,16 @@ function gateSeededClient() {
 }
 
 function renderProjects() {
+  const client = gateSeededClient()
   render(
-    <QueryClientProvider client={gateSeededClient()}>
+    <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={['/settings/global/projects']}>
         <AppRoutes />
         <Toaster />
       </MemoryRouter>
     </QueryClientProvider>,
   )
+  return client
 }
 
 const rows = () => document.querySelectorAll('[data-slot="project-row"]')
@@ -135,6 +137,7 @@ const saveRoot = () => document.querySelector<HTMLButtonElement>('[data-action="
 const inlineError = () => document.querySelector<HTMLElement>('[data-slot="projects-checkout-root-error"]')
 const browseInput = () => document.querySelector<HTMLInputElement>('[data-slot="projects-browse-root"]')
 const saveBrowse = () => document.querySelector<HTMLButtonElement>('[data-action="projects-save-browse-root"]')
+const browseError = () => document.querySelector<HTMLElement>('[data-slot="projects-browse-root-error"]')
 const confirmButton = () => document.querySelector<HTMLButtonElement>('[data-action="projects-confirm-remove"]')
 const deletes = () => requests.filter((r) => r.method === 'DELETE')
 
@@ -191,6 +194,19 @@ describe('Global settings → Projects', () => {
     await waitFor(() => expect(inlineError()).toBeNull())
   })
 
+  it('shows a missing browse-folder warning inline and keeps the typed path', async () => {
+    const reason = 'browse folder does not exist: ~/missing'
+    serve({ putConfig: { status: 400, payload: { error: reason } } })
+    renderProjects()
+    await waitFor(() => expect(browseInput()).not.toBeNull())
+    fireEvent.change(browseInput()!, { target: { value: '~/missing' } })
+    fireEvent.click(saveBrowse()!)
+
+    await waitFor(() => expect(browseError()?.textContent).toContain(reason))
+    expect(browseInput()!.value).toBe('~/missing')
+    expect(browseInput()!.getAttribute('aria-invalid')).toBe('true')
+  })
+
   it('saves a valid checkout root through PUT /api/workspace/config', async () => {
     serve()
     renderProjects()
@@ -213,7 +229,12 @@ describe('Global settings → Projects', () => {
 
   it('saves the browse folder independently without refreshing the clone destination', async () => {
     serve()
-    renderProjects()
+    const client = renderProjects()
+    client.setQueryData(workspaceQueryKeys.fsBrowse(null), {
+      path: '/home/piotr',
+      parent: null,
+      dirs: [],
+    })
     await waitFor(() => expect(browseInput()).not.toBeNull())
     expect(browseInput()!.value).toBe('~/')
     fireEvent.change(browseInput()!, { target: { value: '~/source' } })
@@ -225,6 +246,7 @@ describe('Global settings → Projects', () => {
     )
     expect(rootInput()!.value).toBe('~/cezar/projects')
     expect(requests.filter((r) => r.method === 'GET' && r.url === '/api/projects')).toHaveLength(0)
+    await waitFor(() => expect(client.getQueryState(workspaceQueryKeys.fsBrowse(null))?.isInvalidated).toBe(true))
   })
 
   it('removes a project only after a confirm that promises no files are deleted', async () => {

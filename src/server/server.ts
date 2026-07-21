@@ -642,13 +642,15 @@ function parseUiStateBody<S extends z.ZodTypeAny>(schema: S, body: unknown): { d
 }
 
 /** Workspace-root writability probe (multi-project spec, "API Contracts"):
- *  `mkdir -p`, `access W_OK`, then a real create/delete round-trip — W_OK alone
+ *  optional `mkdir -p`, `access W_OK`, then a real create/delete round-trip — W_OK alone
  *  can lie (e.g. a read-only mount still reports writable permission bits).
  *  Returns the failure message, or null when the directory is usable. */
-async function probeWritableDir(dir: string): Promise<string | null> {
+async function probeWritableDir(dir: string, create: boolean): Promise<string | null> {
   const probe = join(dir, `.cez-write-probe-${process.pid}-${Date.now().toString(36)}`);
   try {
-    await mkdir(dir, { recursive: true });
+    if (create) await mkdir(dir, { recursive: true });
+    const info = await stat(dir);
+    if (!info.isDirectory()) return `${dir} is not a directory`;
     await access(dir, fsConstants.W_OK);
     await writeFile(probe, '', 'utf8');
     await unlink(probe);
@@ -1355,15 +1357,31 @@ export function createApp(deps: ServerDeps): Hono {
       return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
     }
     const { browseRoot, projectsDir, resources } = parsed.data;
-    for (const configuredRoot of [browseRoot, projectsDir]) {
+    for (const [configuredRoot, create] of [
+      [browseRoot, false],
+      [projectsDir, true],
+    ] as const) {
       if (configuredRoot === undefined) continue;
-      // Validated ON CHANGE, never at load (spec): expand `~`, `mkdir -p`,
-      // probe real writability. Any failure → 400 and NO change persisted.
+      // Validated ON CHANGE, never at load (spec): browse roots must already
+      // exist; checkout roots use `mkdir -p`. Both get a real write probe.
+      // Any failure → 400 and NO change persisted.
       const expanded = expandTilde(configuredRoot);
       if (!expanded.startsWith('/')) {
         return c.json({ error: `not writable: ${configuredRoot} is not an absolute path` }, 400);
       }
-      const probeError = await probeWritableDir(expanded);
+      if (!create) {
+        try {
+          if (!(await stat(expanded)).isDirectory()) {
+            return c.json({ error: `browse folder is not a directory: ${configuredRoot}` }, 400);
+          }
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+            return c.json({ error: `browse folder does not exist: ${configuredRoot}` }, 400);
+          }
+          return c.json({ error: `browse folder unavailable: ${err instanceof Error ? err.message : String(err)}` }, 400);
+        }
+      }
+      const probeError = await probeWritableDir(expanded, create);
       if (probeError !== null) return c.json({ error: `not writable: ${probeError}` }, 400);
     }
     let written: WorkspaceConfig;

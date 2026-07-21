@@ -344,7 +344,7 @@ difference until they add a second project.
 | `POST /api/projects/checkout` | `{ url, name? } → { project }` \| `{ error }` | `gh repo clone <url> <projectsDir>/<name>`; zod-validates `url` as a GitHub repo URL/`owner/name`; 409 target dir exists; degrades to `{ error, reason }` when `gh` is unavailable (mirrors `github.ts` degradation). Long-running: answers when the clone finishes; the dialog shows progress from `checkout-progress` SSE events. |
 | `DELETE /api/projects/:projectId` | `{ ok: true }` | Unregisters only. 409 while the project has running tasks. Never deletes files. |
 | `GET /api/fs/browse?path=` | `{ path, parent, dirs: [{name, path, isRepo}] }` | Directories only, rooted at `browseRoot`; rejects paths escaping it (realpath check); dotfolders hidden by default, `showHidden=1` opts in. |
-| `GET/PUT /api/workspace/config` | global settings (`browseRoot`, `projectsDir`, `resources`) | Each root validates independently on PUT: expand `~`, `mkdir -p`, probe writability (`access W_OK` + create/delete a probe file); on failure → 400 `{ error: "not writable: …" }` and no change. Defaults come from `CEZ_BROWSE_ROOT` (`~/`) and `CEZ_PROJECTS_DIR` (`~/cezar/projects`). |
+| `GET/PUT /api/workspace/config` | global settings (`browseRoot`, `projectsDir`, `resources`) | Each root validates independently on PUT: expand `~`; require `browseRoot` to already be a directory, use `mkdir -p` for `projectsDir`, then probe writability (`access W_OK` + create/delete a probe file). On failure → 400 `{ error }` and no change. Defaults come from `CEZ_BROWSE_ROOT` (`~/`) and `CEZ_PROJECTS_DIR` (`~/cezar/projects`). |
 | `GET/PUT /api/workspace/ui-state` | global GUI state | Same merge/cap semantics as the per-repo ui-state route. |
 
 ### Project-scoped (mirrored)
@@ -523,7 +523,7 @@ bookmarklets keep working via the redirect (boot project).
 | Run started in project B while A's tasks run | Independent stores/managers; workspace semaphore caps total agent processes at global `maxParallel`. |
 | `gh` missing / unauthenticated | Clone option disabled with reason (same degradation contract as the GitHub pane). |
 | Clone fails mid-way (network, auth) | Partial target dir removed if the clone created it; dialog shows the error; nothing registered. |
-| `browseRoot` or `projectsDir` set to an unwritable path | 400 with reason on save; setting unchanged (validated server-side, shown inline). Missing directories are created recursively. |
+| `browseRoot` or `projectsDir` set to an unwritable path | 400 with reason on save; setting unchanged (validated server-side, shown inline). A missing browse root is rejected; a missing checkout root is created recursively. |
 | Checkout target already exists | 409; offer "register the existing folder instead". |
 | Migration crashes mid-run | `schemaVersion` unbumped → re-run next boot; steps idempotent. |
 | Older cezar run after the new one | Reads its per-repo files as always (they were left in place); ignores `~/.cezar/config.json` extras (`.passthrough()` both ways). |

@@ -152,14 +152,16 @@ function WorkspaceRootField({
 }) {
   const queryClient = useQueryClient()
   // The merged config the PUT answers with lands straight in the workspace-config query. The
-  // projects response also carries projectsDir for the clone dialog, so invalidate that
-  // authoritative answer too; otherwise reopening Add project keeps the old root until reload.
+  // projects response carries projectsDir for the clone dialog, while every fs-browse result is
+  // relative to browseRoot. Invalidate the corresponding authoritative cache after either save.
   const save = useMutation({
     mutationFn: (next: string) =>
       putWorkspaceConfig(configKey === 'browseRoot' ? { browseRoot: next } : { projectsDir: next }),
     onSuccess: (result) => {
       queryClient.setQueryData(workspaceQueryKeys.config, result)
-      if (refreshProjects) {
+      if (configKey === 'browseRoot') {
+        void queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.fsBrowseRoot })
+      } else if (refreshProjects) {
         void queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.projects })
       }
     },
@@ -176,7 +178,11 @@ function WorkspaceRootField({
   return (
     <SettingsField
       title={title}
-      hint={`${hint} The folder is created recursively if needed, then verified writable before saving.`}
+      hint={`${hint} ${
+        configKey === 'browseRoot'
+          ? 'Choose an existing folder; it is verified writable before saving.'
+          : 'The folder is created recursively if needed, then verified writable before saving.'
+      }`}
     >
       <div className="flex items-center gap-2">
         <input

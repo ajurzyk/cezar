@@ -432,7 +432,7 @@ Useful environment variables:
 | `CEZ_CLAUDE_BIN=/path/to/claude` | Override which `claude` binary is used. |
 | `CEZ_CODEX_BIN=/path/to/codex` | Override which `codex` binary is used. |
 | `CEZ_OPENCODE_BIN=/path/to/opencode` | Override which `opencode` binary is used. |
-| `CEZ_BROWSE_ROOT=~/` | Default root for **Add project → Open local folder…**. The picker cannot navigate above it; a saved workspace value overrides the environment default. |
+| `CEZ_BROWSE_ROOT=~/` | Default root for **Add project → Open local folder…**. The picker cannot navigate above it; a saved workspace value overrides the environment default and must name an existing folder. |
 | `CEZ_PROJECTS_DIR=~/cezar/projects` | Default destination for **Clone from GitHub**. Saved workspace settings override it, and missing directories are created recursively. |
 | `GITHUB_TOKEN` | Fallback for GitHub reads/PRs when `gh` isn't authenticated. |
 | `CEZ_ENV_PASSTHROUGH=A,B` | Forward these extra host env vars to spawned agents. By default agents get a least-privilege env (safe shell/toolchain vars + the backend's own auth + `GITHUB_TOKEN` + `CEZ_*`), not your full environment — use this to add a var an agent needs. |
