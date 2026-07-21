@@ -12,7 +12,9 @@ import {
   TriangleAlertIcon,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react'
-import { Link, Navigate, useParams } from 'react-router'
+import { useParams } from 'react-router'
+
+import { Link, Navigate } from '@/lib/project-router'
 
 import { getGithub, getGithubComments, putUiState } from '@/api/client'
 import { queryKeys, useGithub, useGithubComments, useSkills, useUiState, useWorkflows } from '@/api/queries'

@@ -35,6 +35,18 @@ const HEALTH: HealthResponse = {
   capabilities: { localHandoff: true, followups: true },
 }
 
+/** One registered project — the degenerate workspace every existing install upgrades into. */
+const PROJECT = {
+  id: 'cezar',
+  name: 'cezar',
+  root: '/home/me/Projects/cezar',
+  addedAt: '2026-07-01T00:00:00.000Z',
+  lastOpenedAt: '2026-07-20T12:00:00.000Z',
+  source: 'local' as const,
+  status: 'ok' as const,
+  branch: 'main',
+}
+
 const TODOS = [
   { id: 't1', summary: 'Review the PR' },
   { id: 't2', summary: 'Rebase the branch' },
@@ -171,6 +183,47 @@ describe('sidebar wiring', () => {
     expect(repoChip()).toBeNull()
     expect(versionChip()).toBeNull()
     expect(screen.getByText('route content')).toBeTruthy()
+  })
+
+  // The upgrade path: one registered project must look exactly like the cockpit did before the
+  // workspace existed — flat nav, one quick-list, repo chip, no group headers.
+  it('keeps the single-project sidebar when the registry holds one project', async () => {
+    serve({
+      '/api/health': HEALTH,
+      '/api/todos': [],
+      '/api/projects': { projects: [PROJECT], bootProject: 'cezar', projectsDir: '/home/me/cezar/projects' },
+      '/api/runs': [],
+    })
+    renderShell()
+
+    await waitFor(() => expect(repoChip()).not.toBeNull())
+    expect(document.querySelector('[data-slot="project-groups"]')).toBeNull()
+    expect(screen.getByRole('navigation', { name: 'Main' })).toBeTruthy()
+    expect(document.querySelector('[data-slot="task-quick-list"]')).not.toBeNull()
+  })
+
+  it('renders one collapsible group per project once the workspace has two', async () => {
+    serve({
+      '/api/health': HEALTH,
+      '/api/todos': [],
+      '/api/projects': {
+        projects: [PROJECT, { ...PROJECT, id: 'shop', name: 'shop', lastOpenedAt: '2026-07-19T00:00:00.000Z' }],
+        bootProject: 'cezar',
+        projectsDir: '/home/me/cezar/projects',
+      },
+      '/api/workspace/ui-state': {},
+      '/api/p/cezar/runs': [],
+    })
+    renderShell()
+
+    await waitFor(() =>
+      expect(document.querySelectorAll('[data-slot="project-group"]')).toHaveLength(2),
+    )
+    // The flat nav and the shared quick-list step aside — each group brings its own.
+    expect(screen.queryByRole('navigation', { name: 'Main' })).toBeNull()
+    expect(document.querySelector('[data-slot="task-quick-list"]')).toBeNull()
+    // …and so does the repo chip, which the boot project's own group header now carries.
+    expect(repoChip()).toBeNull()
   })
 
   it('shows the version chip even outside a git repo', async () => {
