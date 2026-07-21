@@ -5,7 +5,14 @@ import { useLocation, useParams } from 'react-router'
 import { Link } from '@/lib/project-router'
 
 import { ApiError } from '@/api/client'
-import { useRun, useRuns, useSendMessage } from '@/api/queries'
+import {
+  useEditQueuedMessage,
+  usePatchRun,
+  useRemoveQueuedMessage,
+  useRun,
+  useRuns,
+  useSendMessage,
+} from '@/api/queries'
 import { useRunEvents } from '@/api/run-events'
 import type { ApiRun } from '@/api/types'
 import { CenteredState } from '@/components/centered-state'
@@ -99,12 +106,51 @@ export function TaskThreadRoute() {
  * (thread-scroll.ts owns the rule). Row keys are turn-scoped — the same keys the open-card
  * cache uses, because v2 item ids repeat across sessions.
  */
-export function buildThreadRows(run: ApiRun, thread: ThreadState): ThreadRow[] {
+export function buildThreadRows(
+  run: ApiRun,
+  thread: ThreadState,
+  /** Queued-run affordances (#472). Omitted (the default) renders every bubble read-only,
+   *  which is what every caller outside the live thread view wants. */
+  edit?: {
+    onEditTask: (text: string) => Promise<void>
+    onEditMessage: (msgId: string, text: string) => Promise<void>
+    onRemoveMessage: (msgId: string) => Promise<void>
+  },
+): ThreadRow[] {
   const rows: ThreadRow[] = []
   // The initial prompt: the engine writes no v1 `user-message` line for it — the task on
   // the run record IS that message, so it renders from there, not from an invented event.
   if (run.task)
-    rows.push({ key: 'task', node: <UserBubble text={run.task} images={run.taskImages ?? []} /> })
+    rows.push({
+      key: 'task',
+      node: (
+        <UserBubble
+          text={run.task}
+          images={run.taskImages ?? []}
+          // Editable but never removable: a run with no prompt is not a run.
+          onEdit={edit ? edit.onEditTask : undefined}
+          editLabel="Edit the prompt"
+        />
+      ),
+    })
+  // Messages stacked onto the run while it waits for a slot (#472). Same provenance as the
+  // task bubble — they live on the record, not in the event stream, and the engine writes no
+  // `user-message` line for them (they are folded into the prompt, not sent as turns). So
+  // rendering them here is what keeps the thread showing exactly one bubble per authored
+  // message, before the run starts and after.
+  for (const message of run.queuedMessages ?? []) {
+    rows.push({
+      key: `queued:${message.id}`,
+      node: (
+        <UserBubble
+          text={message.text}
+          images={message.images ?? []}
+          onEdit={edit ? (text) => edit.onEditMessage(message.id, text) : undefined}
+          onRemove={edit ? () => edit.onRemoveMessage(message.id) : undefined}
+        />
+      ),
+    })
+  }
   for (const turn of thread.turns) {
     if (turn.userMessage) {
       rows.push({
@@ -141,6 +187,12 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
   // The legacy session-open rule (web/app.js `updateDetail`): the composer can deliver while
   // the engine owns a live session — running queues the message, waiting answers it.
   const sessionOpen = run.status === 'running' || run.status === 'waiting'
+  // …and the third state (#472): a queued run has not started, so its prompt is still
+  // authorable. "Session closed — Continue to reopen." was wrong on its own terms here —
+  // the session is not closed, it was never opened, and Continue means nothing for a run
+  // that has not run. Deliberately `queued` only: review/done/failed/cancelled keep the
+  // existing copy and their Continue action.
+  const queued = run.status === 'queued'
   // A closed session can never settle its in-flight items — nothing in the reducer rewrites a
   // `running` item on `session.ended`, so an interrupted fan-out stays `running` in the
   // persisted stream forever. Without this, reopening it pulses `Agents · 0/1` above a dead
@@ -173,7 +225,30 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
   )
   const sendMessage = useSendMessage(run.id)
 
-  const rows = useMemo(() => buildThreadRows(run, thread), [run, thread])
+  // The queued-run affordances (#472), passed only while the run is queued — so the bubbles
+  // go read-only on the next `run` SSE frame once it starts. The bubbles await these promises
+  // so a failed write keeps its editor/draft open and shows the server's error.
+  // Depend on the `mutateAsync` functions, NOT the mutation result objects: TanStack returns a
+  // fresh result object every render, so memoizing on those would rebuild `edit` — and with it
+  // every thread row — on each render, defeating the memo that exists because these threads get
+  // big enough to virtualize. `mutateAsync` is referentially stable.
+  const { mutateAsync: patchRunAsync } = usePatchRun(run.id)
+  const { mutateAsync: editQueuedAsync } = useEditQueuedMessage(run.id)
+  const { mutateAsync: removeQueuedAsync } = useRemoveQueuedMessage(run.id)
+  const edit = useMemo(
+    () =>
+      queued ?
+        {
+          onEditTask: async (text: string) => { await patchRunAsync({ task: text }) },
+          onEditMessage: (msgId: string, text: string) =>
+            editQueuedAsync({ msgId, message: { text } }).then(() => undefined),
+          onRemoveMessage: (msgId: string) => removeQueuedAsync(msgId).then(() => undefined),
+        }
+      : undefined,
+    [queued, patchRunAsync, editQueuedAsync, removeQueuedAsync],
+  )
+
+  const rows = useMemo(() => buildThreadRows(run, thread, edit), [run, thread, edit])
   const { search } = useLocation()
   const mode = threadRenderMode(search, rows.length)
   const scroll = useThreadScroll(run.id)
@@ -283,15 +358,27 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
             </div>
           ) : null}
 
+          {queued ? (
+            <div
+              data-slot="queued-hint"
+              className="flex items-center gap-2 px-1 text-xs text-muted-foreground"
+            >
+              <StatusDot tone="pending" />
+              Messages you add now are folded into the prompt before the run starts.
+            </div>
+          ) : null}
+
           <Composer
             onSubmit={(text, images) => sendMessage.mutateAsync({ text, images })}
-            disabled={!sessionOpen}
+            disabled={!sessionOpen && !queued}
             disabledReason="Session closed — Continue to reopen."
+            // Continue is meaningless for a run that has not run, so the queued branch
+            // renders no disabled action at all (it is not disabled in the first place).
             disabledAction={<ContinueAction run={run} />}
             placeholder={
-              run.status === 'waiting'
-                ? 'Reply — / for skills, @ for files…'
-                : 'Message the agent — / for skills, @ for files…'
+              queued ? 'Add to the prompt — sent when the run starts…'
+              : run.status === 'waiting' ? 'Reply — / for skills, @ for files…'
+              : 'Message the agent — / for skills, @ for files…'
             }
             autocompleteSkills
             quickReplies

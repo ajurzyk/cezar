@@ -507,9 +507,11 @@ const uiStateSchema = z
   })
   .passthrough();
 
-// Editable titles (#389). `title` is the only editable field for now.
+// Editable titles (#389), and the initial prompt while the run is still queued
+// (#472 — rejected with 409 on any other status by the handler).
 const patchRunSchema = z.object({
   title: z.string().trim().min(1).max(300).optional(),
+  task: z.string().trim().min(1).max(100_000).optional(),
 });
 
 // Session commit (redesign R5 — §"Git/session API additions").
@@ -527,23 +529,49 @@ const openInSchema = z.object({
   path: z.string().max(1_000).optional(),
 });
 
+const imageInputSchema = z.object({
+  mediaType: z.string().regex(/^image\//),
+  // ~5 MB per image once base64-decoded.
+  data: z.string().min(1).max(7_000_000),
+});
+
 const messageSchema = z
   .object({
     text: z.string().max(100_000).default(''),
-    images: z
-      .array(
-        z.object({
-          mediaType: z.string().regex(/^image\//),
-          // ~5 MB per image once base64-decoded.
-          data: z.string().min(1).max(7_000_000),
-        }),
-      )
-      .max(4)
-      .default([]),
+    images: z.array(imageInputSchema).max(4).default([]),
   })
   .refine((m) => m.text.trim().length > 0 || m.images.length > 0, {
     message: 'message needs text or at least one image',
   });
+
+// PATCH semantics are load-bearing here: an omitted field keeps its current value.
+// In particular, the cockpit edits text without re-uploading existing attachments.
+const queuedMessagePatchSchema = z
+  .object({
+    text: z.string().max(100_000).optional(),
+    images: z.array(imageInputSchema).max(4).optional(),
+  })
+  .refine((m) => m.text !== undefined || m.images !== undefined, {
+    message: 'message edit needs text or images',
+  });
+
+// Queued prompt stack bounds (#472). The per-message bounds mirror `messageSchema`
+// above; the one that actually matters is the FOLDED total, because 20 messages of
+// 100 000 chars each would otherwise compose a ~2 M-character {{task}}.
+const MAX_QUEUED_MESSAGES = 20;
+const MAX_QUEUED_IMAGES = 8;
+const MAX_FOLDED_TASK_CHARS = 200_000;
+
+/** Length of the prompt a run would execute with — `task` plus its whole stack,
+ *  composed exactly as `hydrateQueuedInput` composes it. Checked against the
+ *  PROSPECTIVE state so the user is stopped at the write, not at dequeue where
+ *  there would be no one left to tell. */
+function foldedLength(task: string, stack: Array<{ text: string }>): number {
+  return [task, ...stack.map((m) => m.text)]
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0)
+    .join('\n\n').length;
+}
 
 // "Continue"/"Send back" body (spec 003 / #401): every field optional, so an empty POST reopens
 // the last session on the run's current backend (backward compat). A runner/model override lets
@@ -1764,12 +1792,29 @@ export function createApp(deps: ServerDeps): Hono {
   // titleSummary (RunManager.recordTurnEnd), so an edit wins over any past or
   // future auto-summary. Answers the updated record.
   api.patch('/runs/:id', async (c) => {
-    const { store } = c.get('project');
+    const { store, manager } = c.get('project');
     const id = c.req.param('id');
     if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
     const parsed = patchRunSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
       return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
+    }
+    // The prompt is editable only while the run is still queued (#472). Checked
+    // BEFORE the title write so a rejected PATCH is a no-op rather than a partial
+    // one. `title` itself keeps working on any status — no regression to #389.
+    if (parsed.data.task !== undefined) {
+      const foldedChars = foldedLength(parsed.data.task, store.getRun(id)?.queuedMessages ?? []);
+      if (foldedChars > MAX_FOLDED_TASK_CHARS) {
+        return c.json(
+          {
+            error: `prompt too long — ${MAX_FOLDED_TASK_CHARS} character limit across the task and its queued messages (would be ${foldedChars})`,
+          },
+          400,
+        );
+      }
+      if (!manager.editTask(id, parsed.data.task)) {
+        return c.json({ error: 'run already started' }, 409);
+      }
     }
     if (parsed.data.title !== undefined) {
       // titleOrigin 'user' permanently stops the namer's live updates for this run
@@ -1808,9 +1853,107 @@ export function createApp(deps: ServerDeps): Hono {
       })),
       ...(parsed.data.text.trim() ? [{ type: 'text', text: parsed.data.text } satisfies ContentBlock] : []),
     ];
-    const delivered = manager.sendMessage(id, content);
-    if (!delivered) return c.json({ error: 'session closed' }, 409);
-    return c.json({ delivered: true });
+    // Three-rung delivery ladder (#472). Branch on the ENGINE's answer rather
+    // than a status read here: the handler cannot observe the dequeue safely
+    // (the record is written a tick later), the engine can.
+    //   live session → delivered · still queued → folded into the prompt
+    //   starting up  → buffered  · anything else → 409, exactly as before
+    if (manager.sendMessage(id, content)) return c.json({ delivered: true });
+
+    const run = store.getRun(id);
+    const stack = run?.queuedMessages ?? [];
+    // Bounds apply only to a message that is actually about to be stacked. Without this
+    // gate an over-long message posted to a *finished* run would answer `400 prompt too
+    // long` when the truthful answer is `409 session closed`. The status read is safe
+    // here because it only decides whether to reject EARLY — `enqueueMessage` still
+    // re-checks against the engine's own queue before writing anything.
+    if (run?.status === 'queued') {
+      if (stack.length >= MAX_QUEUED_MESSAGES) {
+        return c.json({ error: `too many queued messages — ${MAX_QUEUED_MESSAGES} message limit` }, 400);
+      }
+      const stackedImages = stack.reduce((n, m) => n + (m.images?.length ?? 0), 0);
+      if (stackedImages + parsed.data.images.length > MAX_QUEUED_IMAGES) {
+        return c.json({ error: `too many queued images — ${MAX_QUEUED_IMAGES} image limit across the stack` }, 400);
+      }
+      const prospective = foldedLength(run.task, [...stack, { text: parsed.data.text }]);
+      if (prospective > MAX_FOLDED_TASK_CHARS) {
+        return c.json(
+          {
+            error: `prompt too long — ${MAX_FOLDED_TASK_CHARS} character limit across the task and its queued messages (would be ${prospective})`,
+          },
+          400,
+        );
+      }
+    }
+
+    const queued = manager.enqueueMessage(id, content);
+    if (queued) return c.json({ queued: true, message: queued });
+    if (manager.deferMessage(id, content)) return c.json({ deferred: true });
+    return c.json({ error: 'session closed' }, 409);
+  });
+
+  // Edit / remove a stacked message (#472). Registered before any conflicting
+  // `/:id` route so `queued-messages` never matches as a run id.
+  api.patch('/runs/:id/queued-messages/:msgId', async (c) => {
+    const { store, manager } = c.get('project');
+    const id = c.req.param('id');
+    const run = store.getRun(id);
+    if (!run) return c.json({ error: 'not found' }, 404);
+    const parsed = queuedMessagePatchSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
+    }
+    const msgId = c.req.param('msgId');
+    const stack = run.queuedMessages ?? [];
+    const existing = stack.find((m) => m.id === msgId);
+    if (!existing) return c.json({ error: 'not found' }, 404);
+
+    const effectiveText = parsed.data.text ?? existing.text;
+    const effectiveImageCount = parsed.data.images?.length ?? existing.images?.length ?? 0;
+    if (!effectiveText.trim() && effectiveImageCount === 0) {
+      return c.json({ error: 'message needs text or at least one image' }, 400);
+    }
+
+    const others = stack.filter((m) => m.id !== msgId);
+    const stackedImages = others.reduce((n, m) => n + (m.images?.length ?? 0), 0);
+    if (stackedImages + effectiveImageCount > MAX_QUEUED_IMAGES) {
+      return c.json({ error: `too many queued images — ${MAX_QUEUED_IMAGES} image limit across the stack` }, 400);
+    }
+    const prospective = foldedLength(run.task, [...others, { text: effectiveText }]);
+    if (prospective > MAX_FOLDED_TASK_CHARS) {
+      return c.json(
+        {
+          error: `prompt too long — ${MAX_FOLDED_TASK_CHARS} character limit across the task and its queued messages (would be ${prospective})`,
+        },
+        400,
+      );
+    }
+
+    const images: ContentBlock[] | undefined = parsed.data.images?.map(
+        (img): ContentBlock => ({
+          type: 'image',
+          source: { type: 'base64', media_type: img.mediaType, data: img.data },
+        }),
+      );
+    const message = manager.editQueuedMessage(id, msgId, {
+      ...(parsed.data.text !== undefined ? { text: parsed.data.text } : {}),
+      ...(images !== undefined ? { images } : {}),
+    });
+    if (!message) return c.json({ error: 'run already started' }, 409);
+    return c.json({ message });
+  });
+
+  api.delete('/runs/:id/queued-messages/:msgId', (c) => {
+    const { store, manager } = c.get('project');
+    const id = c.req.param('id');
+    const run = store.getRun(id);
+    if (!run) return c.json({ error: 'not found' }, 404);
+    const msgId = c.req.param('msgId');
+    if (!(run.queuedMessages ?? []).some((m) => m.id === msgId)) {
+      return c.json({ error: 'not found' }, 404);
+    }
+    if (!manager.removeQueuedMessage(id, msgId)) return c.json({ error: 'run already started' }, 409);
+    return c.json({ removed: true });
   });
 
   // "Finish": gracefully close a waiting session — the run completes as done.
