@@ -337,7 +337,15 @@ class CodexSession implements AgentSession {
       });
       return;
     }
-    const res = await this.rpc.request('turn/start', { threadId: this.threadId, input });
+    // Ask the app-server for reasoning summaries; without this the model runs
+    // with its default (no summary), so the reasoning thread stays empty even
+    // though the mapper and UI can render it. The override persists for this
+    // turn and every subsequent turn, so seeding it on turn/start is enough.
+    const res = await this.rpc.request('turn/start', {
+      threadId: this.threadId,
+      input,
+      summary: reasoningSummary(),
+    });
     this.activeTurnId = turnIdOf(res) ?? this.activeTurnId;
   }
 
@@ -503,6 +511,22 @@ function userInputAnswers(questions: AskQuestion[], text: string): Record<string
 
 /** ThreadItem `type`s that are conversation text, not tool activity. */
 const NON_TOOL_ITEMS = new Set(['agentMessage', 'userMessage', 'reasoning', 'plan']);
+
+const REASONING_SUMMARIES = new Set(['auto', 'concise', 'detailed', 'none']);
+
+/**
+ * The reasoning-summary override sent on `turn/start` (TurnStartParams.summary).
+ * Defaults to `auto` so reasoning is visible out of the box — without it the
+ * app-server runs with its own default (no summary) and the reasoning thread
+ * stays empty even when the model reasons. `CEZ_CODEX_REASONING` overrides the
+ * default (`auto`/`concise`/`detailed`, or `none` to opt out); an unrecognized
+ * value falls back to `auto`.
+ */
+export function reasoningSummary(env: NodeJS.ProcessEnv = process.env): string {
+  const raw = env.CEZ_CODEX_REASONING?.trim().toLowerCase();
+  if (!raw) return 'auto';
+  return REASONING_SUMMARIES.has(raw) ? raw : 'auto';
+}
 
 function textOf(content: ContentBlock[]): string {
   return content
