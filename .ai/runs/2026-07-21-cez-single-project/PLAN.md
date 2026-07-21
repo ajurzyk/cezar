@@ -16,8 +16,8 @@ Source spec: `.ai/specs/2026-07-21-cez-single-project.md`
 | 3 | 3.2 | Hide the global Projects settings section and route | done | 841567c |
 | 3 | 3.3 | Prove one-project sidebar and composer collapse behavior | done | f97804e |
 | 4 | 4.1 | Document the environment and compatibility contracts | done | cb05b7d |
-| 4 | 4.2 | Add real-browser single-project workspace coverage | done | this commit |
-| 4 | 4.3 | Run and record the full repository validation gate | todo | — |
+| 4 | 4.2 | Add real-browser single-project workspace coverage | done | 7599a3f |
+| 4 | 4.3 | Run and record the full repository validation gate | done | this commit |
 
 ## Goal
 
