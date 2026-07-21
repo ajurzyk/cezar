@@ -34,8 +34,11 @@ Ensure Codex reasoning is visible in the task thread when the app-server deliver
 - Joining multiple reasoning parts with the wrong separator could change meaning; preserve part boundaries with newlines.
 - Snapshot text must not overwrite a fuller live raw-reasoning stream or concatenate raw reasoning with its summary.
 - Empty or malformed wire arrays must continue to degrade to an empty, non-throwing item.
+- GitHub rejects a formal approval from the PR author, so a different reviewer must submit the required approval.
 
 ## Progress
+
+PR: #573
 
 > Convention: `- [ ]` pending, `- [x]` done. Append ` — <commit sha>` when a step lands. Do not rename step titles.
 
