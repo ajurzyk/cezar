@@ -1,6 +1,6 @@
 # Handoff — GitHub timeline events
 
-**Updated:** 2026-07-21, checkpoint 1
+**Updated:** 2026-07-21, checkpoint 2
 **Branch:** `feat/github-timeline-events`
 **PR:** [#552](https://github.com/open-mercato/cezar/pull/552) (draft)
 **Spec:** `.ai/specs/2026-07-20-github-timeline-events.md`
@@ -8,19 +8,23 @@
 
 ## Where things stand
 
-**Phase 1 server side is done and green** (Steps 1.1–1.5, five commits). The thread is now sourced
-from `/issues/{n}/timeline` behind a bounded page loop; `commented` rows flow through the unchanged
-`normalizeComments`, everything else through the new `normalizeEvents`. `comments[]` is pinned
-byte-identical by test. 30 new unit cases, all passing; `npm run typecheck` clean.
+**Phases 1 and 2 are complete and green** (Steps 1.1–2.5, twelve commits). The thread now
+interleaves timeline events with comments, commits carry rolled-up CI glyphs, and consecutive
+same-author commit runs collapse behind an `aria-expanded` expander.
 
-Nothing is user-visible yet — the client still ignores `events[]`.
+typecheck clean; **1861 web tests** and **115 forge tests** passing.
+
+Screenshots are deliberately deferred to checkpoint 3 — `mockGithubComments` has no fixture events
+yet, so a dry-run screenshot today would show a thread with no events at all while looking like a
+pass. Step 3.2 fixes that.
 
 ## Next Step
 
-**1.6** — mirror `GithubTimelineEvent` and the optional `events` field into
-`web/app/src/api/types.ts` (around `:513-532`), matching `src/server/forge/types.ts` exactly.
-Then **1.7**, the first user-visible step: `EventRow`, the client-side interleave, `labelColors`
-threading, the `Activity · N comments` header, and the empty-guard fix.
+**3.1** — the refresh mutation at `github.tsx` invalidates only `queryKeys.github({limit: FULL_LIMIT})`,
+never open `queryKeys.githubComments` keys, so a manual refresh leaves the open thread stale for up
+to 60 s. Pre-existing, but in scope because it now hides commits too. Then 3.2 (dry-run fixtures —
+unblocks screenshots), 3.3–3.6 (type pins, route assertions, §2 inventory + drift guard), 3.7 (e2e),
+3.8 (full gate).
 
 ## Resume in 30 seconds
 
@@ -37,6 +41,9 @@ threading, the `Activity · N comments` header, and the empty-guard fix.
 - **`src/server/request-validation.test.ts` has one failure that is pre-existing on `main`**
   (409 ≠ 400). Verified against a clean base worktree. Not this branch's; don't chase it.
 - `noUncheckedIndexedAccess` is on — indexed access in tests needs `!`.
+- **Two same-author commits in a fixture now collapse into a group.** If a component test suddenly
+  finds fewer `gh-event-row`s than it expects, that is Step 2.5 working, not a bug — give the
+  commits distinct authors when the test is about something other than grouping.
 
 ## Blockers
 

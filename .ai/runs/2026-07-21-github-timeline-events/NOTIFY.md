@@ -17,3 +17,8 @@ Append-only, UTC timestamps, newest at the bottom.
 - **2026-07-21T11:32Z — checkpoint 1** (after Step 1.5). Phase 1 server side complete and green:
   typecheck clean, 101 forge tests passing, 30 new cases. UI verification skipped — nothing
   user-visible has changed yet (first UI step is 1.7). See `checkpoint-1-checks.md`.
+- **2026-07-21T11:41Z — checkpoint 2** (after Step 2.5). Phases 1 and 2 complete: typecheck clean,
+  1861 web tests + 115 forge tests passing. See `checkpoint-2-checks.md`.
+- **2026-07-21T11:41Z — UI verification skipped, with reason.** `mockGithubComments` serves no
+  fixture events yet, so a `CEZ_DRY_RUN=1` screenshot would show an event-free thread while looking
+  like a pass. Deferred to checkpoint 3, immediately after Step 3.2 adds the fixtures.
