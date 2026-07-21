@@ -52,6 +52,46 @@ describe('the github comments API', () => {
     }
   });
 
+  it('serves timeline events beside the unchanged comments array (#525)', async () => {
+    const res = await app.request('/api/github/comments/issue/142');
+    const body = (await res.json()) as ForgeCommentsData;
+
+    // Additive: comments keeps its exact shape, events arrives alongside it.
+    expect(Array.isArray(body.events)).toBe(true);
+    expect(body.events!.length).toBeGreaterThan(0);
+    expect(body.comments.every((c) => c.kind === 'comment' || c.kind === 'review')).toBe(true);
+
+    // The dry-run fixtures deliberately cover the cases that are easy to get wrong.
+    const kinds = body.events!.map((e) => e.kind);
+    expect(kinds).toContain('committed');
+    expect(kinds).toContain('labeled');
+    expect(kinds).toContain('cross-referenced');
+
+    const commits = body.events!.filter((e) => e.kind === 'committed');
+    expect(commits.length).toBeGreaterThan(1); // a RUN, so grouping is exercised
+    // Full 40-char SHAs — the rollup query's `oid` rejects abbreviated ones, so a fixture that
+    // cheated here would look fine offline and fail against the real API.
+    expect(commits.every((c) => c.sha?.length === 40)).toBe(true);
+    // Mixed states, including an explicit null (no CI configured), distinct from absent.
+    expect(new Set(commits.map((c) => c.checks)).size).toBeGreaterThan(1);
+    expect(commits.some((c) => c.checks === null)).toBe(true);
+  });
+
+  it('gives every event a unique, stable id — they become React keys', async () => {
+    const res = await app.request('/api/github/comments/pr/137');
+    const body = (await res.json()) as ForgeCommentsData;
+    const ids = body.events!.map((e) => e.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids.every((id) => id.startsWith('evt-'))).toBe(true); // cannot collide with comment keys
+  });
+
+  it('includes a merge event for a PR but not for an issue', async () => {
+    const pr = (await (await app.request('/api/github/comments/pr/137')).json()) as ForgeCommentsData;
+    const issue = (await (await app.request('/api/github/comments/issue/142')).json()) as ForgeCommentsData;
+    expect(pr.events!.some((e) => e.kind === 'merged')).toBe(true);
+    expect(issue.events!.some((e) => e.kind === 'merged')).toBe(false);
+  });
+
   it('includes a PR review summary for a valid pr request', async () => {
     const res = await app.request('/api/github/comments/pr/137');
     expect(res.status).toBe(200);
