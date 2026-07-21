@@ -47,6 +47,7 @@
 | 5 | 5.4 | Make `resources.worktreeRetentionDefault` actually seed per-project retention (fix-forward from Step 5.1) | done | 4950ea0 |
 | 5 | 5.5 | Apply code-review fixes: notes.md debris, redirect query/hash loss, hosted existence oracle | done | 9395221 |
 | 5 | 5.6 | De-flake `project-groups.e2e.ts` (state-driven group expansion) | done | f02fc78 |
+| 5 | 5.7 | Second-pass review fixes: split hosted containment (lexical + realpath), correct the de-flake rationale | done | c6a8e73 |
 
 ## Goal
 

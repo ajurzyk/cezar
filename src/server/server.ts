@@ -72,7 +72,12 @@ import { reviewGateEnabled } from '../runs/review-gate.js';
 import { readUiState, uiStatePath } from '../ui-state.js';
 import { expandTilde } from '../paths.js';
 import { resolveCapabilities } from './capabilities.js';
-import { browseDirectory, isInsideBrowseRoot, resolveBrowseRoot } from './fs-browse.js';
+import {
+  browseDirectory,
+  isInsideBrowseRoot,
+  isLexicallyInsideBrowseRoot,
+  resolveBrowseRoot,
+} from './fs-browse.js';
 import { resolveForge } from './forge/index.js';
 import { fetchGithub, fetchGithubComments } from './github.js';
 import { ensureLaunchKey } from './launch-key.js';
@@ -885,14 +890,21 @@ export function createApp(deps: ServerDeps): Hono {
     // project under `/srv/code` is a normal local setup and `cezar serve`
     // registers it today.
     //
-    // Asked BEFORE the stat, and that order is the security property: an
-    // out-of-root path must answer the SAME way whether or not it exists, or
-    // the route becomes the existence oracle fs-browse narrows the tree to
-    // prevent. Local mode is unaffected — it skips this block, so it still
-    // reaches the stat first.
-    if (!capabilities().localHandoff) {
-      const browseRoot = resolveBrowseRoot(true, await workspaceProjectsDir());
-      if (!(await isInsideBrowseRoot(browseRoot, requested))) {
+    // Containment is asked in two halves, around the stat, and the split is
+    // deliberate.
+    //
+    // The LEXICAL half runs BEFORE the stat, and that order is the security
+    // property: an out-of-root path must answer the SAME way whether or not it
+    // exists, or the route becomes the existence oracle fs-browse narrows the
+    // tree to prevent. Lexical, not realpath, because a realpath check answers
+    // `false` for a path that IS inside the root and merely absent — which
+    // would tell a hosted user who typo'd a folder under their own checkout
+    // root that it is "outside the browsable root".
+    const hostedBrowseRoot = capabilities().localHandoff
+      ? null
+      : resolveBrowseRoot(true, await workspaceProjectsDir());
+    if (hostedBrowseRoot !== null) {
+      if (!(await isLexicallyInsideBrowseRoot(hostedBrowseRoot, requested))) {
         // No resolved path in the message (fs-browse's rule): saying where the
         // root is would hand a remote viewer the layout the narrowing hides.
         return { status: 400, body: { error: 'folder is outside the browsable root' } };
@@ -903,6 +915,13 @@ export function createApp(deps: ServerDeps): Hono {
     // `missing` rows the user never had is worse than a 400 they can act on.
     const info = await stat(requested).catch(() => null);
     if (!info?.isDirectory()) return { status: 400, body: { error: `no such folder: ${spelled}` } };
+    // The REALPATH half, now that the path is known to exist: a symlink inside
+    // the root pointing out of it spells as contained and is not. Same message
+    // as the lexical rejection, so the two halves stay indistinguishable from
+    // outside.
+    if (hostedBrowseRoot !== null && !(await isInsideBrowseRoot(hostedBrowseRoot, requested))) {
+      return { status: 400, body: { error: 'folder is outside the browsable root' } };
+    }
     // The boot-time auto-registration guard, applied to the manual gesture
     // too: `$HOME` and cezar's own task worktrees are exactly as wrong a
     // project root when a human clicks "Add project" as when `cezar serve`

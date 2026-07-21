@@ -135,12 +135,18 @@ const groupBody = (projectId: string) =>
 /**
  * Toggle a group to `expanded` and wait until it really is.
  *
- * A bare `click` + wait-for-body is a race: `gotoGrouped` waits for the group to EXIST, and an
- * element exists a beat before React has wired its handler, so an early click is swallowed and
- * the body never arrives. Asserting the header's own `aria-expanded` first proves the row is
- * rendered WITH state, and re-clicking on a missed toggle makes the helper idempotent — call it
- * on an already-open group and it returns without touching anything, so a test never has to
- * assume which state a previous test left behind.
+ * A bare `click` + wait-for-body is a LAYOUT race, not a handler-wiring one. `browser.click`
+ * resolves the element's centre coordinate and then dispatches a mouse event there; meanwhile the
+ * boot group is expanded by default and its body is still filling as `useProjectRuns` resolves,
+ * which pushes the groups below it down between those two steps. The click lands where the header
+ * used to be. That is a harness artifact — React attaches its delegated listener to the root
+ * container before any child exists, so a rendered header cannot miss a click for want of a
+ * handler, and no real user is losing clicks here.
+ *
+ * Re-reading `aria-expanded` each attempt is what makes the retry safe: a click that DID register
+ * is observed before the next one is sent, so a slow toggle is never double-fired. The helper is
+ * also idempotent — call it on an already-open group and it returns without touching anything, so
+ * a test never has to assume which state a previous test left behind.
  */
 function setGroupExpanded(projectId: string, expanded: boolean): void {
   const header = groupHeader(projectId)

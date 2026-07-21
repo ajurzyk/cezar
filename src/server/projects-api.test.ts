@@ -1,4 +1,12 @@
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
@@ -252,6 +260,42 @@ describe('workspace projects API', () => {
       // …and neither leaks the probed spelling back (the `no such folder`
       // message echoes it; the containment one deliberately does not).
       expect(absent.body.error).not.toContain('nope');
+      expect((await getProjects()).projects).toEqual([]);
+    });
+
+    it('hosted mode: a missing folder INSIDE the root still says so, not "outside"', async () => {
+      // The uniform out-of-root answer above must not cost message accuracy in
+      // the root the caller is actually allowed to use. Containment is asked
+      // lexically before the stat (so existence stays unobservable outside the
+      // root) and by realpath after it (so symlink escapes still fail) — which
+      // leaves an in-root typo free to get the honest `no such folder`.
+      const checkoutRoot = join(home, 'checkouts');
+      mkdirSync(checkoutRoot, { recursive: true });
+      await mergeWriteWorkspaceConfig((config) => {
+        config.projectsDir = checkoutRoot;
+      });
+      process.env.CEZ_REMOTE = '1';
+      const typo = join(checkoutRoot, 'my-porject');
+      const answer = await post({ root: typo });
+      expect(answer.status).toBe(400);
+      expect(answer.body.error).toBe(`no such folder: ${typo}`);
+      expect((await getProjects()).projects).toEqual([]);
+    });
+
+    it('hosted mode: a symlink inside the root pointing out of it is refused', async () => {
+      // The realpath half of containment, which only the post-stat check can
+      // catch: this path spells as inside the checkout root and is not.
+      const checkoutRoot = join(home, 'checkouts');
+      mkdirSync(checkoutRoot, { recursive: true });
+      await mergeWriteWorkspaceConfig((config) => {
+        config.projectsDir = checkoutRoot;
+      });
+      const escape = join(checkoutRoot, 'escape');
+      symlinkSync(otherRoot, escape);
+      process.env.CEZ_REMOTE = '1';
+      const answer = await post({ root: escape });
+      expect(answer.status).toBe(400);
+      expect(answer.body.error).toBe('folder is outside the browsable root');
       expect((await getProjects()).projects).toEqual([]);
     });
   });

@@ -108,6 +108,23 @@ function contains(root: string, candidate: string): boolean {
  * with the same realpath-based rule. Both paths are realpath'd here (unlike
  * `contains`, which trusts its callers) because neither is guaranteed resolved.
  */
+/**
+ * The LEXICAL half of the containment question: does `candidate` spell as being inside `root`,
+ * judged without asking whether it exists?
+ *
+ * `isInsideBrowseRoot` below realpaths both sides, which makes it answer `false` for a path that
+ * is inside the root but simply not there — so using it alone as the first gate would tell a
+ * hosted user who typo'd a folder under their own checkout root that it is "outside the browsable
+ * root". This split lets the register route reject out-of-root paths UNIFORMLY (the existence
+ * oracle stays shut, because a spelling outside the root is refused whether or not it exists),
+ * then answer honestly about existence, then still catch symlink escapes with the realpath gate.
+ */
+export async function isLexicallyInsideBrowseRoot(root: string, candidate: string): Promise<boolean> {
+  const realRoot = await realpathOrNull(root);
+  if (realRoot === null) return false;
+  return contains(realRoot, resolve(candidate));
+}
+
 export async function isInsideBrowseRoot(root: string, candidate: string): Promise<boolean> {
   const realRoot = await realpathOrNull(root);
   if (realRoot === null) return false;
