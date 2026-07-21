@@ -24,7 +24,7 @@ command is verified before the installer moves on.
 - Ubuntu/Debian VPS with `apt`, reachable over SSH.
 - A **normal, sudo-capable user** (the wizard refuses to run as root).
 - At least one logged-in agent CLI on that user — `claude`, `codex`, or
-  OpenCode. (The installer can install `gh` and the npm-based CLIs for you.)
+  OpenCode (experimental). (The installer can install `gh` and the npm-based CLIs for you.)
 - For HTTPS: a domain with a DNS `A`/`AAAA` record pointing at the box.
 
 > Tools installed in `~/.local/bin` or via nvm are found automatically — the

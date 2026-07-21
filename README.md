@@ -5,8 +5,8 @@
 **Parallel coding agents orchestrator** — a local cockpit for running and
 tracking AI coding-agent tasks in your repo.
 
-Type a task, pick a workflow and an agent — **Claude Code, Codex or OpenCode,
-or a mix of them per step** — and watch it work live: steps, tool calls,
+Type a task, pick a workflow and an agent — **Claude Code, Codex or OpenCode
+(experimental), or a mix of them per step** — and watch it work live: steps, tool calls,
 tokens, diffs, in a browser cockpit that runs entirely on your machine.
 Your CLI logins, your `gh`, your files. No accounts, no database, no cloud.
 
@@ -106,7 +106,7 @@ and an orchestrator keeps a whole queue of them moving.
   Take it over interactively in one click (`claude --resume <id>`), or continue it
   in-process from the cockpit.
 - 🔀 **Locked into one agent vendor.** Most tools wed you to a single CLI. cezar
-  drives **Claude Code, Codex and OpenCode** through one runner seam — set a
+  drives **Claude Code, Codex and OpenCode (experimental)** through one runner seam — set a
   default, pick a backend per task, or mix them inside one workflow (implement
   with one agent, review with another) — and through **OpenCode** you can point
   a run at **open-source or local models**, not just the big vendors. See
@@ -454,7 +454,11 @@ cezar is not married to one vendor. Every agent step runs through a single
 |---|---|---|---|
 | **Claude Code** (default) | [`claude`](https://github.com/anthropics/claude-code) | Headless `stream-json` mode. | Per-tool `--allowedTools` (`bashAllowlist` scopes `Bash`); `dontAsk` denies unapproved tools without prompting (`CEZ_APPROVAL_GATE=1` → `acceptEdits` + approval UI). |
 | **Codex** | [`codex`](https://github.com/openai/codex) | `codex app-server` — JSON-RPC over stdio, the same transport the Codex IDE extensions use. | Ignores `allowedTools`; the default auto mode uses `danger-full-access` with `approvalPolicy: never` (`CEZ_CODEX_NETWORK=0` opts into the network-blocked `workspace-write` sandbox). |
-| **OpenCode** | [`opencode`](https://opencode.ai) | `opencode serve` — a local HTTP server with an SSE event stream. | Ignores `allowedTools` entirely; every permission is auto-approved. |
+| **OpenCode** _(experimental)_ | [`opencode`](https://opencode.ai) | `opencode serve` — a local HTTP server with an SSE event stream. | Ignores `allowedTools` entirely; every permission is auto-approved. |
+
+> ⚠️ **OpenCode support is experimental.** The runner works but is less battle-tested
+> than the Claude Code and Codex backends, and OpenCode auto-approves every permission
+> (it ignores `allowedTools`). Treat it as a preview and expect rough edges.
 
 On startup cezar probes which CLIs are installed and the cockpit only offers
 the backends it found — install any one of the three and you're operational.
