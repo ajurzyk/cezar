@@ -153,6 +153,9 @@ try_reuse() {
   pid=$(json_get "$ENV_DESCRIPTOR" app.pid)
   url=$(json_get "$ENV_DESCRIPTOR" baseUrl)
   started=$(json_get "$ENV_DESCRIPTOR" startedAt)
+  requested_single_project=false
+  [ "${CEZ_SINGLE_PROJECT:-}" = 1 ] && requested_single_project=true
+  [ "$(json_get "$ENV_DESCRIPTOR" environment.singleProject)" = "$requested_single_project" ] || return 1
   [ -n "$pid" ] && [ -n "$url" ] || return 1
   # A state file is a claim, not proof: the PID must still be alive…
   kill -0 "$pid" 2>/dev/null || return 1
@@ -339,9 +342,11 @@ start_app() {
 
 # ---- 7. descriptor write ----------------------------------------------------
 write_descriptor() {
+  SINGLE_PROJECT=false
+  [ "${CEZ_SINGLE_PROJECT:-}" = 1 ] && SINGLE_PROJECT=true
   node -e '
     const fs = require("fs");
-    const [out, baseUrl, port, pid, cmd, bInstalled, bCmd, bVer, bNotes, desc] = process.argv.slice(1);
+    const [out, baseUrl, port, pid, cmd, bInstalled, bCmd, bVer, bNotes, desc, singleProject] = process.argv.slice(1);
     fs.writeFileSync(out, JSON.stringify({
       version: 1,
       runId: "cezar-" + new Date().toISOString().slice(0, 10) + "-" + pid,
@@ -354,6 +359,7 @@ write_descriptor() {
       app: { startCommand: cmd, port: Number(port), healthPath: "/api/health", pid: Number(pid) },
       services: [],
       credentials: [],
+      environment: { singleProject: singleProject === "true" },
       browser: {
         provider: "agent-browser",
         installed: bInstalled === "1",
@@ -369,7 +375,8 @@ write_descriptor() {
     }, null, 2) + "\n");
   ' "$ENV_DESCRIPTOR" "$BASE_URL" "$PORT" "$APP_PID" \
     "CEZ_DRY_RUN=1 CEZ_HOME=.ai/qa/cez-home node dist/index.js --port $PORT --no-open" \
-    "$BROWSER_INSTALLED" "$BROWSER_COMMAND" "$BROWSER_VERSION" "$BROWSER_NOTES" "$BROWSER_DESCRIPTOR"
+    "$BROWSER_INSTALLED" "$BROWSER_COMMAND" "$BROWSER_VERSION" "$BROWSER_NOTES" "$BROWSER_DESCRIPTOR" \
+    "$SINGLE_PROJECT"
 }
 
 # ---- main -------------------------------------------------------------------
