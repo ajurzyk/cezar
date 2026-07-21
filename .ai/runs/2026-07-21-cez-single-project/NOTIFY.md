@@ -10,3 +10,8 @@
 - Resumed by: @pkarw
 - Resume point: 1.1 (source: newly drafted Tasks table from the spec)
 - PR head SHA: cfb26ff
+
+## 2026-07-21T19:41:00Z — checkpoint 1
+- Steps: 1.1..3.1
+- Targeted typecheck and 260 focused tests passed after removing inherited `CEZ_REMOTE=1` environment contamination.
+- Live single-project shell verified with screenshot; Add project control absent after health resolution.

@@ -12,7 +12,7 @@ Source spec: `.ai/specs/2026-07-21-cez-single-project.md`
 | 1 | 1.2 | Pin project listings to explicit boot identity | done | 7ccf390 |
 | 2 | 2.1 | Refuse project-management HTTP surfaces before side effects | done | d7c9e6e |
 | 2 | 2.2 | Refuse project CLI mutations in single-project mode | done | d9c694e |
-| 3 | 3.1 | Hide the add-project menu under the capability | done | this commit |
+| 3 | 3.1 | Hide the add-project menu under the capability | done | 91b0cf4 |
 | 3 | 3.2 | Hide the global Projects settings section and route | todo | — |
 | 3 | 3.3 | Prove one-project sidebar and composer collapse behavior | todo | — |
 | 4 | 4.1 | Document the environment and compatibility contracts | todo | — |

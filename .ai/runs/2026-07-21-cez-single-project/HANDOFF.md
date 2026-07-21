@@ -1,17 +1,17 @@
 # Handoff — 2026-07-21-cez-single-project
 
-**Last updated:** 2026-07-21T19:20:00Z
+**Last updated:** 2026-07-21T19:41:00Z
 **Branch:** spec/cez-single-project
 **PR:** https://github.com/open-mercato/cezar/pull/597
-**Current phase/step:** Phase 1 Step 1.1
-**Last commit:** cfb26ff — docs(specs): add UI mockups for cez-single-project
+**Current phase/step:** Phase 3 Step 3.2
+**Last commit:** 91b0cf4 — feat(ui): hide add-project menu in single-project mode
 
 ## What just happened
-- The implementation-ready spec and visual evidence landed on PR #597.
-- The PR is claimed for loop implementation.
+- Steps 1.1 through 3.1 landed and checkpoint 1 validation passed.
+- Live browser evidence confirms the Add project control disappears after health resolves.
 
 ## Next concrete action
-- Implement Step 1.1: add the server and client single-project capability.
+- Implement Step 3.2: hide the global Projects settings section and route.
 
 ## Blockers / open questions
 - none
