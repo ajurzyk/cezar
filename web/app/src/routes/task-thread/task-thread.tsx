@@ -25,7 +25,9 @@ import {
   UserBubble,
 } from './thread-items'
 import { ContinueAction } from './follow-up-engine'
+import { AgentsDock } from './agents-dock'
 import { PlanDock, planCounts } from './plan-dock'
+import { collectSubagents } from './subagent-dock'
 import { AcceptCelebration, ReviewPanel } from './review-panel'
 import { queuePosition } from './run-actions'
 import { RunHeader } from './run-header'
@@ -131,6 +133,9 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
   // plan hides the dock and the header mirror alike).
   const plan = latestPlanEntries(thread)
   const planTally = plan !== undefined && plan.length > 0 ? planCounts(plan) : undefined
+  // The Agents dock's data: the current fan-out's sub-agents, or [] when there is none to
+  // show (#474). Derived from the same reduced turns the thread renders — no new subscription.
+  const agents = useMemo(() => collectSubagents(thread.turns), [thread.turns])
   // The legacy session-open rule (web/app.js `updateDetail`): the composer can deliver while
   // the engine owns a live session — running queues the message, waiting answers it.
   const sessionOpen = run.status === 'running' || run.status === 'waiting'
@@ -215,6 +220,10 @@ export function ThreadView({ run, thread }: { run: ApiRun; thread: ThreadState }
           </div>
         ) : null}
         <div className="mx-auto flex w-full max-w-[820px] flex-col gap-2.5">
+          {/* Agents above the plan: the fan-out is the more urgent "what is happening now",
+              and it is transient — the plan outlives it. Keyed by run id like the plan dock. */}
+          <AgentsDock key={`agents:${run.id}`} runId={run.id} agents={agents} />
+
           {plan !== undefined && plan.length > 0 ? (
             // Keyed by run id: the collapse default re-derives per task (see PlanDock).
             <PlanDock key={run.id} runId={run.id} entries={plan} />
