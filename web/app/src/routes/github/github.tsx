@@ -16,7 +16,13 @@ import { Link, Navigate, useParams } from 'react-router'
 
 import { getGithub, putUiState } from '@/api/client'
 import { queryKeys, useGithub, useGithubComments, useSkills, useUiState, useWorkflows } from '@/api/queries'
-import type { GithubComment, GithubItem, UiState } from '@/api/types'
+import type {
+  GithubComment,
+  GithubItem,
+  GithubTimelineEvent,
+  GithubTimelineEventKind,
+  UiState,
+} from '@/api/types'
 import { CenteredState } from '@/components/centered-state'
 import type { EnginePick } from '@/components/engine-pills'
 import { GithubIcon } from '@/components/icons'
@@ -593,7 +599,7 @@ function GithubDetail({
         )}
       </div>
 
-      <GithubThread item={item} />
+      <GithubThread item={item} colors={colors} />
 
       {children}
     </article>
@@ -605,9 +611,23 @@ function GithubDetail({
  *  issue body does. Lazy — only fetched while this detail view is mounted. Everything degrades:
  *  loading → skeleton, unreachable → one-line reason + "open on GitHub", empty → nothing (the
  *  count badge already said there were none). */
-function GithubThread({ item }: { item: GithubItem }) {
+function GithubThread({ item, colors }: { item: GithubItem; colors: Record<string, string> }) {
   const thread = useGithubComments(item.kind, item.number)
   const data = thread.data
+
+  // Interleave client-side (#525): the server returns comments and events as two independently
+  // capped arrays and deliberately does NOT merge them — ordering is presentation, and a
+  // server-side merge would either reshape the §2-protected response or force a combined cap.
+  const entries = useMemo(() => {
+    const merged: ThreadRow[] = [
+      ...(data?.comments ?? []).map((comment) => ({ row: 'comment' as const, comment })),
+      ...(data?.events ?? []).map((event) => ({ row: 'event' as const, event })),
+    ]
+    // Stable sort on the ISO timestamp. Both streams are UTC-normalized server-side, so a string
+    // compare is correct — `normalizeEvents` converts `author.date`'s numeric offset for exactly
+    // this reason.
+    return merged.sort((a, b) => at(a).localeCompare(at(b)))
+  }, [data?.comments, data?.events])
 
   if (thread.isPending) {
     return (
@@ -640,8 +660,10 @@ function GithubThread({ item }: { item: GithubItem }) {
   }
 
   // An empty thread renders nothing: the count badge already communicated "no discussion", and an
-  // empty "Comments · 0" section would be noise on the many quiet issues/PRs.
-  if (data.comments.length === 0) return null
+  // empty "Activity" section would be noise on the many quiet issues/PRs. Counts BOTH streams
+  // (#525) — keyed on comments alone this would hide the whole feature on its motivating case, a
+  // merged PR with commits, labels and a merge event but no conversation.
+  if (entries.length === 0) return null
 
   return (
     <section data-slot="gh-thread" className="mt-6 border-t border-border pt-5">
@@ -649,12 +671,19 @@ function GithubThread({ item }: { item: GithubItem }) {
         data-slot="gh-thread-header"
         className="mb-4 text-[11px] font-semibold tracking-wide text-soft-foreground uppercase"
       >
-        Comments · {data.comments.length}
+        {/* "Activity", not "Comments": heading a twenty-row list `Comments · 2` would be
+            incoherent once events render. The comment count stays as a secondary. This is a
+            different surface from the row badge, which still counts comments only. */}
+        Activity · {data.comments.length} comment{data.comments.length === 1 ? '' : 's'}
       </h3>
       <ul className="flex flex-col gap-5">
-        {data.comments.map((comment) => (
-          <ThreadEntry key={`${comment.kind}-${comment.id}`} comment={comment} />
-        ))}
+        {entries.map((entry) =>
+          entry.row === 'comment' ? (
+            <ThreadEntry key={`${entry.comment.kind}-${entry.comment.id}`} comment={entry.comment} />
+          ) : (
+            <EventRow key={entry.event.id} event={entry.event} colors={colors} />
+          ),
+        )}
       </ul>
       {data.truncated ? (
         <a
@@ -670,6 +699,128 @@ function GithubThread({ item }: { item: GithubItem }) {
       ) : null}
     </section>
   )
+}
+
+/** One row in the interleaved thread (#525) — a conversation comment/review, or a timeline event.
+ *  A discriminated union rather than a widened `GithubComment['kind']`, so each branch keeps its
+ *  own narrowing. */
+type ThreadRow =
+  | { row: 'comment'; comment: GithubComment }
+  | { row: 'event'; event: GithubTimelineEvent }
+
+/** Sort key for either row shape. */
+const at = (entry: ThreadRow): string =>
+  entry.row === 'comment' ? entry.comment.createdAt : entry.event.createdAt
+
+/** Per-kind glyph. Deliberately text glyphs rather than icon components: `EventRow` is a single
+ *  muted line and an icon set would pull it visually level with the comment cards it sits
+ *  between. */
+const EVENT_GLYPH: Record<GithubTimelineEventKind, string> = {
+  committed: '⚙',
+  labeled: '◆',
+  unlabeled: '◇',
+  assigned: '◍',
+  unassigned: '◌',
+  merged: '⑃',
+  closed: '⊘',
+  reopened: '⊙',
+  head_ref_force_pushed: '↻',
+  'cross-referenced': '↗',
+  renamed: '✎',
+}
+
+/**
+ * One timeline event — deliberately NOT a `ThreadEntry`: single line, muted, no card, no avatar
+ * block, so events read as connective tissue between comments rather than competing with them.
+ * Mirrors github.com's density.
+ */
+function EventRow({ event, colors }: { event: GithubTimelineEvent; colors: Record<string, string> }) {
+  return (
+    <li
+      data-slot="gh-event-row"
+      data-kind={event.kind}
+      className={cn(
+        'flex min-w-0 items-center gap-1.5 font-mono text-[11px] text-soft-foreground',
+        event.kind === 'merged' && 'text-accent-foreground',
+      )}
+    >
+      <span aria-hidden="true" className="shrink-0">
+        {EVENT_GLYPH[event.kind]}
+      </span>
+      <span className="font-sans font-medium text-foreground">{event.actor}</span>
+      <EventPhrase event={event} colors={colors} />
+      <span className="shrink-0">{shortAge(event.createdAt)}</span>
+      {event.url ? (
+        <a
+          href={event.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label={`open ${event.kind} on GitHub`}
+          className="ml-auto shrink-0 text-muted-foreground hover:text-foreground"
+        >
+          <ExternalLinkIcon aria-hidden="true" className="size-2.5" />
+        </a>
+      ) : null}
+    </li>
+  )
+}
+
+/** The kind-specific middle of an event row. Split out so `EventRow` stays a layout shell and
+ *  each phrase can be asserted on its own in tests. */
+function EventPhrase({ event, colors }: { event: GithubTimelineEvent; colors: Record<string, string> }) {
+  switch (event.kind) {
+    case 'committed':
+      return (
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span className="shrink-0">committed</span>
+          {event.sha ? <span className="shrink-0 text-muted-foreground">{event.sha.slice(0, 7)}</span> : null}
+          {event.message ? (
+            <span className="truncate font-sans text-foreground">{event.message}</span>
+          ) : null}
+        </span>
+      )
+    case 'labeled':
+    case 'unlabeled':
+      return (
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span className="shrink-0">{event.kind === 'labeled' ? 'added the' : 'removed the'}</span>
+          {event.label ? (
+            <span
+              data-slot="gh-event-label"
+              style={labelChipStyle(event.label.color ?? colors[event.label.name])}
+              className="max-w-[12rem] truncate rounded-full border px-1.5 py-px font-sans text-[10px]"
+            >
+              {event.label.name}
+            </span>
+          ) : null}
+          <span className="shrink-0">label</span>
+        </span>
+      )
+    case 'assigned':
+    case 'unassigned':
+      return (
+        <span className="truncate">
+          {event.kind === 'assigned' ? 'assigned' : 'unassigned'} {event.subject ?? 'someone'}
+        </span>
+      )
+    case 'merged':
+      return <span>merged this</span>
+    case 'closed':
+      return <span>closed this</span>
+    case 'reopened':
+      return <span>reopened this</span>
+    case 'head_ref_force_pushed':
+      return <span>force-pushed</span>
+    case 'renamed':
+      return <span className="truncate">renamed this to {event.subject ?? '—'}</span>
+    case 'cross-referenced':
+      return (
+        <span className="truncate">
+          referenced this in {event.refNumber ? `#${event.refNumber}` : 'another thread'}
+          {event.refTitle ? ` ${event.refTitle}` : ''}
+        </span>
+      )
+  }
 }
 
 /** Review-state chip tones — the same success/danger/muted vocabulary the checks badge uses, so

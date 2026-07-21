@@ -450,12 +450,16 @@ describe('the comment thread', () => {
   const threadSection = () => document.querySelector('[data-slot="gh-thread"]')
   const entries = () => [...document.querySelectorAll<HTMLElement>('[data-slot="gh-thread-entry"]')]
 
-  it('renders a "Comments · N" section with each body through the markdown pipeline', async () => {
+  it('renders an "Activity · N comments" section with each body through the markdown pipeline', async () => {
     stubFetch(thread('issue', 142, { available: true, comments: [COMMENT_TEXT, COMMENT_IMAGE] }))
     renderAt('/github/issues/142')
 
     await waitFor(() => expect(threadSection()).not.toBeNull())
-    expect(document.querySelector('[data-slot="gh-thread-header"]')?.textContent).toBe('Comments · 2')
+    // Retitled by #525: heading a twenty-row list `Comments · 2` would be incoherent once events
+    // render, so the section is "Activity" and the comment count becomes a secondary.
+    expect(document.querySelector('[data-slot="gh-thread-header"]')?.textContent).toBe(
+      'Activity · 2 comments',
+    )
     expect(entries()).toHaveLength(2)
     expect(entries()[0]?.textContent).toContain('maya')
     expect(entries()[0]?.querySelector('[data-slot="gh-thread-body"]')?.textContent).toContain(
@@ -472,8 +476,8 @@ describe('the comment thread', () => {
     expect(img?.getAttribute('src')).toBe('https://example.com/shot.png')
   })
 
-  it('renders nothing for an empty thread — the count badge already said there were none', async () => {
-    stubFetch(thread('issue', 139, { available: true, comments: [] }))
+  it('renders nothing when BOTH streams are empty — the count badge already said so', async () => {
+    stubFetch(thread('issue', 139, { available: true, comments: [], events: [] }))
     renderAt('/github/issues/139')
 
     await waitFor(() => expect(detail()?.textContent).toContain('Add --json flag'))
@@ -515,6 +519,118 @@ describe('the comment thread', () => {
     const fallback = entries()[1]?.querySelector('[data-slot="gh-avatar-fallback"]')
     expect(fallback).not.toBeNull()
     expect(fallback?.textContent).toBe('n') // first letter of "noAvatar"
+  })
+
+  // ---- timeline events (#525) ----------------------------------------------
+
+  const events = () => [...document.querySelectorAll<HTMLElement>('[data-slot="gh-event-row"]')]
+  const SHA = 'abc1234' + 'f'.repeat(33)
+  const EVT = {
+    committed: {
+      id: `evt-${SHA}`, kind: 'committed' as const, actor: 'Ada Lovelace',
+      createdAt: '2026-01-02T00:00:00Z', sha: SHA, message: 'bound the timeline page loop',
+    },
+    labeled: {
+      id: 'evt-1', kind: 'labeled' as const, actor: 'octocat',
+      createdAt: '2026-01-03T00:00:00Z', label: { name: 'bug', color: 'd73a4a' },
+    },
+    merged: { id: 'evt-2', kind: 'merged' as const, actor: 'octocat', createdAt: '2026-01-04T00:00:00Z' },
+    crossRef: {
+      id: 'evt-3', kind: 'cross-referenced' as const, actor: 'octocat',
+      createdAt: '2026-01-05T00:00:00Z', refNumber: 520, refTitle: 'Sibling work',
+      refIsPr: true, url: 'https://github.com/o/r/pull/520',
+    },
+  }
+
+  it('renders a row per event kind, each carrying data-kind for keying', async () => {
+    stubFetch(thread('pr', 137, {
+      available: true, comments: [],
+      events: [
+        EVT.committed, EVT.labeled, EVT.merged, EVT.crossRef,
+        { id: 'evt-4', kind: 'assigned', actor: 'octocat', createdAt: '2026-01-06T00:00:00Z', subject: 'maya' },
+        { id: 'evt-5', kind: 'renamed', actor: 'octocat', createdAt: '2026-01-07T00:00:00Z', subject: 'A better title' },
+        { id: 'evt-6', kind: 'head_ref_force_pushed', actor: 'octocat', createdAt: '2026-01-08T00:00:00Z' },
+        { id: 'evt-7', kind: 'closed', actor: 'octocat', createdAt: '2026-01-09T00:00:00Z' },
+      ],
+    }))
+    renderAt('/github/prs/137')
+
+    await waitFor(() => expect(events()).toHaveLength(8))
+    expect(events().map((e) => e.dataset.kind)).toEqual([
+      'committed', 'labeled', 'merged', 'cross-referenced',
+      'assigned', 'renamed', 'head_ref_force_pushed', 'closed',
+    ])
+    expect(events()[0]?.textContent).toContain('Ada Lovelace')
+    expect(events()[0]?.textContent).toContain('abc1234') // short sha
+    expect(events()[0]?.textContent).toContain('bound the timeline page loop')
+    expect(events()[2]?.textContent).toContain('merged this')
+    expect(events()[3]?.textContent).toContain('#520')
+    expect(events()[4]?.textContent).toContain('assigned maya')
+    expect(events()[5]?.textContent).toContain('renamed this to A better title')
+    expect(events()[6]?.textContent).toContain('force-pushed')
+  })
+
+  it('renders a PR with events but ZERO comments — the motivating case', async () => {
+    // The empty guard used to key on comments alone, which would hide the whole feature on a
+    // merged PR carrying commits, labels and a merge event but no conversation.
+    stubFetch(thread('pr', 137, { available: true, comments: [], events: [EVT.committed, EVT.merged] }))
+    renderAt('/github/prs/137')
+
+    await waitFor(() => expect(threadSection()).not.toBeNull())
+    expect(events()).toHaveLength(2)
+    expect(entries()).toHaveLength(0)
+    expect(document.querySelector('[data-slot="gh-thread-header"]')?.textContent).toBe(
+      'Activity · 0 comments',
+    )
+  })
+
+  it('interleaves comments and events chronologically', async () => {
+    // The server returns two independently-capped arrays and deliberately does NOT merge them;
+    // ordering is presentation. This is the merge.
+    stubFetch(thread('pr', 137, {
+      available: true,
+      comments: [{ ...COMMENT_TEXT, createdAt: '2026-01-03T12:00:00Z' }],
+      events: [
+        { ...EVT.committed, createdAt: '2026-01-02T00:00:00Z' },
+        { ...EVT.merged, createdAt: '2026-01-04T00:00:00Z' },
+      ],
+    }))
+    renderAt('/github/prs/137')
+
+    await waitFor(() => expect(events()).toHaveLength(2))
+    const rows = [...document.querySelectorAll('[data-slot="gh-thread-entry"], [data-slot="gh-event-row"]')]
+    expect(rows.map((r) => (r as HTMLElement).dataset.slot ?? r.getAttribute('data-slot'))).toEqual([
+      'gh-event-row', 'gh-thread-entry', 'gh-event-row',
+    ])
+  })
+
+  it('tints a label chip from the event colour', async () => {
+    stubFetch(thread('pr', 137, { available: true, comments: [], events: [EVT.labeled] }))
+    renderAt('/github/prs/137')
+
+    await waitFor(() => expect(events()).toHaveLength(1))
+    const chip = document.querySelector<HTMLElement>('[data-slot="gh-event-label"]')
+    expect(chip?.textContent).toBe('bug')
+    expect(chip?.style.borderColor).not.toBe('') // tinted, not the muted fallback
+  })
+
+  it('links a cross-reference out to the referenced thread', async () => {
+    stubFetch(thread('pr', 137, { available: true, comments: [], events: [EVT.crossRef] }))
+    renderAt('/github/prs/137')
+
+    await waitFor(() => expect(events()).toHaveLength(1))
+    expect(events()[0]?.querySelector('a')?.getAttribute('href')).toBe('https://github.com/o/r/pull/520')
+  })
+
+  it('renders comments unchanged when the server sent no events at all', async () => {
+    // The degraded path: the server fell back to the legacy comments-only fetch, so `events` is
+    // absent. The thread must render exactly as it did pre-#525.
+    stubFetch(thread('issue', 142, { available: true, comments: [COMMENT_TEXT] }))
+    renderAt('/github/issues/142')
+
+    await waitFor(() => expect(entries()).toHaveLength(1))
+    expect(events()).toHaveLength(0)
+    expect(threadSection()).not.toBeNull()
   })
 
   it('shows a truncation row linking to GitHub when the thread was trimmed', async () => {
