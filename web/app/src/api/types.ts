@@ -38,6 +38,20 @@ export type StepStatus =
  *  choice and are Claude by definition (see `resumeCommand` in the server). */
 export type Runner = 'claude' | 'codex' | 'opencode'
 
+export interface RunnerModelOption {
+  id: string
+  label: string
+  description: string
+}
+
+export interface RunnerModelCatalogResponse {
+  runner: Runner
+  models: RunnerModelOption[]
+  source: 'live' | 'cache' | 'unavailable'
+  stale: boolean
+  reason?: string
+}
+
 export interface StepState {
   id: string
   name: string

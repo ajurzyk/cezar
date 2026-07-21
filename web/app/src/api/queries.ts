@@ -15,6 +15,7 @@ import {
   getOpenTargets,
   getProjectRuns,
   getProjects,
+  getRunnerModels,
   getRepo,
   getRunCommit,
   getRunCommits,
@@ -135,6 +136,7 @@ export const queryKeys = {
  * scope changes → key changes → data gone → provider unmounts).
  */
 export const workspaceQueryKeys = {
+  models: (runner: string) => ['workspace', 'models', runner] as const,
   projects: ['workspace', 'projects'] as const,
   /** `~/.cezar/ui-state.json` via `GET/PUT /api/workspace/ui-state` (step 2.7) — cross-project
    *  GUI prefs, e.g. the sidebar's per-project collapse map (step 3.3), and — since step 3.5 —
@@ -148,6 +150,14 @@ export const workspaceQueryKeys = {
    *  Not scope-led: there is one filesystem behind the workspace, not one per project. */
   fsBrowseRoot: ['workspace', 'fs-browse'] as const,
   fsBrowse: (path: string | null) => [...workspaceQueryKeys.fsBrowseRoot, path] as const,
+}
+
+export function useRunnerModels() {
+  return useQuery({
+    queryKey: workspaceQueryKeys.models('codex'),
+    queryFn: ({ signal }) => getRunnerModels({ signal }),
+    staleTime: 5 * 60 * 1_000,
+  })
 }
 
 /** The workspace project registry (`GET /api/projects`): the `/p/:projectId` route gate's
