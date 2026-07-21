@@ -46,5 +46,5 @@ Ensure Codex reasoning is visible in the task thread when the app-server deliver
 
 ### Phase 2: Regression verification
 
-- [ ] 2.1 Cover persisted replay and mixed snapshot/delta edge cases, and update the protocol note.
+- [x] 2.1 Cover persisted replay and mixed snapshot/delta edge cases, and update the protocol note. — af72b54
 - [ ] 2.2 Run the configured validation gate and review the branch for compatibility and scope.
