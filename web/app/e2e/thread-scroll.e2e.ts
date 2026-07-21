@@ -144,7 +144,14 @@ beforeAll(async () => {
 afterAll(() => {
   browser?.close()
   server?.kill()
-  if (dataRoot) rmSync(dataRoot, { recursive: true, force: true })
+  // The killed server may still be flushing its NDJSON into dataRoot, which races rmSync and
+  // throws ENOTEMPTY — a suite-level failure on a run whose every test passed. A temp dir that
+  // outlives the run is litter, not a failure; the OS reaps it.
+  try {
+    if (dataRoot) rmSync(dataRoot, { recursive: true, force: true })
+  } catch {
+    /* the OS reaps it */
+  }
 })
 
 describe('thread virtualization on a 1,000-row transcript', () => {
