@@ -39,15 +39,17 @@ export function normalizePath(path: string): string {
   return path.replace(/:[A-Za-z0-9_]+/g, ':p').replace(/\/+$/, '');
 }
 
-/** Every `/api/*` path registered via `app.<method>(...)` in server.ts. `app.use` is deliberately
- *  excluded — the `/api/health` CORS middleware is not a route, and counting it would make the
- *  guard demand an inventory entry for a thing users cannot call. */
+/** Every legacy `/api/*` path registered in server.ts. Project routes are declared on the `api`
+ *  sub-app and mounted at `/api` (plus the scoped mirror), while workspace routes are declared
+ *  directly on `app`. `use` is deliberately excluded — middleware is not a callable route. */
 export function registeredApiRoutes(source: string): Set<string> {
   const out = new Set<string>();
-  const re = /\bapp\.(get|post|put|patch|delete)\(\s*'([^']+)'/g;
+  const re = /\b(app|api)\.(get|post|put|patch|delete)\(\s*'([^']+)'/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(source)) !== null) {
-    const path = m[2]!;
+    const receiver = m[1]!;
+    const declaredPath = m[3]!;
+    const path = receiver === 'api' ? `/api${declaredPath}` : declaredPath;
     if (path.startsWith('/api/')) out.add(normalizePath(path));
   }
   return out;
@@ -119,6 +121,11 @@ describe('BACKWARD_COMPATIBILITY.md §2 route inventory', () => {
     it('ignores app.use middleware — it is not a callable route', () => {
       const fake = `app.use('/api/health', mw); app.get('/api/real', h);`;
       expect(registeredApiRoutes(fake)).toEqual(new Set(['/api/real']));
+    });
+
+    it('includes project routes mounted from the api sub-app under the legacy prefix', () => {
+      const fake = `api.get('/runs/:runId', h); app.route('/api', api);`;
+      expect(registeredApiRoutes(fake)).toEqual(new Set(['/api/runs/:p']));
     });
 
     it('ignores non-/api routes', () => {
