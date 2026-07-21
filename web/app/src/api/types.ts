@@ -266,6 +266,16 @@ export interface RegisterProjectResponse {
   error?: string
 }
 
+/** `DELETE /api/projects/:projectId` (multi-project spec, step 4.4) — Settings → Projects'
+ *  per-row Remove. Deregistration ONLY: the server never touches anything under the project
+ *  root, so this is a registry edit and nothing else. The interesting failures are 409s (the
+ *  project has running tasks, or it is the project this server booted in), whose `{ error }`
+ *  the pane shows verbatim. */
+export interface RemoveProjectResponse {
+  removed: true
+  id: string
+}
+
 /** `POST /api/projects/checkout` (multi-project spec, step 4.3) — the clone-from-GitHub body.
  *  `name` defaults server-side to the repo name; `checkoutId` is the cockpit's own correlation
  *  token, echoed on every `checkout-progress` event so two tabs cloning at once never render

@@ -33,6 +33,7 @@ import type {
   PlanResponse,
   ProjectsResponse,
   RegisterProjectResponse,
+  RemoveProjectResponse,
   RemoveTodoResponse,
   RepoBranchResponse,
   RepoCommitPayload,
@@ -386,6 +387,18 @@ export async function registerProject(root: string): Promise<RegisterProjectResp
  */
 export function checkoutProject(input: CheckoutProjectInput): Promise<RegisterProjectResponse> {
   return mutate<RegisterProjectResponse>('POST', '/api/projects/checkout', input)
+}
+
+/**
+ * Deregister a project (`DELETE /api/projects/:projectId`, step 4.4).
+ *
+ * Registry-only by contract — the server deletes NOTHING under the project root — so this
+ * never needs an "are you sure you have a backup" ceremony beyond the pane's own confirm.
+ * Ordinary `mutate()`: the 409s (running tasks, the boot project) are real failures whose
+ * `{ error }` message is what the pane shows, and `errorFor` already surfaces it.
+ */
+export function removeProject(projectId: string): Promise<RemoveProjectResponse> {
+  return mutate<RemoveProjectResponse>('DELETE', `/api/projects/${encodeURIComponent(projectId)}`)
 }
 
 // ---- run mutations ------------------------------------------------------------------------

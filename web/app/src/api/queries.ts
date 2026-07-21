@@ -32,6 +32,7 @@ import {
   getWorktrees,
   patchRun,
   registerProject,
+  removeProject,
   sendMessage,
 } from './client'
 import { queryScope } from './project-scope'
@@ -184,6 +185,26 @@ export function useRegisterProject() {
  * the server's own cleanup of the partial directory and land on the 409 instead of the real
  * error, which is precisely the confusing outcome the cleanup exists to prevent.
  */
+/**
+ * Deregister a project (`DELETE /api/projects/:projectId`, step 4.4 — Settings → Projects).
+ *
+ * Same registry invalidation as the two add paths, for the mirror reason: the sidebar must
+ * LOSE the group without a reload. The server also emits `project-removed` on the workspace
+ * stream, which invalidates the same key for every OTHER open tab (global-events.tsx) — this
+ * one is for the tab that pressed the button, whose own answer arrives before the event.
+ *
+ * No retry: the interesting failures are the deliberate 409s (running tasks, the boot
+ * project), and re-asking cannot change those answers.
+ */
+export function useRemoveProject() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (projectId: string) => removeProject(projectId),
+    retry: false,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.projects }),
+  })
+}
+
 export function useCheckoutProject() {
   const queryClient = useQueryClient()
   return useMutation({

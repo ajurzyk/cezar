@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
@@ -8,8 +8,10 @@ import type { RunManager } from '../workflows/run.js';
 import {
   allocateProjectSlug,
   clearProjectProbeCache,
+  listProjects,
   registerProject,
 } from '../workspace/projects.js';
+import { ProjectContexts } from './project-context.js';
 import { mergeWriteWorkspaceConfig } from '../workspace/config.js';
 import {
   WorkspaceEventBus,
@@ -231,6 +233,105 @@ describe('workspace projects API', () => {
       const allowed = await post({ root: inside });
       expect(allowed.status).toBe(200);
       expect(allowed.body.project.root).toBe(await realpath(inside));
+    });
+  });
+
+  describe('DELETE /api/projects/:projectId — Settings → Projects remove (step 4.4)', () => {
+    /** Every file under `dir`, path → contents. The removal contract is "no file on disk is
+     *  touched", so the assertion has to be about FILES, not just about the root surviving. */
+    const snapshot = (dir: string): Record<string, string> => {
+      const out: Record<string, string> = {};
+      const walk = (current: string, prefix: string): void => {
+        for (const entry of readdirSync(current, { withFileTypes: true })) {
+          const child = join(current, entry.name);
+          const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+          if (entry.isDirectory()) walk(child, rel);
+          else out[rel] = readFileSync(child, 'utf8');
+        }
+      };
+      walk(dir, '');
+      return out;
+    };
+
+    const del = async (id: string, over: Partial<ServerDeps> = {}) => {
+      const res = await makeApp(over).request(`/api/projects/${id}`, { method: 'DELETE' });
+      return { status: res.status, body: (await res.json()) as { error?: string; removed?: boolean; id?: string; runningTasks?: number } };
+    };
+
+    it('deregisters the project, emits project-removed, and leaves every file on disk untouched', async () => {
+      // A realistic project: source, git metadata, and its own cezar state — the three things a
+      // user would be devastated to lose behind a button labelled "Remove".
+      mkdirSync(join(otherRoot, '.git'), { recursive: true });
+      mkdirSync(join(otherRoot, '.ai/cezar/runs'), { recursive: true });
+      writeFileSync(join(otherRoot, 'README.md'), '# keep me\n', 'utf8');
+      writeFileSync(join(otherRoot, '.git/HEAD'), 'ref: refs/heads/main\n', 'utf8');
+      writeFileSync(join(otherRoot, '.ai/cezar/runs.json'), '[]\n', 'utf8');
+      clearProjectProbeCache();
+      const other = await registerProject(otherRoot);
+      const before = snapshot(otherRoot);
+
+      const bus = new WorkspaceEventBus();
+      const seen: { event: string; data: unknown }[] = [];
+      bus.on((event, data) => seen.push({ event, data }));
+      const { status, body } = await del(other.id, { workspaceEvents: bus });
+
+      expect(status).toBe(200);
+      expect(body).toEqual({ removed: true, id: other.id });
+      // Gone from the registry…
+      expect((await getProjects()).projects.map((p) => p.id)).not.toContain(other.id);
+      // …and NOTHING else changed. This is the whole promise of the button.
+      expect(snapshot(otherRoot)).toEqual(before);
+      // The sidebar's live update (step 2.8 → global-events.tsx) hangs off this event.
+      expect(seen).toEqual([{ event: 'project-removed', data: { id: other.id } }]);
+    });
+
+    it('409s while the project has running tasks, and removes nothing', async () => {
+      const contexts = new ProjectContexts({ listProjects });
+      const other = await registerProject(otherRoot);
+      // Build the context the way a first API touch would, THEN put a live run in its store —
+      // seeding first would make `manager.recover()` resume it, which is not what is under test.
+      await contexts.context(other.id);
+      const ctx = contexts.peek(other.id);
+      expect(ctx).toBeDefined();
+      const run = ctx!.store.createRun({ title: 'live', workflow: 'quick-task', task: 'x', steps: [] });
+      expect(run.status).toBe('queued'); // one of the three statuses the engine still owns
+
+      const refused = await del(other.id, { contexts });
+      expect(refused.status).toBe(409);
+      expect(refused.body.runningTasks).toBe(1);
+      expect(refused.body.error).toMatch(/running task/);
+      // Still registered, and its context is still alive — a refused removal must be a no-op.
+      expect((await getProjects()).projects.map((p) => p.id)).toContain(other.id);
+      expect(contexts.peek(other.id)).toBeDefined();
+
+      // Settle the run and the same call succeeds — the 409 is about live work, not about the
+      // project having history.
+      ctx!.store.updateRun(run.id, { status: 'done' });
+      const allowed = await del(other.id, { contexts });
+      expect(allowed.status).toBe(200);
+      // The store/manager handles are dropped with the entry (step 2.1's dispose).
+      expect(contexts.peek(other.id)).toBeUndefined();
+      contexts.disposeAll();
+    });
+
+    it('404s an unknown id and a malformed one, without touching the registry', async () => {
+      const other = await registerProject(otherRoot);
+      for (const id of ['nope', 'Not%20A%20Slug', 'a'.repeat(120)]) {
+        const { status, body } = await del(id);
+        expect(status, id).toBe(404);
+        expect(body.error, id).toContain('unknown project');
+      }
+      expect((await getProjects()).projects.map((p) => p.id)).toEqual([other.id]);
+    });
+
+    it('refuses the boot project (and its `default` alias) — it re-registers itself at every start', async () => {
+      const boot = await registerProject(repoRoot);
+      for (const id of [boot.id, 'default']) {
+        const { status, body } = await del(id);
+        expect(status, id).toBe(409);
+        expect(body.error, id).toContain('re-registers');
+      }
+      expect((await getProjects()).projects.map((p) => p.id)).toEqual([boot.id]);
     });
   });
 

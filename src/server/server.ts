@@ -60,6 +60,7 @@ import {
   listProjects,
   probeProjectStatus,
   registerProject,
+  removeProject,
   shouldRegisterProject,
   type ProjectListEntry,
 } from '../workspace/projects.js';
@@ -215,6 +216,15 @@ export interface ProjectsResponse {
 export interface RegisterProjectResponse {
   project: ProjectListEntry;
   error?: string;
+}
+
+/** `DELETE /api/projects/:projectId` (multi-project spec, step 4.4) — the
+ *  Projects settings pane's Remove. DEREGISTRATION ONLY: the entry leaves
+ *  `~/.cezar/config.json` and nothing under the project root is read, moved or
+ *  deleted. `removed` is always true on a 200 (the failure paths are 404/409). */
+export interface RemoveProjectResponse {
+  removed: true;
+  id: string;
 }
 
 /** `GET/PUT /api/workspace/config` (multi-project spec, step 2.7) — the
@@ -932,6 +942,108 @@ export function createApp(deps: ServerDeps): Hono {
     if (!parsed.success) return c.json({ error: 'root must be a non-empty path' }, 400);
     const { status, body } = await registerFolder(parsed.data.root, 'local');
     return c.json(body, status);
+  });
+
+  // Deregister a project (multi-project spec, step 4.4 — Settings → Projects,
+  // the per-row "Remove"). READ THIS BEFORE TOUCHING THE HANDLER: the ONLY
+  // durable effect allowed here is dropping one entry from
+  // `~/.cezar/config.json`. There is deliberately no `rm`, no `rmdir`, no
+  // `RunStore.open` (which would `mkdir` `<root>/.ai/cezar/runs` and therefore
+  // WRITE into a folder the user just asked us to forget) anywhere below —
+  // `removeProject` is a registry filter and `contexts.dispose` only tears down
+  // in-process handles. Re-registering the same root later finds every task,
+  // worktree and transcript exactly where it was. The confirmation copy in the
+  // cockpit promises precisely this; the promise is kept here.
+  //
+  // A run this server is responsible for blocks the removal with a 409 (spec):
+  // deregistering mid-run would strand a live agent process under a root no
+  // route can resolve any more — the run would keep burning tokens with no
+  // cockpit able to show, message or cancel it.
+  const ACTIVE_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
+    'queued',
+    'running',
+    'waiting',
+  ]);
+
+  /**
+   * How many of `projectId`'s runs this process is actively responsible for.
+   *
+   * Counted from the ALREADY-BUILT context only (`peek`, never `context()`):
+   * a project with no context in this process has no manager, therefore no
+   * agent to strand — and building one to answer the question would recover
+   * and resume runs on a project being deleted, which is the exact opposite of
+   * what the caller asked for. Reading the run index off disk instead was
+   * rejected for the same reason as the `rm` above: `RunStore.open` creates
+   * directories, and a stale `running` row left by a crashed process would
+   * become a 409 the user could never clear.
+   */
+  const activeRunCount = (projectId: string): number => {
+    const ctx = contexts.peek(projectId);
+    if (!ctx) return 0;
+    return ctx.store.listRuns().filter((run) => ACTIVE_RUN_STATUSES.has(run.status)).length;
+  };
+
+  app.delete('/api/projects/:projectId', async (c) => {
+    const raw = c.req.param('projectId');
+    // Same gate the scoped-route resolver applies, and the same 404 wording —
+    // a malformed id is an unknown project, not a validation essay.
+    if (!projectIdSchema.safeParse(raw).success) {
+      return c.json({ error: `unknown project: ${raw}` }, 404);
+    }
+    const bootId = await resolveBootProject();
+    // `default` is the boot alias everywhere else in the API; honour it here
+    // too rather than 404ing a spelling the cockpit is allowed to use.
+    const id = raw === 'default' ? bootId : raw;
+
+    let entry: WorkspaceProject | undefined;
+    try {
+      entry = (await loadWorkspaceConfig()).projects.find((p) => p.id === id);
+    } catch {
+      // unreadable workspace — there is nothing to remove, and saying so is
+      // more useful than a 500 the user cannot act on
+    }
+    if (!entry) return c.json({ error: `unknown project: ${id}` }, 404);
+
+    // The boot project is refused, not removed: `cezar serve` re-registers the
+    // repo it was started in on every boot, so "removing" it would undo itself
+    // at the next restart while breaking this session's sidebar in the
+    // meantime. The pane disables the button and says the same thing.
+    if (id === bootId) {
+      return c.json(
+        {
+          error: `cezar is serving ${entry.name} right now — it re-registers itself at every start, so it cannot be removed from here`,
+        },
+        409,
+      );
+    }
+
+    const active = activeRunCount(id);
+    if (active > 0) {
+      return c.json(
+        {
+          error: `${entry.name} has ${active} running task${active === 1 ? '' : 's'} — cancel or finish ${active === 1 ? 'it' : 'them'} before removing the project`,
+          runningTasks: active,
+        },
+        409,
+      );
+    }
+
+    let removed: boolean;
+    try {
+      removed = await removeProject(id);
+    } catch (err) {
+      // e.g. a read-only home — nothing was persisted (atomic tmp+rename).
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+    // Lost a race with another writer (or another cezar process): the entry is
+    // gone, which is what the caller wanted, but say it honestly.
+    if (!removed) return c.json({ error: `unknown project: ${id}` }, 404);
+    // In-process handles for a project no route can reach any more: store
+    // closed (index flushed), manager's timers and usage subscription dropped.
+    contexts.dispose(id);
+    workspaceEvents.emit('project-removed', { id });
+    const body: RemoveProjectResponse = { removed: true, id };
+    return c.json(body);
   });
 
   // ---- GUI clone (multi-project spec, step 4.3) ----------------------------

@@ -17,6 +17,7 @@ import { AgentsSection } from './agents-section'
 import { AppearanceSection } from './appearance'
 import { BookmarkletsSection } from './bookmarklets-section'
 import { NotificationsSection } from './notifications-section'
+import { ProjectsSection } from './projects-section'
 import { PromptTemplatesSection } from './prompt-templates-section'
 import { ResourcesSection } from './resources-section'
 import { WorktreesSection } from './worktrees-section'
@@ -152,14 +153,10 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
   },
   {
     id: 'projects',
-    // SCAFFOLD ONLY. Step 4.4 owns this pane: the registry table (name, path, status, remove)
-    // and the checkout-root field with its inline server-side writability error. It is declared
-    // and routed here because the global nav must show the four sections the mockup shows —
-    // an absent entry would make the split look half-finished.
     title: 'Projects',
     description: 'The workspace registry and where GitHub checkouts land.',
     icon: FoldersIcon,
-    component: comingSoon('Projects', FoldersIcon),
+    component: ProjectsSection,
     scope: 'global',
   },
   {
