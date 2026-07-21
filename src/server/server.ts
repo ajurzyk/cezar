@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { access, constants as fsConstants, mkdir, readFile, realpath, unlink, writeFile } from 'node:fs/promises';
+import { access, constants as fsConstants, mkdir, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -55,7 +55,14 @@ import {
   type WorkspaceConfig,
   type WorkspaceProject,
 } from '../workspace/config.js';
-import { allocateProjectSlug, listProjects, type ProjectListEntry } from '../workspace/projects.js';
+import {
+  allocateProjectSlug,
+  listProjects,
+  probeProjectStatus,
+  registerProject,
+  shouldRegisterProject,
+  type ProjectListEntry,
+} from '../workspace/projects.js';
 import { WorkspaceSemaphore } from '../workspace/semaphore.js';
 import { mergeWriteWorkspaceUiState, readWorkspaceUiState } from '../workspace/ui-state.js';
 import { ProjectContextError, ProjectContexts, type ProjectContext } from './project-context.js';
@@ -63,7 +70,7 @@ import { reviewGateEnabled } from '../runs/review-gate.js';
 import { readUiState, uiStatePath } from '../ui-state.js';
 import { expandTilde } from '../paths.js';
 import { resolveCapabilities } from './capabilities.js';
-import { browseDirectory, resolveBrowseRoot } from './fs-browse.js';
+import { browseDirectory, isInsideBrowseRoot, resolveBrowseRoot } from './fs-browse.js';
 import { resolveForge } from './forge/index.js';
 import { fetchGithub, fetchGithubComments } from './github.js';
 import { ensureLaunchKey } from './launch-key.js';
@@ -194,6 +201,16 @@ export interface ProjectsResponse {
   projectsDir: string;
 }
 
+/** `POST /api/projects` (multi-project spec, step 4.2) — the folder-browser
+ *  dialog's commit step. The entry carries the same `status`/`branch` probe
+ *  `GET /api/projects` attaches, so the cockpit sees one project shape.
+ *  `error` is present ONLY on the 409 (already registered), where `project` is
+ *  the EXISTING entry — the dialog navigates to it instead of dead-ending. */
+export interface RegisterProjectResponse {
+  project: ProjectListEntry;
+  error?: string;
+}
+
 /** `GET/PUT /api/workspace/config` (multi-project spec, step 2.7) — the
  *  settings slice of `~/.cezar/config.json`: global knobs ONLY, never the
  *  project registry (that is `GET /api/projects`' job). */
@@ -216,9 +233,10 @@ export type WorkspaceEventName = 'project-added' | 'project-removed' | 'checkout
 
 /**
  * The in-process bus for workspace-level SSE events. The registry-mutating
- * routes (`POST /api/projects`, `DELETE /api/projects/:projectId` — Phase 4;
- * today only GET exists, so nothing emits yet) and the checkout flow (step
- * 4.3) call `emit()`; every open `/api/workspace/events` stream relays the
+ * routes (`POST /api/projects` — step 4.2, emits `project-added` for a
+ * genuinely new entry; `DELETE /api/projects/:projectId` — step 4.4) and the
+ * checkout flow (step 4.3) call `emit()`; every open `/api/workspace/events`
+ * stream relays the
  * event verbatim under its name. Injectable via `ServerDeps.workspaceEvents`
  * so tests (and any out-of-createApp emitter) can drive the stream.
  */
@@ -809,6 +827,86 @@ export function createApp(deps: ServerDeps): Hono {
       projectsDir,
     };
     return c.json(body);
+  });
+
+  // Register an existing folder (multi-project spec, "Add project" — the
+  // folder-browser dialog's commit step, step 4.2). Workspace-level like its
+  // GET twin. Everything here is a guard; the registry write itself is one
+  // idempotent `registerProject` call.
+  const registerProjectSchema = z.object({ root: z.string().trim().min(1).max(4096) });
+  app.post('/api/projects', async (c) => {
+    const parsed = registerProjectSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: 'root must be a non-empty path' }, 400);
+    const spelled = parsed.data.root;
+    // `~` is expanded for the same reason `/api/fs/browse` expands it: the
+    // dialog hands back absolute paths, but a hand-written body (curl, a
+    // future CLI) spells home the way a shell does.
+    const requested = expandTilde(spelled);
+    if (!requested.startsWith('/')) {
+      return c.json({ error: `not a folder: ${spelled} is not an absolute path` }, 400);
+    }
+    // Existence is checked HERE rather than left to `registerProject` (which
+    // degrades a failed realpath to a plain resolve): a registry full of
+    // `missing` rows the user never had is worse than a 400 they can act on.
+    const info = await stat(requested).catch(() => null);
+    if (!info?.isDirectory()) return c.json({ error: `no such folder: ${spelled}` }, 400);
+    // Hosted mode: the same root the picker is narrowed to, re-checked — see
+    // `isInsideBrowseRoot`. Local mode deliberately has NO containment: a
+    // project under `/srv/code` is a normal local setup and `cezar serve`
+    // registers it today.
+    if (!capabilities().localHandoff) {
+      let projectsDir = defaultWorkspaceConfig().projectsDir;
+      try {
+        projectsDir = (await loadWorkspaceConfig()).projectsDir;
+      } catch {
+        // unreadable workspace — the default checkout root is the honest fallback
+      }
+      const browseRoot = resolveBrowseRoot(true, projectsDir);
+      if (!(await isInsideBrowseRoot(browseRoot, requested))) {
+        // No resolved path in the message (fs-browse's rule): saying where the
+        // root is would hand a remote viewer the layout the narrowing hides.
+        return c.json({ error: 'folder is outside the browsable root' }, 400);
+      }
+    }
+    // The boot-time auto-registration guard, applied to the manual gesture
+    // too: `$HOME` and cezar's own task worktrees are exactly as wrong a
+    // project root when a human clicks "Add project" as when `cezar serve`
+    // would have registered them. Reachable from the dialog, which starts at
+    // `~` and can add the folder it is showing.
+    if (!(await shouldRegisterProject(requested))) {
+      return c.json(
+        { error: `not a project folder: ${spelled} is your home directory or a cezar task worktree` },
+        400,
+      );
+    }
+    // Asked BEFORE the write, because `registerProject` is idempotent and
+    // cannot tell us afterwards whether it appended or just bumped
+    // `lastOpenedAt`. Same realpath key the registry dedupes on.
+    const real = await realpath(requested).catch(() => requested);
+    let known = false;
+    try {
+      known = (await loadWorkspaceConfig()).projects.some((p) => p.root === real);
+    } catch {
+      // unreadable workspace — treat as unknown; the write below will fail loudly
+    }
+    let project: ProjectListEntry;
+    try {
+      const entry = await registerProject(requested, 'local');
+      project = { ...entry, ...(await probeProjectStatus(entry.root)) };
+    } catch (err) {
+      // e.g. a read-only home — nothing was persisted (atomic tmp+rename).
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+    if (known) {
+      // 409 with the EXISTING entry (spec): the dialog treats it as "you
+      // already have this one" and navigates there rather than dead-ending.
+      const body: RegisterProjectResponse = { project, error: `already registered as ${project.id}` };
+      return c.json(body, 409);
+    }
+    // Only a genuinely new project is an event — a re-add is a no-op for every
+    // open cockpit's sidebar.
+    workspaceEvents.emit('project-added', { project });
+    return c.json({ project } satisfies RegisterProjectResponse);
   });
 
   // ---- workspace settings (multi-project spec, step 2.7) -------------------

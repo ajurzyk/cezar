@@ -11,6 +11,7 @@ import * as React from 'react'
 import type { ReactNode } from 'react'
 import { Link as RouterLink, useLocation } from 'react-router'
 
+import { AddProjectDialog } from '@/components/add-project-dialog'
 import { openCommandPalette } from '@/components/command-palette'
 import { GithubIcon } from '@/components/icons'
 import { Link, stripProjectPrefix } from '@/lib/project-router'
@@ -459,13 +460,17 @@ function GlobalSettingsLink({
 /**
  * The "Add project" dropdown beside the New task CTA (multi-project spec, "Sidebar → Header").
  *
- * Both entries exist so the affordance is discoverable NOW, but stay disabled until Phase 4
- * wires them ("Open local folder…" → the `/api/fs/browse` dialog, "Clone from GitHub…" → the
- * checkout flow). Disabled menu items over hidden ones: the menu's whole job at this commit is
- * to say what is coming, and the label row says why neither works yet — the smallest honest UI
- * short of dead buttons that pretend to act.
+ * "Open local folder…" opens the folder-browser dialog (step 4.2). "Clone from GitHub…" stays
+ * disabled until step 4.3 wires the checkout flow — a disabled item over a hidden one, so the
+ * menu still says what is coming rather than pretending the option does not exist.
+ *
+ * The dialog is mounted only while open, ON PURPOSE: it is the one part of this shell that
+ * talks to the API (queries + a mutation), and the shell itself must keep rendering in the
+ * places that mount it without a QueryClient. The cost is no close animation, which is the
+ * cheaper half of the trade.
  */
 function AddProjectMenu() {
+  const [browsing, setBrowsing] = React.useState(false)
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -481,18 +486,17 @@ function AddProjectMenu() {
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-56">
-        <DropdownMenuLabel className="text-xs text-soft-foreground">
-          Add project — coming soon (Phase 4)
-        </DropdownMenuLabel>
-        <DropdownMenuItem disabled data-slot="add-project-local">
+        <DropdownMenuLabel className="text-xs text-soft-foreground">Add project</DropdownMenuLabel>
+        <DropdownMenuItem data-slot="add-project-local" onSelect={() => setBrowsing(true)}>
           <FolderIcon aria-hidden="true" />
           Open local folder…
         </DropdownMenuItem>
         <DropdownMenuItem disabled data-slot="add-project-clone">
           <GithubIcon aria-hidden="true" />
-          Clone from GitHub…
+          Clone from GitHub… (soon)
         </DropdownMenuItem>
       </DropdownMenuContent>
+      {browsing ? <AddProjectDialog open onOpenChange={setBrowsing} /> : null}
     </DropdownMenu>
   )
 }

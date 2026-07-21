@@ -96,6 +96,26 @@ function contains(root: string, candidate: string): boolean {
   return candidate.startsWith(root.endsWith(sep) ? root : root + sep);
 }
 
+/**
+ * Is `candidate` the browse root or strictly beneath it — the same containment
+ * question `browseDirectory` asks, exported for the ONE other route that must
+ * ask it: `POST /api/projects` (step 4.2).
+ *
+ * Narrowing the browse root in hosted mode (above) only limits what the picker
+ * can SEE. A register call naming an arbitrary absolute path would walk around
+ * that in one request — and a registered project's panes read its whole tree.
+ * So the register route re-asks containment for itself, against the same root,
+ * with the same realpath-based rule. Both paths are realpath'd here (unlike
+ * `contains`, which trusts its callers) because neither is guaranteed resolved.
+ */
+export async function isInsideBrowseRoot(root: string, candidate: string): Promise<boolean> {
+  const realRoot = await realpathOrNull(root);
+  if (realRoot === null) return false;
+  const real = await realpathOrNull(candidate);
+  if (real === null) return false;
+  return contains(realRoot, real);
+}
+
 /** realpath or null — every "does it exist / where does it really point"
  *  question in this module is best-effort and answered without throwing. */
 async function realpathOrNull(path: string): Promise<string | null> {

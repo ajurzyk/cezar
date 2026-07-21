@@ -52,6 +52,9 @@ describe('scopeApiPath — scoped', () => {
     expect(scopeApiPath('/api/workspace/events')).toBe('/api/workspace/events')
     expect(scopeApiPath('/api/workspace/config')).toBe('/api/workspace/config')
     expect(scopeApiPath('/api/workspace/ui-state')).toBe('/api/workspace/ui-state')
+    // The folder picker (step 4.2): one filesystem behind the workspace, not one per project.
+    expect(scopeApiPath('/api/fs/browse')).toBe('/api/fs/browse')
+    expect(scopeApiPath('/api/fs/browse?path=%2Fhome%2Fme')).toBe('/api/fs/browse?path=%2Fhome%2Fme')
   })
 
   it('never double-prefixes an already-scoped path', () => {

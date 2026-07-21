@@ -202,6 +202,19 @@ async function probeRoot(root: string): Promise<RootProbe> {
 }
 
 /**
+ * One root's `status` (+`branch`) through the same TTL cache `listProjects`
+ * uses. Exported for `POST /api/projects` (step 4.2): the register route
+ * answers with the freshly registered entry and must hand the cockpit the
+ * SAME shape the list route does — one project, one shape, whichever route
+ * produced it.
+ */
+export async function probeProjectStatus(
+  root: string,
+): Promise<Pick<ProjectListEntry, 'status' | 'branch'>> {
+  return probeRoot(root);
+}
+
+/**
  * Registry entries in stored order, each with its `status` (+`branch` when
  * available). Probes run concurrently and are TTL-cached per root. A
  * `missing` project is only ever *listed* — callers must never instantiate a

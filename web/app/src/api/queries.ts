@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import {
+  browseFs,
   getConfig,
   getGithub,
   getGithubComments,
@@ -29,6 +30,7 @@ import {
   getWorkspaceUiState,
   getWorktrees,
   patchRun,
+  registerProject,
   sendMessage,
 } from './client'
 import { queryScope } from './project-scope'
@@ -125,6 +127,10 @@ export const workspaceQueryKeys = {
   /** `~/.cezar/config.json`'s settings slice via `GET/PUT /api/workspace/config` (step 2.7):
    *  the global Resources knobs and the checkout root. */
   config: ['workspace', 'config'] as const,
+  /** One directory listing from `GET /api/fs/browse` (step 4.2's folder picker). Keyed by the
+   *  browsed path — `null` is the browse root, whose absolute location only the server knows.
+   *  Not scope-led: there is one filesystem behind the workspace, not one per project. */
+  fsBrowse: (path: string | null) => ['workspace', 'fs-browse', path] as const,
 }
 
 /** The workspace project registry (`GET /api/projects`): the `/p/:projectId` route gate's
@@ -134,6 +140,37 @@ export function useProjects() {
   return useQuery({
     queryKey: workspaceQueryKeys.projects,
     queryFn: ({ signal }) => getProjects({ signal }),
+  })
+}
+
+/** One directory listing for the add-project folder picker (step 4.2). `path: null` asks for
+ *  the browse root. Retries are off: the interesting failures here are the deliberate 400/404s
+ *  (outside the root, no such directory) — re-asking cannot change those answers, and the
+ *  dialog shows the server's own words instead. */
+export function useFsBrowse(path: string | null) {
+  return useQuery({
+    queryKey: workspaceQueryKeys.fsBrowse(path),
+    queryFn: ({ signal }) => browseFs(path ?? undefined, { signal }),
+    retry: false,
+  })
+}
+
+/**
+ * Register a browsed folder (`POST /api/projects`, step 4.2).
+ *
+ * Invalidates the registry so the sidebar grows the new project WITHOUT a reload — the caller
+ * navigates to `/p/<id>/` on success, and the `/p/:projectId` route gate reads that same query
+ * to decide the id is known, so a stale list would bounce a just-added project to the
+ * unknown-project screen.
+ *
+ * A 409 (already registered) resolves rather than rejects — see `registerProject` in client.ts;
+ * the caller navigates to the existing entry either way.
+ */
+export function useRegisterProject() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (root: string) => registerProject(root),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.projects }),
   })
 }
 

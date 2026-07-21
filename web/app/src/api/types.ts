@@ -258,6 +258,39 @@ export interface ProjectsResponse {
   projectsDir: string
 }
 
+/** `POST /api/projects` (multi-project spec, step 4.2) — what the folder-browser dialog gets
+ *  back. `error` is present ONLY on the 409 (already registered), where `project` is the
+ *  EXISTING entry: the dialog navigates to it rather than dead-ending on a duplicate. */
+export interface RegisterProjectResponse {
+  project: ProjectListEntry
+  error?: string
+}
+
+/** One directory in a `GET /api/fs/browse` listing (multi-project spec, step 4.1). `path` is
+ *  absolute — same-origin route, like `ProjectListEntry.root`. */
+export interface FsBrowseDir {
+  name: string
+  path: string
+  /** Has a `.git` entry — drives the "git" badge. A non-repo folder is still selectable
+   *  (cezar degrades in a non-git folder exactly as `cezar serve` does today). */
+  isRepo: boolean
+}
+
+/** `GET /api/fs/browse?path=` — the folder picker's listing. Rooted at the operator's home
+ *  (hosted mode narrows it to the checkout root), directories only. */
+export interface FsBrowseResponse {
+  /** The realpath'd directory actually listed — never the spelling asked for, so the
+   *  breadcrumb shows where the picker really is. */
+  path: string
+  /** `null` AT the browse root: there is no "up" out of it, and the dialog must render no
+   *  parent row rather than one that 400s. */
+  parent: string | null
+  dirs: FsBrowseDir[]
+  /** True when the listing was capped server-side — surfaced honestly instead of showing a
+   *  silently short list. */
+  truncated: boolean
+}
+
 /** `GET/PUT /api/workspace/ui-state` — cross-project GUI prefs in `~/.cezar/ui-state.json`
  *  (multi-project spec, step 2.7). Passthrough like its per-repo twin (`UiState` below):
  *  unknown keys round-trip untouched. `sidebar.collapsed` is the sidebar's per-project

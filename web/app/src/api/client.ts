@@ -14,6 +14,7 @@ import type {
   DeleteRunResponse,
   DeleteWorkflowResponse,
   FinishResponse,
+  FsBrowseResponse,
   GitCommitResponse,
   GitPushResponse,
   GithubCommentsData,
@@ -30,6 +31,7 @@ import type {
   PickVariantResponse,
   PlanResponse,
   ProjectsResponse,
+  RegisterProjectResponse,
   RemoveTodoResponse,
   RepoBranchResponse,
   RepoCommitPayload,
@@ -203,6 +205,14 @@ export function getProjects(opts?: ReadOptions): Promise<ProjectsResponse> {
   return get<ProjectsResponse>('/api/projects', opts)
 }
 
+/** One directory listing for the folder picker (`GET /api/fs/browse`, step 4.1). `path`
+ *  omitted means the browse root — the server decides where that is (home locally, the
+ *  checkout root when hosted), so the dialog never has to know. */
+export function browseFs(path?: string, opts?: ReadOptions): Promise<FsBrowseResponse> {
+  const query = path === undefined || path === '' ? '' : `?path=${encodeURIComponent(path)}`
+  return get<FsBrowseResponse>(`/api/fs/browse${query}`, opts)
+}
+
 /** The authoritative run list — sorted newest-first by the server. */
 export function getRuns(opts?: ReadOptions): Promise<ApiRun[]> {
   return get<ApiRun[]>('/api/runs', opts)
@@ -331,6 +341,33 @@ export function runFileRawUrl(id: string, path: string): string {
  *  `git diff --stat` text and the handoff Progress excerpt. 404 for an unknown group. */
 export function getGroup(groupId: string, opts?: ReadOptions): Promise<GroupResponse> {
   return get<GroupResponse>(`/api/groups/${encodeURIComponent(groupId)}`, opts)
+}
+
+// ---- workspace mutations ------------------------------------------------------------------
+
+/**
+ * Register an existing folder (`POST /api/projects`, step 4.2).
+ *
+ * The one call in this module that does not funnel through `request()`: a 409 (already
+ * registered) is NOT a failure for the add-project flow — the server answers it with the
+ * EXISTING entry, which is exactly what the dialog needs to navigate to. Every other non-2xx
+ * still becomes the same ApiError as anywhere else.
+ */
+export async function registerProject(root: string): Promise<RegisterProjectResponse> {
+  const path = '/api/projects'
+  const res = await send(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ root }),
+  })
+  const body = await res.text()
+  const parsed = parseJson(body)
+  const project = (parsed as { project?: unknown } | undefined)?.project
+  if ((res.ok || res.status === 409) && project !== undefined && project !== null) {
+    return parsed as RegisterProjectResponse
+  }
+  if (!res.ok) throw errorFor(res.status, res.statusText, body)
+  throw new ApiError(res.status, `the cezar server answered ${path} without a project`)
 }
 
 // ---- run mutations ------------------------------------------------------------------------
