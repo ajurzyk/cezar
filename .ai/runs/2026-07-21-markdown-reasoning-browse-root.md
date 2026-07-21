@@ -55,3 +55,4 @@ Render agent reasoning as Markdown and keep the Add Project folder browser immed
 - [x] 2.1 Require an existing browse root and retain checkout creation — 746cbb2
 - [x] 2.2 Refresh cached folder-browser listings after save — 746cbb2
 - [x] 2.3 Add regression coverage and update contracts — 746cbb2
+- [x] Post-review fix: stabilize native watcher scope assertion under full-suite load — 5c93c35
