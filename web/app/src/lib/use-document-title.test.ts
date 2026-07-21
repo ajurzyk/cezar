@@ -1,7 +1,11 @@
 import { renderHook } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
 
-import { documentTitleOf, useDocumentTitle } from './use-document-title'
+import {
+  documentTitleOf,
+  type DocumentTitleParts,
+  useDocumentTitle,
+} from './use-document-title'
 
 describe('documentTitleOf', () => {
   it.each([
@@ -37,10 +41,13 @@ describe('useDocumentTitle', () => {
   })
 
   it('updates the existing writer when its truthful inputs change', () => {
+    const initialProps: DocumentTitleParts = {
+      projectName: 'Storefront',
+      pageLabel: 'Tasks',
+    }
     const { rerender } = renderHook(
-      (parts: { projectName: string | null; pageLabel: string | null }) =>
-        useDocumentTitle(parts),
-      { initialProps: { projectName: 'Storefront', pageLabel: 'Tasks' } },
+      (parts: DocumentTitleParts) => useDocumentTitle(parts),
+      { initialProps },
     )
 
     expect(document.title).toBe('Storefront — Tasks · cezar')
