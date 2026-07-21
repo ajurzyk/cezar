@@ -53,9 +53,18 @@ describe('per-dataDir todos watch (step 2.3)', () => {
   it('scopes events to the written dataDir — A fires, B stays silent', async () => {
     let a = 0;
     let b = 0;
+    await fs.mkdir(dirA, { recursive: true });
+    await fs.mkdir(dirB, { recursive: true });
+    await fs.writeFile(todosPath(dirA), '[]');
+    await fs.writeFile(todosPath(dirB), '[]');
     subscribe(dirA, () => a++);
     subscribe(dirB, () => b++);
 
+    // macOS FSEvents can deliver the just-created files as backlog after watch() returns. Let
+    // that registration noise clear before measuring the write whose project scope matters.
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    a = 0;
+    b = 0;
     await fs.writeFile(todosPath(dirA), JSON.stringify([{ id: 't1', summary: 'from A' }]));
     await waitFor(() => expect(a).toBeGreaterThan(0));
     // A full debounce window past A's delivery — a late cross-fire would land here.

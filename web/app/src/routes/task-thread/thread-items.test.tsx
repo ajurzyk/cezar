@@ -176,7 +176,7 @@ describe('ReasoningItem', () => {
     const twoLines = `Orienting on the project structure…\nThen I will read the README.`
     render(<ReasoningItem text={twoLines} />)
     const button = screen.getByRole('button', { name: /Thinking — Orienting on the project structure/ })
-    expect(button.textContent).toContain('…')
+    expect(document.querySelector('[data-slot="reasoning"]')?.textContent).toContain('…')
     expect(screen.queryByText(/Then I will read the README/)).toBeNull()
     fireEvent.click(button)
     expect(screen.getByText(/Then I will read the README/)).toBeTruthy()
@@ -184,18 +184,22 @@ describe('ReasoningItem', () => {
 
   it('a single-line reasoning (the golden fixture text) shows whole with no ellipsis', () => {
     render(<ReasoningItem text={text} />)
-    expect(screen.getByRole('button').textContent).toBe(`Thinking — ${text}`)
+    expect(screen.getByRole('button', { name: `Thinking — ${text}` })).toBeTruthy()
+    expect(document.querySelector('[data-slot="reasoning"]')?.textContent).toContain(`Thinking — ${text}`)
   })
 
-  it('renders the expanded body as markdown — bold and list markup become elements, not literals', () => {
-    const md = 'First I check **the middleware**, then:\n\n- preserve the cookie\n- re-run the redirect'
-    const { container } = render(<ReasoningItem text={md} />)
-    fireEvent.click(screen.getByRole('button'))
-    const body = container.querySelector('[data-slot="collapsible-content"]')!
-    // The body markdown is rendered, not shown as raw source.
-    expect(body.querySelector('[data-streamdown="strong"]')?.textContent).toBe('the middleware')
-    expect(body.querySelectorAll('li').length).toBe(2)
-    expect(body.textContent).not.toContain('**the middleware**')
+  it('renders Markdown in the compact preview and expanded reasoning without nested controls', () => {
+    render(<ReasoningItem text={'**Assessing the lock** with `gh api`.\n\n- inspect owner\n- release safely'} />)
+
+    const trigger = screen.getByRole('button', { name: /Thinking — Assessing the lock/ })
+    const reasoning = document.querySelector('[data-slot="reasoning"]')!
+    expect(reasoning.querySelector('[data-streamdown="strong"]')?.textContent).toBe('Assessing the lock')
+    expect(trigger.querySelector('a, button')).toBeNull()
+    expect(reasoning.textContent).not.toContain('**')
+
+    fireEvent.click(trigger)
+    expect(reasoning.querySelector('[data-streamdown="inline-code"]')?.textContent).toBe('gh api')
+    expect(reasoning.querySelectorAll('[data-streamdown="list-item"]')).toHaveLength(2)
   })
 
   // #528 — an empty item must not leave a bare, un-expandable "Thinking —" row.

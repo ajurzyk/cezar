@@ -13,7 +13,7 @@ import {
   Trash2Icon,
   WrenchIcon,
 } from 'lucide-react'
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { ZoomableImage } from '@/components/zoomable-image'
@@ -242,26 +242,37 @@ export function NoteLine({ note }: { note: ThreadNote }) {
  * Streams live — the reducer grows `text` in place, so the summary line grows with it.
  */
 export function ReasoningItem({ text }: { text: string }) {
+  const previewId = useId()
   // A mapper regression that mints an empty reasoning item should degrade
   // quietly rather than render a bare, un-expandable "Thinking —" row (#528).
   if (text.trim() === '') return null
   const firstLine = text.split('\n', 1)[0] ?? ''
   const truncated = firstLine.length < text.length
   return (
-    <Collapsible data-slot="reasoning" className="min-w-0">
-      <CollapsibleTrigger className="group flex w-full items-center gap-1.5 rounded-md p-0.5 text-left text-[13px] text-soft-foreground hover:text-muted-foreground">
+    <Collapsible data-slot="reasoning" className="group/reasoning min-w-0">
+      <div
+        id={previewId}
+        className="relative flex w-full items-center gap-1.5 rounded-md p-0.5 text-left text-[13px] text-soft-foreground hover:text-muted-foreground"
+      >
         <ChevronRightIcon
           aria-hidden
-          className="size-3.5 shrink-0 transition-transform group-data-[state=open]:rotate-90"
+          className="size-3.5 shrink-0 transition-transform group-data-[state=open]/reasoning:rotate-90"
         />
-        <span className="min-w-0 truncate">
-          Thinking — <em className="text-muted-foreground not-italic">{firstLine}</em>
-          {truncated ? '…' : ''}
-        </span>
-      </CollapsibleTrigger>
+        <span className="shrink-0">Thinking — </span>
+        <div className="min-w-0 truncate text-muted-foreground">
+          <Markdown inline>{firstLine}</Markdown>
+        </div>
+        {truncated ? <span aria-hidden>…</span> : null}
+        {/* Keep rendered Markdown OUTSIDE the trigger: links are unwrapped above, and the native
+            button overlays the preview without inheriting invalid block descendants. */}
+        <CollapsibleTrigger
+          aria-labelledby={previewId}
+          className="absolute inset-0 rounded-md focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
+        />
+      </div>
       <CollapsibleContent>
         <div className="px-6 py-1.5 text-[13px] leading-[1.6] text-soft-foreground">
-          <Markdown breaks>{text}</Markdown>
+          <Markdown>{text}</Markdown>
         </div>
       </CollapsibleContent>
     </Collapsible>

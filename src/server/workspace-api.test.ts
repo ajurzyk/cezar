@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Hono } from 'hono';
@@ -169,8 +169,9 @@ describe('the workspace settings API (step 2.7)', () => {
     expect(readdirSync(dir)).toEqual([]);
   });
 
-  it('PUT browseRoot recursively creates and persists an independent browse directory', async () => {
-    const browseRoot = join(home, 'deep', 'source', 'repos');
+  it('PUT browseRoot accepts and persists an existing independent browse directory', async () => {
+    const browseRoot = join(home, 'source', 'repos');
+    mkdirSync(browseRoot, { recursive: true });
     const res = await putConfig({ browseRoot });
     expect(res.status).toBe(200);
     expect(((await res.json()) as WorkspaceConfigResponse).browseRoot).toBe(browseRoot);
@@ -179,6 +180,21 @@ describe('the workspace settings API (step 2.7)', () => {
     expect(((await (await getConfig()).json()) as WorkspaceConfigResponse).projectsDir).toBe(
       '~/cezar/projects',
     );
+  });
+
+  it('PUT browseRoot warns for a missing directory without creating or persisting it', async () => {
+    const existing = join(home, 'existing-source');
+    mkdirSync(existing);
+    expect((await putConfig({ browseRoot: existing })).status).toBe(200);
+
+    const missing = join(home, 'missing', 'source');
+    const res = await putConfig({ browseRoot: missing });
+    expect(res.status).toBe(400);
+    expect((await res.json()) as { error: string }).toEqual({
+      error: `browse folder does not exist: ${missing}`,
+    });
+    expect(existsSync(missing)).toBe(false);
+    expect(rawConfig().browseRoot).toBe(existing);
   });
 
   it('an unwritable projectsDir answers 400 "not writable: …" and persists NO change', async () => {
