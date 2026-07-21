@@ -11,8 +11,9 @@ import { AgentBrowser } from './agent-browser'
  * Stacking, editing and removing a queued run's prompt (#472), end-to-end against a LIVE
  * dry-run cezar — the one state the cockpit used to forbid editing in.
  *
- * The queue is forced with `{"maxParallel": 1}` in the throwaway instance's
- * `.ai/cezar/config.json`, and the slot is held by a `mock:slow` run (~25 s turn). That
+ * The queue is forced with `{"resources":{"maxParallel":1}}` in the throwaway
+ * workspace's `CEZ_HOME/config.json`, and the slot is held by a `mock:slow` run
+ * (~25 s turn). That
  * matters: a `waiting` run does NOT hold a slot (#347), so parking the first run would
  * free the queue immediately and there would be nothing queued to test.
  *
@@ -53,11 +54,22 @@ async function waitForHealth(url: string): Promise<void> {
 }
 
 async function getRun(url: string, id: string): Promise<{ status: string; task: string; queuedMessages?: Array<{ id: string; text: string }> }> {
-  return (await (await fetch(`${url}/api/runs/${id}`)).json()) as {
-    status: string
-    task: string
-    queuedMessages?: Array<{ id: string; text: string }>
+  let lastError: unknown
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      const response = await fetch(`${url}/api/runs/${id}`)
+      if (!response.ok) throw new Error(`GET run answered ${response.status}`)
+      return (await response.json()) as {
+        status: string
+        task: string
+        queuedMessages?: Array<{ id: string; text: string }>
+      }
+    } catch (error) {
+      lastError = error
+      await new Promise((r) => setTimeout(r, 100))
+    }
   }
+  throw lastError
 }
 
 async function waitForStatus(url: string, id: string, wanted: string[], tries = 160): Promise<string> {
@@ -96,16 +108,22 @@ beforeAll(async () => {
   git('add', '.')
   git('commit', '-qm', 'init')
 
-  // One agent slot, so the second run demonstrably waits in the queue.
-  mkdirSync(join(dataRoot, '.ai/cezar'), { recursive: true })
-  writeFileSync(join(dataRoot, '.ai/cezar/config.json'), JSON.stringify({ maxParallel: 1 }), 'utf8')
+  // One workspace-wide agent slot, so the second run demonstrably waits in the queue.
+  // CEZ_HOME keeps this test isolated from the developer's real workspace config.
+  const cezHome = join(dataRoot, '.cez-home')
+  mkdirSync(cezHome, { recursive: true })
+  writeFileSync(
+    join(cezHome, 'config.json'),
+    JSON.stringify({ resources: { maxParallel: 1 } }),
+    'utf8',
+  )
 
   const port = await freePort()
   baseUrl = `http://localhost:${port}`
   server = spawn(
     process.execPath,
     [join(repoRoot, 'dist/index.js'), 'serve', '--repo', dataRoot, '--port', String(port), '--no-open'],
-    { env: { ...process.env, CEZ_DRY_RUN: '1' }, stdio: 'ignore' },
+    { env: { ...process.env, CEZ_DRY_RUN: '1', CEZ_HOME: cezHome }, stdio: 'ignore' },
   )
   await waitForHealth(baseUrl)
 
