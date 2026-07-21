@@ -46,7 +46,7 @@ PR: #592
 ### Phase 1: Pure title and route contracts
 
 - [x] 1.1 Add the document-title formatter/effect and its table-driven unit tests — 4a7b5de
-- [ ] 1.2 Add the route title-context resolver beside AppRoutes and cover current route families
+- [x] 1.2 Add the route title-context resolver beside AppRoutes and cover current route families — b7018ad
 
 ### Phase 2: Live shell integration
 
