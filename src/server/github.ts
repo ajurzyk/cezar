@@ -6,4 +6,9 @@
  */
 export { fetchGithub, fetchGithubComments, GH_MAX_LIMIT } from './forge/github.js';
 export type { GithubData, GithubItem } from './forge/github.js';
-export type { ForgeComment, ForgeCommentsData } from './forge/types.js';
+export type {
+  ForgeComment,
+  ForgeCommentsData,
+  ForgeTimelineEvent,
+  ForgeTimelineEventKind,
+} from './forge/types.js';
