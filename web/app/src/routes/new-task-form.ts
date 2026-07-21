@@ -4,6 +4,7 @@ import type {
   CreateRunResponse,
   ImageInput,
   Runner,
+  RunnerModelCatalogResponse,
   Skill,
   UiState,
   WorkflowDef,
@@ -51,9 +52,9 @@ export interface ModelPreset {
   desc: string
 }
 
-/** Model presets per runner (legacy `MODELS_BY_RUNNER`, verbatim). `id: ''` is always "auto" —
+/** Static model presets per runner. `id: ''` is always "auto" —
  *  no model flag, the runner decides. Claude takes tier aliases + pinned versions; Codex takes
- *  gpt-*-codex ids; OpenCode takes `provider/model` ids. */
+ *  Codex entries are supplied by host discovery; OpenCode takes `provider/model` ids. */
 export const MODELS_BY_RUNNER: Record<Runner, readonly ModelPreset[]> = {
   claude: [
     { id: '', label: 'auto', desc: 'Pick the best model per step' },
@@ -67,9 +68,6 @@ export const MODELS_BY_RUNNER: Record<Runner, readonly ModelPreset[]> = {
   ],
   codex: [
     { id: '', label: 'auto', desc: 'Use your Codex default model' },
-    { id: 'gpt-5.1-codex', label: 'gpt-5.1-codex', desc: 'Codex-tuned, latest' },
-    { id: 'gpt-5.1-codex-mini', label: 'gpt-5.1-codex-mini', desc: 'Faster, cheaper' },
-    { id: 'gpt-5-codex', label: 'gpt-5-codex', desc: 'Previous generation' },
   ],
   opencode: [
     { id: '', label: 'auto', desc: 'Use your OpenCode default model' },
@@ -80,8 +78,36 @@ export const MODELS_BY_RUNNER: Record<Runner, readonly ModelPreset[]> = {
   ],
 }
 
-export function modelsForRunner(runner: Runner): readonly ModelPreset[] {
-  return MODELS_BY_RUNNER[runner] ?? MODELS_BY_RUNNER.claude
+export function modelsForRunner(
+  runner: Runner,
+  catalog?: RunnerModelCatalogResponse,
+  customIds: readonly (string | null | undefined)[] = [],
+): readonly ModelPreset[] {
+  const base = [...(MODELS_BY_RUNNER[runner] ?? MODELS_BY_RUNNER.claude)]
+  if (runner !== 'codex') return base
+  const seen = new Set(base.map((model) => model.id))
+  for (const model of catalog?.models ?? []) {
+    if (!model.id || seen.has(model.id)) continue
+    seen.add(model.id)
+    base.push({ id: model.id, label: model.label || model.id, desc: model.description })
+  }
+  for (const id of customIds) {
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    base.push({ id, label: id, desc: 'Custom or legacy model' })
+  }
+  return base
+}
+
+export function modelCatalogStatus(
+  runner: Runner,
+  catalog: RunnerModelCatalogResponse | undefined,
+  failed = false,
+): string | undefined {
+  if (runner !== 'codex') return undefined
+  if (catalog?.stale) return 'Using cached Codex model list'
+  if (failed || catalog?.source === 'unavailable') return 'Latest Codex models unavailable'
+  return undefined
 }
 
 /** Which runners the pill offers, from the health checks (legacy `renderChrome`). The `claude`
@@ -116,8 +142,9 @@ export function resolveModel(
   picked: string | null,
   runner: Runner,
   defaults?: Partial<Record<Runner, string>>,
+  catalog?: RunnerModelCatalogResponse,
 ): string {
-  const models = modelsForRunner(runner)
+  const models = modelsForRunner(runner, catalog, [picked, defaults?.[runner]])
   if (picked !== null && models.some((m) => m.id === picked)) return picked
   const preset = defaults?.[runner]
   if (preset !== undefined && models.some((m) => m.id === preset)) return preset

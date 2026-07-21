@@ -12,6 +12,8 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
 import { detectEnvironment } from '../core/backend-detect.js';
 import type { ContentBlock } from '../core/agent-runner.js';
+import { discoverCodexModels } from '../core/codex-model-catalog.js';
+import { RunnerModelCatalog } from '../core/runner-model-catalog.js';
 import { currentUsage, onUsage } from '../core/process-usage.js';
 import { WORKFLOWS_DIR, loadWorkflows } from '../workflows/load.js';
 import {
@@ -130,6 +132,8 @@ export interface ServerDeps {
    *  route's guards, cleanup and error surfacing are exercised for real
    *  against real temp dirs, without a network or a `gh` binary. */
   cloneRunner?: CloneRunner;
+  /** Host-wide model discovery service. Tests inject a deterministic adapter. */
+  modelCatalog?: RunnerModelCatalog;
 }
 
 // ---- project-scoped routing (multi-project spec, step 2.2) -----------------
@@ -670,6 +674,9 @@ export function createApp(deps: ServerDeps): Hono {
   // turns into a compile error instead.
   const bootRoot = deps.repoRoot;
   const bootDataDir = join(bootRoot, '.ai/cezar');
+  const modelCatalog = deps.modelCatalog ?? new RunnerModelCatalog({
+    adapters: { codex: { discover: () => discoverCodexModels({ cwd: bootRoot }) } },
+  });
 
   // ---- workspace boot-project identity (multi-project spec) ----------------
   // The boot flow (`initWorkspace` in src/index.ts) registers the boot repo
@@ -998,6 +1005,14 @@ export function createApp(deps: ServerDeps): Hono {
       projects: workspace.projects,
       bootProject: workspace.bootProject,
     });
+  });
+
+  // Host capability, not project state: one installed/authenticated Codex CLI
+  // and one in-memory cache are shared by every registered workspace.
+  app.get('/api/models', async (c) => {
+    const query = z.object({ runner: z.literal('codex') }).safeParse(c.req.query());
+    if (!query.success) return c.json({ error: 'runner must be codex' }, 400);
+    return c.json(await modelCatalog.get(query.data.runner));
   });
 
   // ---- workspace projects (multi-project spec) -----------------------------

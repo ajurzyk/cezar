@@ -13,6 +13,7 @@ import {
   getGroup,
   getHealth,
   getRepo,
+  getRunnerModels,
   getRun,
   getRunDiff,
   getRunHandoff,
@@ -78,6 +79,7 @@ describe('request shapes', () => {
     body?: unknown
   }> = [
     { name: 'getHealth', call: () => getHealth(), path: '/api/health', method: 'GET' },
+    { name: 'getRunnerModels', call: () => getRunnerModels(), path: '/api/models?runner=codex', method: 'GET' },
     { name: 'getRuns', call: () => getRuns(), path: '/api/runs', method: 'GET' },
     { name: 'getRun', call: () => getRun('run-1'), path: '/api/runs/run-1', method: 'GET' },
     { name: 'getRunDiff', call: () => getRunDiff('run-1'), path: '/api/runs/run-1/diff', method: 'GET' },

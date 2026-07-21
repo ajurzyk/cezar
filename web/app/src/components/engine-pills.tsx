@@ -1,9 +1,10 @@
-import { useConfig, useHealth } from '@/api/queries'
+import { useConfig, useHealth, useRunnerModels } from '@/api/queries'
 import type { CreateRunInput, Runner } from '@/api/types'
 import { PickerPill, RunnerPill } from '@/components/picker-pill'
 import {
   availableRunners,
   modelsForRunner,
+  modelCatalogStatus,
   resolveModel,
   resolveRunner,
 } from '@/routes/new-task-form'
@@ -42,12 +43,13 @@ export interface ResolvedEngine {
 export function useResolvedEngine(pick: EnginePick): ResolvedEngine {
   const health = useHealth()
   const config = useConfig()
+  const catalog = useRunnerModels()
   const runners = availableRunners(health.data?.checks ?? [])
   const defaultRunner = health.data?.defaultRunner ?? 'claude'
   const runner = resolveRunner(pick.runner, runners, defaultRunner)
   return {
     runner,
-    model: resolveModel(pick.model, runner, config.data?.defaultModels),
+    model: resolveModel(pick.model, runner, config.data?.defaultModels, catalog.data),
     runners,
     defaultRunner,
   }
@@ -89,7 +91,9 @@ export function EnginePills({
   disabled?: boolean
 }) {
   const { runner, model, runners } = useResolvedEngine(pick)
-  const models = modelsForRunner(runner)
+  const config = useConfig()
+  const catalog = useRunnerModels()
+  const models = modelsForRunner(runner, catalog.data, [pick.model, config.data?.defaultModels?.[runner]])
 
   return (
     <>
@@ -113,6 +117,7 @@ export function EnginePills({
         disabled={disabled}
         onPick={(next) => onChange({ ...pick, model: next })}
         options={models.map((m) => ({ value: m.id, label: m.label, desc: m.desc }))}
+        status={modelCatalogStatus(runner, catalog.data, catalog.isError)}
       />
     </>
   )

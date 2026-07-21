@@ -5,6 +5,7 @@ import type { Runner } from '@/api/types'
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuItem,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
@@ -36,6 +37,7 @@ export function PickerPill({
   disabled = false,
   hint,
   disabledHint,
+  status,
 }: {
   slot: string
   ariaLabel: string
@@ -47,6 +49,8 @@ export function PickerPill({
   /** Hover explanation for the enabled pill — what the setting does (e.g. the ×1 variants pill). */
   hint?: string
   disabledHint?: string
+  /** Quiet non-selectable catalog state, kept inside the menu's accessible reading order. */
+  status?: string
 }) {
   const trigger = (
     <button
@@ -87,6 +91,11 @@ export function PickerPill({
             </DropdownMenuRadioItem>
           ))}
         </DropdownMenuRadioGroup>
+        {status ? (
+          <DropdownMenuItem disabled className="border-t border-border text-[11.5px] text-muted-foreground">
+            {status}
+          </DropdownMenuItem>
+        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
   )

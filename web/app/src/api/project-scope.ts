@@ -50,7 +50,7 @@ export function queryScope(): string {
  * `/api/fs/*` (the folder picker —
  * one filesystem, not one per project), and `/api/health` (CORS-open, boot-bound by design).
  */
-const WORKSPACE_LEVEL = /^\/api\/(?:health$|projects(?:$|[/?])|workspace\/|fs\/)/
+const WORKSPACE_LEVEL = /^\/api\/(?:health$|models(?:$|[/?])|projects(?:$|[/?])|workspace\/|fs\/)/
 
 /**
  * Prefix a root-relative `/api/...` path with the active project scope.

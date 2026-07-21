@@ -3,7 +3,7 @@ import { BotIcon } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 
 import { putConfig } from '@/api/client'
-import { queryKeys, useConfig, useRepo } from '@/api/queries'
+import { queryKeys, useConfig, useRepo, useRunnerModels } from '@/api/queries'
 import type { ConfigResponse, Runner, SetConfigInput } from '@/api/types'
 import { CenteredState } from '@/components/centered-state'
 import { Button } from '@/components/ui/button'
@@ -11,7 +11,7 @@ import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { toast } from '@/components/ui/toaster'
 import { cn } from '@/lib/utils'
-import { MODELS_BY_RUNNER, RUNNERS } from '@/routes/new-task-form'
+import { modelCatalogStatus, modelsForRunner, RUNNERS } from '@/routes/new-task-form'
 
 /**
  * Settings → Agents (R6 Step 1.5, spec §"Settings"): today's scattered `PUT /api/config` knobs
@@ -33,6 +33,7 @@ const SYSTEM_PROMPT_MAX = 20_000
 
 export function AgentsSection() {
   const config = useConfig()
+  const catalog = useRunnerModels()
 
   if (config.isPending) {
     return (
@@ -52,10 +53,10 @@ export function AgentsSection() {
       />
     )
   }
-  return <AgentsForm config={config.data} />
+  return <AgentsForm config={config.data} catalog={catalog.data} />
 }
 
-function AgentsForm({ config }: { config: ConfigResponse }) {
+function AgentsForm({ config, catalog }: { config: ConfigResponse; catalog: ReturnType<typeof useRunnerModels>['data'] }) {
   const repo = useRepo()
   const queryClient = useQueryClient()
 
@@ -150,11 +151,14 @@ function AgentsForm({ config }: { config: ConfigResponse }) {
                 }
                 className="block w-full rounded-md border border-input bg-card px-3 py-1.5 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:opacity-50"
               >
-                {MODELS_BY_RUNNER[runner.id].map((model) => (
+                {modelsForRunner(runner.id, catalog, [config.defaultModels[runner.id]]).map((model) => (
                   <option key={model.id} value={model.id}>
                     {model.id === '' ? 'auto (default)' : model.label}
                   </option>
                 ))}
+                {modelCatalogStatus(runner.id, catalog) ? (
+                  <option disabled>{modelCatalogStatus(runner.id, catalog)}</option>
+                ) : null}
               </select>
             </label>
           ))}
