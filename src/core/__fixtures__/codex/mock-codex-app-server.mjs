@@ -16,7 +16,12 @@ rl.on('line', (line) => {
   } catch {
     return;
   }
-  if (msg.method === 'initialize') {
+  if (msg.id === 'ask-1' && msg.result) {
+    const answer = msg.result.answers?.library?.answers;
+    emit(Array.isArray(answer) && answer[0] === 'Vitest'
+      ? { method: 'turn/completed', params: { turn: { id: 'turn_mock_1', status: 'completed' } } }
+      : { method: 'turn/failed', params: { turn: { id: 'turn_mock_1', status: 'failed' }, error: { message: 'bad answer' } } });
+  } else if (msg.method === 'initialize') {
     emit({ id: msg.id, result: { userAgent: 'mock-codex/0.0.0' } });
   } else if (msg.method === 'thread/start' || msg.method === 'thread/resume') {
     const expectedSandbox = process.env.CEZ_CODEX_NETWORK === '0' ? 'workspace-write' : 'danger-full-access';
@@ -40,6 +45,16 @@ rl.on('line', (line) => {
   } else if (msg.method === 'turn/start') {
     emit({ id: msg.id, result: { turn: { id: 'turn_mock_1' } } });
     emit({ method: 'turn/started', params: { turn: { id: 'turn_mock_1', status: 'inProgress', items: [] } } });
+    const turnText = msg.params?.input?.map?.((part) => part.text ?? '').join('\n') ?? '';
+    if (process.env.MOCK_CODEX_ASK === '1' || turnText.includes('mock:native-codex-ask')) {
+      emit({ id: 'ask-1', method: 'item/tool/requestUserInput', params: {
+        threadId: 'th_mock_1', turnId: 'turn_mock_1', itemId: 'item_ask_1', autoResolutionMs: null,
+        questions: [{ id: 'library', header: 'Library', question: 'Which test library?', isOther: true,
+          isSecret: false, options: [{ label: 'Vitest', description: 'Use the existing test runner.' },
+            { label: 'Node test', description: 'Use node:test.' }] }],
+      } });
+      return;
+    }
     emit({ method: 'item/started', params: { threadId: 'th_mock_1', turnId: 'turn_mock_1', item: { type: 'agentMessage', id: 'item_m1', text: '' } } });
     emit({ method: 'item/agentMessage/delta', params: { threadId: 'th_mock_1', turnId: 'turn_mock_1', itemId: 'item_m1', delta: 'Checking the working tree.' } });
     emit({ method: 'item/completed', params: { threadId: 'th_mock_1', turnId: 'turn_mock_1', item: { type: 'agentMessage', id: 'item_m1', text: 'Checking the working tree.' } } });

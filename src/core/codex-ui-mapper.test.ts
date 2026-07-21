@@ -63,6 +63,9 @@ const GOLDEN_FIXTURES = [
   'turn-plan-updated',
   'turn-failed',
   'review-mode',
+  // Codex 0.144.6 generated schema, plus the current upstream spelling.
+  'collab-agent-tool-call',
+  'collab-tool-call',
 ] as const;
 
 describe('codex → v2 golden fixtures', () => {
@@ -736,6 +739,31 @@ describe('CodexAppServerRunner v2 wiring (against the bundled mock app-server)',
     } finally {
       vi.unstubAllEnvs();
     }
+  }, 30_000);
+
+  it('bridges native requestUserInput to ask.requested and answers the server request', async () => {
+    const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 60_000 });
+    const v2: UiEvent[] = [];
+    let resolveAsk!: () => void;
+    const asked = new Promise<void>((resolve) => { resolveAsk = resolve; });
+    const session = runner.startSession(
+      { userPrompt: 'ask me', cwd: process.cwd(), env: { MOCK_CODEX_ASK: '1' } },
+      undefined,
+      { autoEndAfterFirstTurn: true, onUiEvent: (event) => {
+        v2.push(event);
+        if (event.type === 'ask.requested') resolveAsk();
+      } },
+    );
+    await asked;
+    expect(v2).toContainEqual({
+      type: 'ask.requested', requestId: 'codex-ask-1', questions: [{
+        id: 'library', header: 'Library', question: 'Which test library?', multiSelect: false,
+        options: [{ label: 'Vitest', description: 'Use the existing test runner.' },
+          { label: 'Node test', description: 'Use node:test.' }],
+      }],
+    });
+    expect(session.sendMessage([{ type: 'text', text: 'Library: Vitest' }])).toBe(true);
+    await expect(session.result).resolves.toMatchObject({ sessionId: 'th_mock_1' });
   }, 30_000);
 
   it('rejects a failed resume through session.result without an unhandled rejection', async () => {
