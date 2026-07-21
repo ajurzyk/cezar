@@ -21,7 +21,9 @@
   .editor-pre, .editor-ta {
     margin: 0; border: 0; outline: none; background: transparent;
     font: 400 12px/1.7 var(--mono);
-    padding: 0 16px 0 68px;      /* 16 (row px) + 40 (gutter) + 12 (gutter pr) */
+    padding: 0 16px 0 56px;      /* px-4 (16) + w-10 gutter (40). The gutter's
+                                    pr-3 is INSIDE its 40px under border-box —
+                                    adding it again is a 12px caret drift. */
     white-space: pre; tab-size: 8; overflow-wrap: normal; word-break: normal;
     letter-spacing: normal;
   }
@@ -190,7 +192,11 @@ function isLoopbackHost(host?: string): boolean {
       editing — the write lands in a checkout an agent is actively running in.
       <b>This mockup uses a real <code>&lt;textarea&gt;</code> over a real token layer</b>, so the
       caret you see sitting exactly on its glyph is the alignment invariant of
-      §Syntax highlighting in edit mode being demonstrated, not drawn.
+      §Syntax highlighting in edit mode being demonstrated, not drawn. It is a
+      <b>fixed-density approximation</b>: the text column sits at
+      <code>px-4 (16) + w-10 (40) = 56px</code>, but Tailwind derives both from
+      <code>--spacing</code>, which the app overrides per density — so the real control
+      must compute this offset, never hardcode it.
     </p>
 
   </div>
