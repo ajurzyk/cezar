@@ -8,12 +8,7 @@ import {
   spawnCodexAppServer,
   type CodexAppServerMessage,
 } from './codex-app-server-transport.js';
-
-export interface ModelOption {
-  id: string;
-  label: string;
-  description: string;
-}
+import type { ModelOption } from './runner-model-catalog.js';
 
 export interface CodexModelDiscoveryOptions {
   cwd: string;
