@@ -88,3 +88,10 @@
 - Incidental live verification: the first evidence capture showed "browse root is not available" because the operator's shell exports `CEZ_REMOTE=1` and the env was booted without scrubbing it — the 4.1 hosted-mode root narrowing behaving exactly as specified, confirmed in a real browser. Recaptured under `env -u CEZ_REMOTE`.
 - UI evidence in `checkpoint-6-artifacts/`: `settings-projects-pane.png`, `add-project-folder-browser.png`.
 - Phase 4 complete. Next: Phase 5 (5.1–5.3), then the final gate.
+
+## 2026-07-21T10:50:00Z — defect found during Step 5.1: `worktreeRetentionDefault` is a dead setting
+- The Step-5.1 executor declined to document `resources.worktreeRetentionDefault` and flagged it instead. Verified by the dispatcher: the claim holds.
+- `GET/PUT /api/workspace/config` (step 2.7) reads and writes it, `src/workspace/config.ts` schemas it, and the Step-3.5 Worktrees settings section tells the user it "only seeds projects that never set their own" — but **no enforcement path consults it**. `src/server/project-context.ts:191`, `src/index.ts:186` and `src/workflows/run.ts:620` all read the PER-REPO `worktreeRetention` and fall back to a hardcoded `?? 10`.
+- Severity: a user-facing setting that silently does nothing, with UI copy actively asserting that it does. Worse than an absent feature, because it invites the user to rely on it.
+- Decision: fix forward as Step **5.4** — make the workspace default actually seed the per-project fallback (replace the hardcoded `?? 10`), or remove the field and its UI copy. Fixing is preferred: the field is already in the persisted config schema and in `BACKWARD_COMPATIBILITY.md`'s workspace-config surface, so removing it is the more disruptive option.
+- Credit where due: this was caught only because the executor was instructed to VERIFY every doc claim against the code rather than describe intent. Two earlier "pre-existing" attributions in this run turned out to be wrong under the same scrutiny.

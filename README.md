@@ -338,6 +338,17 @@ repo and its `.ai/cezar/` are never touched, so re-adding it later finds all its
 tasks intact. The project cezar is currently serving can't be removed: it
 re-registers itself at the next start.
 
+**From the terminal** — the same registry, no cockpit required (handy over ssh):
+
+```bash
+cezar projects                    # list: id, branch or status, path
+cezar projects add ~/code/api     # register a folder (defaults to the current repo)
+cezar projects remove api         # drop the registry entry; the repo is untouched
+```
+
+These read and write `~/.cezar/config.json` directly, so they work with the
+server stopped, and `CEZ_HOME` selects which workspace they operate on.
+
 Settings split along the same line: **Agents**, **Worktrees**, **Bookmarklets**,
 **Prompt templates** and **MCP** describe one repo and live under
 `/p/<projectId>/settings`; **Appearance**, **Notifications**, **Resources**,

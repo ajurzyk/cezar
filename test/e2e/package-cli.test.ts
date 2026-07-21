@@ -103,6 +103,17 @@ test('the release tarball installs and runs the dry-run CLI workflow', { timeout
       'a headless run registers the boot repo in the workspace registry',
     );
 
+    // `cezar projects` (step 5.2) reads the same registry with no server
+    // running — the ssh-into-the-box view of Settings → Projects.
+    const projects = await execFile(process.execPath, [cliPath, 'projects'], {
+      cwd: consumerDir,
+      env: { ...process.env, CEZ_HOME: cezHome },
+      timeout: 30_000,
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    assert.match(projects.stdout, /fixture-repo/);
+    assert.match(projects.stdout, /1 project\(s\)/);
+
     // server-install / server-uninstall dry-run round-trip. CEZ_HOME isolates
     // ~/.cezar/server.json to a temp dir; CEZ_DRY_RUN performs no real sudo.
     assert.match(help.stdout, /cezar server-install/);

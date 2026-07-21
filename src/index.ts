@@ -18,6 +18,7 @@ import { checkForUpdate } from './update-check.js';
 import { printSkillsBanner } from './skills-banner.js';
 import { runMigrations } from './workspace/migrations.js';
 import { registerProject, shouldRegisterProject } from './workspace/projects.js';
+import { runProjectsCommand } from './workspace/projects-cli.js';
 import { WorkspaceSemaphore } from './workspace/semaphore.js';
 
 const HELP = `cezar — local cockpit for AI agent tasks in your repo
@@ -26,6 +27,8 @@ Usage:
   cezar                     start the cockpit (server + GUI) for the current repo
   cezar run "<task>"        run a task headless in the terminal
   cezar init                scaffold .ai/cezar/ (example workflow + skill)
+  cezar projects            list the projects this cockpit serves
+                            (also: projects add [<dir>] · projects remove <id>)
   cezar server-install      interactive wizard to host cezar on a server
   cezar server-deploy       redeploy a new version (reload the service) + verify
   cezar server-uninstall    reverse a server-install
@@ -96,6 +99,10 @@ async function main(): Promise<void> {
       return;
     case 'init':
       initCommand(repoRoot);
+      return;
+    case 'projects':
+      // Registry-only (no server, no HTTP) — see workspace/projects-cli.ts.
+      process.exitCode = await runProjectsCommand(positionals.slice(1), { defaultRoot: repoRoot });
       return;
     case 'server-install':
       await serverCommand('install', repoRoot, values.platform, {

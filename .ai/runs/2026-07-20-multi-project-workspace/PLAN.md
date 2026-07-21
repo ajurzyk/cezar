@@ -42,8 +42,9 @@
 | 4 | 4.4 | Global Projects settings pane: list/remove, `projectsDir` field with inline validation | done | 76b35de |
 | 4 | 4.5 | Make shared-env e2e deterministic about registry shape (fix-forward from Step 4.2 triage) | done | 98148c3 |
 | 5 | 5.1 | Docs: AGENTS.md routing rows, README multi-project section, `.env.example` | done | e702cca |
-| 5 | 5.2 | `cezar projects` CLI + server-install docs note | todo | |
+| 5 | 5.2 | `cezar projects` CLI + server-install docs note | done | ce0fe96 |
 | 5 | 5.3 | File follow-up issue: retire `liveInstancesExist()` / `~/.cezar/instances/` | todo | |
+| 5 | 5.4 | Make `resources.worktreeRetentionDefault` actually seed per-project retention (fix-forward from Step 5.1) | todo | |
 
 ## Goal
 
