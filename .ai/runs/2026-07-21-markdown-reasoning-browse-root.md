@@ -43,6 +43,8 @@ Render agent reasoning as Markdown and keep the Add Project folder browser immed
 
 ## Progress
 
+PR: #588
+
 > Convention: `- [ ]` pending, `- [x]` done. Append ` — <commit sha>` when a step lands. Do not rename step titles.
 
 ### Phase 1: Reasoning Markdown
