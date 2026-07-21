@@ -93,6 +93,8 @@ This mode intentionally removes choices instead of adding a settings control:
 
 Accessibility is preserved because controls are not rendered rather than visually disabled. Existing keyboard order therefore closes over the remaining controls without dead focus targets.
 
+Illustrative proposed-state mockup: [single-project shell](assets/cez-single-project/mockup-01-single-project-shell.png). Current-state references: [sidebar](assets/cez-single-project/current-01-sidebar.png) and [Projects settings](assets/cez-single-project/current-02-projects-settings.png).
+
 ## Edge Cases & Failure Scenarios
 
 | Scenario | Behavior |
