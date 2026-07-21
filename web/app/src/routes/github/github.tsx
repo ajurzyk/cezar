@@ -1,4 +1,4 @@
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { hashKey, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowLeftIcon,
   CheckIcon,
@@ -11,7 +11,7 @@ import {
   TagIcon,
   TriangleAlertIcon,
 } from 'lucide-react'
-import { useEffect, useMemo, useState, type DragEvent, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react'
 import { Link, Navigate, useParams } from 'react-router'
 
 import { getGithub, getGithubComments, putUiState } from '@/api/client'
@@ -116,34 +116,47 @@ export function GithubRoute({ view }: { view: GithubView }) {
       })
   }
 
-  // The thread the user is actually looking at, so a manual refresh can bust its SERVER cache.
-  const openNumber = n && /^\d+$/.test(n) ? Number(n) : null
-  const openKind: 'issue' | 'pr' = view === 'prs' ? 'pr' : 'issue'
+  // The thread actually ON SCREEN, so a manual refresh can bust its SERVER cache.
+  //
+  // Deliberately a ref fed from the rendered `selected`, NOT derived from the `:n` route param.
+  // With no `:n` the tab still renders a thread — `selected` falls back to `items[0]` (see below,
+  // legacy behavior) — so keying off the URL would leave the bare `/github` and `/github/prs`
+  // routes, i.e. the default landing pages, refreshing nothing. A ref because this mutation is
+  // defined before `selected` exists and reads it at click time, not render time.
+  const openThreadRef = useRef<{ kind: 'issue' | 'pr'; number: number } | null>(null)
 
   const refresh = useMutation({
-    mutationFn: async () => {
-      const data = await getGithub({ refresh: true })
-      // Refresh the open thread with `refresh: true` as well (#525). Invalidating its query key
-      // is NOT enough and was the bug in the first attempt at this: an invalidate re-requests
-      // `/api/github/comments/…` WITHOUT `refresh=1`, and the route only busts `commentsCache`
-      // when that param is present — so the client dutifully refetched and was handed the same
-      // ≤60 s-old object. Pressing refresh has to reach `gh`, or it is theatre.
-      if (openNumber !== null) {
-        const thread = await getGithubComments(openKind, openNumber, { refresh: true })
-        queryClient.setQueryData(queryKeys.githubComments(openKind, openNumber), thread)
-      }
-      return data
-    },
+    mutationFn: () => getGithub({ refresh: true }),
     onSuccess: (data) => {
       queryClient.setQueryData(queryKeys.github({}), data)
       // The refresh busted the server cache; the full batch must re-run against it.
       void queryClient.invalidateQueries({ queryKey: queryKeys.github({ limit: FULL_LIMIT }) })
-      // Any OTHER cached thread is now suspect but not on screen — drop it so the next open
-      // refetches, rather than firing a request per cached thread right now.
+
+      // The open thread must be re-fetched with `refresh: true` (#525). Invalidating its key is
+      // NOT enough, and was the bug in the first attempt: an invalidate re-requests
+      // `/api/github/comments/…` WITHOUT `refresh=1`, and the route only busts `commentsCache`
+      // when that param is present — so the client dutifully refetched and was handed the same
+      // ≤60 s-old object. Pressing refresh has to reach `gh`, or it is theatre.
+      const open = openThreadRef.current
+      if (!open) {
+        // No thread on screen (the unavailable branch) — nothing mounted, so clearing is free.
+        void queryClient.removeQueries({ queryKey: ['github', 'comments'] })
+        return
+      }
+      const openKey = queryKeys.githubComments(open.kind, open.number)
+      // Fire-and-forget rather than awaited in `mutationFn`: a thread fetch that fails must not
+      // discard an already-successful list refresh.
+      void getGithubComments(open.kind, open.number, { refresh: true })
+        .then((thread) => queryClient.setQueryData(openKey, thread))
+        .catch(() => {
+          /* the list refresh still landed; leave the thread showing what it has */
+        })
+      // Every OTHER cached thread is now suspect but not on screen — drop it so it refetches when
+      // next opened. The open one MUST be excluded: removing a mounted query resets it to pending
+      // and flashes the loading skeleton under the user.
       void queryClient.removeQueries({
         queryKey: ['github', 'comments'],
-        predicate: (q) =>
-          !(openNumber !== null && q.queryHash === JSON.stringify(queryKeys.githubComments(openKind, openNumber))),
+        predicate: (q) => q.queryHash !== hashKey(openKey),
       })
     },
     onError: (error) => toast(error.message, { tone: 'danger' }),
@@ -208,6 +221,9 @@ export function GithubRoute({ view }: { view: GithubView }) {
     return <GithubLoading />
   }
 
+  // No thread is mounted on the unavailable path — keep the ref honest rather than stale.
+  openThreadRef.current = null
+
   if (!gh.available) {
     return (
       <div data-route="github" className="flex min-h-full flex-col">
@@ -248,6 +264,10 @@ export function GithubRoute({ view }: { view: GithubView }) {
   // list so a deep link to #N still opens even while a filter is active.
   const selected =
     number === null ? (items[0] ?? null) : (allItems.find((item) => item.number === number) ?? null)
+  // Feed the refresh mutation the thread that is genuinely rendered — including the no-`:n`
+  // fallback to items[0], which is what the bare /github and /github/prs routes show.
+  openThreadRef.current = selected ? { kind: selected.kind, number: selected.number } : null
+
   const listPath = view === 'issues' ? '/github' : '/github/prs'
 
   return (
@@ -649,9 +669,19 @@ function GithubThread({ item, colors }: { item: GithubItem; colors: Record<strin
     // Compare parsed instants, not the raw strings. Both streams are UTC, but at DIFFERENT
     // precisions: events go through `toISOString()` (always milliseconds, `…00.000Z`) while
     // comments keep GitHub's second-precision `…00Z`. A string compare puts `.` (46) before `Z`
-    // (90), so an event would always sort above a comment made in the same second regardless of
-    // true order. Array.prototype.sort is stable, so equal instants keep insertion order.
-    return merged.sort((a, b) => Date.parse(at(a)) - Date.parse(at(b)))
+    // (90), so an event would always sort above a comment made in the same second — not a
+    // tie-break, a systematic bias. Array.prototype.sort is stable, so equal instants keep
+    // insertion order (comments first, matching pre-#525 behavior).
+    //
+    // `normalizeReviews` emits `createdAt: ''` for a review with no `submitted_at` (a pending
+    // one), and `Date.parse('')` is NaN. An NaN comparator result coerces to +0, which makes the
+    // sort inconsistent rather than crashing — so those rows are pinned to the top explicitly
+    // instead of landing wherever the engine happens to leave them.
+    const key = (entry: ThreadRow): number => {
+      const parsed = Date.parse(at(entry))
+      return Number.isNaN(parsed) ? -Infinity : parsed
+    }
+    return merged.sort((a, b) => key(a) - key(b))
   }, [data?.comments, data?.events])
 
   if (thread.isPending) {

@@ -43,3 +43,15 @@ Append-only, UTC timestamps, newest at the bottom.
   real captured timeline row; the index-fallback instability pinned honestly; the 40-hex sha
   invariant enforced at the boundary; same-second comment/event tie-order fixed (ms vs second
   precision made events always win). Gate re-run: **3045/3045**.
+- **2026-07-21T12:24Z — the RE-REVIEW caught a regression my own fix batch introduced.** Keying the
+  open thread off the `:n` route param left the **default landing pages** (`/github`, `/github/prs`)
+  refreshing nothing, because with no `:n` the tab still renders a thread (`selected` falls back to
+  `items[0]`) — so the original bug survived exactly where users land most. And the `removeQueries`
+  predicate wiped that mounted query, flashing the loading skeleton on every refresh — a *new*
+  regression the old invalidate-only code did not have. The refresh now follows the rendered
+  `selected` via a ref. Two tests added for precisely these two cases.
+- **2026-07-21T12:24Z — remaining re-review items fixed.** Unparseable `createdAt` (a bodied PENDING
+  review yields `''`, and `Date.parse('')` is NaN, which makes the sort *inconsistent* rather than
+  crashing) pinned deterministically; the cap test that could not have detected a combined cap
+  supplemented with an end-to-end one asserting 200 comments **and** 200 events (400 total) from a
+  single fetch; unused imports dropped. Gate: **3049/3049**.

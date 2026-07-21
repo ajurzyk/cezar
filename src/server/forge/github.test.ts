@@ -32,11 +32,8 @@ import {
   parseOwnerName,
   rollupToChecks,
   THREAD_ENTRY_CAP,
-  TIMELINE_BUDGET_MS,
   TIMELINE_EVENT_CAP,
   TIMELINE_EVENT_KINDS,
-  TIMELINE_MAX_PAGES,
-  TIMELINE_MIN_PAGE_MS,
 } from './github.js';
 import type { ForgeComment } from './types.js';
 
@@ -448,10 +445,11 @@ describe('TIMELINE_EVENT_KINDS (#525)', () => {
 });
 
 describe('timeline fetch bounds (#525)', () => {
-  it('caps events independently of the comment stream', () => {
-    // Not "they happen to be equal" — they must be SEPARATE knobs, so this asserts the BEHAVIOUR
-    // rather than the two constants. 250 events and 250 comments through their own paths must
-    // each yield their own 200, which a combined cap could not produce.
+  it('caps each stream at its own 200 — the normalizers cannot see each other', () => {
+    // The unit half of the independence claim: each normalizer caps its own stream. This alone
+    // cannot rule out a combined cap, which would live in fetchGithubComments — that is covered
+    // end-to-end by 'returns a full 200 comments AND 200 events from one over-long timeline'
+    // in the integration block below.
     const events = Array.from({ length: 250 }, (_, i) => ({
       event: 'labeled', id: i,
       created_at: new Date(Date.UTC(2026, 0, 1) + i * 60_000).toISOString(),
@@ -950,6 +948,28 @@ describe('fetchGithubComments timeline integration (#525)', () => {
 
     expect(data.available).toBe(true); // NOT the empty-thread path
     expect(data.comments.map((c) => c.id)).toEqual([1]);
+    expect(data.truncated).toBe(true);
+  });
+
+  it('returns a full 200 comments AND 200 events from one over-long timeline', async () => {
+    // THE test a combined cap would fail. One fetch carrying 250 comments and 250 events must
+    // yield 200 of each — a shared 200-slot budget could only ever produce 200 TOTAL, which is
+    // the §2 break the spec's own review caught in its first draft.
+    const rows = [
+      ...Array.from({ length: 250 }, (_, i) => commented(i + 1)),
+      ...Array.from({ length: 250 }, (_, i) => ({
+        event: 'labeled', id: 10_000 + i,
+        created_at: new Date(Date.UTC(2026, 0, 1) + i * 60_000).toISOString(),
+        actor: { login: 'a' }, label: { name: `l${i}` },
+      })),
+    ];
+    routeGh({ timeline: (page) => (page === 1 ? rows.slice(0, 100) : rows.slice((page - 1) * 100, page * 100)) });
+
+    const data = await fetchGithubComments(repoRoot, 'issue', 1);
+
+    expect(data.comments).toHaveLength(THREAD_ENTRY_CAP);
+    expect(data.events).toHaveLength(TIMELINE_EVENT_CAP);
+    expect(data.comments.length + (data.events?.length ?? 0)).toBe(400); // NOT 200
     expect(data.truncated).toBe(true);
   });
 

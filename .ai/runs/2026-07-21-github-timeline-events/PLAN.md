@@ -32,6 +32,7 @@
 | 3 | 3.7 | `web/app/e2e/github.e2e.ts` — thread coverage (comments, commit row, CI glyph) | done | |
 | 3 | 3.8 | Full validation gate + e2e + dry-run manual pass with screenshot | done | |
 | 3 | 3.9-review-fix | Review findings: real refresh=1 bust, non-vacuous tests, sha invariant, tie-order | done | |
+| 3 | 3.10-review-fix | Re-review findings: refresh follows rendered thread (not `:n`), no skeleton flash | done | |
 
 Checkpoints fire after Steps 1.5, 2.3, 3.2, 3.7 (≈ every 5 Steps / on phase close).
 

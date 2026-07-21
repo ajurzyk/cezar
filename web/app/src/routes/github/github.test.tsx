@@ -604,6 +604,42 @@ describe('the comment thread', () => {
     ])
   })
 
+  it('sends refresh=1 on the BARE /github route too, where no :n is in the URL', async () => {
+    // The regression the first fix batch shipped: keying the open thread off the `:n` route param
+    // left the DEFAULT landing pages refreshing nothing, because with no `:n` the tab still shows
+    // a thread — `selected` falls back to items[0]. The refresh must follow what is rendered.
+    const threadRequests: string[] = []
+    stubFetch({ 'GET /api/github?refresh=1': () => jsonResponse(GITHUB) })
+    const origFetch = globalThis.fetch
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path.startsWith('/api/github/comments/')) threadRequests.push(path)
+      return (origFetch as typeof fetch)(input, init as RequestInit)
+    })
+
+    renderAt('/github') // no :n at all
+    await waitFor(() => expect(threadRequests.length).toBe(1))
+
+    fireEvent.click(document.querySelector<HTMLElement>('[data-slot="gh-refresh"]')!)
+
+    await waitFor(() => expect(threadRequests.some((p) => p.includes('refresh=1'))).toBe(true))
+  })
+
+  it('does not blank the open thread while refreshing it', async () => {
+    // The other half of that regression: the removeQueries predicate wiped the MOUNTED thread,
+    // resetting it to pending so the loading skeleton flashed under the user on every refresh.
+    stubFetch({ 'GET /api/github?refresh=1': () => jsonResponse(GITHUB) })
+    renderAt('/github/issues/142')
+
+    await waitFor(() => expect(document.querySelector('[data-slot="gh-thread"]')).not.toBeNull())
+
+    fireEvent.click(document.querySelector<HTMLElement>('[data-slot="gh-refresh"]')!)
+
+    // The thread stays rendered throughout — never replaced by the loading skeleton.
+    await waitFor(() => expect(document.querySelector('[data-slot="gh-thread"]')).not.toBeNull())
+    expect(document.querySelector('[data-slot="gh-thread-loading"]')).toBeNull()
+  })
+
   it('orders a comment and an event made in the SAME second by their true order', async () => {
     // The two streams carry different precisions: events go through toISOString() (`…00.000Z`),
     // comments keep GitHub's `…00Z`. A raw string compare puts '.' (46) before 'Z' (90), so the
@@ -619,6 +655,29 @@ describe('the comment thread', () => {
     const rows = [...document.querySelectorAll('[data-slot="gh-thread-entry"], [data-slot="gh-event-row"]')]
     // Same instant → stable sort keeps insertion order, and comments are inserted first.
     expect(rows[0]?.getAttribute('data-slot')).toBe('gh-thread-entry')
+  })
+
+  it('does not let an unparseable timestamp scramble the order', async () => {
+    // normalizeReviews emits createdAt: '' for a PENDING review that has a body, and
+    // Date.parse('') is NaN. An NaN comparator result coerces to +0, which makes the sort
+    // INCONSISTENT rather than crashing — the row lands wherever the engine leaves it. Pinned
+    // to the top explicitly instead.
+    stubFetch(thread('pr', 137, {
+      available: true,
+      comments: [
+        { ...COMMENT_TEXT, id: 91, createdAt: '' },
+        { ...COMMENT_TEXT, id: 92, createdAt: '2026-01-03T00:00:00Z' },
+      ],
+      events: [{ ...EVT.merged, createdAt: '2026-01-02T00:00:00Z' }],
+    }))
+    renderAt('/github/prs/137')
+
+    await waitFor(() => expect(entries()).toHaveLength(2))
+    const rows = [...document.querySelectorAll('[data-slot="gh-thread-entry"], [data-slot="gh-event-row"]')]
+    // The timestamp-less row first, then the ordered ones — deterministic, whatever else changes.
+    expect(rows.map((r) => r.getAttribute('data-slot'))).toEqual([
+      'gh-thread-entry', 'gh-event-row', 'gh-thread-entry',
+    ])
   })
 
   it('tints a label chip from the event colour', async () => {
