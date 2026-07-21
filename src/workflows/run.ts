@@ -9,6 +9,11 @@ import { createRunner } from '../core/runner-factory.js';
 import type { RunnerId } from '../core/agent-runner.js';
 import { modelConflictsWithRunner } from '../core/model-presets.js';
 import {
+  ModelIdentityError,
+  formatModelIdentity,
+  normalizeModelForBackend,
+} from '../core/model-identity.js';
+import {
   HANDOFF_ONLY_INSTRUCTIONS,
   HANDOFF_INSTRUCTIONS,
   appendHandoffHeartbeat,
@@ -1010,7 +1015,44 @@ export class RunManager {
 
     // Backend + model come off the record: the run's current backend by default, or the
     // follow-up override that `continueRun` persisted before scheduling (#401).
-    const runner = createRunner(record?.runner ?? 'claude');
+    const continueBackend = record?.runner ?? 'claude';
+    // Apply the SAME canonical-identity gate the first spawn applies (#405, review M1).
+    // A follow-up may switch both runner and model (#401), so without this the record keeps
+    // asserting the identity the run STARTED with while a different model serves the turn —
+    // the exact defect this PR exists to remove — and the raw record string reaches the CLI
+    // in the un-normalised wire form the first step already converted away (`anthropic/opus`
+    // instead of `opus`). Fail loud here too rather than let the backend pick a default.
+    let continueModel: string | undefined;
+    try {
+      const normalized = normalizeModelForBackend(continueBackend, record?.model);
+      continueModel = normalized?.backendModel;
+      this.store.updateRun(runId, {
+        modelIdentity: normalized ? formatModelIdentity(normalized.identity) : undefined,
+      });
+    } catch (err) {
+      if (!(err instanceof ModelIdentityError)) throw err;
+      const failedAt = new Date().toISOString();
+      sink.sessionEnded('error', err.message);
+      this.store.updateStep(runId, stepId, {
+        status: 'failed',
+        error: err.message,
+        finishedAt: failedAt,
+      });
+      this.store.updateRun(runId, {
+        status: 'failed',
+        error: `continue failed: ${err.message}`,
+        finishedAt: failedAt,
+        currentStepId: undefined,
+      });
+      this.store.appendEvent(runId, {
+        type: 'lifecycle',
+        message: `continue failed — ${err.message}`,
+      });
+      this.dropActive(runId);
+      void this.pump();
+      return;
+    }
+    const runner = createRunner(continueBackend);
     const session = runner.startSession(
       {
         // The Continue step is a fresh agent session on the same run — the
@@ -1025,7 +1067,7 @@ export class RunManager {
         allowedTools: DEFAULT_ALLOWED_TOOLS,
         additionalDirectories: [join(this.dataDir, 'runs')],
         env: this.agentEnv(runId, generateFollowups),
-        model: record?.model,
+        model: continueModel,
         sessionId,
         resume: true,
         timeoutMs: 0,
@@ -1097,11 +1139,24 @@ export class RunManager {
     // Extra system prompt (R2 2.3): POST override > config default; echoed on
     // the record so the UI/API can show what the run actually used.
     const extraSystemPrompt = resolveExtraSystemPrompt(input.systemPrompt, config.systemPrompt);
+    // Canonical provider/model identity (#405) — the normalised `provider/model`
+    // the task ran with, persisted for cost attribution / reproducible replay
+    // beside the free-text `model`. Best-effort here (a per-step `runner`/`model`
+    // can still override below); the authoritative fail-loud gate is at spawn.
+    let modelIdentity: string | undefined;
+    try {
+      const normalized = normalizeModelForBackend(taskBackend, input.model);
+      modelIdentity = normalized ? formatModelIdentity(normalized.identity) : undefined;
+    } catch {
+      // An unresolvable task-level model surfaces loudly at the step below; the
+      // metadata echo stays absent rather than guessing.
+    }
     this.store.updateRun(runId, {
       status: 'running',
       startedAt: new Date().toISOString(),
       runner: taskBackend,
       systemPrompt: extraSystemPrompt,
+      modelIdentity,
     });
     emit({ type: 'lifecycle', message: `run started — workflow "${workflow.name}" (runner: ${taskBackend})` });
 
@@ -1473,7 +1528,27 @@ export class RunManager {
       }
     };
 
-    const runner = createRunner(step.runner ?? taskBackend);
+    const stepBackend = step.runner ?? taskBackend;
+    // Normalise the selected model to canonical `provider/model` and back to the
+    // backend's own wire form via the ONE shared mapper (#405). Fail-loud: an
+    // unresolvable model (e.g. a bare id on opencode) returns the step error
+    // instead of letting the backend silently substitute its default.
+    let backendModel: string | undefined;
+    try {
+      const normalized = normalizeModelForBackend(stepBackend, step.model ?? input.model);
+      backendModel = normalized?.backendModel;
+      // Persist the identity of what ACTUALLY runs (#405, review M1). The run-start echo
+      // (line ~993) is best-effort from `taskBackend`/`input.model`; a per-step `runner`/`model`
+      // override makes it assert a model that never ran. Re-write it here, from the resolved
+      // step identity, so the record — the product of this PR — is always one that ran.
+      this.store.updateRun(runId, {
+        modelIdentity: normalized ? formatModelIdentity(normalized.identity) : undefined,
+      });
+    } catch (err) {
+      if (err instanceof ModelIdentityError) return err.message;
+      throw err;
+    }
+    const runner = createRunner(stepBackend);
     let session: AgentSession;
     try {
       session = runner.startSession(
@@ -1495,7 +1570,7 @@ export class RunManager {
           // The handoff file lives outside the worktree — grant access.
           additionalDirectories: [join(this.dataDir, 'runs')],
           env: this.agentEnv(runId, followupsEnabled() && input.generateFollowups !== false),
-          model: step.model ?? input.model,
+          model: backendModel,
           sessionId,
           // Interactive sessions have no wall clock — the idle timer rules.
           timeoutMs: interactive ? 0 : undefined,
