@@ -1,36 +1,31 @@
 # Handoff — 2026-07-20-multi-project-workspace
 
-**Last updated (cp5):** 2026-07-21T07:30:00Z — was 2026-07-20T17:31:20Z (cp4)
+**Last updated (cp6):** 2026-07-21T10:15:00Z — was 2026-07-21T07:30:00Z (cp5)
 **Branch:** feat/multi-project-workspace
 **PR:** https://github.com/open-mercato/cezar/pull/521 (three-signal lock held by pkarw)
-**Current phase/step:** Phase 4 Step 4.1
-**Last commit:** 3ccc943 — test(e2e): realign the suite with the project-scoped URL grammar (step 3.8)
+**Current phase/step:** Phase 5 Step 5.1
+**Last commit:** a0fb7f4 — test(e2e): pin the shared env registry shape + grouped-sidebar coverage (step 4.5)
 
 ## What just happened
 
-- **Phase 3 complete (3.1–3.8).** This resume landed 3.3–3.8: multi-project
-  sidebar with collapse persisted through `/api/workspace/ui-state`; new-task
-  project pill (per-project drafts, scoped submit); settings split into project
-  (`/p/<id>/settings`) and global (`/settings/global`) areas with store moves;
-  project-scoped bookmarklets; Phase 3 `BACKWARD_COMPATIBILITY.md`; and a
-  fix-forward e2e realignment.
-- **Checkpoint 5 green** on the full gate: typecheck, 3030/3030 unit,
-  test:unit 31/31, build + check:pack, test:package 8/8.
-- **Two real defects found and fixed en route** (details in `NOTIFY.md`):
-  1. A latent Step-3.1 `ProjectScopeProvider` effect-ordering bug — the scope
-     was nulled from an effect *cleanup*, so the arriving project's first
-     requests went out unprefixed and cached under the wrong key. Fixed inside
-     3.4 (its acceptance test cannot pass without it).
-  2. The e2e harness was mutating the operator's real `~/.cezar/config.json`
-     (16 dead fixture entries pruned) and four specs depended on the operator's
-     shell for `CEZ_REVIEW_GATE`. Fixed in 3.8.
+- **Phase 4 complete (4.1–4.5).** `GET /api/fs/browse` with realpath
+  containment; `POST /api/projects` + the folder-browser dialog;
+  `POST /api/projects/checkout` with `checkout-progress` SSE and partial-clone
+  cleanup; `DELETE /api/projects/:id` + the global Projects settings pane; and
+  a fix-forward that pins the shared e2e env's registry shape.
+- **Checkpoint 6 green**: typecheck, 3098/3098 unit, test:unit 31/31, build +
+  check:pack, test:package 8/8. E2E 166 passed / 3 failed — exactly the three
+  documented pre-existing residuals.
+- Phase 3's earlier work and its two defect fixes are recorded in
+  `checkpoint-5-checks.md`; Phase 4's security review of the browse containment,
+  the clone cleanup guard, and the deregister-only removal is in
+  `checkpoint-6-checks.md`.
 
 ## Next concrete action
 
-- Dispatch **Step 4.1**: `GET /api/fs/browse` — home-rooted, realpath
-  containment, dirs only, `CEZ_REMOTE` restriction. Security-sensitive: path
-  escape attempts must be rejected, and the step's own test asks for exactly
-  that plus the `isRepo` flag.
+- Dispatch **Step 5.1**: docs — AGENTS.md routing rows, README multi-project
+  section, `.env.example`. Then 5.2 (`cezar projects` CLI) and 5.3 (file the
+  `liveInstancesExist()` follow-up issue), then the final gate.
 
 ## Blockers / open questions
 
@@ -38,8 +33,9 @@
   - **Branch is 29 ahead / 20 behind `origin/main`.** Merge `main` before this
     lands; two of the four residual e2e failures trace to `mock-claude.mjs`
     turn semantics that `main` has since changed (#473).
-  - The global **Projects** settings pane is a routed `comingSoon` scaffold
-    from 3.5 — **Step 4.4 owns filling it in**.
+  - The Step-4.3 clone dialog surfaces a missing `gh` as a 503 in the DIALOG
+    rather than disabling the menu item (the shell renders without a
+    QueryClient). Deliberate; recorded in `NOTIFY.md`.
 
 ## Environment caveats
 
@@ -50,10 +46,14 @@
   checkpoint 5 is why this line exists.
 - 4 residual e2e failures are pre-existing and individually accounted for in
   `checkpoint-5-checks.md`; do not chase them as regressions.
-- Test env: `sh .ai/scripts/test-env-up.sh` (reuses a healthy env);
-  agent-browser 0.32.1 installed. The registry under `.ai/qa/cez-home` now has
-  three real projects registered for evidence capture — that is deliberate, and
-  it is what makes the grouped sidebar render.
+- Test env: `env -u CEZ_REMOTE sh .ai/scripts/test-env-up.sh` (reuses a healthy
+  env); agent-browser 0.32.1 installed. **Boot it with `CEZ_REMOTE` scrubbed** —
+  the operator's shell exports `CEZ_REMOTE=1`, which puts the server in hosted
+  mode and narrows `/api/fs/browse`'s root to a `projectsDir` that does not
+  exist, so the add-project dialog answers "browse root is not available".
+- The shared registry (`.ai/qa/cez-home/config.json`) is now pinned per-run by
+  Step 4.5's vitest `globalSetup`, so e2e no longer depends on its local shape.
+  Leave it at `projects: []`; do not hand-register projects into it.
 
 ## Worktree
 
