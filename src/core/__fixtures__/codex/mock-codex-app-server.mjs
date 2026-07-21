@@ -18,8 +18,19 @@ rl.on('line', (line) => {
   }
   if (msg.method === 'initialize') {
     emit({ id: msg.id, result: { userAgent: 'mock-codex/0.0.0' } });
-  } else if (msg.method === 'thread/start') {
-    emit({ method: 'thread/started', params: { thread: { id: 'th_mock_1' } } });
+  } else if (msg.method === 'thread/start' || msg.method === 'thread/resume') {
+    const expectedSandbox = process.env.CEZ_CODEX_NETWORK === '0' ? 'workspace-write' : 'danger-full-access';
+    if (msg.params?.sandbox !== expectedSandbox || msg.params?.approvalPolicy !== 'never') {
+      emit({ id: msg.id, error: { code: -32602, message: `expected ${expectedSandbox} auto permissions` } });
+      return;
+    }
+    if (process.argv.includes('sandbox_workspace_write.network_access=true')) {
+      emit({ id: msg.id, error: { code: -32602, message: 'workspace-write override is obsolete in full-access mode' } });
+      return;
+    }
+    if (msg.method === 'thread/start') {
+      emit({ method: 'thread/started', params: { thread: { id: 'th_mock_1' } } });
+    }
     emit({ id: msg.id, result: { thread: { id: 'th_mock_1' } } });
   } else if (msg.method === 'turn/start') {
     emit({ id: msg.id, result: { turn: { id: 'turn_mock_1' } } });
