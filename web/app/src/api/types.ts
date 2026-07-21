@@ -522,13 +522,60 @@ export interface GithubComment {
   url: string
 }
 
+/** The timeline event kinds the thread renders (#525) — an allowlist, so an unknown GitHub event
+ *  type is dropped server-side rather than reaching the client. Mirrors
+ *  `ForgeTimelineEventKind`. */
+export type GithubTimelineEventKind =
+  | 'committed'
+  | 'labeled'
+  | 'unlabeled'
+  | 'assigned'
+  | 'unassigned'
+  | 'merged'
+  | 'closed'
+  | 'reopened'
+  | 'head_ref_force_pushed'
+  | 'cross-referenced'
+  | 'renamed'
+
+/** One non-comment timeline row (#525) — commit, label change, assignment, merge, force-push,
+ *  cross-reference or rename. Mirrors `ForgeTimelineEvent`. Deliberately a separate type from
+ *  `GithubComment` rather than a widened `kind`, which would break narrowing below. */
+export interface GithubTimelineEvent {
+  id: string
+  kind: GithubTimelineEventKind
+  /** Login — or the git author name for `committed`, which carries no GitHub actor. */
+  actor: string
+  /** Absent for `committed`. */
+  avatarUrl?: string
+  createdAt: string
+  url?: string
+  /** `committed` — full 40-char SHA. */
+  sha?: string
+  /** `committed` — first line, capped at 120 chars. */
+  message?: string
+  /** `committed` — **absent** (lookup failed/skipped) and **`null`** (no CI configured) both
+   *  render no glyph, but stay distinct values. */
+  checks?: 'passing' | 'failing' | 'pending' | null
+  label?: { name: string; color?: string }
+  /** `assigned`/`unassigned` login, or the new title for `renamed`. */
+  subject?: string
+  refNumber?: number
+  refTitle?: string
+  refIsPr?: boolean
+}
+
 /** `GET /api/github/comments/:kind/:number` — degrades to `{ available: false, reason }` like the
  *  list fetch, never an error. */
 export interface GithubCommentsData {
   available: boolean
   reason?: string
   comments: GithubComment[]
+  /** True when either stream hit its cap, or the timeline fetch stopped short. */
   truncated?: boolean
+  /** Timeline events (#525) — additive and optional; absent when the server degraded to the
+   *  legacy comments-only fetch. Capped independently of `comments`. */
+  events?: GithubTimelineEvent[]
 }
 
 // ---- GUI prefs (`PUT /api/ui-state`) -----------------------------------------------------------
