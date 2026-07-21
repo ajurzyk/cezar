@@ -47,10 +47,10 @@ PR: #571
 
 ### Phase 1: Clone-dialog shortcut
 
-- [ ] 1.1 Add the accessible settings icon control and responsive target-preview layout.
-- [ ] 1.2 Add unit coverage for its exact destination, accessible name, and pending state.
+- [x] 1.1 Add the accessible settings icon control and responsive target-preview layout. — b4e9704
+- [x] 1.2 Add unit coverage for its exact destination, accessible name, and pending state. — b4e9704
 
 ### Phase 2: Verification and delivery
 
-- [ ] 2.1 Run targeted validation, remove scope creep, and commit the implementation.
+- [x] 2.1 Run targeted validation, remove scope creep, and commit the implementation. — b4e9704
 - [ ] 2.2 Run the complete repository gate and both review passes; normalize the existing PR.
