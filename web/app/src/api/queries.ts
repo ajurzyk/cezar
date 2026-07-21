@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import {
   browseFs,
+  checkoutProject,
   getConfig,
   getGithub,
   getGithubComments,
@@ -34,7 +35,7 @@ import {
   sendMessage,
 } from './client'
 import { queryScope } from './project-scope'
-import type { MessageInput, PatchRunInput } from './types'
+import type { CheckoutProjectInput, MessageInput, PatchRunInput } from './types'
 
 /**
  * Query keys, in one place and exported, because they are a contract rather than an
@@ -170,6 +171,24 @@ export function useRegisterProject() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (root: string) => registerProject(root),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.projects }),
+  })
+}
+
+/**
+ * Clone a GitHub repo into the checkout root and register it (`POST /api/projects/checkout`,
+ * step 4.3). Same registry invalidation as `useRegisterProject` and for the same reason — the
+ * caller navigates to `/p/<id>/`, and the route gate reads that query to decide the id is known.
+ *
+ * No retry: a clone is a long, side-effecting call. Re-running it after a failure would race
+ * the server's own cleanup of the partial directory and land on the 409 instead of the real
+ * error, which is precisely the confusing outcome the cleanup exists to prevent.
+ */
+export function useCheckoutProject() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (input: CheckoutProjectInput) => checkoutProject(input),
+    retry: false,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.projects }),
   })
 }

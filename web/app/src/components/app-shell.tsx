@@ -12,6 +12,7 @@ import type { ReactNode } from 'react'
 import { Link as RouterLink, useLocation } from 'react-router'
 
 import { AddProjectDialog } from '@/components/add-project-dialog'
+import { CloneProjectDialog } from '@/components/clone-project-dialog'
 import { openCommandPalette } from '@/components/command-palette'
 import { GithubIcon } from '@/components/icons'
 import { Link, stripProjectPrefix } from '@/lib/project-router'
@@ -460,17 +461,24 @@ function GlobalSettingsLink({
 /**
  * The "Add project" dropdown beside the New task CTA (multi-project spec, "Sidebar → Header").
  *
- * "Open local folder…" opens the folder-browser dialog (step 4.2). "Clone from GitHub…" stays
- * disabled until step 4.3 wires the checkout flow — a disabled item over a hidden one, so the
- * menu still says what is coming rather than pretending the option does not exist.
+ * "Open local folder…" opens the folder-browser dialog (step 4.2); "Clone from GitHub…" opens
+ * the checkout dialog (step 4.3).
  *
- * The dialog is mounted only while open, ON PURPOSE: it is the one part of this shell that
+ * Neither item is gh-gated here, deliberately. The spec's "disabled with a reason when `gh` is
+ * unavailable" would mean reading `GET /api/health` from this component — and the dialogs are
+ * mounted only while open precisely BECAUSE this shell must keep rendering where no QueryClient
+ * is provided. So the degradation lands one click later instead, in the dialog, which shows the
+ * server's own `gh CLI not found — install it and run 'gh auth login'` verbatim: the same
+ * information, at the moment it is actionable, without a query in the shell.
+ *
+ * The dialogs are mounted only while open, ON PURPOSE: they are the one part of this shell that
  * talks to the API (queries + a mutation), and the shell itself must keep rendering in the
  * places that mount it without a QueryClient. The cost is no close animation, which is the
  * cheaper half of the trade.
  */
 function AddProjectMenu() {
   const [browsing, setBrowsing] = React.useState(false)
+  const [cloning, setCloning] = React.useState(false)
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -491,12 +499,13 @@ function AddProjectMenu() {
           <FolderIcon aria-hidden="true" />
           Open local folder…
         </DropdownMenuItem>
-        <DropdownMenuItem disabled data-slot="add-project-clone">
+        <DropdownMenuItem data-slot="add-project-clone" onSelect={() => setCloning(true)}>
           <GithubIcon aria-hidden="true" />
-          Clone from GitHub… (soon)
+          Clone from GitHub…
         </DropdownMenuItem>
       </DropdownMenuContent>
       {browsing ? <AddProjectDialog open onOpenChange={setBrowsing} /> : null}
+      {cloning ? <CloneProjectDialog open onOpenChange={setCloning} /> : null}
     </DropdownMenu>
   )
 }

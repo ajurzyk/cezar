@@ -3,6 +3,7 @@ import type {
   ArchiveFinishedResponse,
   CancelResponse,
   ChangesPayload,
+  CheckoutProjectInput,
   ConfigResponse,
   ReclaimWorktreesResponse,
   RemoveWorktreeResponse,
@@ -368,6 +369,23 @@ export async function registerProject(root: string): Promise<RegisterProjectResp
   }
   if (!res.ok) throw errorFor(res.status, res.statusText, body)
   throw new ApiError(res.status, `the cezar server answered ${path} without a project`)
+}
+
+/**
+ * Clone a GitHub repo into the checkout root and register it (`POST /api/projects/checkout`,
+ * step 4.3).
+ *
+ * Ordinary `mutate()`, unlike `registerProject` above: every non-2xx here IS a failure the
+ * dialog must show (a 409 means the target folder exists, and there is no entry to navigate
+ * to). `mutate` already surfaces the server's `{ error }` string as the ApiError message, which
+ * is exactly what the dialog renders — a clone fails for reasons only the server can name.
+ *
+ * No timeout of our own: cloning a large repo legitimately takes minutes, and the request is
+ * what the dialog waits on. Progress meanwhile comes from `checkout-progress` on the workspace
+ * stream, keyed by `input.checkoutId`.
+ */
+export function checkoutProject(input: CheckoutProjectInput): Promise<RegisterProjectResponse> {
+  return mutate<RegisterProjectResponse>('POST', '/api/projects/checkout', input)
 }
 
 // ---- run mutations ------------------------------------------------------------------------

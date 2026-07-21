@@ -266,6 +266,27 @@ export interface RegisterProjectResponse {
   error?: string
 }
 
+/** `POST /api/projects/checkout` (multi-project spec, step 4.3) — the clone-from-GitHub body.
+ *  `name` defaults server-side to the repo name; `checkoutId` is the cockpit's own correlation
+ *  token, echoed on every `checkout-progress` event so two tabs cloning at once never render
+ *  each other's progress. */
+export interface CheckoutProjectInput {
+  url: string
+  name?: string
+  checkoutId?: string
+}
+
+/** One `checkout-progress` workspace SSE payload (step 4.3). `cloning` carries one line of
+ *  `git clone` output; `done`/`error` are terminal. The dialog shows `error` VERBATIM — a
+ *  clone fails for reasons (auth, network, a typo'd repo) only the server can name. */
+export interface CheckoutProgressEvent {
+  checkoutId?: string
+  name: string
+  phase: 'cloning' | 'done' | 'error'
+  line?: string
+  error?: string
+}
+
 /** One directory in a `GET /api/fs/browse` listing (multi-project spec, step 4.1). `path` is
  *  absolute — same-origin route, like `ProjectListEntry.root`. */
 export interface FsBrowseDir {

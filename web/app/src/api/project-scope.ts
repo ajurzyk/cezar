@@ -46,7 +46,8 @@ export function queryScope(): string {
 /**
  * Workspace-level routes — single-mount on the server (`app.get`, never mirrored under
  * `/api/p/`), so prefixing them would 404. `/api/workspace/*` (config, ui-state, events),
- * `/api/projects` (the registry, GET + the step 4.2 POST), `/api/fs/*` (the folder picker —
+ * `/api/projects` (the registry, GET + the step 4.2 POST + the step 4.3 `/checkout`),
+ * `/api/fs/*` (the folder picker —
  * one filesystem, not one per project), and `/api/health` (CORS-open, boot-bound by design).
  */
 const WORKSPACE_LEVEL = /^\/api\/(?:health$|projects(?:$|[/?])|workspace\/|fs\/)/

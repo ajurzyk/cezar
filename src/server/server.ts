@@ -65,6 +65,7 @@ import {
 } from '../workspace/projects.js';
 import { WorkspaceSemaphore } from '../workspace/semaphore.js';
 import { mergeWriteWorkspaceUiState, readWorkspaceUiState } from '../workspace/ui-state.js';
+import { checkoutRepo, type CloneRunner } from './checkout.js';
 import { ProjectContextError, ProjectContexts, type ProjectContext } from './project-context.js';
 import { reviewGateEnabled } from '../runs/review-gate.js';
 import { readUiState, uiStatePath } from '../ui-state.js';
@@ -114,6 +115,11 @@ export interface ServerDeps {
    *  streams through this. Optional — createApp builds a private one; inject
    *  to emit from outside the app (tests, future CLI hooks). */
   workspaceEvents?: WorkspaceEventBus;
+  /** How `POST /api/projects/checkout` (step 4.3) actually clones. Defaults to
+   *  `gh repo clone` (or the `CEZ_DRY_RUN=1` fake) — injected by tests so the
+   *  route's guards, cleanup and error surfacing are exercised for real
+   *  against real temp dirs, without a network or a `gh` binary. */
+  cloneRunner?: CloneRunner;
 }
 
 // ---- project-scoped routing (multi-project spec, step 2.2) -----------------
@@ -812,6 +818,18 @@ export function createApp(deps: ServerDeps): Hono {
   // health), so absolute `root`s are fine here. `listProjects()` TTL-caches
   // its per-root status/branch probes, so a burst of renders never shells git
   // N times. Never 404s: empty or unreadable registry → `projects: []`.
+  /** The configured checkout root, as WRITTEN (`~` kept — callers that touch
+   *  the filesystem expand it). An unreadable workspace degrades to the
+   *  default rather than failing the request: every caller here is a route
+   *  that must keep answering. */
+  const workspaceProjectsDir = async (): Promise<string> => {
+    try {
+      return (await loadWorkspaceConfig()).projectsDir;
+    } catch {
+      return defaultWorkspaceConfig().projectsDir;
+    }
+  };
+
   app.get('/api/projects', async (c) => {
     let projects: ProjectListEntry[] = [];
     let projectsDir = defaultWorkspaceConfig().projectsDir;
@@ -834,38 +852,39 @@ export function createApp(deps: ServerDeps): Hono {
   // GET twin. Everything here is a guard; the registry write itself is one
   // idempotent `registerProject` call.
   const registerProjectSchema = z.object({ root: z.string().trim().min(1).max(4096) });
-  app.post('/api/projects', async (c) => {
-    const parsed = registerProjectSchema.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) return c.json({ error: 'root must be a non-empty path' }, 400);
-    const spelled = parsed.data.root;
+
+  /**
+   * The register-a-folder half of `POST /api/projects`, factored out so the
+   * checkout route (step 4.3) commits its fresh clone through the SAME guards
+   * and the same `project-added` emission rather than a second copy of them.
+   * Returns the status + body for the caller to answer with.
+   */
+  const registerFolder = async (
+    spelled: string,
+    source: 'local' | 'checkout',
+  ): Promise<{ status: 200 | 400 | 409 | 500; body: RegisterProjectResponse | { error: string } }> => {
     // `~` is expanded for the same reason `/api/fs/browse` expands it: the
     // dialog hands back absolute paths, but a hand-written body (curl, a
     // future CLI) spells home the way a shell does.
     const requested = expandTilde(spelled);
     if (!requested.startsWith('/')) {
-      return c.json({ error: `not a folder: ${spelled} is not an absolute path` }, 400);
+      return { status: 400, body: { error: `not a folder: ${spelled} is not an absolute path` } };
     }
     // Existence is checked HERE rather than left to `registerProject` (which
     // degrades a failed realpath to a plain resolve): a registry full of
     // `missing` rows the user never had is worse than a 400 they can act on.
     const info = await stat(requested).catch(() => null);
-    if (!info?.isDirectory()) return c.json({ error: `no such folder: ${spelled}` }, 400);
+    if (!info?.isDirectory()) return { status: 400, body: { error: `no such folder: ${spelled}` } };
     // Hosted mode: the same root the picker is narrowed to, re-checked — see
     // `isInsideBrowseRoot`. Local mode deliberately has NO containment: a
     // project under `/srv/code` is a normal local setup and `cezar serve`
     // registers it today.
     if (!capabilities().localHandoff) {
-      let projectsDir = defaultWorkspaceConfig().projectsDir;
-      try {
-        projectsDir = (await loadWorkspaceConfig()).projectsDir;
-      } catch {
-        // unreadable workspace — the default checkout root is the honest fallback
-      }
-      const browseRoot = resolveBrowseRoot(true, projectsDir);
+      const browseRoot = resolveBrowseRoot(true, await workspaceProjectsDir());
       if (!(await isInsideBrowseRoot(browseRoot, requested))) {
         // No resolved path in the message (fs-browse's rule): saying where the
         // root is would hand a remote viewer the layout the narrowing hides.
-        return c.json({ error: 'folder is outside the browsable root' }, 400);
+        return { status: 400, body: { error: 'folder is outside the browsable root' } };
       }
     }
     // The boot-time auto-registration guard, applied to the manual gesture
@@ -874,10 +893,10 @@ export function createApp(deps: ServerDeps): Hono {
     // would have registered them. Reachable from the dialog, which starts at
     // `~` and can add the folder it is showing.
     if (!(await shouldRegisterProject(requested))) {
-      return c.json(
-        { error: `not a project folder: ${spelled} is your home directory or a cezar task worktree` },
-        400,
-      );
+      return {
+        status: 400,
+        body: { error: `not a project folder: ${spelled} is your home directory or a cezar task worktree` },
+      };
     }
     // Asked BEFORE the write, because `registerProject` is idempotent and
     // cannot tell us afterwards whether it appended or just bumped
@@ -891,22 +910,79 @@ export function createApp(deps: ServerDeps): Hono {
     }
     let project: ProjectListEntry;
     try {
-      const entry = await registerProject(requested, 'local');
+      const entry = await registerProject(requested, source);
       project = { ...entry, ...(await probeProjectStatus(entry.root)) };
     } catch (err) {
       // e.g. a read-only home — nothing was persisted (atomic tmp+rename).
-      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+      return { status: 500, body: { error: err instanceof Error ? err.message : String(err) } };
     }
     if (known) {
       // 409 with the EXISTING entry (spec): the dialog treats it as "you
       // already have this one" and navigates there rather than dead-ending.
-      const body: RegisterProjectResponse = { project, error: `already registered as ${project.id}` };
-      return c.json(body, 409);
+      return { status: 409, body: { project, error: `already registered as ${project.id}` } };
     }
     // Only a genuinely new project is an event — a re-add is a no-op for every
     // open cockpit's sidebar.
     workspaceEvents.emit('project-added', { project });
-    return c.json({ project } satisfies RegisterProjectResponse);
+    return { status: 200, body: { project } };
+  };
+
+  app.post('/api/projects', async (c) => {
+    const parsed = registerProjectSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: 'root must be a non-empty path' }, 400);
+    const { status, body } = await registerFolder(parsed.data.root, 'local');
+    return c.json(body, status);
+  });
+
+  // ---- GUI clone (multi-project spec, step 4.3) ----------------------------
+  // "Add project → Clone from GitHub": clone into the checkout root, then
+  // register the result through `registerFolder` above (same guards, same
+  // `project-added`). Everything dangerous — where the clone may land, and
+  // what a failed clone is allowed to delete — lives in src/server/checkout.ts.
+  //
+  // Long-running by design (the spec's contract): the response lands when the
+  // clone finishes, and the dialog's liveness comes from `checkout-progress`
+  // events on the workspace stream. `checkoutId` is the cockpit's own
+  // correlation token, echoed on every event so two tabs cloning at once never
+  // render each other's progress.
+  const checkoutSchema = z.object({
+    url: z.string().trim().min(1).max(512),
+    name: z.string().trim().max(128).optional(),
+    checkoutId: z.string().trim().max(128).optional(),
+  });
+  app.post('/api/projects/checkout', async (c) => {
+    const parsed = checkoutSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: 'url must be a GitHub repository' }, 400);
+    const { url, name, checkoutId } = parsed.data;
+    const result = await checkoutRepo({
+      url,
+      name,
+      checkoutId,
+      projectsDir: expandTilde(await workspaceProjectsDir()),
+      onProgress: (event) => workspaceEvents.emit('checkout-progress', event),
+      // A closed dialog / navigated-away tab aborts the request; the clone is
+      // killed and its partial directory removed rather than left running.
+      signal: c.req.raw.signal,
+      ...(deps.cloneRunner ? { run: deps.cloneRunner } : {}),
+    });
+    if (!result.ok) {
+      // `reason` rides along on the 503 (`gh` unavailable) — the spec's
+      // `{ error, reason }` degradation, mirroring the GitHub pane.
+      return c.json(
+        'reason' in result ? { error: result.error, reason: result.reason } : { error: result.error },
+        result.status,
+      );
+    }
+    const { status, body } = await registerFolder(result.target, 'checkout');
+    if (status !== 200) {
+      // The clone SUCCEEDED and its files are legitimately the user's, so this
+      // path deliberately does NOT clean up — an unregisterable checkout is a
+      // registry problem, not a reason to delete a repo we just fetched. Say
+      // where it is so they can register it by hand.
+      const error = 'error' in body && body.error ? body.error : 'could not register the checkout';
+      return c.json({ error: `${error} (the clone is at ${result.target})` }, status);
+    }
+    return c.json(body, 200);
   });
 
   // ---- workspace settings (multi-project spec, step 2.7) -------------------
@@ -1003,13 +1079,7 @@ export function createApp(deps: ServerDeps): Hono {
   // `projectsDir`, because a remote viewer has no business enumerating the
   // host's whole home. Read per request, so a `CEZ_REMOTE` flip applies live.
   app.get('/api/fs/browse', async (c) => {
-    let projectsDir = defaultWorkspaceConfig().projectsDir;
-    try {
-      projectsDir = (await loadWorkspaceConfig()).projectsDir;
-    } catch {
-      // unreadable workspace — the default checkout root is the honest fallback
-    }
-    const root = resolveBrowseRoot(!capabilities().localHandoff, projectsDir);
+    const root = resolveBrowseRoot(!capabilities().localHandoff, await workspaceProjectsDir());
     const result = await browseDirectory({
       root,
       path: c.req.query('path'),

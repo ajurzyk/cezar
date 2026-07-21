@@ -12,7 +12,7 @@ import {
   type UsageStore,
 } from './events'
 import { getApiScope } from './project-scope'
-import { queryKeys } from './queries'
+import { queryKeys, workspaceQueryKeys } from './queries'
 import type { ApiRun, HealthResponse, ProcessUsage } from './types'
 
 /**
@@ -50,6 +50,36 @@ const REOPEN_DELAY_MS = 3_000
 /** Everything the stream is allowed to say. An unknown name never reaches `parseGlobalEvent`,
  *  because SSE only delivers named events to a matching listener in the first place. */
 const EVENT_NAMES = ['run', 'run-deleted', 'todos', 'usage', 'ping'] as const
+
+/**
+ * The workspace-only names (server: `WorkspaceEventName`). Unlike the list above these are not
+ * project-stamped and never patch a run cache — they are registry news, so they invalidate the
+ * projects query (the sidebar grows/loses a group without a reload) and fan out to whoever
+ * subscribed via `onWorkspaceEvent`.
+ */
+const WORKSPACE_EVENT_NAMES = ['project-added', 'project-removed', 'checkout-progress'] as const
+
+type WorkspaceEventName = (typeof WORKSPACE_EVENT_NAMES)[number]
+
+const workspaceListeners = new Set<(name: WorkspaceEventName, payload: unknown) => void>()
+
+/**
+ * Subscribe to the workspace-level events on the one stream. Returns an unsubscribe.
+ *
+ * A module-level registry rather than a React context because the subscriber (the clone dialog,
+ * step 4.3) is mounted far from the provider and cares about exactly one event id — a context
+ * carrying every payload would re-render the whole tree on each `git clone` progress line.
+ * Payloads are handed over RAW (parsed JSON, unvalidated): each listener knows the shape of the
+ * event it asked for, and inventing a second parser here would only duplicate events.ts.
+ */
+export function onWorkspaceEvent(
+  listener: (name: WorkspaceEventName, payload: unknown) => void,
+): () => void {
+  workspaceListeners.add(listener)
+  return () => {
+    workspaceListeners.delete(listener)
+  }
+}
 
 /**
  * Refetch the authoritative endpoints.
@@ -190,6 +220,25 @@ export function useGlobalEvents(usage: UsageStore, url: string = SSE_URL): void 
           // the rest. `ping` (project null) always passes — liveness is not project-owned.
           if (parsed.project !== null && parsed.project !== activeProject(queryClient)) return
           applyGlobalEvent(queryClient, usage, parsed.event)
+        })
+      }
+
+      for (const name of WORKSPACE_EVENT_NAMES) {
+        source.addEventListener(name, (event) => {
+          let payload: unknown
+          try {
+            payload = JSON.parse((event as MessageEvent<string>).data)
+          } catch {
+            return
+          }
+          // A registry mutation changes the sidebar for every open tab, not just the one that
+          // clicked. `checkout-progress` is deliberately NOT in this branch: a clone emits a
+          // line every few hundred ms, and re-listing the registry on each would turn one clone
+          // into a request flood (the dialog's own success handler invalidates once, at the end).
+          if (name !== 'checkout-progress') {
+            void queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.projects })
+          }
+          for (const listener of [...workspaceListeners]) listener(name, payload)
         })
       }
 

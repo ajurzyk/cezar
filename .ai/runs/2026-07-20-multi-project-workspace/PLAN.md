@@ -38,8 +38,9 @@
 | 3 | 3.8 | Realign the e2e suite with the project-scoped URL grammar (fix-forward from checkpoint 5) | done | 0616b58 |
 | 4 | 4.1 | `GET /api/fs/browse` (home-rooted, realpath containment, `CEZ_REMOTE` restriction) | done | af5e8ec |
 | 4 | 4.2 | Folder-browser dialog → `POST /api/projects` | done | e61c4f6 |
-| 4 | 4.3 | `POST /api/projects/checkout` + `checkout-progress` SSE + partial-clone cleanup + dialog flow | todo | |
+| 4 | 4.3 | `POST /api/projects/checkout` + `checkout-progress` SSE + partial-clone cleanup + dialog flow | done | bdeb159 |
 | 4 | 4.4 | Global Projects settings pane: list/remove, `projectsDir` field with inline validation | todo | |
+| 4 | 4.5 | Make shared-env e2e deterministic about registry shape (fix-forward from Step 4.2 triage) | todo | |
 | 5 | 5.1 | Docs: AGENTS.md routing rows, README multi-project section, `.env.example` | todo | |
 | 5 | 5.2 | `cezar projects` CLI + server-install docs note | todo | |
 | 5 | 5.3 | File follow-up issue: retire `liveInstancesExist()` / `~/.cezar/instances/` | todo | |
