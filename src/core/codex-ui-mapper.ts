@@ -462,8 +462,24 @@ function reasoningItem(
   state: CodexUiMapperState,
 ): UiReasoningItem {
   const streamed = state.reasonings.get(id);
-  const summary = longer(str(raw.summary), str(streamed?.summary));
-  return { kind: 'reasoning', id, text: str(raw.content) ?? str(streamed?.text) ?? summary ?? '' };
+  // app-server v2 snapshots use arrays for both fields. Deltas remain scalar
+  // strings, and older recorded transcripts may still contain scalar snapshots,
+  // so accept both without weakening the untrusted-wire boundary.
+  const summary = longer(reasoningSnapshotText(raw.summary), str(streamed?.summary));
+  return {
+    kind: 'reasoning',
+    id,
+    text: reasoningSnapshotText(raw.content) ?? str(streamed?.text) ?? summary ?? '',
+  };
+}
+
+/** Join app-server reasoning parts without flattening their boundaries. Scalar
+ *  strings remain accepted for replay compatibility with older transcripts. */
+function reasoningSnapshotText(value: unknown): string | undefined {
+  if (typeof value === 'string') return str(value);
+  if (!Array.isArray(value)) return undefined;
+  const parts = value.filter((part): part is string => typeof part === 'string' && part !== '');
+  return parts.length > 0 ? parts.join('\n') : undefined;
 }
 
 /** The longer of two optional strings — neither present yields undefined. */

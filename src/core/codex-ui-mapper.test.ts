@@ -54,6 +54,8 @@ const GOLDEN_FIXTURES = [
   // Reasoning streamed as textDelta and closed with a summary-only
   // `item/completed` — the wire shape #528 was reported against.
   'reasoning-stream',
+  // Current app-server v2 snapshot shape: summary/content are string arrays.
+  'reasoning-snapshot-arrays',
   'command-lifecycle',
   'file-change-and-mcp',
   // NOT app-server wire truth: codex has no `todoList` item and no `item/updated`
