@@ -223,6 +223,11 @@ function VirtualFiles({
   // run header, toolbar and totals line above it). Measured, not assumed — header height
   // varies by breakpoint and content. A stale value only shifts the overscan window
   // (buffered), so re-measuring on viewport resize is enough.
+  //
+  // The scroller is resolved from THIS component's own element, not handed down from the
+  // parent's ref callback: React attaches refs child-first, so a parent element's callback
+  // runs AFTER this layout effect: the ref would still be null here, `measure()` would bail,
+  // and with stable deps it would never run again — pinning startMargin at 0 forever.
   const [startMargin, setStartMargin] = useState(0)
   useLayoutEffect(() => {
     const measure = () => {
@@ -244,7 +249,14 @@ function VirtualFiles({
   }, [scrollElRef])
 
   return (
-    <div ref={containerRef} data-slot="diff-files" data-virtualized="true">
+    <div
+      ref={(el) => {
+        containerRef.current = el
+        if (el) scrollElRef.current = el.closest<HTMLElement>('[data-slot="main"]')
+      }}
+      data-slot="diff-files"
+      data-virtualized="true"
+    >
       <Virtualizer ref={handleRef} scrollRef={scrollElRef} startMargin={startMargin}>
         {files.map((file) => (
           <div key={fileKey(file)} data-slot="diff-file-slot" className="pb-3">
