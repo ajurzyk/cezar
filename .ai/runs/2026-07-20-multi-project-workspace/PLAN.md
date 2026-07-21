@@ -46,6 +46,7 @@
 | 5 | 5.3 | File follow-up issue: retire `liveInstancesExist()` / `~/.cezar/instances/` | done | (issue #535) |
 | 5 | 5.4 | Make `resources.worktreeRetentionDefault` actually seed per-project retention (fix-forward from Step 5.1) | done | 4950ea0 |
 | 5 | 5.5 | Apply code-review fixes: notes.md debris, redirect query/hash loss, hosted existence oracle | done | 9395221 |
+| 5 | 5.6 | De-flake `project-groups.e2e.ts` (state-driven group expansion) | done | f02fc78 |
 
 ## Goal
 

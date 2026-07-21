@@ -132,6 +132,36 @@ const groupHeader = (projectId: string) =>
 const groupBody = (projectId: string) =>
   `[data-slot="project-group"][data-project="${projectId}"] [data-slot="project-group-body"]`
 
+/**
+ * Toggle a group to `expanded` and wait until it really is.
+ *
+ * A bare `click` + wait-for-body is a race: `gotoGrouped` waits for the group to EXIST, and an
+ * element exists a beat before React has wired its handler, so an early click is swallowed and
+ * the body never arrives. Asserting the header's own `aria-expanded` first proves the row is
+ * rendered WITH state, and re-clicking on a missed toggle makes the helper idempotent — call it
+ * on an already-open group and it returns without touching anything, so a test never has to
+ * assume which state a previous test left behind.
+ */
+function setGroupExpanded(projectId: string, expanded: boolean): void {
+  const header = groupHeader(projectId)
+  const state = `document.querySelector('${header}')?.getAttribute('aria-expanded')`
+  browser.waitForFunction(`${state} !== null && ${state} !== undefined`)
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (browser.evaluate(state) === String(expanded)) break
+    browser.click(header)
+    try {
+      browser.waitForFunction(`${state} === '${expanded}'`)
+      break
+    } catch {
+      // Click landed before the handler did. Fall through and try again.
+    }
+  }
+  browser.waitForFunction(`${state} === '${expanded}'`)
+  browser.waitForFunction(
+    `document.querySelector('${groupBody(projectId)}') ${expanded ? '!==' : '==='} null`
+  )
+}
+
 describe('the grouped multi-project sidebar', () => {
   it('replaces the flat nav with one group per registered project', () => {
     gotoGrouped(scoped(bootProject, '/'))
@@ -166,8 +196,7 @@ describe('the grouped multi-project sidebar', () => {
 
   it('scopes every group nav to its own project, and lights only the active one', () => {
     gotoGrouped(scoped(bootProject, '/git'))
-    browser.click(groupHeader(ALPHA.id))
-    browser.waitForFunction(`document.querySelector('${groupBody(ALPHA.id)}') !== null`)
+    setGroupExpanded(ALPHA.id, true)
     // The GitHub row waits on the health answer — settle it before sampling any group's nav,
     // exactly as the flat-shell specs do.
     if (forgeAvailable) {
@@ -205,8 +234,7 @@ describe('the grouped multi-project sidebar', () => {
 
     // Shut the active group — the one case the default would re-open on its own, so a reload
     // that still finds it shut can only mean the state was stored and read back.
-    browser.click(groupHeader(bootProject))
-    browser.waitForFunction(`document.querySelector('${groupBody(bootProject)}') === null`)
+    setGroupExpanded(bootProject, false)
 
     // The PUT is debounced, so wait for the server to actually hold it rather than for a clock.
     await vi.waitFor(
@@ -221,8 +249,7 @@ describe('the grouped multi-project sidebar', () => {
     ).toBe('false')
 
     // And back: the same gesture re-opens it, so the stored `true` is a toggle and not a trap.
-    browser.click(groupHeader(bootProject))
-    browser.waitForFunction(`document.querySelector('${groupBody(bootProject)}') !== null`)
+    setGroupExpanded(bootProject, true)
     await vi.waitFor(
       async () => expect((await workspaceUiState()).sidebar?.collapsed?.[bootProject]).toBe(false),
       { timeout: 10_000, interval: 200 }
