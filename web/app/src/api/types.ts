@@ -50,6 +50,8 @@ export interface StepState {
   error?: string
   /** Latest agent session id — `claude --resume <id>` and friends. */
   sessionId?: string
+  /** Backend that owns `sessionId`; absent on records written before backend affinity. */
+  backend?: Runner
   costUsd?: number
 }
 
@@ -77,6 +79,8 @@ export interface RunRecord {
    *  removable only while `status === 'queued'`. Absent on every pre-#472 run. */
   queuedMessages?: QueuedMessage[]
   model?: string
+  /** Normalized provider/model identity used for attribution and reproducible replay. */
+  modelIdentity?: string
   runner?: Runner
   /** Echo of the extra system prompt the run used (POST override or config default). */
   systemPrompt?: string
@@ -245,6 +249,142 @@ export interface HealthResponse {
   /** R5 additive fields (BACKWARD_COMPATIBILITY.md §2 keeps the pre-forge shape intact). */
   forge: ForgeInfo | null
   capabilities: Capabilities
+  /** Multi-project additive fields (step 1.6): the registered projects — id + name ONLY, never
+   *  roots (health is the one CORS-open route) — and the id of the project cezar booted in.
+   *  `bootProject` is what the workspace-events filter compares stamps against when unscoped. */
+  projects?: { id: string; name: string }[]
+  bootProject?: string
+}
+
+/** One `GET /api/projects` registry entry (multi-project spec, step 1.6). Unlike health's
+ *  id+name pairs this carries absolute `root`s — same-origin only, never the CORS-open route. */
+export interface ProjectListEntry {
+  id: string
+  name: string
+  root: string
+  addedAt: string
+  lastOpenedAt: string
+  source: 'local' | 'checkout'
+  /** `not-git` is fully usable (degraded single-queue mode); only `missing` blocks. */
+  status: 'ok' | 'missing' | 'not-git'
+  /** Current branch when cheaply available (omitted e.g. on an unborn HEAD). */
+  branch?: string
+}
+
+/** `GET /api/projects` — the workspace registry. Workspace-level: never 404s, never scoped. */
+export interface ProjectsResponse {
+  projects: ProjectListEntry[]
+  bootProject: string
+  projectsDir: string
+}
+
+/** `POST /api/projects` (multi-project spec, step 4.2) — what the folder-browser dialog gets
+ *  back. `error` is present ONLY on the 409 (already registered), where `project` is the
+ *  EXISTING entry: the dialog navigates to it rather than dead-ending on a duplicate. */
+export interface RegisterProjectResponse {
+  project: ProjectListEntry
+  error?: string
+}
+
+/** `DELETE /api/projects/:projectId` (multi-project spec, step 4.4) — Settings → Projects'
+ *  per-row Remove. Deregistration ONLY: the server never touches anything under the project
+ *  root, so this is a registry edit and nothing else. The interesting failures are 409s (the
+ *  project has running tasks, or it is the project this server booted in), whose `{ error }`
+ *  the pane shows verbatim. */
+export interface RemoveProjectResponse {
+  removed: true
+  id: string
+}
+
+/** `POST /api/projects/checkout` (multi-project spec, step 4.3) — the clone-from-GitHub body.
+ *  `name` defaults server-side to the repo name; `checkoutId` is the cockpit's own correlation
+ *  token, echoed on every `checkout-progress` event so two tabs cloning at once never render
+ *  each other's progress. */
+export interface CheckoutProjectInput {
+  url: string
+  name?: string
+  checkoutId?: string
+}
+
+/** One `checkout-progress` workspace SSE payload (step 4.3). `cloning` carries one line of
+ *  `git clone` output; `done`/`error` are terminal. The dialog shows `error` VERBATIM — a
+ *  clone fails for reasons (auth, network, a typo'd repo) only the server can name. */
+export interface CheckoutProgressEvent {
+  checkoutId?: string
+  name: string
+  phase: 'cloning' | 'done' | 'error'
+  line?: string
+  error?: string
+}
+
+/** One directory in a `GET /api/fs/browse` listing (multi-project spec, step 4.1). `path` is
+ *  absolute — same-origin route, like `ProjectListEntry.root`. */
+export interface FsBrowseDir {
+  name: string
+  path: string
+  /** Has a `.git` entry — drives the "git" badge. A non-repo folder is still selectable
+   *  (cezar degrades in a non-git folder exactly as `cezar serve` does today). */
+  isRepo: boolean
+}
+
+/** `GET /api/fs/browse?path=` — the folder picker's listing. Rooted at the operator's home
+ *  (hosted mode narrows it to the checkout root), directories only. */
+export interface FsBrowseResponse {
+  /** The realpath'd directory actually listed — never the spelling asked for, so the
+   *  breadcrumb shows where the picker really is. */
+  path: string
+  /** `null` AT the browse root: there is no "up" out of it, and the dialog must render no
+   *  parent row rather than one that 400s. */
+  parent: string | null
+  dirs: FsBrowseDir[]
+  /** True when the listing was capped server-side — surfaced honestly instead of showing a
+   *  silently short list. */
+  truncated: boolean
+}
+
+/** `GET/PUT /api/workspace/ui-state` — cross-project GUI prefs in `~/.cezar/ui-state.json`
+ *  (multi-project spec, step 2.7). Passthrough like its per-repo twin (`UiState` below):
+ *  unknown keys round-trip untouched. `sidebar.collapsed` is the sidebar's per-project
+ *  collapse map (step 3.3) — `true` collapses a group, `false` pins it open, absent means
+ *  the default (the active project expands, the rest collapse). The PUT merges SHALLOWLY at
+ *  the top level server-side, so a writer must send the whole `sidebar` object, not a leaf. */
+export interface WorkspaceUiState {
+  sidebar?: { collapsed?: Record<string, boolean> } & Record<string, unknown>
+  /** Settings → Appearance, GLOBAL since step 3.5: accent + density describe the person at
+   *  the keyboard, not a repo, so they live in `~/.cezar/ui-state.json` and follow the user
+   *  across every project. Same shape as the per-repo `UiState.appearance` it superseded
+   *  (Migration 001 copied the old per-repo value up). */
+  appearance?: { accent?: 'lime' | 'violet'; density?: 'comfortable' | 'compact' | 'ultra' }
+  /** Settings → Notifications, GLOBAL since step 3.5 — one answer for the whole workspace,
+   *  since the delivering browser is one browser whichever project you are looking at. */
+  notifications?: { enabled?: boolean }
+  [key: string]: unknown
+}
+
+/** `GET/PUT /api/workspace/config` — the settings slice of `~/.cezar/config.json` (step 2.7).
+ *  Global knobs only: the registry itself is `GET /api/projects`, and `schemaVersion` (a
+ *  migration cursor, not a setting) is deliberately absent. `resources` is the workspace's
+ *  host-protection budget — the ONLY effective `maxParallel`/`memoryLimitMb` since Phase 2
+ *  (spec §"Resource governance"); `worktreeRetentionDefault` seeds projects that set none. */
+export interface WorkspaceConfigResponse {
+  projectsDir: string
+  resources: {
+    maxParallel: number
+    memoryLimitMb: number | null
+    worktreeRetentionDefault: number
+  }
+}
+
+/** `PUT /api/workspace/config` body — partial: absent keys stay untouched. A rejected
+ *  `projectsDir` (not writable) 400s with the reason and persists NOTHING, resources
+ *  included, so callers may send both in one request only if they want that atomicity. */
+export interface SetWorkspaceConfigInput {
+  projectsDir?: string
+  resources?: {
+    maxParallel?: number
+    memoryLimitMb?: number | null
+    worktreeRetentionDefault?: number
+  }
 }
 
 /** `GET /api/launch-key` — the bookmarklet auto-start secret (spec 011). Fetched to COMPARE
@@ -686,6 +826,59 @@ export interface SetConfigInput {
 
 /** The PUT answer: the same shape GET serves (the pre-R6 fields stayed, the rest is additive). */
 export type SetConfigResponse = ConfigResponse
+
+// ---- Agent config files (spec #404) --------------------------------------------------------
+
+export type AgentConfigFormat = 'json' | 'jsonc' | 'toml' | 'markdown'
+export type AgentConfigScope = 'user' | 'project' | 'local'
+export type AgentConfigKind = 'settings' | 'memory' | 'mcp'
+export type AgentConfigTracked = 'tracked' | 'gitignored' | 'outside-repo'
+
+export interface AgentConfigFile {
+  id: string
+  runners: Runner[]
+  kind: AgentConfigKind
+  scope: AgentConfigScope
+  label: string
+  path: string
+  format: AgentConfigFormat
+  tracked: AgentConfigTracked
+  seeded: boolean
+  holdsMcp: boolean
+  precedence: string
+  hotReload?: string
+  docsUrl: string
+  exists: boolean
+  size: number
+  version: string | null
+  writable: boolean
+  readOnlyReason?: string
+}
+
+export interface UserMcpListing {
+  path: string
+  servers: string[]
+  readable: boolean
+}
+
+export interface AgentConfigListing {
+  editable: boolean
+  files: AgentConfigFile[]
+  userMcp: UserMcpListing | null
+}
+
+export interface AgentConfigFileContent {
+  id: string
+  path: string
+  exists: boolean
+  content: string
+  version: string | null
+}
+
+export interface SetAgentConfigInput {
+  content: string
+  version: string | null
+}
 
 /** One materialized task worktree in the management panel (#483). `sizeBytes` is
  *  null when `du` is unavailable (Windows / missing). `reclaimable` = finished,

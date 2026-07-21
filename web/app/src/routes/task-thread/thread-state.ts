@@ -236,8 +236,9 @@ function planFromTodos(input: unknown): PlanEntry[] | undefined {
 
 export function reduceThread(events: RunEvent[]): ThreadState {
   const turns: DraftTurn[] = []
-  /** itemId → live item. Rebound on every `item.started`, so per-session id reuse (each step
-   *  restarts `item_1`) always resolves to the newest incarnation. */
+  /** stepId:itemId → live item. Runner sessions restart ids at `item_1`, while every current
+   *  persisted event is stamped with its workflow step. Old recordings without a step id keep
+   *  the historical bare-id lookup semantics. */
   const itemsById = new Map<string, { turn: DraftTurn; entry: DraftEntry }>()
   let sessionEnded: ThreadState['sessionEnded']
   let turnSeq = 0
@@ -254,7 +255,12 @@ export function reduceThread(events: RunEvent[]): ThreadState {
   }
   const currentTurn = (): DraftTurn => turns.at(-1) ?? newTurn()
 
-  const upsertV2 = (turn: DraftTurn, raw: UiItem) => {
+  const itemKey = (event: RunEvent, itemId: string) => {
+    const stepId = str(event.stepId)
+    return stepId === undefined ? itemId : `${stepId}:${itemId}`
+  }
+
+  const upsertV2 = (turn: DraftTurn, raw: UiItem, key: string) => {
     // Clone: deltas append in place, and the event object off the wire must stay untouched.
     const item = { ...raw }
     if (!turn.v2Items) {
@@ -266,15 +272,15 @@ export function reduceThread(events: RunEvent[]): ThreadState {
       }
       turn.entries = turn.entries.filter((e) => !(e.origin === 'v1' && isUiItem(e.entry)))
     }
-    const existing = itemsById.get(item.id)
+    const existing = itemsById.get(key)
     if (existing && existing.turn === turn) {
       existing.entry.entry = item
-      itemsById.set(item.id, existing)
+      itemsById.set(key, existing)
       return
     }
     const draft: DraftEntry = { origin: 'v2', entry: item }
     turn.entries.push(draft)
-    itemsById.set(item.id, { turn, entry: draft })
+    itemsById.set(key, { turn, entry: draft })
   }
 
   for (const event of events) {
@@ -346,12 +352,14 @@ export function reduceThread(events: RunEvent[]): ThreadState {
           break
         }
         const item = event.item as unknown as UiItem
-        const located = itemsById.get(item.id)
-        upsertV2(located?.turn ?? currentTurn(), item)
+        const key = itemKey(event, item.id)
+        const located = itemsById.get(key)
+        upsertV2(located?.turn ?? currentTurn(), item, key)
         break
       }
       case 'item.delta': {
-        const located = itemsById.get(str(event.itemId) ?? '')
+        const itemId = str(event.itemId) ?? ''
+        const located = itemsById.get(itemKey(event, itemId))
         const delta = str(event.delta) ?? ''
         if (!located || delta === '' || !isUiItem(located.entry.entry)) break
         const item = located.entry.entry

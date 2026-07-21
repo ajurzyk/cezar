@@ -392,10 +392,11 @@ describe('RunStore — secret redaction before persistence (#427)', () => {
       task: 'task',
       steps: [{ id: 'task', name: 'Do the task', kind: 'agent' }],
     });
-    store.updateStep(run.id, 'task', { status: 'done', sessionId: 'sess-123', tokensUsed: 42 });
+    store.updateStep(run.id, 'task', { status: 'done', sessionId: 'sess-123', backend: 'codex', tokensUsed: 42 });
     const step = store.getRun(run.id)?.steps[0];
     expect(step?.status).toBe('done');
     expect(step?.sessionId).toBe('sess-123');
+    expect(step?.backend).toBe('codex');
     expect(step?.tokensUsed).toBe(42);
   });
 

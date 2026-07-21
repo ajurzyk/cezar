@@ -10,7 +10,7 @@ import {
   ZapIcon,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
-import { Link } from 'react-router'
+import { Link } from '@/lib/project-router'
 
 import { createRun, putUiState } from '@/api/client'
 import { queryKeys, useUiState } from '@/api/queries'

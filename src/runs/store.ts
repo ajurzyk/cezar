@@ -34,8 +34,10 @@ const stepStateSchema = z.object({
   startedAt: z.string().optional(),
   finishedAt: z.string().optional(),
   error: z.string().optional(),
-  /** Latest claude session id — the user can `claude --resume <id>` with it. */
+  /** Latest backend-owned session id, used for same-backend Continue. */
   sessionId: z.string().optional(),
+  /** Backend that owns `sessionId`. Optional so pre-affinity runs.json files still parse. */
+  backend: z.enum(['claude', 'codex', 'opencode']).optional(),
   /** Dollar cost reported by the claude CLI for this step's turns. */
   costUsd: z.number().optional(),
 });
@@ -76,6 +78,12 @@ const runRecordSchema = z.object({
    *  (#image-display) — persisted like agent screenshots, served from `/images/`. */
   taskImages: z.array(z.string()).optional(),
   model: z.string().optional(),
+  /** Canonical provider/model identity (#405) — the normalised `provider/model`
+   *  (e.g. `anthropic/claude-opus-4-8`) the run actually used, resolved from the
+   *  free-text `model` against the chosen runner. Additive and optional: pre-#405
+   *  records carry only `model`, and it stays the human/hand-edit surface; this
+   *  is the parseable identity cost attribution and reproducible replay key off. */
+  modelIdentity: z.string().optional(),
   /** Agent backend this run used — drives "open in CLI" resume command. */
   runner: z.enum(['claude', 'codex', 'opencode']).optional(),
   /** Echo of the extra system prompt this run actually used (R2): the

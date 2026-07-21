@@ -1,7 +1,9 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeftIcon, RefreshCwIcon, SparklesIcon, TriangleAlertIcon, ZapIcon } from 'lucide-react'
 import { useState } from 'react'
-import { Link, useSearchParams } from 'react-router'
+import { useSearchParams } from 'react-router'
+
+import { Link } from '@/lib/project-router'
 
 import { refreshSkills } from '@/api/client'
 import { queryKeys, useSkills, useWorkflows } from '@/api/queries'

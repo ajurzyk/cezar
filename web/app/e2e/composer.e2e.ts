@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { AgentBrowser } from './agent-browser'
+import { AgentBrowser, fixtureServeEnv } from './agent-browser'
 
 /**
  * The composer (R3 Step 2.1) end-to-end, against a LIVE dry-run session — not a replayed
@@ -90,7 +90,7 @@ beforeAll(async () => {
   server = spawn(
     process.execPath,
     [join(repoRoot, 'dist/index.js'), 'serve', '--repo', dataRoot, '--port', String(port), '--no-open'],
-    { env: { ...process.env, CEZ_DRY_RUN: '1' }, stdio: 'ignore' },
+    { env: fixtureServeEnv(dataRoot), stdio: 'ignore' },
   )
   await waitForHealth(baseUrl)
 

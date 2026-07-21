@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { AgentBrowser } from './agent-browser'
+import { AgentBrowser, fixtureServeEnv } from './agent-browser'
 
 /**
  * The review gate (R3 Step 2.2) end-to-end, against a LIVE dry run — cezar's core promise
@@ -80,7 +80,10 @@ beforeAll(async () => {
   server = spawn(
     process.execPath,
     [join(repoRoot, 'dist/index.js'), 'serve', '--repo', dataRoot, '--port', String(port), '--no-open'],
-    { env: { ...process.env, CEZ_DRY_RUN: '1' }, stdio: 'ignore' },
+    // CEZ_REVIEW_GATE=1 because this spec is ABOUT the gate: it is opt-in (#489, default OFF),
+    // so pinning it here is what makes the parked-at-review fixture reproducible instead of
+    // depending on whatever the operator happens to export.
+    { env: fixtureServeEnv(dataRoot, { CEZ_REVIEW_GATE: '1' }), stdio: 'ignore' },
   )
   await waitForHealth(baseUrl)
 

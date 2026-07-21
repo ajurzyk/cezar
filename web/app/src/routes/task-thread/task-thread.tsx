@@ -1,6 +1,8 @@
 import { MessageSquareTextIcon, SearchXIcon } from 'lucide-react'
 import { useMemo, useState } from 'react'
-import { Link, useLocation, useParams } from 'react-router'
+import { useLocation, useParams } from 'react-router'
+
+import { Link } from '@/lib/project-router'
 
 import { ApiError } from '@/api/client'
 import {

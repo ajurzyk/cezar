@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { detectEnvironment } from './core/backend-detect.js';
 import { pruneOrphans } from './git-worktree.js';
 import { getRepoInfo } from './server/git.js';
-import { loadConfig } from './config.js';
+import { DEFAULT_WORKTREE_RETENTION, loadConfig, resolveWorktreeRetention } from './config.js';
 import { reclaimWorktrees } from './runs/retention.js';
 import { RunStore } from './runs/store.js';
 import { RunManager } from './workflows/run.js';
@@ -16,6 +16,10 @@ import { loadWorkflows } from './workflows/load.js';
 import { startServer } from './server/server.js';
 import { checkForUpdate } from './update-check.js';
 import { printSkillsBanner } from './skills-banner.js';
+import { runMigrations } from './workspace/migrations.js';
+import { registerProject, shouldRegisterProject } from './workspace/projects.js';
+import { runProjectsCommand } from './workspace/projects-cli.js';
+import { WorkspaceSemaphore } from './workspace/semaphore.js';
 
 const HELP = `cezar — local cockpit for AI agent tasks in your repo
 
@@ -23,6 +27,8 @@ Usage:
   cezar                     start the cockpit (server + GUI) for the current repo
   cezar run "<task>"        run a task headless in the terminal
   cezar init                scaffold .ai/cezar/ (example workflow + skill)
+  cezar projects            list the projects this cockpit serves
+                            (also: projects add [<dir>] · projects remove <id>)
   cezar server-install      interactive wizard to host cezar on a server
   cezar server-deploy       redeploy a new version (reload the service) + verify
   cezar server-uninstall    reverse a server-install
@@ -94,6 +100,10 @@ async function main(): Promise<void> {
     case 'init':
       initCommand(repoRoot);
       return;
+    case 'projects':
+      // Registry-only (no server, no HTTP) — see workspace/projects-cli.ts.
+      process.exitCode = await runProjectsCommand(positionals.slice(1), { defaultRoot: repoRoot });
+      return;
     case 'server-install':
       await serverCommand('install', repoRoot, values.platform, {
         yes: Boolean(values.yes),
@@ -122,13 +132,48 @@ async function main(): Promise<void> {
   }
 }
 
+// ---- workspace boot ----------------------------------------------------------
+
+/**
+ * Boot-time workspace bookkeeping (spec 2026-07-20-multi-project-workspace,
+ * "Boot flow"): run pending `~/.cezar` migrations first, then register the
+ * boot repo in the per-user project registry. Registration is suppressed for
+ * task worktrees and `$HOME` itself (`shouldRegisterProject`) — the process
+ * still serves those folders normally. Strictly non-fatal: the zero-config
+ * law says a broken or read-only home degrades to a smaller cockpit, never a
+ * failed boot, so any workspace error logs one warning and boot continues.
+ *
+ * Returns the boot project's registry id when registration happened —
+ * `serveCommand` plumbs it into the server (`ServerDeps.bootProjectId`) so
+ * `/api/projects` and `/api/health` can name the boot project without a
+ * lookup. Undefined when registration was suppressed or the workspace is
+ * unavailable; the server then derives a fallback on its own.
+ */
+async function initWorkspace(repoRoot: string): Promise<string | undefined> {
+  try {
+    await runMigrations({ bootRepoRoot: repoRoot });
+    if (await shouldRegisterProject(repoRoot)) return (await registerProject(repoRoot)).id;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`[cez] workspace registry unavailable (${message}) — continuing without it`);
+  }
+  return undefined;
+}
+
 // ---- serve -----------------------------------------------------------------
 
 async function serveCommand(repoRoot: string, preferredPort: number, openBrowser: boolean): Promise<void> {
+  const bootProjectId = await initWorkspace(repoRoot);
+  // ONE workspace semaphore for the whole process (spec 2026-07-20, step 2.5):
+  // the boot manager and every lazily-built project context count their runs
+  // against the same `resources.maxParallel`. The boot refresh() below is the
+  // cache hook's first call; PUT /api/workspace/config (step 2.7) re-fires it.
+  const semaphore = new WorkspaceSemaphore();
+  await semaphore.refresh();
   // keepLive + recover() (#367): runs that were queued/running/waiting when
   // the previous process exited are re-queued or resumed instead of failed.
   const store = openStore(repoRoot, { keepLive: true });
-  const manager = new RunManager(store, repoRoot);
+  const manager = new RunManager(store, repoRoot, { semaphore });
   const version = readOwnVersion();
 
   const checks = await detectEnvironment();
@@ -145,7 +190,7 @@ async function serveCommand(repoRoot: string, preferredPort: number, openBrowser
     // Count-based worktree retention (#483): reclaim finished worktrees beyond
     // the keep-limit (directory only — `cez/<id8>` branch kept, so recoverable).
     // Best-effort; never blocks boot.
-    const keep = (await loadConfig(repoRoot).catch(() => null))?.worktreeRetention ?? 10;
+    const keep = await resolveWorktreeRetention(repoRoot).catch(() => DEFAULT_WORKTREE_RETENTION);
     const reclaimed = await reclaimWorktrees(repoRoot, store, keep).catch(() => [] as string[]);
     if (reclaimed.length > 0) {
       console.log(`  reclaimed ${reclaimed.length} old worktree(s), branch kept: ${reclaimed.map((id) => id.slice(0, 8)).join(', ')}`);
@@ -169,7 +214,7 @@ async function serveCommand(repoRoot: string, preferredPort: number, openBrowser
   });
 
   const port = await pickPort(preferredPort);
-  startServer({ repoRoot, store, manager, version, update }, port);
+  startServer({ repoRoot, store, manager, version, update, bootProjectId, semaphore }, port);
   const url = `http://localhost:${port}`;
 
   console.log(`\n  cezar v${version} — ${repoRoot}`);
@@ -243,6 +288,7 @@ async function runCommand(
     process.exitCode = 1;
     return;
   }
+  await initWorkspace(repoRoot);
   const { workflows, issues } = await loadWorkflows(repoRoot);
   for (const issue of issues) console.error(`! skipped ${issue.path}: ${issue.message}`);
   const name = workflowName ?? 'quick-task';
@@ -254,7 +300,11 @@ async function runCommand(
   }
 
   const store = openStore(repoRoot);
-  const manager = new RunManager(store, repoRoot);
+  // Headless runs enforce the same workspace-level cap/memory limit (step
+  // 2.5) — one refreshed semaphore, even with just one manager in play.
+  const semaphore = new WorkspaceSemaphore();
+  await semaphore.refresh();
+  const manager = new RunManager(store, repoRoot, { semaphore });
 
   store.on('event', ({ event }) => {
     switch (event.type) {

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { AgentBrowser } from './agent-browser'
+import { AgentBrowser, bootProjectId, fixtureServeEnv } from './agent-browser'
 
 /**
  * The Changes tab (R5 Step 1.5) end-to-end against a LIVE dry run, same doctrine as
@@ -69,6 +69,12 @@ let browser: AgentBrowser
 let server: ChildProcess
 let dataRoot: string
 let baseUrl: string
+let bootProject: string
+
+/** A flat route target under this server's own project prefix (multi-project spec, step 3.2):
+ *  every cockpit link is scoped, and every legacy flat URL redirects onto its scoped twin. */
+const scoped = (path: string) => `/p/${bootProject}${path}`
+
 let runId: string
 let worktreePath: string
 
@@ -90,9 +96,13 @@ beforeAll(async () => {
   server = spawn(
     process.execPath,
     [join(repoRoot, 'dist/index.js'), 'serve', '--repo', dataRoot, '--port', String(port), '--no-open'],
-    { env: { ...process.env, CEZ_DRY_RUN: '1' }, stdio: 'ignore' },
+    // CEZ_REVIEW_GATE=1 because this spec is ABOUT the gate: it is opt-in (#489, default OFF),
+    // so pinning it here is what makes the parked-at-review fixture reproducible instead of
+    // depending on whatever the operator happens to export.
+    { env: fixtureServeEnv(dataRoot, { CEZ_REVIEW_GATE: '1' }), stdio: 'ignore' },
   )
   await waitForHealth(baseUrl)
+  bootProject = await bootProjectId(baseUrl)
 
   const created = (await (
     await fetch(`${baseUrl}/api/runs`, {
@@ -125,13 +135,13 @@ afterAll(() => {
 
 describe('the Changes tab against a live dry run', () => {
   it('the Session header tab navigates to /changes: tree, toolbar and the real diff', () => {
-    browser.goto(`${baseUrl}/tasks/${runId}`)
+    browser.goto(`${baseUrl}${scoped(`/tasks/${runId}`)}`)
     browser.waitForFunction(`document.querySelector('[data-slot="run-tabs"]') !== null`)
-    browser.click(`[data-slot="run-tabs"] a[href="/tasks/${runId}/changes"]`)
+    browser.click(`[data-slot="run-tabs"] a[href="${scoped(`/tasks/${runId}/changes`)}"]`)
 
     // Client-side navigation into the lazy chunk — wait for the toolbar to exist.
     browser.waitForFunction(`document.querySelector('[data-slot="git-toolbar"]') !== null`)
-    expect(browser.url()).toBe(`${baseUrl}/tasks/${runId}/changes`)
+    expect(browser.url()).toBe(`${baseUrl}${scoped(`/tasks/${runId}/changes`)}`)
 
     // The Changes tab is the active one now.
     expect(
@@ -186,7 +196,7 @@ describe('the Changes tab against a live dry run', () => {
   })
 
   it('deep-linking /tasks/:id/changes cold-loads the same surface', () => {
-    browser.goto(`${baseUrl}/tasks/${runId}/changes`)
+    browser.goto(`${baseUrl}${scoped(`/tasks/${runId}/changes`)}`)
     browser.waitForFunction(`document.querySelector('[data-slot="diff-file"][data-path="notes.md"]') !== null`)
     expect(browser.count('[data-route="task-changes"]')).toBe(1)
     expect(browser.count('[data-slot="changes-tree"]')).toBe(1)
@@ -223,9 +233,9 @@ describe('the Changes tab against a live dry run', () => {
   })
 
   it('the Files tab opens the worktree browser under the same header (deep coverage: task-files.e2e.ts)', () => {
-    browser.click(`[data-slot="run-tabs"] a[href="/tasks/${runId}/files"]`)
+    browser.click(`[data-slot="run-tabs"] a[href="${scoped(`/tasks/${runId}/files`)}"]`)
     browser.waitForFunction(`document.querySelector('[data-route="task-files"] [data-slot="files-tree"]') !== null`)
-    expect(browser.url()).toBe(`${baseUrl}/tasks/${runId}/files`)
+    expect(browser.url()).toBe(`${baseUrl}${scoped(`/tasks/${runId}/files`)}`)
     expect(
       browser.evaluate(
         `document.querySelector('[data-slot="run-tabs"] a[aria-current="page"]').textContent`,
@@ -235,7 +245,7 @@ describe('the Changes tab against a live dry run', () => {
 
   it('below md the segments stay tappable and the diff forces unified+wrap (toggles gone)', () => {
     browser.setViewport(390, 844)
-    browser.goto(`${baseUrl}/tasks/${runId}/changes`)
+    browser.goto(`${baseUrl}${scoped(`/tasks/${runId}/changes`)}`)
     browser.waitForFunction(`document.querySelector('[data-slot="diff"]') !== null`)
 
     // Forced mobile combination, no matter what the desktop toggles said.
@@ -253,7 +263,8 @@ describe('the Changes tab against a live dry run', () => {
       ),
     ).toBe(true)
     // The tabs remain a tappable segment row and the page does not overflow sideways.
-    expect(browser.count('[data-slot="run-tabs"] a')).toBe(3)
+    // Session / Changes / Commits / Files — the whole row survives the phone framing.
+    expect(browser.count('[data-slot="run-tabs"] a')).toBe(4)
     expect(browser.evaluate(`document.documentElement.scrollWidth <= window.innerWidth`)).toBe(true)
 
     browser.screenshot(`${artifactsDir}/changes-mobile.png`)
