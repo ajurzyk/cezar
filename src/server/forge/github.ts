@@ -531,7 +531,7 @@ export async function createDraftPr(input: DraftPrInput): Promise<DraftPrOutcome
   }
 
   // Final autosave: the branch must hold everything before it leaves the box.
-  await autosaveCommit(worktree);
+  await autosaveCommit(worktree, 'pre-PR');
 
   // DRY-RUN (CEZ_DRY_RUN=1): no push, no gh — simulate success with a fake PR
   // URL so the whole review → PR flow is testable without GitHub.

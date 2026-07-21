@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync, realpathSync, type Dirent } from 'node:fs';
-import { readdir, rm } from 'node:fs/promises';
+import { readdir, readFile, rm } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 import { isSafeGitRef } from './git-refs.js';
 
@@ -242,13 +242,50 @@ export async function removeWorktree(
 }
 
 /**
+ * Why an autosave commit happened. Only `periodic` is gated (behind
+ * `CEZ_AUTOSAVE=1`, #471) — the three flushes always run so the branch ends
+ * holding the finished state. Before this was recorded, all four wrote the bare
+ * message `cezar autosave`, so a user who had opted out of the periodic timer
+ * still saw `cezar autosave` in `git log` and reasonably concluded the opt-out
+ * was broken. Only commit *spacing* (~90 s ⇒ timer) told them apart.
+ */
+export type AutosaveReason = 'periodic' | 'turn end' | 'run finalize' | 'pre-PR';
+
+/**
+ * Leftover merge-conflict markers, anchored at line start as git writes them.
+ * Both ends must be present: a bare `=======` line is ordinary Markdown (a
+ * setext heading underline), and matching it alone would refuse legitimate
+ * autosaves of this repo's own docs.
+ */
+const CONFLICT_START = /^<{7}(?:\s|$)/m;
+const CONFLICT_END = /^>{7}(?:\s|$)/m;
+
+/**
  * Stage and commit everything in the worktree as a "cezar autosave" commit
  * (janitor pattern) — the agent's progress is always recoverable from the
  * `cez/<id8>` branch history. Quietly a no-op when nothing changed.
+ *
+ * The message carries `reason` so the opt-in periodic timer and the always-on
+ * flushes are distinguishable in `git log`; the `cezar autosave` prefix is kept
+ * so existing log greps still match.
+ *
+ * Refuses to commit a worktree that is mid-merge or still carries conflict
+ * markers: the incident behind #471 was an autosave capturing a half-resolved
+ * merge, and a blind `git add -A` would do it again.
  */
-export async function autosaveCommit(dir: string): Promise<boolean> {
+export async function autosaveCommit(
+  dir: string,
+  reason: AutosaveReason = 'turn end',
+): Promise<boolean> {
   const status = await git(dir, ['status', '--porcelain']);
   if (!status.ok || !status.stdout.trim()) return false;
+  const unresolved = await unresolvedConflicts(dir, status.stdout);
+  if (unresolved) {
+    // Losing one recovery point beats poisoning the branch with a commit that
+    // does not build. The next flush picks the work up once the merge resolves.
+    console.warn(`[cezar] skipping ${reason} autosave in ${dir}: ${unresolved}`);
+    return false;
+  }
   await git(dir, ['add', '-A']);
   // Commit as the CURRENT git user, so the branch's commits (and any PR opened from it) are
   // attributed to the real author and pass CLA / attribution checks. The old hardcoded
@@ -263,9 +300,57 @@ export async function autosaveCommit(dir: string): Promise<boolean> {
     'commit',
     '--no-verify',
     '-m',
-    'cezar autosave',
+    `cezar autosave (${reason})`,
   ]);
   return commit.ok;
+}
+
+/**
+ * Is the worktree mid-merge or still carrying conflict markers? Returns a
+ * human-readable reason, or `null` when it is safe to autosave.
+ *
+ * Two independent checks, because they catch different failures: porcelain `U`
+ * codes catch an *unresolved* merge, while the marker scan catches the worse
+ * case — someone ran `git add` on a file they had not finished resolving, which
+ * clears the `U` code but leaves `<<<<<<<` in the text.
+ */
+async function unresolvedConflicts(dir: string, porcelain: string): Promise<string | null> {
+  const entries = porcelain.split('\n').filter(Boolean);
+  const unmerged = entries.filter((line) => {
+    const xy = line.slice(0, 2);
+    // Unmerged per `git status` docs: any side U, plus the AA / DD collisions.
+    return xy.includes('U') || xy === 'AA' || xy === 'DD';
+  });
+  const firstUnmerged = unmerged[0];
+  if (firstUnmerged) {
+    return `${unmerged.length} unmerged path(s), e.g. ${firstUnmerged.slice(3)}`;
+  }
+  // Only tracked, non-deleted paths can carry markers into the commit.
+  const candidates = entries
+    .filter((line) => !line.startsWith('D ') && !line.startsWith(' D') && !line.startsWith('??'))
+    .map((line) => {
+      // A rename reads `old -> new`; the new path is what gets committed.
+      const raw = line.slice(3).trim();
+      const path = raw.includes(' -> ') ? (raw.split(' -> ')[1] ?? raw) : raw;
+      // Git quotes paths containing spaces or non-ASCII bytes.
+      return path.startsWith('"') ? path.slice(1, -1) : path;
+    });
+  for (const path of candidates) {
+    // Read the working tree, not the index: this runs before `git add -A`, so
+    // the on-disk copy is what would be committed. Binary files decode to
+    // mojibake rather than throwing, but cannot match the anchored marker
+    // pattern; unreadable paths (races, symlinks) are skipped, not fatal.
+    let text: string;
+    try {
+      text = await readFile(join(dir, path), 'utf8');
+    } catch {
+      continue;
+    }
+    if (CONFLICT_START.test(text) && CONFLICT_END.test(text)) {
+      return `leftover conflict markers in ${path}`;
+    }
+  }
+  return null;
 }
 
 /** Does this repo/worktree resolve a git author identity (name + email)? Ambient config wins so
