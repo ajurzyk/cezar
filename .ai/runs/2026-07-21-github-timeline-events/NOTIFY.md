@@ -22,3 +22,14 @@ Append-only, UTC timestamps, newest at the bottom.
 - **2026-07-21T11:41Z — UI verification skipped, with reason.** `mockGithubComments` serves no
   fixture events yet, so a `CEZ_DRY_RUN=1` screenshot would show an event-free thread while looking
   like a pass. Deferred to checkpoint 3, immediately after Step 3.2 adds the fixtures.
+- **2026-07-21T12:00Z — CORRECTION to the checkpoint-1 finding.** The `request-validation` failure
+  is **not** repo drift: it fails only when `CEZ_REMOTE=1` leaks in from the surrounding cezar
+  session. Comparing against `origin/main` did not expose that, because the variable was set for
+  both runs. With it scrubbed, `npm test` is **3043/3043 green**. Conclusion ("not this branch")
+  stood; the stated cause was wrong.
+- **2026-07-21T12:00Z — final gate.** All five `validation.commands` pass. e2e: 6 failed on this
+  branch vs **8 failed on a clean `origin/main`** — every failure pre-existing and environmental.
+  `github.e2e.ts` isolated: base 2 failed/2 passed, branch 2 failed/**3** passed — same two
+  pre-existing specs, the new one is the extra pass.
+- **2026-07-21T12:00Z — UI verified.** `github-thread-timeline.png` shows the Activity header, a
+  tinted label event, the 4-commit grouping, and per-commit ✓/✗ CI glyphs interleaved with comments.
