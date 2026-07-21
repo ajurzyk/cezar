@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { chmodSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
@@ -118,6 +119,36 @@ export async function loadWorkspaceConfig(): Promise<WorkspaceConfig> {
 }
 
 /**
+ * The tmp path an atomic write stages through — UNIQUE PER WRITE, never a
+ * fixed `${path}.tmp`. `~/.cezar/` is shared by every cezar process on the
+ * machine (a `serve` per repo, `cezar run`s, a settings PUT), and two writers
+ * staging through the same tmp name interleave: writer B's `O_TRUNC` open can
+ * empty the file between writer A's write and rename, so A renames a
+ * truncated/half-written file into place — and B's own rename then throws
+ * `ENOENT` on the name A consumed. The pid + random suffix gives every writer
+ * its own staging file, so the only cross-process contention left is the
+ * rename itself, which is atomic.
+ */
+export function atomicTmpPath(path: string): string {
+  return `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+}
+
+/** Atomic JSON write (`0600`, dir `0700`) via a per-writer tmp + rename —
+ *  shared by the workspace config and ui-state writers. Throws on write
+ *  failure (e.g. a read-only home) — degrading is the caller's policy. */
+export function atomicWriteJsonSync(path: string, value: unknown): void {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const tmp = atomicTmpPath(path);
+  writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  renameSync(tmp, path);
+  try {
+    chmodSync(path, 0o600); // best-effort — ignored on some filesystems
+  } catch {
+    // non-fatal
+  }
+}
+
+/**
  * Read-modify-write merge: re-read the file, apply `mutator`, atomic-rename
  * write (`0600`, dir `0700`). Because every writer re-reads immediately before
  * writing, two processes registering different projects converge instead of
@@ -132,15 +163,6 @@ export async function mergeWriteWorkspaceConfig(
 ): Promise<WorkspaceConfig> {
   const current = await loadWorkspaceConfig();
   const next = mutator(current) ?? current;
-  const path = workspaceConfigPath();
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const tmp = `${path}.tmp`;
-  writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
-  renameSync(tmp, path);
-  try {
-    chmodSync(path, 0o600); // best-effort — ignored on some filesystems
-  } catch {
-    // non-fatal
-  }
+  atomicWriteJsonSync(workspaceConfigPath(), next);
   return next;
 }

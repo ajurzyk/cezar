@@ -1,7 +1,6 @@
-import { chmodSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
 import { workspaceUiStatePath } from '../paths.js';
+import { atomicWriteJsonSync } from './config.js';
 
 /**
  * `~/.cezar/ui-state.json` — global GUI state, the workspace twin of the
@@ -29,25 +28,18 @@ export async function readWorkspaceUiState(): Promise<Record<string, unknown>> {
 
 /**
  * Read-modify-write for `~/.cezar/ui-state.json`, written with the same atomic
- * tmp+rename `0600` pattern (dir `0700`) as `mergeWriteWorkspaceConfig`. A
- * missing or corrupt file merges from `{}`. The mutator may mutate its
- * argument in place or return a replacement. Throws on write failure (e.g. a
- * read-only home) — degrading is the caller's policy, per house rules.
+ * per-writer tmp+rename `0600` pattern (dir `0700`) as
+ * `mergeWriteWorkspaceConfig` (`atomicWriteJsonSync` — one shared writer, so
+ * the unique-tmp rule cannot drift between the two files). A missing or
+ * corrupt file merges from `{}`. The mutator may mutate its argument in place
+ * or return a replacement. Throws on write failure (e.g. a read-only home) —
+ * degrading is the caller's policy, per house rules.
  */
 export async function mergeWriteWorkspaceUiState(
   mutator: (state: Record<string, unknown>) => Record<string, unknown> | void,
 ): Promise<Record<string, unknown>> {
-  const path = workspaceUiStatePath();
   const current = await readWorkspaceUiState();
   const next = mutator(current) ?? current;
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const tmp = `${path}.tmp`;
-  writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
-  renameSync(tmp, path);
-  try {
-    chmodSync(path, 0o600); // best-effort — ignored on some filesystems
-  } catch {
-    // non-fatal
-  }
+  atomicWriteJsonSync(workspaceUiStatePath(), next);
   return next;
 }

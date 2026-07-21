@@ -1,9 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { workspaceConfigPath } from '../paths.js';
 import {
+  atomicTmpPath,
   defaultWorkspaceConfig,
   loadWorkspaceConfig,
   mergeWriteWorkspaceConfig,
@@ -82,6 +83,30 @@ describe('workspace config', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     write('[1, 2, 3]');
     expect(await loadWorkspaceConfig()).toEqual(defaultWorkspaceConfig());
+  });
+
+  it('every atomic write stages through its own tmp file (pid + random, never a shared name)', () => {
+    // Two cezar processes (a `serve` per repo, a settings PUT, `cezar run`)
+    // share `~/.cezar/` — a fixed `${path}.tmp` would let one writer O_TRUNC
+    // the other's staging file mid-write and rename corruption into place.
+    const path = workspaceConfigPath();
+    const a = atomicTmpPath(path);
+    const b = atomicTmpPath(path);
+    expect(a).not.toBe(b); // unique per call, even within one process
+    for (const tmp of [a, b]) {
+      expect(tmp.startsWith(`${path}.`)).toBe(true); // stays in the target's directory
+      expect(tmp.endsWith('.tmp')).toBe(true);
+      expect(tmp).toContain(`.${process.pid}.`); // per-process namespace
+    }
+  });
+
+  it('a merge-write leaves no staging file behind', async () => {
+    await mergeWriteWorkspaceConfig((config) => {
+      config.projects.push(project('cezar'));
+    });
+    const dir = readdirSync(dirname(workspaceConfigPath()));
+    expect(dir.filter((name) => name.endsWith('.tmp'))).toEqual([]);
+    expect((await loadWorkspaceConfig()).projects.map((p) => p.id)).toEqual(['cezar']);
   });
 
   it('concurrent merge-writes from stale in-memory copies keep both writers projects', async () => {
