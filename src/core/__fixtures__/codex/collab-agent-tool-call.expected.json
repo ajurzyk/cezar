@@ -34,6 +34,24 @@
     }
   },
   {
+    "type": "item.started",
+    "item": {
+      "kind": "tool",
+      "id": "item_child_early",
+      "name": "commandExecution",
+      "toolKind": "execute",
+      "title": "Ran",
+      "status": "running",
+      "parentItemId": "item_spawn"
+    }
+  },
+  {
+    "type": "item.delta",
+    "itemId": "item_child_early",
+    "field": "output",
+    "delta": "early child output"
+  },
+  {
     "type": "item.completed",
     "item": {
       "kind": "tool",

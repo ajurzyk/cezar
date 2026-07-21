@@ -719,7 +719,10 @@ function mapDelta(
   const events: UiEvent[] = [];
   let knownItems: ReadonlySet<string> = state.knownItems;
   if (!knownItems.has(itemId)) {
-    events.push({ type: 'item.started', item: synthesizedItem(itemId, field) });
+    const item = synthesizedItem(itemId, field);
+    const parentItemId = collabParentItemId(params, state);
+    if (parentItemId !== undefined) item.parentItemId = parentItemId;
+    events.push({ type: 'item.started', item });
     knownItems = new Set(knownItems).add(itemId);
   }
   events.push({ type: 'item.delta', itemId, field, delta });

@@ -766,6 +766,22 @@ describe('CodexAppServerRunner v2 wiring (against the bundled mock app-server)',
     await expect(session.result).resolves.toMatchObject({ sessionId: 'th_mock_1' });
   }, 30_000);
 
+  it('routes an unstructured multi-question free-text reply to the first native question', async () => {
+    const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 60_000 });
+    let resolveAsk!: () => void;
+    const asked = new Promise<void>((resolve) => { resolveAsk = resolve; });
+    const session = runner.startSession(
+      { userPrompt: 'mock:native-codex-ask multi free text', cwd: process.cwd() },
+      undefined,
+      { autoEndAfterFirstTurn: true, onUiEvent: (event) => {
+        if (event.type === 'ask.requested') resolveAsk();
+      } },
+    );
+    await asked;
+    expect(session.sendMessage([{ type: 'text', text: 'Use sensible defaults' }])).toBe(true);
+    await expect(session.result).resolves.toMatchObject({ sessionId: 'th_mock_1' });
+  }, 30_000);
+
   it('rejects a failed resume through session.result without an unhandled rejection', async () => {
     const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 60_000 });
     const unhandled: unknown[] = [];

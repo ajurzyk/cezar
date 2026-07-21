@@ -537,11 +537,12 @@ function codexAskQuestions(value: unknown): AskQuestion[] | null {
 
 function userInputAnswers(questions: AskQuestion[], text: string): Record<string, { answers: string[] }> {
   const lines = text.split(/\r?\n/);
+  const hasStructuredAnswer = questions.some((question) => lines.some((line) => line.startsWith(`${question.header}:`)));
   const answers: Record<string, { answers: string[] }> = {};
   for (const [index, question] of questions.entries()) {
     const prefix = `${question.header}:`;
     const matching = lines.find((line) => line.startsWith(prefix));
-    const raw = matching?.slice(prefix.length).trim() ?? (questions.length === 1 ? text.trim() : '');
+    const raw = matching?.slice(prefix.length).trim() ?? (!hasStructuredAnswer && index === 0 ? text.trim() : '');
     answers[question.id ?? String(index)] = {
       answers: raw === '' ? [] : raw.split(',').map((answer) => answer.trim()).filter(Boolean),
     };

@@ -18,7 +18,8 @@ rl.on('line', (line) => {
   }
   if (msg.id === 'ask-1' && msg.result) {
     const answer = msg.result.answers?.library?.answers;
-    emit(Array.isArray(answer) && answer[0] === 'Vitest'
+    const freeText = msg.result.answers?.first?.answers;
+    emit((Array.isArray(answer) && answer[0] === 'Vitest') || (Array.isArray(freeText) && freeText[0] === 'Use sensible defaults')
       ? { method: 'turn/completed', params: { turn: { id: 'turn_mock_1', status: 'completed' } } }
       : { method: 'turn/failed', params: { turn: { id: 'turn_mock_1', status: 'failed' }, error: { message: 'bad answer' } } });
   } else if (msg.method === 'initialize') {
@@ -47,11 +48,17 @@ rl.on('line', (line) => {
     emit({ method: 'turn/started', params: { turn: { id: 'turn_mock_1', status: 'inProgress', items: [] } } });
     const turnText = msg.params?.input?.map?.((part) => part.text ?? '').join('\n') ?? '';
     if (process.env.MOCK_CODEX_ASK === '1' || turnText.includes('mock:native-codex-ask')) {
+      const questions = turnText.includes('multi free text')
+        ? [{ id: 'first', header: 'First', question: 'First choice?', isOther: true, isSecret: false,
+            options: [{ label: 'A', description: 'Option A.' }, { label: 'B', description: 'Option B.' }] },
+          { id: 'second', header: 'Second', question: 'Second choice?', isOther: true, isSecret: false,
+            options: [{ label: 'C', description: 'Option C.' }, { label: 'D', description: 'Option D.' }] }]
+        : [{ id: 'library', header: 'Library', question: 'Which test library?', isOther: true,
+            isSecret: false, options: [{ label: 'Vitest', description: 'Use the existing test runner.' },
+              { label: 'Node test', description: 'Use node:test.' }] }];
       emit({ id: 'ask-1', method: 'item/tool/requestUserInput', params: {
         threadId: 'th_mock_1', turnId: 'turn_mock_1', itemId: 'item_ask_1', autoResolutionMs: null,
-        questions: [{ id: 'library', header: 'Library', question: 'Which test library?', isOther: true,
-          isSecret: false, options: [{ label: 'Vitest', description: 'Use the existing test runner.' },
-            { label: 'Node test', description: 'Use node:test.' }] }],
+        questions,
       } });
       return;
     }
