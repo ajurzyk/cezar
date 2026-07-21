@@ -51,9 +51,9 @@ Related implementation: PR #569.
 
 ### Phase 1: Workspace root contracts
 
-- [ ] 1.1 Add environment-backed workspace root defaults
-- [ ] 1.2 Route and validate independent roots with recursive creation
-- [ ] 1.3 Add backend regression coverage
+- [x] 1.1 Add environment-backed workspace root defaults — 5db245d
+- [x] 1.2 Route and validate independent roots with recursive creation — 5db245d
+- [x] 1.3 Add backend regression coverage — 5db245d
 
 ### Phase 2: Cockpit and documentation
 
