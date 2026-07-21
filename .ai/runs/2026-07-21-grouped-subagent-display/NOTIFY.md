@@ -43,3 +43,30 @@
 
 ## 2026-07-21T11:07:00Z — adversarial review round 2 dispatched
 - Re-reviewing the fix batch itself, because fix batches are where new defects enter.
+
+## 2026-07-21T11:05:00Z — external om-auto-review-pr: CHANGES REQUESTED
+- A concurrent automation reviewed the PR at 11:04:49Z (against `06436c3`, i.e. pre-fix) and
+  found 5 majors + 6 minors. M1/M2/M4 were already fixed in `73f15c7` a minute later; M3 was
+  the opencode change I had already reverted.
+- Genuinely NEW from that review: **M5** — a terminal run never settles its in-flight agents, so
+  reopening a cancelled fan-out pulses `Agents · 0/1` above a dead transcript forever. Fixed.
+- Also new: m2 (`aria-describedby={undefined}` suppressed the sheet's description) and m6
+  (`findSubagent` structurally could not carry `activity`). Both fixed.
+- An `om-auto-qa-pr` run posted ✅ PASS then a correction: its PASS covers only the happy path
+  and is explicitly NOT a QA sign-off; `needs-qa` stands and no `qa-approved` was applied.
+
+## 2026-07-21T11:13:00Z — adversarial review round 2: my own fix batch was defective
+- Round 2 (re-review of `73f15c7`) confirmed 7 of 10 fixes clean but found the MAJOR-4 fix
+  introduced TWO new majors:
+  1. carrying only *unsettled* earlier items made a row vanish the instant it settled — the
+     odometer counted DOWN (3 → 2 → 1) and could never reach N/N; a failed agent lost its glyph.
+  2. the lookback was unbounded, so one stranded agent (which the opencode revert guarantees is
+     possible) would inject itself into every later fan-out and pin the dock open for the run.
+- Fixed in `99c2fb1`: carry-over is turn-granular and bounded by the last fully-settled fan-out.
+- This is the third time in this repo that a fix batch introduced defects a later pass caught.
+  Re-reviewing every batch is not optional.
+- Gate after the batch: 3017 tests green; dock e2e 3/3.
+- Follow-up filed: #551 (opencode single-slot subtask attribution).
+
+## 2026-07-21T11:16:00Z — adversarial review round 3 dispatched
+- Verifying the round-2 carry-over rewrite before flipping the pipeline label.
