@@ -4,6 +4,10 @@
 # history:
 #   2026-07-14 generated (cold ~40s, warm ~2s) — cezar has no backing services, so
 #             the service-provisioning step of the contract is deliberately absent.
+#   2026-07-21 detach the app with nohup so non-interactive bootstrap shells do not
+#             terminate the healthy server immediately after the script exits.
+#   2026-07-21 start a new session when setsid is available; some task runners reap
+#             every process left in the bootstrap shell's process group despite nohup.
 set -eu
 
 # ---- project-specific parameters -------------------------------------------
@@ -305,8 +309,13 @@ start_app() {
 
   log "starting cezar on $BASE_URL (CEZ_DRY_RUN=1)"
   # --no-open: a test boot must never hijack the operator's browser.
-  (cd "$REPO_ROOT" && exec node dist/index.js --port "$PORT" --no-open --repo "$REPO_ROOT" \
-    >"$APP_LOG" 2>&1) &
+  if command -v setsid >/dev/null 2>&1; then
+    (cd "$REPO_ROOT" && exec setsid nohup node dist/index.js --port "$PORT" --no-open --repo "$REPO_ROOT" \
+      >"$APP_LOG" 2>&1 </dev/null) &
+  else
+    (cd "$REPO_ROOT" && exec nohup node dist/index.js --port "$PORT" --no-open --repo "$REPO_ROOT" \
+      >"$APP_LOG" 2>&1 </dev/null) &
+  fi
   APP_PID=$!
 
   waited=0
