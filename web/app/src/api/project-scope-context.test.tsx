@@ -1,4 +1,5 @@
 import { cleanup, render } from '@testing-library/react'
+import { useEffect } from 'react'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { ProjectScopeProvider, useProjectScope } from './project-scope-context'
@@ -55,6 +56,34 @@ describe('ProjectScopeProvider', () => {
 
     view.unmount()
     expect(getApiScope()).toBeNull()
+  })
+
+  // The composer's project pill (step 3.4) swaps scope by navigating, which remounts the
+  // routed subtree under a provider whose projectId changed in the same commit. React runs
+  // every destroy before any create, so a reset in the `[projectId]` effect's cleanup would
+  // fire between the provider's render and the fresh children's mount effects — and their
+  // first requests (the arriving project's skills, workflows, config) would go out unscoped.
+  it('never dips back to unscoped while remounting children across a projectId change', () => {
+    const seen: (string | null)[] = []
+    /** Records the scope its mount effect sees — a child query's fetch timing, exactly. */
+    function MountProbe() {
+      useEffect(() => {
+        seen.push(getApiScope())
+      }, [])
+      return null
+    }
+
+    const view = render(
+      <ProjectScopeProvider projectId="a">
+        <MountProbe key="a" />
+      </ProjectScopeProvider>,
+    )
+    view.rerender(
+      <ProjectScopeProvider projectId="b">
+        <MountProbe key="b" />
+      </ProjectScopeProvider>,
+    )
+    expect(seen).toEqual(['a', 'b'])
   })
 
   it('passes null through as the unscoped boot project', () => {

@@ -156,6 +156,22 @@ function ProjectScopeRoute() {
 }
 
 /**
+ * The composer, remounted per project (multi-project spec, step 3.4).
+ *
+ * A `/p/:projectId` param change alone re-renders the SAME `NewTaskRoute` instance — React
+ * Router matches the same route element either way. That is fine for the queries (their keys
+ * carry the scope) but wrong for the composer's mount-time state: the draft is read once from
+ * the departing project's storage key, and the write-back effect would then persist it under
+ * the arriving project's key — exactly the draft leak the per-project keys exist to prevent.
+ * Keying on the project makes the swap a real unmount/mount, so the draft, the pickers and the
+ * deep-link capture all start from the project the URL now names.
+ */
+function NewTaskProjectRoute() {
+  const { projectId = '' } = useParams()
+  return <NewTaskRoute key={projectId} />
+}
+
+/**
  * Legacy flat URLs — every pre-multi-project path, `/tasks/:id` bookmarks and the `/new?...`
  * bookmarklet grammar included — redirect to the boot project's scoped twin, preserving path,
  * query and hash byte-for-byte (BACKWARD_COMPATIBILITY.md protects the bookmarklet contract).
@@ -195,7 +211,7 @@ export function AppRoutes() {
     <Routes>
       <Route path="/p/:projectId" element={<ProjectScopeRoute />}>
         <Route index element={<TasksOverviewRoute />} />
-        <Route path="new" element={<NewTaskRoute />} />
+        <Route path="new" element={<NewTaskProjectRoute />} />
 
         <Route
           path="tasks/:id"
