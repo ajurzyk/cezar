@@ -870,6 +870,27 @@ export async function fetchGithubComments(
       events = undefined;
     }
 
+    // Per-commit CI (#525 Phase 2). One extra subprocess per opened thread that contains commits,
+    // behind the same 60 s LRU — a per-thread-open cost, not per-render. Every failure path here
+    // leaves `checks` ABSENT rather than null, so commits simply render unglyphed: the fetch
+    // degrades to "no data" and the render decides what absence looks like.
+    const commitShas = (events ?? []).flatMap((e) => (e.kind === 'committed' && e.sha ? [e.sha] : []));
+    if (commitShas.length > 0) {
+      const handle = await resolveRepoHandle(repoRoot);
+      if (handle) {
+        const runGraphql: GraphqlRunner = (query, variables) => {
+          const args = ['api', 'graphql', '-f', `query=${query}`];
+          for (const [k, v] of Object.entries(variables)) args.push('-f', `${k}=${v}`);
+          return gh(repoRoot, args);
+        };
+        const checks = await fetchCommitChecks(runGraphql, handle.owner, handle.name, commitShas);
+        for (const event of events ?? []) {
+          if (event.kind !== 'committed' || !event.sha) continue;
+          if (event.sha in checks) event.checks = checks[event.sha];
+        }
+      }
+    }
+
     const parts: ForgeComment[][] = [normalizeComments(commentRows)];
     if (kind === 'pr') {
       const reviewsOut = await gh(repoRoot, ['api', `repos/{owner}/{repo}/pulls/${number}/reviews`, '--paginate']);

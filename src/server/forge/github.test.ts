@@ -764,6 +764,7 @@ describe('fetchGithubComments timeline integration (#525)', () => {
     vi.stubEnv('CEZ_DRY_RUN', '');
     execFileMock.mockReset();
     __clearCommentsCacheForTests();
+    __clearRepoHandleCacheForTests();
   });
   afterEach(() => vi.unstubAllEnvs());
 
@@ -887,6 +888,62 @@ describe('fetchGithubComments timeline integration (#525)', () => {
     expect(data.events).toHaveLength(TIMELINE_EVENT_CAP);
     expect(data.truncated).toBe(true);
     expect(data.comments).toEqual([]); // comments untouched by event volume
+  });
+
+  it('attaches per-commit checks to committed events', async () => {
+    const commitSha = 'd'.repeat(40);
+    execFileMock.mockImplementation((...args: unknown[]) => {
+      const argv = args[1] as string[];
+      const cb = args[args.length - 1] as (e: unknown, r: unknown) => void;
+      const ok = (v: unknown) => cb(null, { stdout: typeof v === 'string' ? v : JSON.stringify(v), stderr: '' });
+      if (argv[0] === 'repo') return ok('o/r');
+      if (argv[1] === 'graphql') return ok({ data: { repository: { c0: { statusCheckRollup: { state: 'SUCCESS' } } } } });
+      const path = argv.find((a) => a.includes('repos/{owner}/{repo}')) ?? '';
+      if (path.includes('/timeline')) {
+        return ok([{ event: 'committed', created_at: null, sha: commitSha, message: 'ship it', author: { name: 'Ada', date: '2026-01-01T00:00:00Z' } }]);
+      }
+      if (path.includes('/reviews')) return ok([]);
+      return cb(new Error('unexpected'), null);
+    });
+
+    const data = await fetchGithubComments(repoRoot, 'pr', 1);
+
+    expect(data.events?.[0]).toMatchObject({ kind: 'committed', sha: commitSha, checks: 'passing' });
+  });
+
+  it('leaves checks ABSENT (not null) when the rollup query fails', async () => {
+    // absent = "we never found out"; null = "this commit has no CI". Both render no glyph, but the
+    // values stay distinct so a diagnosis can tell them apart.
+    const commitSha = 'e'.repeat(40);
+    execFileMock.mockImplementation((...args: unknown[]) => {
+      const argv = args[1] as string[];
+      const cb = args[args.length - 1] as (e: unknown, r: unknown) => void;
+      const ok = (v: unknown) => cb(null, { stdout: typeof v === 'string' ? v : JSON.stringify(v), stderr: '' });
+      if (argv[0] === 'repo') return ok('o/r');
+      if (argv[1] === 'graphql') return cb(new Error('HTTP 502'), null); // rollup fails
+      const path = argv.find((a) => a.includes('repos/{owner}/{repo}')) ?? '';
+      if (path.includes('/timeline')) {
+        return ok([{ event: 'committed', created_at: null, sha: commitSha, author: { name: 'Ada', date: '2026-01-01T00:00:00Z' } }]);
+      }
+      if (path.includes('/reviews')) return ok([]);
+      return cb(new Error('unexpected'), null);
+    });
+
+    const data = await fetchGithubComments(repoRoot, 'pr', 1);
+
+    expect(data.available).toBe(true);
+    expect(data.events?.[0]).toMatchObject({ kind: 'committed', sha: commitSha });
+    expect(data.events?.[0] && 'checks' in data.events[0]).toBe(false);
+  });
+
+  it('skips the checks query entirely when the timeline has no commits', async () => {
+    routeGh({
+      timeline: () => [{ event: 'labeled', id: 1, created_at: '2026-01-01T00:00:00Z', actor: { login: 'a' }, label: { name: 'bug' } }],
+    });
+    await fetchGithubComments(repoRoot, 'issue', 1);
+    const calls = execFileMock.mock.calls.map((c) => (c[1] as string[]).join(' '));
+    expect(calls.some((c) => c.includes('graphql'))).toBe(false);
+    expect(calls.some((c) => c.includes('repo view'))).toBe(false);
   });
 
   it('still fetches PR reviews alongside the timeline', async () => {
