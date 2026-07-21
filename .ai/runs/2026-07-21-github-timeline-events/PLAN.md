@@ -28,7 +28,7 @@
 | 3 | 3.3 | Pin `GithubTimelineEvent` / `GithubCommentsData` type-exact in `api-types.test.ts` | done | |
 | 3 | 3.4 | Extend `github-comments-api.test.ts` dry-run route assertions for `events[]` | done | |
 | 3 | 3.5 | `BACKWARD_COMPATIBILITY.md` §2: add 3 missing routes + note `events?` additive | done | |
-| 3 | 3.6 | §2 route-inventory drift guard test (brace-expander, param normalization) | todo | |
+| 3 | 3.6 | §2 route-inventory drift guard test (brace-expander, param normalization) | done | |
 | 3 | 3.7 | `web/app/e2e/github.e2e.ts` — thread coverage (comments, commit row, CI glyph) | todo | |
 | 3 | 3.8 | Full validation gate + e2e + dry-run manual pass with screenshot | todo | |
 
