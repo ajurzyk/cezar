@@ -24,7 +24,7 @@
 | 2 | 2.4 | Render CI glyph on commit rows reusing `CHECKS_GLYPH`/`CHECKS_TONE` | done | |
 | 2 | 2.5 | Client-side collapse of consecutive same-author commit runs + `aria-expanded` expander | done | |
 | 3 | 3.1 | Refresh mutation also invalidates open `queryKeys.githubComments` keys | done | |
-| 3 | 3.2 | Extend `mockGithubComments` with fixture events (full 40-char SHAs) | todo | |
+| 3 | 3.2 | Extend `mockGithubComments` with fixture events (full 40-char SHAs) | done | |
 | 3 | 3.3 | Pin `GithubTimelineEvent` / `GithubCommentsData` type-exact in `api-types.test.ts` | todo | |
 | 3 | 3.4 | Extend `github-comments-api.test.ts` dry-run route assertions for `events[]` | todo | |
 | 3 | 3.5 | `BACKWARD_COMPATIBILITY.md` §2: add 3 missing routes + note `events?` additive | todo | |

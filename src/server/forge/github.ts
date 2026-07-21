@@ -954,7 +954,82 @@ function mockGithubComments(kind: 'issue' | 'pr'): ForgeCommentsData {
       url: 'https://github.com/mock/repo/pull/1#pullrequestreview-3',
     });
   }
-  return { available: true, comments };
+
+  // Timeline events (#525) so the whole feature is demoable and e2e-testable offline. Deliberately
+  // covers the cases that are easy to get wrong rather than one of each: a multi-commit run by ONE
+  // author (exercises the client-side grouping) with MIXED check states (passing/failing/pending
+  // plus one `null` = no CI configured), a label change, a cross-reference, and — for PRs — a
+  // merge. SHAs are full 40-char because the rollup query's `oid` rejects abbreviated ones, and a
+  // fixture that cheated there would not survive being pasted into a real query.
+  const sha = (seed: string) => seed.repeat(40).slice(0, 40);
+  const events: ForgeTimelineEvent[] = [
+    {
+      id: 'evt-100',
+      kind: 'labeled',
+      actor: 'ada',
+      avatarUrl: 'https://avatars.githubusercontent.com/u/1?v=4',
+      createdAt: at(300_000),
+      label: { name: 'bug', color: 'd73a4a' },
+    },
+    {
+      id: `evt-${sha('a')}`,
+      kind: 'committed',
+      actor: 'Lin Zhao',
+      createdAt: at(900_000),
+      sha: sha('a'),
+      message: 'fix(session): keep the refresh token on reload',
+      checks: 'passing',
+    },
+    {
+      id: `evt-${sha('b')}`,
+      kind: 'committed',
+      actor: 'Lin Zhao',
+      createdAt: at(960_000),
+      sha: sha('b'),
+      message: 'test(session): cover the reload path',
+      checks: 'failing',
+    },
+    {
+      id: `evt-${sha('c')}`,
+      kind: 'committed',
+      actor: 'Lin Zhao',
+      createdAt: at(1_020_000),
+      sha: sha('c'),
+      message: 'chore: appease the linter',
+      checks: 'pending',
+    },
+    {
+      id: `evt-${sha('d')}`,
+      kind: 'committed',
+      actor: 'Lin Zhao',
+      createdAt: at(1_080_000),
+      sha: sha('d'),
+      message: 'docs: note the new behavior',
+      checks: null, // no CI configured — renders no glyph, distinct from absent
+    },
+    {
+      id: 'evt-101',
+      kind: 'cross-referenced',
+      actor: 'grace',
+      avatarUrl: 'https://avatars.githubusercontent.com/u/3?v=4',
+      createdAt: at(1_500_000),
+      refNumber: 42,
+      refTitle: 'Session handling rewrite',
+      refIsPr: true,
+      url: 'https://github.com/mock/repo/pull/42',
+    },
+  ];
+  if (kind === 'pr') {
+    events.push({
+      id: 'evt-102',
+      kind: 'merged',
+      actor: 'grace',
+      avatarUrl: 'https://avatars.githubusercontent.com/u/3?v=4',
+      createdAt: at(1_800_000),
+    });
+  }
+
+  return { available: true, comments, events };
 }
 
 // ---- draft-PR creation (review gate, spec 009) ------------------------------
