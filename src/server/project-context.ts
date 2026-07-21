@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { loadConfig } from '../config.js';
+import { DEFAULT_WORKTREE_RETENTION, resolveWorktreeRetention } from '../config.js';
 import { pruneOrphans } from '../git-worktree.js';
 import { reclaimWorktrees } from '../runs/retention.js';
 import { RunStore } from '../runs/store.js';
@@ -188,7 +188,9 @@ export class ProjectContexts {
         await pruneOrphans(project.root, new Set(store.listRuns().map((r) => r.id))).catch(
           () => [] as string[],
         );
-        const keep = (await loadConfig(project.root).catch(() => null))?.worktreeRetention ?? 10;
+        const keep = await resolveWorktreeRetention(project.root).catch(
+          () => DEFAULT_WORKTREE_RETENTION,
+        );
         await reclaimWorktrees(project.root, store, keep).catch(() => [] as string[]);
       }
       await manager.recover();

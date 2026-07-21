@@ -18,7 +18,7 @@ import { todosPath } from '../todos.js';
 import type { AgentEvent, ContentBlock } from '../core/agent-runner.js';
 import { discoverSkills, type Skill } from '../skills.js';
 import { materializeSkillDir } from '../skills-remote.js';
-import { loadConfig } from '../config.js';
+import { loadConfig, resolveWorktreeRetention } from '../config.js';
 import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff, worktreeShortstat } from '../git-worktree.js';
 import { getRepoInfo } from '../server/git.js';
 import { loadWorkflows } from './load.js';
@@ -617,7 +617,7 @@ export class RunManager {
    *  lifecycle. `review`/live runs are excluded by the selector. */
   private async enforceRetention(): Promise<void> {
     try {
-      const keep = (await loadConfig(this.repoRoot)).worktreeRetention;
+      const keep = await resolveWorktreeRetention(this.repoRoot);
       await reclaimWorktrees(this.repoRoot, this.store, keep);
     } catch {
       // retention is best-effort; swallow so terminal transitions never break.

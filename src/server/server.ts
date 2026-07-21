@@ -46,7 +46,7 @@ import {
   pushCurrentBranch,
   readWorktreePath,
 } from './git-changes.js';
-import { loadConfig, type CezConfig } from '../config.js';
+import { loadConfig, resolveWorktreeRetention, type CezConfig } from '../config.js';
 import {
   PROJECT_ID_RE,
   defaultWorkspaceConfig,
@@ -1977,7 +1977,9 @@ export function createApp(deps: ServerDeps): Hono {
   // /api/runs/:id/remove-worktree route above.
   api.get('/worktrees', async (c) => {
     const { root: repoRoot, store } = c.get('project');
-    const config = await loadConfig(repoRoot);
+    // The keep-limit the panel reports is the one the enforcer will actually
+    // apply — inherited from the workspace default when this repo sets none.
+    const keep = await resolveWorktreeRetention(repoRoot);
     const runs = store.listRuns().filter((r) => r.worktreePath && existsSync(r.worktreePath));
     const worktrees = await Promise.all(
       runs.map(async (r) => ({
@@ -1995,7 +1997,7 @@ export function createApp(deps: ServerDeps): Hono {
     const totalBytes = worktrees.some((w) => w.sizeBytes === null)
       ? null
       : worktrees.reduce((sum, w) => sum + (w.sizeBytes ?? 0), 0);
-    return c.json({ worktrees, totalBytes, keep: config.worktreeRetention });
+    return c.json({ worktrees, totalBytes, keep });
   });
 
   const reclaimBodySchema = z.object({}).passthrough();
@@ -2004,8 +2006,7 @@ export function createApp(deps: ServerDeps): Hono {
     // Accept an empty or `{}` body; retention is best-effort, so 200 always.
     const parsed = reclaimBodySchema.safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) return c.json({ error: 'invalid body' }, 400);
-    const { worktreeRetention } = await loadConfig(repoRoot);
-    const reclaimed = await reclaimWorktrees(repoRoot, store, worktreeRetention);
+    const reclaimed = await reclaimWorktrees(repoRoot, store, await resolveWorktreeRetention(repoRoot));
     return c.json({ reclaimed });
   });
 

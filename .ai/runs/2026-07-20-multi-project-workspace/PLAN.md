@@ -44,7 +44,7 @@
 | 5 | 5.1 | Docs: AGENTS.md routing rows, README multi-project section, `.env.example` | done | e702cca |
 | 5 | 5.2 | `cezar projects` CLI + server-install docs note | done | ce0fe96 |
 | 5 | 5.3 | File follow-up issue: retire `liveInstancesExist()` / `~/.cezar/instances/` | todo | |
-| 5 | 5.4 | Make `resources.worktreeRetentionDefault` actually seed per-project retention (fix-forward from Step 5.1) | todo | |
+| 5 | 5.4 | Make `resources.worktreeRetentionDefault` actually seed per-project retention (fix-forward from Step 5.1) | done | 4950ea0 |
 
 ## Goal
 
