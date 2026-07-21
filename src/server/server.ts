@@ -912,21 +912,28 @@ export function createApp(deps: ServerDeps): Hono {
 
     const run = store.getRun(id);
     const stack = run?.queuedMessages ?? [];
-    if (stack.length >= MAX_QUEUED_MESSAGES) {
-      return c.json({ error: `too many queued messages — ${MAX_QUEUED_MESSAGES} message limit` }, 400);
-    }
-    const stackedImages = stack.reduce((n, m) => n + (m.images?.length ?? 0), 0);
-    if (stackedImages + parsed.data.images.length > MAX_QUEUED_IMAGES) {
-      return c.json({ error: `too many queued images — ${MAX_QUEUED_IMAGES} image limit across the stack` }, 400);
-    }
-    const prospective = foldedLength(run?.task ?? '', [...stack, { text: parsed.data.text }]);
-    if (prospective > MAX_FOLDED_TASK_CHARS) {
-      return c.json(
-        {
-          error: `prompt too long — ${MAX_FOLDED_TASK_CHARS} character limit across the task and its queued messages (would be ${prospective})`,
-        },
-        400,
-      );
+    // Bounds apply only to a message that is actually about to be stacked. Without this
+    // gate an over-long message posted to a *finished* run would answer `400 prompt too
+    // long` when the truthful answer is `409 session closed`. The status read is safe
+    // here because it only decides whether to reject EARLY — `enqueueMessage` still
+    // re-checks against the engine's own queue before writing anything.
+    if (run?.status === 'queued') {
+      if (stack.length >= MAX_QUEUED_MESSAGES) {
+        return c.json({ error: `too many queued messages — ${MAX_QUEUED_MESSAGES} message limit` }, 400);
+      }
+      const stackedImages = stack.reduce((n, m) => n + (m.images?.length ?? 0), 0);
+      if (stackedImages + parsed.data.images.length > MAX_QUEUED_IMAGES) {
+        return c.json({ error: `too many queued images — ${MAX_QUEUED_IMAGES} image limit across the stack` }, 400);
+      }
+      const prospective = foldedLength(run.task, [...stack, { text: parsed.data.text }]);
+      if (prospective > MAX_FOLDED_TASK_CHARS) {
+        return c.json(
+          {
+            error: `prompt too long — ${MAX_FOLDED_TASK_CHARS} character limit across the task and its queued messages (would be ${prospective})`,
+          },
+          400,
+        );
+      }
     }
 
     const queued = manager.enqueueMessage(id, content);

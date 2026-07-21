@@ -899,8 +899,13 @@ export class RunManager {
   private flushDeferred(runId: string): void {
     const pending = this.deferredMessages.get(runId);
     if (!pending?.length) return;
-    this.deferredMessages.delete(runId);
-    for (const content of pending) this.sendMessage(runId, content);
+    // Re-buffer whatever the session refused rather than dropping it. `sendMessage`
+    // answers false when the session is not open yet — and silently losing a message
+    // here would be precisely the failure `deferMessage` exists to prevent. Anything
+    // left over is retried by the next session that opens on this run.
+    const unsent = pending.filter((content) => !this.sendMessage(runId, content));
+    if (unsent.length) this.deferredMessages.set(runId, unsent);
+    else this.deferredMessages.delete(runId);
   }
 
   /**

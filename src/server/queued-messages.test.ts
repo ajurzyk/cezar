@@ -28,6 +28,9 @@ describe('queued prompt stack routes (#472)', () => {
     repoRoot = mkdtempSync(join(tmpdir(), 'cez-472-routes-'));
     store = RunStore.open(join(repoRoot, '.ai/cezar'));
     record = store.createRun({ title: 't', workflow: '(planned)', task: 'the task', steps: [] });
+    // The record's own status now gates the early bounds checks (a finished run gets 409
+    // rather than a bounds 400), so the fixture must look queued as well as answer on that rung.
+    store.updateRun(record.id, { status: 'queued' });
     rung = 'queued';
 
     const manager = {
@@ -119,6 +122,29 @@ describe('queued prompt stack routes (#472)', () => {
   it('still 409s for a genuinely closed run', async () => {
     rung = 'closed';
     const res = await post({ text: 'too late' });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: 'session closed' });
+  });
+
+  /**
+   * Review fix: the bounds describe a message about to be STACKED, so they must not answer
+   * for a run that can no longer stack anything. An over-long message posted to a finished
+   * run gets the truthful `409 session closed`, not `400 prompt too long`.
+   */
+  it('answers 409, not a bounds 400, when an over-long message hits a finished run', async () => {
+    // Individually legal (the per-message zod bound is 100k and rejects earlier), but it
+    // would overflow the FOLDED total — which is the bound the gate now skips for a run
+    // that can no longer stack anything.
+    seed('x'.repeat(100_000), 'y'.repeat(99_000));
+    const overflowing = { text: 'z'.repeat(2_000) };
+
+    // Same body while queued: rejected by the folded bound, proving the input really is
+    // over-long and the two cases differ only by status.
+    expect((await post(overflowing)).status).toBe(400);
+
+    store.updateRun(record.id, { status: 'done' });
+    rung = 'closed';
+    const res = await post(overflowing);
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual({ error: 'session closed' });
   });

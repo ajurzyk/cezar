@@ -974,6 +974,39 @@ describe('RunManager queued-stack mutators (#472)', () => {
     expect(manager.deferMessage(r.id, text('mid-spawn'))).toBe(true);
   });
 
+  /**
+   * Review fix: `flushDeferred` used to drop its buffer before sending, so a message the
+   * session refused was silently lost — precisely the failure `deferMessage` exists to
+   * prevent. Anything unsent must stay buffered for the next session that opens.
+   */
+  it('re-buffers a deferred message the session refuses, instead of dropping it', () => {
+    const r = seedQueued();
+    const starting = (manager as unknown as { starting: Set<string> }).starting;
+    const buffer = (manager as unknown as { deferredMessages: Map<string, ContentBlock[][]> })
+      .deferredMessages;
+
+    starting.add(r.id);
+    manager.deferMessage(r.id, text('buffer me'));
+    expect(buffer.get(r.id)).toHaveLength(1);
+
+    // Flush with no open session — `sendMessage` refuses.
+    ;(manager as unknown as { flushDeferred(id: string): void }).flushDeferred(r.id);
+    expect(buffer.get(r.id)).toHaveLength(1);
+
+    // Now a session that accepts it: the buffer drains.
+    const delivered: ContentBlock[][] = [];
+    (manager as unknown as { sendMessage(id: string, c: ContentBlock[]): boolean }).sendMessage = (
+      _id,
+      content,
+    ) => {
+      delivered.push(content);
+      return true;
+    };
+    ;(manager as unknown as { flushDeferred(id: string): void }).flushDeferred(r.id);
+    expect(delivered).toHaveLength(1);
+    expect(buffer.has(r.id)).toBe(false);
+  });
+
   it('stops deferring once a session has opened (a closed session is a real 409)', () => {
     const r = seedQueued();
     (manager as unknown as { active: Map<string, unknown> }).active.set(r.id, {

@@ -23,6 +23,7 @@
 | 2 | 2.3 | Inline edit / remove | done | 5b283ae |
 | 3 | 3.1 | E2E | done | 5aea278 |
 | 3 | 3.2 | Docs | done | cd0b0f2 |
+| 3 | 3.3-review-fix | Review fixes: defer re-buffer + exact 409 | done | 4840978 |
 
 ## Goal
 
