@@ -21,6 +21,7 @@ PR: https://github.com/open-mercato/cezar/pull/613
 | 3 | 3.4 | Add end-to-end coverage and visual evidence | done | 0eac053 |
 | 3 | 3.5-final-fix | Inventory the new protected API routes | done | 7be9b78 |
 | 3 | 3.6-final-fix | Stabilize full-suite browser fixtures | done | e47f5f0 |
+| 3 | 3.7-final-fix | Finish detached-HEAD and teardown stabilization | done | addf3fd |
 
 ## Goal
 
@@ -102,3 +103,7 @@ Add the workspace skills-update routes and additive workspace-config fields to t
 #### Step 3.6-final-fix — Stabilize full-suite browser fixtures
 
 Align legacy browser fixtures with project-scoped routes, detached-checkout semantics, deterministic no-PR dry-run policy, and Streamdown's current token-variable contract; split commit-detail settling across navigation and lazy rendering.
+
+#### Step 3.7-final-fix — Finish detached-HEAD and teardown stabilization
+
+Treat a reported branch as current only when it exists in the rendered branch list, and wait for fixture servers to exit before deleting their temporary roots.

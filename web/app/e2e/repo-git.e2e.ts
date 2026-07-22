@@ -145,9 +145,9 @@ describe('the repo view against the live dry-run server', () => {
     expect(browser.count('[data-slot="branch-row"]')).toBe(repo.branches.length)
     // An attached checkout marks exactly its current branch. CI may run this suite from a
     // detached task worktree; then git honestly reports no branch and no row may be marked.
-    const expectedCurrent = repo.info?.branch ? 1 : 0
+    const expectedCurrent = repo.info?.branch && repo.branches.includes(repo.info.branch) ? 1 : 0
     expect(browser.count('[data-slot="branch-current"]')).toBe(expectedCurrent)
-    if (repo.info?.branch) {
+    if (expectedCurrent === 1 && repo.info) {
       expect(
         browser.evaluate(
           `document.querySelector('[data-slot="branch-current"]').closest('[data-slot="branch-row"]').dataset.branch`,
