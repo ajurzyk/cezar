@@ -10,7 +10,7 @@ PR: https://github.com/open-mercato/cezar/pull/613
 | Phase | Step | Title | Status | Commit |
 |-------|------|-------|--------|--------|
 | 1 | 1.1 | Add provenance-aware update detection service | done | fc73d70 |
-| 1 | 1.2 | Expose cached detection and forced-check APIs | todo | — |
+| 1 | 1.2 | Expose cached detection and forced-check APIs | done | a8117a0 |
 | 2 | 2.1 | Add inherited global auto-update preference | todo | — |
 | 2 | 2.2 | Add safe update execution and lifecycle scheduling | todo | — |
 | 2 | 2.3 | Expose guarded manual apply behavior | todo | — |

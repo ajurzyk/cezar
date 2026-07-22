@@ -61,6 +61,7 @@ import type {
   WorkflowsResponse,
   WorkspaceConfigResponse,
   WorkspaceUiState,
+  SkillsUpdateState,
 } from './types'
 import { scopeApiPath } from './project-scope'
 
@@ -681,6 +682,17 @@ export function putWorkspaceUiState(patch: WorkspaceUiState): Promise<WorkspaceU
  *  (step 4.4) the checkout-root field. Workspace-level, so never scope-prefixed. */
 export function getWorkspaceConfig(opts?: ReadOptions): Promise<WorkspaceConfigResponse> {
   return get<WorkspaceConfigResponse>('/api/workspace/config', opts)
+}
+
+/** Cached Open Mercato update state for one registered project. The GET is immediate; the
+ * server may start a stale detection-only refresh after taking its snapshot. */
+export function getSkillsUpdate(projectId: string, opts?: ReadOptions): Promise<SkillsUpdateState> {
+  return get<SkillsUpdateState>(`/api/workspace/skills-update?projectId=${encodeURIComponent(projectId)}`, opts)
+}
+
+/** Force a bounded detection pass. The browser supplies identity only, never executable input. */
+export function checkSkillsUpdate(projectId: string): Promise<SkillsUpdateState> {
+  return mutate<SkillsUpdateState>('POST', '/api/workspace/skills-update/check', { projectId })
 }
 
 /** Partial update — absent keys stay untouched; answers the merged config. A `projectsDir`

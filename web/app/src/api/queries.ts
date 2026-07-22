@@ -36,6 +36,8 @@ import {
   getWorkflows,
   getWorkspaceConfig,
   getWorkspaceUiState,
+  getSkillsUpdate,
+  checkSkillsUpdate,
   getWorktrees,
   editQueuedMessage,
   patchRun,
@@ -155,6 +157,7 @@ export const workspaceQueryKeys = {
   /** `~/.cezar/config.json`'s settings slice via `GET/PUT /api/workspace/config` (step 2.7):
    *  the global Resources knobs and the checkout root. */
   config: ['workspace', 'config'] as const,
+  skillsUpdate: (projectId: string) => ['workspace', 'skills-update', projectId] as const,
   /** One directory listing from `GET /api/fs/browse` (step 4.2's folder picker). Keyed by the
    *  browsed path — `null` is the browse root, whose absolute location only the server knows.
    *  Not scope-led: there is one filesystem behind the workspace, not one per project. */
@@ -595,6 +598,23 @@ export function useWorkspaceConfig() {
   return useQuery({
     queryKey: workspaceQueryKeys.config,
     queryFn: ({ signal }) => getWorkspaceConfig({ signal }),
+  })
+}
+
+export function useSkillsUpdate(projectId: string, enabled = true) {
+  return useQuery({
+    queryKey: workspaceQueryKeys.skillsUpdate(projectId),
+    queryFn: ({ signal }) => getSkillsUpdate(projectId, { signal }),
+    enabled,
+  })
+}
+
+export function useCheckSkillsUpdate(projectId: string) {
+  const queryClient = useQueryClient()
+  const key = workspaceQueryKeys.skillsUpdate(projectId)
+  return useMutation({
+    mutationFn: () => checkSkillsUpdate(projectId),
+    onSuccess: (state) => queryClient.setQueryData(key, state),
   })
 }
 

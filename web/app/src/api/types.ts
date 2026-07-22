@@ -1005,6 +1005,27 @@ export interface OpenTargetsResponse {
   targets: OpenTarget[]
 }
 
+export type SkillsUpdateStatus = 'idle' | 'checking' | 'available' | 'updating' | 'current' | 'unavailable' | 'error'
+export interface SkillsUpdateScopeState {
+  scope: 'project' | 'global'
+  status: SkillsUpdateStatus
+  available: boolean
+  skills: string[]
+  checkedAt: string | null
+  updatedAt: string | null
+  reason?: string
+}
+export interface SkillsUpdateState {
+  status: SkillsUpdateStatus
+  available: boolean
+  autoUpdateEnabled: boolean
+  inherited: boolean
+  checkedAt: string | null
+  updatedAt: string | null
+  scopes: SkillsUpdateScopeState[]
+  needsUpgradeNotes: boolean
+}
+
 // ---- mutation responses ---------------------------------------------------------------------------
 
 /** `POST /api/runs` — one record for ×1, a group for ×2/×3. */

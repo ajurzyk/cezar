@@ -28,6 +28,7 @@ import {
 } from '../workflows/types.js';
 import { planChain, slugify } from '../planner.js';
 import { discoverSkills } from '../skills.js';
+import { SkillsUpdateService, type SkillsUpdateState } from '../skills-update.js';
 import { getTeamSkillsCached, refreshTeamSkills, waitForTeamSkills } from '../skills-remote.js';
 import { appendHandoffHeartbeat, handoffProgressExcerpt, readHandoff } from '../handoff.js';
 import { markStarted, onTodosChanged, readTodos, removeTodo, todoTaskText, type TodoItem } from '../todos.js';
@@ -134,6 +135,9 @@ export interface ServerDeps {
   cloneRunner?: CloneRunner;
   /** Host-wide model discovery service. Tests inject a deterministic adapter. */
   modelCatalog?: RunnerModelCatalog;
+  /** Process-wide Open Mercato skills update detector. Injected in tests and
+   * shared by every workspace route/project; createApp owns the default. */
+  skillsUpdate?: SkillsUpdateService;
 }
 
 // ---- project-scoped routing (multi-project spec, step 2.2) -----------------
@@ -692,6 +696,7 @@ export function createApp(deps: ServerDeps): Hono {
   const modelCatalog = deps.modelCatalog ?? new RunnerModelCatalog({
     adapters: { codex: { discover: () => discoverCodexModels({ cwd: bootRoot }) } },
   });
+  const skillsUpdate = deps.skillsUpdate ?? new SkillsUpdateService();
 
   // ---- workspace boot-project identity (multi-project spec) ----------------
   // The boot flow (`initWorkspace` in src/index.ts) registers the boot repo
@@ -1297,6 +1302,41 @@ export function createApp(deps: ServerDeps): Hono {
     workspaceEvents.emit('project-removed', { id });
     const body: RemoveProjectResponse = { removed: true, id };
     return c.json(body);
+  });
+
+  // Workspace-level by design: update state spans project and global installs,
+  // but the selected registered project supplies the safe, server-owned cwd.
+  const skillsUpdateInputSchema = z.object({ projectId: projectIdSchema }).strict();
+  const resolveSkillsUpdateRoot = async (raw: string): Promise<
+    { root: string } | { status: 404 | 409; error: string }
+  > => {
+    if (!projectIdSchema.safeParse(raw).success) return { status: 404, error: `unknown project: ${raw}` };
+    const bootId = await resolveBootProject();
+    if (raw === 'default' || raw === bootId) return { root: bootRoot };
+    const project = (await loadWorkspaceConfig()).projects.find((entry) => entry.id === raw);
+    if (!project) return { status: 404, error: `unknown project: ${raw}` };
+    if ((await probeProjectStatus(project.root)).status === 'missing') {
+      return { status: 409, error: `project folder not found: ${raw}` };
+    }
+    return { root: project.root };
+  };
+
+  app.get('/api/workspace/skills-update', async (c) => {
+    const parsed = skillsUpdateInputSchema.safeParse({ projectId: c.req.query('projectId') });
+    if (!parsed.success) return c.json({ error: 'projectId is required' }, 400);
+    const resolved = await resolveSkillsUpdateRoot(parsed.data.projectId);
+    if ('error' in resolved) return c.json({ error: resolved.error }, resolved.status);
+    const state: SkillsUpdateState = skillsUpdate.snapshot(resolved.root);
+    void skillsUpdate.check(resolved.root).catch(() => {});
+    return c.json(state);
+  });
+
+  app.post('/api/workspace/skills-update/check', async (c) => {
+    const parsed = skillsUpdateInputSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: 'body must contain only projectId' }, 400);
+    const resolved = await resolveSkillsUpdateRoot(parsed.data.projectId);
+    if ('error' in resolved) return c.json({ error: resolved.error }, resolved.status);
+    return c.json(await skillsUpdate.check(resolved.root, true));
   });
 
   // ---- GUI clone (multi-project spec, step 4.3) ----------------------------
