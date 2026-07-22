@@ -11,6 +11,7 @@ PR: https://github.com/open-mercato/cezar/pull/613
 |-------|------|-------|--------|--------|
 | 1 | 1.1 | Add provenance-aware update detection service | done | fc73d70 |
 | 1 | 1.2 | Expose cached detection and forced-check APIs | done | a8117a0 |
+| 1 | 1.3 | Harden serialized checks and stale-lock recovery | done | 865c22f |
 | 2 | 2.1 | Add inherited global auto-update preference | todo | — |
 | 2 | 2.2 | Add safe update execution and lifecycle scheduling | todo | — |
 | 2 | 2.3 | Expose guarded manual apply behavior | todo | — |
@@ -55,6 +56,10 @@ Implement `src/skills-update.ts` with tolerant project/global lock readers, cano
 #### Step 1.2 — Expose cached detection and forced-check APIs
 
 Wire one shared service into server lifecycle; add workspace-level GET/check routes plus client/query contracts. Cover validation, project resolution, cached reads, and rejection of executable input.
+
+#### Step 1.3 — Harden serialized checks and stale-lock recovery
+
+Serialize update-service operations across repositories, recover locks owned by dead processes, expose the complete status union, and cover missing-`npx` plus stale-lock cleanup behavior.
 
 ### Phase 2 — Preference and update execution
 

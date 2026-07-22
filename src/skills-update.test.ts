@@ -1,7 +1,7 @@
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { isOpenMercatoSkillsSource, SkillsUpdateService } from './skills-update.js';
 
 const oldDryRun = process.env.CEZ_DRY_RUN;
@@ -17,6 +17,8 @@ async function fixture(project: unknown, global?: unknown) {
 }
 
 describe('SkillsUpdateService', () => {
+  beforeEach(() => { process.env.CEZ_DRY_RUN = '0'; });
+
   it('matches only canonical Open Mercato GitHub sources', () => {
     expect(['open-mercato/skills', 'https://github.com/open-mercato/skills', 'https://github.com/open-mercato/skills.git'].every(isOpenMercatoSkillsSource)).toBe(true);
     expect(['evil/open-mercato/skills', 'https://github.com.evil.test/open-mercato/skills', 'git@github.com:open-mercato/skills.git'].some(isOpenMercatoSkillsSource)).toBe(false);
@@ -44,6 +46,15 @@ describe('SkillsUpdateService', () => {
     const run = vi.fn(async () => { throw new Error('fetch failed token=super-secret'); });
     const state = await new SkillsUpdateService({ homeDir: home, run, resolveNpx: async () => 'npx' }).check(repo);
     expect(state.scopes[0]?.reason).toBe('update check is offline'); expect(JSON.stringify(state)).not.toContain('super-secret');
+  });
+
+  it('degrades when npx is absent without executing', async () => {
+    const { home, repo } = await fixture({ skills: { om: { source: 'open-mercato/skills' } } });
+    const run = vi.fn();
+    const state = await new SkillsUpdateService({ homeDir: home, run, resolveNpx: async () => null }).check(repo);
+    expect(run).not.toHaveBeenCalled();
+    expect(state.status).toBe('unavailable');
+    expect(state.scopes.every((scope) => scope.reason === 'npx is unavailable')).toBe(true);
   });
 
   it('normalizes timeouts', async () => {
@@ -85,5 +96,16 @@ describe('SkillsUpdateService', () => {
     process.env.CEZ_DRY_RUN = '1'; const run = vi.fn();
     const state = await new SkillsUpdateService({ homeDir: '/missing', run, resolveNpx: async () => { throw new Error('no'); } }).check('/missing');
     expect(state.status).toBe('current'); expect(run).not.toHaveBeenCalled();
+  });
+
+  it('recovers a dead cache lock and removes its own lock afterward', async () => {
+    const { home, repo } = await fixture({ skills: { om: { source: 'open-mercato/skills' } } });
+    const lockPath = join(home, '.cache', 'cez', 'skills-update.lock');
+    await mkdir(join(home, '.cache', 'cez'), { recursive: true });
+    await writeFile(lockPath, `99999999\n${Date.now()}\n`);
+    const run = vi.fn(async () => ({ stdout: '', stderr: '' }));
+    await new SkillsUpdateService({ homeDir: home, run, resolveNpx: async () => 'npx' }).check(repo);
+    expect(run).toHaveBeenCalledOnce();
+    await expect(readFile(lockPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
   });
 });

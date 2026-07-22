@@ -12,7 +12,7 @@ const OUTPUT_CAP = 64 * 1_024;
 const LOCK_STALE_MS = 2 * 60 * 1_000;
 
 export type SkillsUpdateScope = 'project' | 'global';
-export type SkillsUpdateStatus = 'idle' | 'checking' | 'available' | 'current' | 'unavailable' | 'error';
+export type SkillsUpdateStatus = 'idle' | 'checking' | 'available' | 'updating' | 'current' | 'unavailable' | 'error';
 
 export interface SkillsUpdateScopeState {
   scope: SkillsUpdateScope;
@@ -124,6 +124,7 @@ export class SkillsUpdateService {
   private readonly resolveNpx: NonNullable<SkillsUpdateServiceOptions['resolveNpx']>;
   private readonly states = new Map<string, SkillsUpdateState>();
   private readonly pending = new Map<string, Promise<SkillsUpdateState>>();
+  private operationTail: Promise<void> = Promise.resolve();
 
   constructor(options: SkillsUpdateServiceOptions = {}) {
     this.home = options.homeDir ?? homedir();
@@ -142,9 +143,17 @@ export class SkillsUpdateService {
     if (!force && cached?.checkedAt && this.now() - Date.parse(cached.checkedAt) < CHECK_TTL_MS) return Promise.resolve(cached);
     const active = this.pending.get(repoRoot);
     if (active) return active;
-    const task = this.performCheck(repoRoot).finally(() => this.pending.delete(repoRoot));
+    const task = this.serialized(() => this.performCheck(repoRoot)).finally(() => this.pending.delete(repoRoot));
     this.pending.set(repoRoot, task);
     return task;
+  }
+
+  private async serialized<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.operationTail;
+    let release!: () => void;
+    this.operationTail = new Promise<void>((resolve) => { release = resolve; });
+    await previous.catch(() => undefined);
+    try { return await operation(); } finally { release(); }
   }
 
   private makeState(scopes = [blankScope('project'), blankScope('global')]): SkillsUpdateState {
@@ -210,11 +219,23 @@ export class SkillsUpdateService {
       await handle.writeFile(`${process.pid}\n${this.now()}\n`); await handle.close();
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      const age = this.now() - (await stat(path)).mtimeMs;
-      if (age <= LOCK_STALE_MS) throw new Error('another skills update check is running');
+      const metadata = await this.readLockMetadata(path);
+      const age = this.now() - metadata.timestamp;
+      if (age <= LOCK_STALE_MS && metadata.alive) throw new Error('another skills update check is running');
       await rm(path, { force: true });
       const handle = await open(path, 'wx', 0o600); await handle.writeFile(`${process.pid}\n${this.now()}\n`); await handle.close();
     }
     return () => rm(path, { force: true });
+  }
+
+  private async readLockMetadata(path: string): Promise<{ timestamp: number; alive: boolean }> {
+    const fallback = (await stat(path)).mtimeMs;
+    try {
+      const [pidText, timestampText] = (await readFile(path, 'utf8')).trim().split(/\s+/);
+      const pid = Number(pidText); const timestamp = Number(timestampText);
+      if (!Number.isSafeInteger(pid) || pid <= 0 || !Number.isFinite(timestamp)) return { timestamp: fallback, alive: false };
+      try { process.kill(pid, 0); return { timestamp, alive: true }; }
+      catch (error) { return { timestamp, alive: (error as NodeJS.ErrnoException).code === 'EPERM' }; }
+    } catch { return { timestamp: fallback, alive: false }; }
   }
 }
