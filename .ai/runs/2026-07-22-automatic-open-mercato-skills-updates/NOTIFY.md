@@ -15,3 +15,9 @@
 - Steps: 1.1–1.3 (`5946e06..b111a8a`)
 - Result: update detection, cached/check APIs, and serialization/lock hardening verified.
 - Checks: typecheck and 15 focused tests passed; UI verification not applicable to this backend-only window.
+
+## 2026-07-22T17:37:10Z — checkpoint 2
+
+- Steps: 2.1–2.3 (`65759ef..28df27b`)
+- Result: preference, safe update scheduling/execution, and guarded manual apply verified.
+- Checks: typecheck and 62 focused tests passed; rendered UI work begins in Phase 3.
