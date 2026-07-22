@@ -27,6 +27,8 @@ function serve(resources: Partial<WorkspaceConfigResponse['resources']> = {}) {
   const state: WorkspaceConfigResponse = {
     browseRoot: '~/',
     projectsDir: '~/cezar/projects',
+    skillsAutoUpdate: null,
+    effectiveSkillsAutoUpdate: true,
     resources: { maxParallel: 2, memoryLimitMb: null, worktreeRetentionDefault: 10, ...resources },
   }
   const json = (payload: unknown, status = 200) =>

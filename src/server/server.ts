@@ -56,6 +56,7 @@ import { listAgentConfig } from '../agent-config/service.js';
 import {
   PROJECT_ID_RE,
   defaultWorkspaceConfig,
+  effectiveSkillsAutoUpdate,
   loadWorkspaceConfig,
   mergeWriteWorkspaceConfig,
   type WorkspaceConfig,
@@ -251,6 +252,9 @@ export interface WorkspaceConfigResponse {
   browseRoot: string;
   /** Checkout root for GUI-cloned projects — stored as written (`~` kept). */
   projectsDir: string;
+  /** Stored override; null means inherit CEZ_SKILLS_AUTO_UPDATE, then true. */
+  skillsAutoUpdate: boolean | null;
+  effectiveSkillsAutoUpdate: boolean;
   resources: {
     maxParallel: number;
     memoryLimitMb: number | null;
@@ -1399,6 +1403,8 @@ export function createApp(deps: ServerDeps): Hono {
   const workspaceConfigBody = (config: WorkspaceConfig): WorkspaceConfigResponse => ({
     browseRoot: config.browseRoot,
     projectsDir: config.projectsDir,
+    skillsAutoUpdate: config.skillsAutoUpdate ?? null,
+    effectiveSkillsAutoUpdate: effectiveSkillsAutoUpdate(config),
     resources: {
       maxParallel: config.resources.maxParallel,
       memoryLimitMb: config.resources.memoryLimitMb,
@@ -1413,6 +1419,7 @@ export function createApp(deps: ServerDeps): Hono {
   const workspaceConfigUpdateSchema = z.object({
     browseRoot: z.string().trim().min(1).max(4096).optional(),
     projectsDir: z.string().trim().min(1).max(4096).optional(),
+    skillsAutoUpdate: z.boolean().nullable().optional(),
     resources: z
       .object({
         maxParallel: z.number().int().min(1).max(16).optional(),
@@ -1426,7 +1433,7 @@ export function createApp(deps: ServerDeps): Hono {
     if (!parsed.success) {
       return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
     }
-    const { browseRoot, projectsDir, resources } = parsed.data;
+    const { browseRoot, projectsDir, skillsAutoUpdate, resources } = parsed.data;
     for (const [configuredRoot, create] of [
       [browseRoot, false],
       [projectsDir, true],
@@ -1460,6 +1467,8 @@ export function createApp(deps: ServerDeps): Hono {
         // Roots are stored as written (`~` kept); only the probe expands them.
         if (browseRoot !== undefined) config.browseRoot = browseRoot;
         if (projectsDir !== undefined) config.projectsDir = projectsDir;
+        if (skillsAutoUpdate === null) delete config.skillsAutoUpdate;
+        else if (skillsAutoUpdate !== undefined) config.skillsAutoUpdate = skillsAutoUpdate;
         if (resources?.maxParallel !== undefined) config.resources.maxParallel = resources.maxParallel;
         if (resources?.memoryLimitMb !== undefined) config.resources.memoryLimitMb = resources.memoryLimitMb;
         if (resources?.worktreeRetentionDefault !== undefined) {

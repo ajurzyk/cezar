@@ -390,6 +390,8 @@ export interface WorkspaceUiState {
 export interface WorkspaceConfigResponse {
   browseRoot: string
   projectsDir: string
+  skillsAutoUpdate: boolean | null
+  effectiveSkillsAutoUpdate: boolean
   resources: {
     maxParallel: number
     memoryLimitMb: number | null
@@ -403,6 +405,7 @@ export interface WorkspaceConfigResponse {
 export interface SetWorkspaceConfigInput {
   browseRoot?: string
   projectsDir?: string
+  skillsAutoUpdate?: boolean | null
   resources?: {
     maxParallel?: number
     memoryLimitMb?: number | null
