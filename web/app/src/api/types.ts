@@ -372,6 +372,13 @@ export interface WorkspaceUiState {
   /** Settings → Notifications, GLOBAL since step 3.5 — one answer for the whole workspace,
    *  since the delivering browser is one browser whichever project you are looking at. */
   notifications?: { enabled?: boolean }
+  /** The user's curated selection of default (vendor) skills — `open-mercato/skills`. GLOBAL, not
+   *  per-repo: "which skills I want" describes the person, not a checkout, and must not depend on
+   *  the launch directory. Tri-state: ABSENT means "not curated", so every default skill shows
+   *  (opt-out default; existing installs are never silently emptied on upgrade); a PRESENT array
+   *  (even `[]`) means only those names show from that repo. The gate lives server-side in
+   *  `discoverSkills`; the Skills page's Manage panel writes the whole array (shallow top-level merge). */
+  importedSkills?: string[]
   [key: string]: unknown
 }
 
@@ -786,10 +793,18 @@ export interface UiState {
    *  present (even `[]`) is the user's own edited list from Settings → Prompt templates.
    *  `skills` (optional) are the skill names the template auto-applies for. */
   promptTemplates?: { id: string; label: string; text: string; skills?: string[] }[]
-  /** The open-mercato/skills promo banner (#391), dismissed for good. Set once true, never
-   *  unset — server-persisted rather than a cookie so "shown once" holds across browsers. */
+  /** The open-mercato/skills promo banner (#391), dismissed for good. Legacy — the banner is
+   *  gone, replaced by the workspace-level `importedSkills` curation (see `WorkspaceUiState`);
+   *  retained so old ui-state.json round-trips. */
   dismissedSkillsBanner?: boolean
   [key: string]: unknown
+}
+
+/** One row in the "Manage skills" panel — a skill a default (vendor) repo offers,
+ *  from `GET /api/skills/importable`, independent of whether it is currently kept. */
+export interface ImportableSkill {
+  name: string
+  description?: string
 }
 
 // ---- request bodies ------------------------------------------------------------------------------
