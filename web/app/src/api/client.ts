@@ -695,6 +695,11 @@ export function checkSkillsUpdate(projectId: string): Promise<SkillsUpdateState>
   return mutate<SkillsUpdateState>('POST', '/api/workspace/skills-update/check', { projectId })
 }
 
+/** Apply the server-owned, lock-authorized update set. Identity is the only browser input. */
+export function applySkillsUpdate(projectId: string): Promise<SkillsUpdateState> {
+  return mutate<SkillsUpdateState>('POST', '/api/workspace/skills-update/apply', { projectId })
+}
+
 /** Partial update — absent keys stay untouched; answers the merged config. A `projectsDir`
  *  the server cannot write to comes back as a 400 `ApiError` whose message is the reason,
  *  which is exactly what the Projects pane renders inline (step 4.4). */

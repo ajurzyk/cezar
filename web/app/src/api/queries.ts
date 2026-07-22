@@ -38,6 +38,7 @@ import {
   getWorkspaceUiState,
   getSkillsUpdate,
   checkSkillsUpdate,
+  applySkillsUpdate,
   getWorktrees,
   editQueuedMessage,
   patchRun,
@@ -616,6 +617,12 @@ export function useCheckSkillsUpdate(projectId: string) {
     mutationFn: () => checkSkillsUpdate(projectId),
     onSuccess: (state) => queryClient.setQueryData(key, state),
   })
+}
+
+export function useApplySkillsUpdate(projectId: string) {
+  const queryClient = useQueryClient()
+  const key = workspaceQueryKeys.skillsUpdate(projectId)
+  return useMutation({ mutationFn: () => applySkillsUpdate(projectId), onSuccess: (state) => queryClient.setQueryData(key, state) })
 }
 
 /** Rename a run (#389): `PATCH /api/runs/:id`. Invalidates `runs.*` so the list and the detail

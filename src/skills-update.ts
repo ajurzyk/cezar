@@ -45,6 +45,11 @@ export interface SkillsUpdateServiceOptions {
   invalidateCatalog?: (repoRoot: string) => Promise<unknown> | unknown;
 }
 
+/** A manual apply distinguishes contention from ordinary unavailable state. */
+export class SkillsUpdateConflictError extends Error {
+  constructor() { super('another skills update operation is running'); this.name = 'SkillsUpdateConflictError'; }
+}
+
 type LockRead = { kind: 'ok'; names: string[] } | { kind: 'missing' } | { kind: 'invalid' };
 type LockEntry = { source?: unknown; sourceUrl?: unknown };
 
@@ -155,10 +160,10 @@ export class SkillsUpdateService {
   /** Apply only names proven available by the latest check. Browser callers
    * cannot widen this list: ownership is re-read from the lock immediately
    * before each fixed-argument invocation. */
-  update(repoRoot: string): Promise<SkillsUpdateState> {
+  update(repoRoot: string, rejectIfBusy = false): Promise<SkillsUpdateState> {
     const active = this.pending.get(repoRoot);
-    if (active) return active;
-    const task = this.serialized(() => this.performUpdate(repoRoot)).finally(() => this.pending.delete(repoRoot));
+    if (active) return rejectIfBusy ? Promise.reject(new SkillsUpdateConflictError()) : active;
+    const task = this.serialized(() => this.performUpdate(repoRoot, rejectIfBusy)).finally(() => this.pending.delete(repoRoot));
     this.pending.set(repoRoot, task);
     return task;
   }
@@ -180,7 +185,7 @@ export class SkillsUpdateService {
       checkedAt: null, updatedAt: null, scopes, needsUpgradeNotes: false };
   }
 
-  private async performCheck(repoRoot: string, force = false): Promise<SkillsUpdateState> {
+  private async performCheck(repoRoot: string, force = false, rejectIfBusy = false): Promise<SkillsUpdateState> {
     if (process.env.CEZ_DRY_RUN === '1') {
       const checkedAt = new Date(this.now()).toISOString();
       const scopes = [blankScope('project'), blankScope('global')].map((scope) => ({ ...scope, status: 'current' as const, checkedAt }));
@@ -190,7 +195,7 @@ export class SkillsUpdateService {
     const lockPath = join(this.home, '.cache', 'cez', 'skills-update.lock');
     let release: (() => Promise<void>) | undefined;
     try {
-      release = await this.acquireLock(lockPath);
+      release = await this.acquireLock(lockPath, rejectIfBusy);
       const npx = await this.resolveNpx();
       if (!npx) throw Object.assign(new Error('missing executable'), { code: 'ENOENT' });
       const pairs: Array<[SkillsUpdateScope, string]> = [
@@ -216,6 +221,7 @@ export class SkillsUpdateService {
       const state = { ...this.makeState(scopes), status, available, checkedAt };
       this.states.set(repoRoot, state); return state;
     } catch (error) {
+      if (error instanceof SkillsUpdateConflictError) throw error;
       const checkedAt = new Date(this.now()).toISOString();
       const reason = reasonFor(error);
       const scopes = [blankScope('project'), blankScope('global')].map((scope) => ({ ...scope, status: 'unavailable' as const, checkedAt, reason }));
@@ -224,7 +230,7 @@ export class SkillsUpdateService {
     } finally { await release?.(); }
   }
 
-  private async performUpdate(repoRoot: string): Promise<SkillsUpdateState> {
+  private async performUpdate(repoRoot: string, rejectIfBusy: boolean): Promise<SkillsUpdateState> {
     if (process.env.CEZ_DRY_RUN === '1') {
       const updatedAt = new Date(this.now()).toISOString();
       const scopes = [blankScope('project'), blankScope('global')].map((scope) => ({ ...scope, status: 'current' as const, checkedAt: updatedAt, updatedAt }));
@@ -233,7 +239,7 @@ export class SkillsUpdateService {
       return state;
     }
     let current = this.states.get(repoRoot);
-    if (!current?.checkedAt) current = await this.performCheck(repoRoot);
+    if (!current?.checkedAt) current = await this.performCheck(repoRoot, false, rejectIfBusy);
     if (!current.available) return current;
 
     const lockPath = join(this.home, '.cache', 'cez', 'skills-update.lock');
@@ -241,7 +247,7 @@ export class SkillsUpdateService {
     const completed = new Set<SkillsUpdateScope>();
     const outcomes: SkillsUpdateScopeState[] = [];
     try {
-      release = await this.acquireLock(lockPath);
+      release = await this.acquireLock(lockPath, rejectIfBusy);
       const npx = await this.resolveNpx();
       if (!npx) throw Object.assign(new Error('missing executable'), { code: 'ENOENT' });
       for (const scope of ['project', 'global'] as const) {
@@ -263,6 +269,7 @@ export class SkillsUpdateService {
         }
       }
     } catch (error) {
+      if (error instanceof SkillsUpdateConflictError) throw error;
       const reason = reasonFor(error);
       for (const scope of ['project', 'global'] as const) {
         const prior = current.scopes.find((entry) => entry.scope === scope) ?? blankScope(scope);
@@ -303,7 +310,7 @@ export class SkillsUpdateService {
     }
   }
 
-  private async acquireLock(path: string): Promise<() => Promise<void>> {
+  private async acquireLock(path: string, rejectIfBusy = false): Promise<() => Promise<void>> {
     await mkdir(dirname(path), { recursive: true });
     try {
       const handle = await open(path, 'wx', 0o600);
@@ -312,7 +319,10 @@ export class SkillsUpdateService {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       const metadata = await this.readLockMetadata(path);
       const age = this.now() - metadata.timestamp;
-      if (age <= LOCK_STALE_MS && metadata.alive) throw new Error('another skills update check is running');
+      if (age <= LOCK_STALE_MS && metadata.alive) {
+        if (rejectIfBusy) throw new SkillsUpdateConflictError();
+        throw new Error('another skills update check is running');
+      }
       await rm(path, { force: true });
       const handle = await open(path, 'wx', 0o600); await handle.writeFile(`${process.pid}\n${this.now()}\n`); await handle.close();
     }

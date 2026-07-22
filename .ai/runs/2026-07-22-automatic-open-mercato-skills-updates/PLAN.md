@@ -14,7 +14,7 @@ PR: https://github.com/open-mercato/cezar/pull/613
 | 1 | 1.3 | Harden serialized checks and stale-lock recovery | done | 865c22f |
 | 2 | 2.1 | Add inherited global auto-update preference | done | 15b0a0b |
 | 2 | 2.2 | Add safe update execution and lifecycle scheduling | done | 2308284 |
-| 2 | 2.3 | Expose guarded manual apply behavior | todo | — |
+| 2 | 2.3 | Expose guarded manual apply behavior | done | 97c98f1 |
 | 3 | 3.1 | Add global Skills settings surface | todo | — |
 | 3 | 3.2 | Add accessible navigation update marker | todo | — |
 | 3 | 3.3 | Add Manage skills update workflow and states | todo | — |

@@ -28,7 +28,7 @@ import {
 } from '../workflows/types.js';
 import { planChain, slugify } from '../planner.js';
 import { discoverSkills } from '../skills.js';
-import { SkillsUpdateCoordinator, SkillsUpdateService, type SkillsUpdateState } from '../skills-update.js';
+import { SkillsUpdateConflictError, SkillsUpdateCoordinator, SkillsUpdateService, type SkillsUpdateState } from '../skills-update.js';
 import { getTeamSkillsCached, refreshTeamSkills, waitForTeamSkills } from '../skills-remote.js';
 import { appendHandoffHeartbeat, handoffProgressExcerpt, readHandoff } from '../handoff.js';
 import { markStarted, onTodosChanged, readTodos, removeTodo, todoTaskText, type TodoItem } from '../todos.js';
@@ -1325,6 +1325,11 @@ export function createApp(deps: ServerDeps): Hono {
     return { root: project.root };
   };
 
+  const skillsUpdateResponse = async (state: SkillsUpdateState): Promise<SkillsUpdateState> => {
+    const config = await loadWorkspaceConfig();
+    return { ...state, autoUpdateEnabled: effectiveSkillsAutoUpdate(config), inherited: config.skillsAutoUpdate === undefined };
+  };
+
   app.get('/api/workspace/skills-update', async (c) => {
     const parsed = skillsUpdateInputSchema.safeParse({ projectId: c.req.query('projectId') });
     if (!parsed.success) return c.json({ error: 'projectId is required' }, 400);
@@ -1332,7 +1337,7 @@ export function createApp(deps: ServerDeps): Hono {
     if ('error' in resolved) return c.json({ error: resolved.error }, resolved.status);
     const state: SkillsUpdateState = skillsUpdate.snapshot(resolved.root);
     void skillsUpdate.check(resolved.root).catch(() => {});
-    return c.json(state);
+    return c.json(await skillsUpdateResponse(state));
   });
 
   app.post('/api/workspace/skills-update/check', async (c) => {
@@ -1340,7 +1345,22 @@ export function createApp(deps: ServerDeps): Hono {
     if (!parsed.success) return c.json({ error: 'body must contain only projectId' }, 400);
     const resolved = await resolveSkillsUpdateRoot(parsed.data.projectId);
     if ('error' in resolved) return c.json({ error: resolved.error }, resolved.status);
-    return c.json(await skillsUpdate.check(resolved.root, true));
+    return c.json(await skillsUpdateResponse(await skillsUpdate.check(resolved.root, true)));
+  });
+
+  app.post('/api/workspace/skills-update/apply', async (c) => {
+    const parsed = skillsUpdateInputSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: 'body must contain only projectId' }, 400);
+    const resolved = await resolveSkillsUpdateRoot(parsed.data.projectId);
+    if ('error' in resolved) return c.json({ error: resolved.error }, resolved.status);
+    try {
+      return c.json(await skillsUpdateResponse(await skillsUpdate.update(resolved.root, true)));
+    } catch (error) {
+      if (error instanceof SkillsUpdateConflictError) {
+        return c.json({ error: 'another skills update operation is running', state: await skillsUpdateResponse(skillsUpdate.snapshot(resolved.root)) }, 409);
+      }
+      throw error;
+    }
   });
 
   // ---- GUI clone (multi-project spec, step 4.3) ----------------------------

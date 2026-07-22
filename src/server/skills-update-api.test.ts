@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import type { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RunStore } from '../runs/store.js';
-import { SkillsUpdateService } from '../skills-update.js';
+import { SkillsUpdateConflictError, SkillsUpdateService } from '../skills-update.js';
 import { mergeWriteWorkspaceConfig } from '../workspace/config.js';
 import type { RunManager } from '../workflows/run.js';
 import { apiRequest } from './loopback-request.testkit.js';
@@ -12,6 +12,7 @@ import { createApp } from './server.js';
 
 describe('workspace skills update API', () => {
   const savedHome = process.env.CEZ_HOME;
+  const savedAutoUpdate = process.env.CEZ_SKILLS_AUTO_UPDATE;
   let home: string;
   let repoRoot: string;
   let missingRoot: string;
@@ -42,6 +43,8 @@ describe('workspace skills update API', () => {
     store.flush();
     if (savedHome === undefined) delete process.env.CEZ_HOME;
     else process.env.CEZ_HOME = savedHome;
+    if (savedAutoUpdate === undefined) delete process.env.CEZ_SKILLS_AUTO_UPDATE;
+    else process.env.CEZ_SKILLS_AUTO_UPDATE = savedAutoUpdate;
     rmSync(home, { recursive: true, force: true });
     rmSync(repoRoot, { recursive: true, force: true });
   });
@@ -81,5 +84,47 @@ describe('workspace skills update API', () => {
     expect((await apiRequest(app, '/api/workspace/skills-update?projectId=unknown')).status).toBe(404);
     expect((await apiRequest(app, '/api/workspace/skills-update?projectId=gone')).status).toBe(409);
     expect((await apiRequest(app, '/api/workspace/skills-update')).status).toBe(400);
+  });
+
+  it('applies using only the registered project identity and returns final safe state', async () => {
+    const final = { ...service.snapshot(repoRoot), status: 'current' as const, updatedAt: '2026-07-22T00:00:00.000Z' };
+    const update = vi.spyOn(service, 'update').mockResolvedValue(final);
+    const response = await apiRequest(app, '/api/workspace/skills-update/apply', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ projectId: 'repo' }) });
+    expect(response.status).toBe(200); expect(update).toHaveBeenCalledWith(repoRoot, true);
+    expect(await response.json()).toMatchObject({ status: 'current', autoUpdateEnabled: true, inherited: true });
+  });
+
+  it('rejects executable apply input and preserves unknown/gone behavior', async () => {
+    const update = vi.spyOn(service, 'update');
+    for (const body of [null, {}, { projectId: 'repo', path: '/tmp' }, { projectId: 'repo', names: ['x'] }, { projectId: 'repo', scope: 'global' }, { projectId: 'repo', source: 'evil/repo' }]) {
+      expect((await apiRequest(app, '/api/workspace/skills-update/apply', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })).status).toBe(400);
+    }
+    for (const [projectId, status] of [['unknown', 404], ['gone', 409]] as const) {
+      expect((await apiRequest(app, '/api/workspace/skills-update/apply', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ projectId }) })).status).toBe(status);
+    }
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('returns 409 and latest safe state when another operation owns mutation', async () => {
+    vi.spyOn(service, 'update').mockRejectedValue(new SkillsUpdateConflictError());
+    const response = await apiRequest(app, '/api/workspace/skills-update/apply', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ projectId: 'repo' }) });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: 'another skills update operation is running', state: { status: 'idle', autoUpdateEnabled: true, inherited: true } });
+  });
+
+  it('reports inherited and explicit off without disabling manual apply', async () => {
+    process.env.CEZ_SKILLS_AUTO_UPDATE = '0';
+    let response = await apiRequest(app, '/api/workspace/skills-update/apply', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ projectId: 'repo' }) });
+    expect(await response.json()).toMatchObject({ autoUpdateEnabled: false, inherited: true, status: 'unavailable' });
+    process.env.CEZ_SKILLS_AUTO_UPDATE = '1';
+    await mergeWriteWorkspaceConfig((config) => { config.skillsAutoUpdate = false; });
+    response = await apiRequest(app, '/api/workspace/skills-update/apply', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ projectId: 'repo' }) });
+    expect(await response.json()).toMatchObject({ autoUpdateEnabled: false, inherited: false });
+  });
+
+  it('keeps apply behind the origin/CSRF guard', async () => {
+    const update = vi.spyOn(service, 'update');
+    const response = await app.request('/api/workspace/skills-update/apply', { method: 'POST', headers: { host: '127.0.0.1:4321', origin: 'https://evil.test', 'content-type': 'application/json' }, body: JSON.stringify({ projectId: 'repo' }) });
+    expect(response.status).toBe(403); expect(update).not.toHaveBeenCalled();
   });
 });

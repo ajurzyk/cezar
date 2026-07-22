@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { isOpenMercatoSkillsSource, SkillsUpdateCoordinator, SkillsUpdateService } from './skills-update.js';
+import { isOpenMercatoSkillsSource, SkillsUpdateConflictError, SkillsUpdateCoordinator, SkillsUpdateService } from './skills-update.js';
 
 const oldDryRun = process.env.CEZ_DRY_RUN;
 afterEach(() => { if (oldDryRun === undefined) delete process.env.CEZ_DRY_RUN; else process.env.CEZ_DRY_RUN = oldDryRun; });
@@ -183,6 +183,26 @@ describe('SkillsUpdateService', () => {
     const dry = new SkillsUpdateService({ run: dryRun, resolveNpx: async () => 'npx' });
     expect((await dry.update(repo)).needsUpgradeNotes).toBe(true);
     expect(dryRun).not.toHaveBeenCalled();
+  });
+
+  it('lets guarded callers distinguish in-process contention', async () => {
+    const { home, repo } = await fixture({ skills: { alpha: { source: 'open-mercato/skills' } } });
+    let release!: () => void; const gate = new Promise<void>((resolve) => { release = resolve; });
+    const service = new SkillsUpdateService({ homeDir: home, resolveNpx: async () => 'npx', run: async () => { await gate; return { stdout: '', stderr: '' }; } });
+    const active = service.check(repo, true);
+    await expect(service.update(repo, true)).rejects.toBeInstanceOf(SkillsUpdateConflictError);
+    release(); await active;
+  });
+
+  it('rejects guarded mutation when another service owns the live cache lock', async () => {
+    const { home, repo } = await fixture({ skills: { alpha: { source: 'open-mercato/skills' } } });
+    let release!: () => void; const gate = new Promise<void>((resolve) => { release = resolve; });
+    const owner = new SkillsUpdateService({ homeDir: home, resolveNpx: async () => 'npx', run: async () => { await gate; return { stdout: '', stderr: '' }; } });
+    const contender = new SkillsUpdateService({ homeDir: home, resolveNpx: async () => 'npx', run: vi.fn() });
+    const active = owner.check(repo, true); const lockPath = join(home, '.cache', 'cez', 'skills-update.lock');
+    await vi.waitFor(async () => { await expect(readFile(lockPath, 'utf8')).resolves.toContain(String(process.pid)); });
+    await expect(contender.update(repo, true)).rejects.toBeInstanceOf(SkillsUpdateConflictError);
+    release(); await active;
   });
 });
 
