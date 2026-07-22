@@ -21,3 +21,9 @@
 - Steps: 2.1–2.3 (`65759ef..28df27b`)
 - Result: preference, safe update scheduling/execution, and guarded manual apply verified.
 - Checks: typecheck and 62 focused tests passed; rendered UI work begins in Phase 3.
+
+## 2026-07-22T18:24:00Z — final gate passed
+
+- Configured validation: typecheck, 4,010 Vitest tests, 34 core tests, build/pack, and 8 package tests passed.
+- Full integration: 31 files passed; 190 tests passed; 4 intentional skips; `TEST_E2E_STATUS=passed`.
+- Visual evidence: four Skills update screenshots retained under `checkpoint-3-artifacts/`.
