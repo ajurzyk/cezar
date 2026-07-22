@@ -22,6 +22,7 @@ PR: https://github.com/open-mercato/cezar/pull/613
 | 3 | 3.5-final-fix | Inventory the new protected API routes | done | 7be9b78 |
 | 3 | 3.6-final-fix | Stabilize full-suite browser fixtures | done | e47f5f0 |
 | 3 | 3.7-final-fix | Finish detached-HEAD and teardown stabilization | done | addf3fd |
+| 3 | 3.8-final-fix | Wait for asynchronous branch settings state | done | 1c341be |
 
 ## Goal
 
@@ -107,3 +108,7 @@ Align legacy browser fixtures with project-scoped routes, detached-checkout sema
 #### Step 3.7-final-fix — Finish detached-HEAD and teardown stabilization
 
 Treat a reported branch as current only when it exists in the rendered branch list, and wait for fixture servers to exit before deleting their temporary roots.
+
+#### Step 3.8-final-fix — Wait for asynchronous branch settings state
+
+Wait for the base-branch control's repository query to settle before asserting the Settings → Agents surface.
