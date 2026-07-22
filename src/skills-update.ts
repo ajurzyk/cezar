@@ -1,0 +1,220 @@
+import { execFile } from 'node:child_process';
+import { constants } from 'node:fs';
+import { access, mkdir, open, readFile, rm, stat } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
+const CHECK_TTL_MS = 6 * 60 * 60 * 1_000;
+const COMMAND_TIMEOUT_MS = 30_000;
+const OUTPUT_CAP = 64 * 1_024;
+const LOCK_STALE_MS = 2 * 60 * 1_000;
+
+export type SkillsUpdateScope = 'project' | 'global';
+export type SkillsUpdateStatus = 'idle' | 'checking' | 'available' | 'current' | 'unavailable' | 'error';
+
+export interface SkillsUpdateScopeState {
+  scope: SkillsUpdateScope;
+  status: SkillsUpdateStatus;
+  available: boolean;
+  skills: string[];
+  checkedAt: string | null;
+  updatedAt: string | null;
+  reason?: string;
+}
+
+export interface SkillsUpdateState {
+  status: SkillsUpdateStatus;
+  available: boolean;
+  autoUpdateEnabled: boolean;
+  inherited: boolean;
+  checkedAt: string | null;
+  updatedAt: string | null;
+  scopes: SkillsUpdateScopeState[];
+  needsUpgradeNotes: boolean;
+}
+
+interface CommandResult { stdout: string; stderr: string }
+export interface SkillsUpdateServiceOptions {
+  homeDir?: string;
+  now?: () => number;
+  timeoutMs?: number;
+  run?: (file: string, args: readonly string[], cwd: string, timeoutMs: number) => Promise<CommandResult>;
+  resolveNpx?: () => Promise<string | null>;
+}
+
+type LockRead = { kind: 'ok'; names: string[] } | { kind: 'missing' } | { kind: 'invalid' };
+type LockEntry = { source?: unknown; sourceUrl?: unknown };
+
+/** Accept only GitHub's canonical host and the documented owner/repo shorthand. */
+export function isOpenMercatoSkillsSource(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  const source = value.trim().replace(/\/$/, '');
+  if (/^open-mercato\/skills(?:\.git)?$/i.test(source)) return true;
+  try {
+    const url = new URL(source);
+    return url.protocol === 'https:' && url.hostname.toLowerCase() === 'github.com'
+      && /^\/open-mercato\/skills(?:\.git)?$/i.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
+async function readLock(path: string): Promise<LockRead> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(path, 'utf8'));
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? { kind: 'missing' } : { kind: 'invalid' };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { kind: 'invalid' };
+  const root = parsed as Record<string, unknown>;
+  if (root.version !== undefined && (!Number.isInteger(root.version) || Number(root.version) < 1 || Number(root.version) > 3)) {
+    return { kind: 'invalid' };
+  }
+  if (!root.skills || typeof root.skills !== 'object' || Array.isArray(root.skills)) return { kind: 'invalid' };
+  const names = Object.entries(root.skills as Record<string, unknown>).flatMap(([name, raw]) => {
+    if (!name || !raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
+    const entry = raw as LockEntry;
+    return isOpenMercatoSkillsSource(entry.source) || isOpenMercatoSkillsSource(entry.sourceUrl) ? [name] : [];
+  });
+  return { kind: 'ok', names: [...new Set(names)].sort() };
+}
+
+function blankScope(scope: SkillsUpdateScope): SkillsUpdateScopeState {
+  return { scope, status: 'idle', available: false, skills: [], checkedAt: null, updatedAt: null };
+}
+
+function reasonFor(error: unknown): string {
+  const err = error as NodeJS.ErrnoException & { killed?: boolean; signal?: string };
+  const text = String(err.message ?? '').toLowerCase();
+  if (err.code === 'ENOENT') return 'npx is unavailable';
+  if (err.killed || err.signal === 'SIGTERM' || text.includes('timed out')) return 'update check timed out';
+  if (/(enotfound|eai_again|network|offline|fetch failed)/.test(text)) return 'update check is offline';
+  return 'update check failed';
+}
+
+async function defaultResolveNpx(): Promise<string | null> {
+  const name = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+  const adjacent = join(dirname(process.execPath), name);
+  try { await access(adjacent, constants.X_OK); return adjacent; } catch { return name; }
+}
+
+async function defaultRun(file: string, args: readonly string[], cwd: string, timeoutMs: number): Promise<CommandResult> {
+  const result = await execFileAsync(file, [...args], {
+    cwd, shell: false, timeout: timeoutMs, maxBuffer: OUTPUT_CAP,
+    env: { ...process.env, npm_config_yes: 'true', GIT_TERMINAL_PROMPT: '0' },
+  });
+  return { stdout: result.stdout, stderr: result.stderr };
+}
+
+/** Parse only explicit update lines naming a lock-authorized skill. */
+function availableNames(output: string, names: readonly string[]): string[] {
+  const lines = output.split(/\r?\n/);
+  return names.filter((name) => lines.some((line) =>
+    line.toLowerCase().includes(name.toLowerCase()) && /update|out.of.date|new version/i.test(line)));
+}
+
+export class SkillsUpdateService {
+  private readonly home: string;
+  private readonly now: () => number;
+  private readonly timeoutMs: number;
+  private readonly runCommand: NonNullable<SkillsUpdateServiceOptions['run']>;
+  private readonly resolveNpx: NonNullable<SkillsUpdateServiceOptions['resolveNpx']>;
+  private readonly states = new Map<string, SkillsUpdateState>();
+  private readonly pending = new Map<string, Promise<SkillsUpdateState>>();
+
+  constructor(options: SkillsUpdateServiceOptions = {}) {
+    this.home = options.homeDir ?? homedir();
+    this.now = options.now ?? Date.now;
+    this.timeoutMs = options.timeoutMs ?? COMMAND_TIMEOUT_MS;
+    this.runCommand = options.run ?? defaultRun;
+    this.resolveNpx = options.resolveNpx ?? defaultResolveNpx;
+  }
+
+  snapshot(repoRoot: string): SkillsUpdateState {
+    return this.states.get(repoRoot) ?? this.makeState();
+  }
+
+  check(repoRoot: string, force = false): Promise<SkillsUpdateState> {
+    const cached = this.states.get(repoRoot);
+    if (!force && cached?.checkedAt && this.now() - Date.parse(cached.checkedAt) < CHECK_TTL_MS) return Promise.resolve(cached);
+    const active = this.pending.get(repoRoot);
+    if (active) return active;
+    const task = this.performCheck(repoRoot).finally(() => this.pending.delete(repoRoot));
+    this.pending.set(repoRoot, task);
+    return task;
+  }
+
+  private makeState(scopes = [blankScope('project'), blankScope('global')]): SkillsUpdateState {
+    return { status: 'idle', available: false, autoUpdateEnabled: true, inherited: true,
+      checkedAt: null, updatedAt: null, scopes, needsUpgradeNotes: false };
+  }
+
+  private async performCheck(repoRoot: string): Promise<SkillsUpdateState> {
+    if (process.env.CEZ_DRY_RUN === '1') {
+      const checkedAt = new Date(this.now()).toISOString();
+      const scopes = [blankScope('project'), blankScope('global')].map((scope) => ({ ...scope, status: 'current' as const, checkedAt }));
+      const state = { ...this.makeState(scopes), status: 'current' as const, checkedAt };
+      this.states.set(repoRoot, state); return state;
+    }
+    const lockPath = join(this.home, '.cache', 'cez', 'skills-update.lock');
+    let release: (() => Promise<void>) | undefined;
+    try {
+      release = await this.acquireLock(lockPath);
+      const npx = await this.resolveNpx();
+      if (!npx) throw Object.assign(new Error('missing executable'), { code: 'ENOENT' });
+      const pairs: Array<[SkillsUpdateScope, string]> = [
+        ['project', join(repoRoot, 'skills-lock.json')],
+        ['global', join(this.home, '.agents', '.skill-lock.json')],
+      ];
+      const scopes: SkillsUpdateScopeState[] = [];
+      for (const [scope, path] of pairs) scopes.push(await this.checkScope(scope, path, repoRoot, npx));
+      const available = scopes.some((scope) => scope.available);
+      const checkedAt = new Date(this.now()).toISOString();
+      const status: SkillsUpdateStatus = available ? 'available'
+        : scopes.some((scope) => scope.status === 'error') ? 'error'
+        : scopes.every((scope) => scope.status === 'unavailable') ? 'unavailable' : 'current';
+      const state = { ...this.makeState(scopes), status, available, checkedAt };
+      this.states.set(repoRoot, state); return state;
+    } catch (error) {
+      const checkedAt = new Date(this.now()).toISOString();
+      const reason = reasonFor(error);
+      const scopes = [blankScope('project'), blankScope('global')].map((scope) => ({ ...scope, status: 'unavailable' as const, checkedAt, reason }));
+      const state = { ...this.makeState(scopes), status: 'unavailable' as const, checkedAt };
+      this.states.set(repoRoot, state); return state;
+    } finally { await release?.(); }
+  }
+
+  private async checkScope(scope: SkillsUpdateScope, path: string, cwd: string, npx: string): Promise<SkillsUpdateScopeState> {
+    const checkedAt = new Date(this.now()).toISOString();
+    const lock = await readLock(path);
+    if (lock.kind === 'missing') return { ...blankScope(scope), status: 'current', checkedAt, reason: 'installation is not tracked' };
+    if (lock.kind === 'invalid') return { ...blankScope(scope), status: 'unavailable', checkedAt, reason: 'installation metadata is unsupported' };
+    if (lock.names.length === 0) return { ...blankScope(scope), status: 'current', checkedAt, reason: 'Open Mercato installation is not tracked' };
+    try {
+      const args = ['--yes', 'skills', 'check', ...lock.names, ...(scope === 'project' ? ['-p'] : ['-g'])];
+      const result = await this.runCommand(npx, args, cwd, this.timeoutMs);
+      const skills = availableNames(`${result.stdout}\n${result.stderr}`, lock.names);
+      return { ...blankScope(scope), status: skills.length ? 'available' : 'current', available: skills.length > 0, skills, checkedAt };
+    } catch (error) {
+      return { ...blankScope(scope), status: 'error', checkedAt, reason: reasonFor(error) };
+    }
+  }
+
+  private async acquireLock(path: string): Promise<() => Promise<void>> {
+    await mkdir(dirname(path), { recursive: true });
+    try {
+      const handle = await open(path, 'wx', 0o600);
+      await handle.writeFile(`${process.pid}\n${this.now()}\n`); await handle.close();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      const age = this.now() - (await stat(path)).mtimeMs;
+      if (age <= LOCK_STALE_MS) throw new Error('another skills update check is running');
+      await rm(path, { force: true });
+      const handle = await open(path, 'wx', 0o600); await handle.writeFile(`${process.pid}\n${this.now()}\n`); await handle.close();
+    }
+    return () => rm(path, { force: true });
+  }
+}
