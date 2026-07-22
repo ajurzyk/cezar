@@ -106,7 +106,7 @@ afterEach(() => {
 })
 
 const PROJECT_SECTIONS = ['agents', 'agent-config', 'worktrees', 'bookmarklets', 'prompt-templates']
-const GLOBAL_SECTIONS = ['appearance', 'notifications', 'resources', 'projects']
+const GLOBAL_SECTIONS = ['appearance', 'notifications', 'resources', 'skills', 'projects']
 
 describe('the section registry', () => {
   it('declares the spec §Settings sections, later ones hidden', () => {
@@ -152,6 +152,9 @@ describe('the settings shell', () => {
     // target would not be a route at all.
     expect(nav.querySelector('[data-section="resources"]')?.getAttribute('href')).toBe(
       '/settings/global/resources',
+    )
+    expect(nav.querySelector('[data-section="skills"]')?.getAttribute('href')).toBe(
+      '/settings/global/skills',
     )
   })
 
