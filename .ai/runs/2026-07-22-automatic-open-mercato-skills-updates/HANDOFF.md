@@ -1,19 +1,19 @@
 # Handoff — 2026-07-22-automatic-open-mercato-skills-updates
 
-**Last updated:** 2026-07-22T17:15:56Z
+**Last updated:** 2026-07-22T17:23:45Z
 **Branch:** `spec/automatic-open-mercato-skills-updates`
 **PR:** https://github.com/open-mercato/cezar/pull/613
-**Current phase/step:** Phase 1 Step 1.1
-**Last commit:** `24ea289` — execution run folder initialized
+**Current phase/step:** Phase 2 Step 2.1
+**Last commit:** `b111a8a` — serialized checks and stale-lock recovery
 
 ## What just happened
 
-- PR #613 was resolved as the implementation branch for the linked spec.
-- The implementation run folder was initialized from the spec's nine steps.
+- Phase 1 delivered provenance-aware detection, cached/check APIs, web contracts, and service hardening.
+- Typecheck and 15 focused service/server tests pass; results are recorded in `checkpoint-1-checks.md`.
 
 ## Next concrete action
 
-- Implement Step 1.1: provenance-aware detection service and focused unit tests.
+- Implement Step 2.1: inherited global auto-update preference and documentation.
 
 ## Blockers / open questions
 
