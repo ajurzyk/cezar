@@ -18,7 +18,7 @@ PR: https://github.com/open-mercato/cezar/pull/613
 | 3 | 3.1 | Add global Skills settings surface | done | 2ab458d |
 | 3 | 3.2 | Add accessible navigation update marker | done | 6891c74 |
 | 3 | 3.3 | Add Manage skills update workflow and states | done | 5f19845 |
-| 3 | 3.4 | Add end-to-end coverage and visual evidence | todo | — |
+| 3 | 3.4 | Add end-to-end coverage and visual evidence | done | 0eac053 |
 
 ## Goal
 
