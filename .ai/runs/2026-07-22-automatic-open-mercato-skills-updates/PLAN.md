@@ -20,6 +20,7 @@ PR: https://github.com/open-mercato/cezar/pull/613
 | 3 | 3.3 | Add Manage skills update workflow and states | done | 5f19845 |
 | 3 | 3.4 | Add end-to-end coverage and visual evidence | done | 0eac053 |
 | 3 | 3.5-final-fix | Inventory the new protected API routes | done | 7be9b78 |
+| 3 | 3.6-final-fix | Stabilize full-suite browser fixtures | done | e47f5f0 |
 
 ## Goal
 
@@ -97,3 +98,7 @@ Exercise degraded, scoped, mixed-source, preference, manual-update, and concurre
 #### Step 3.5-final-fix — Inventory the new protected API routes
 
 Add the workspace skills-update routes and additive workspace-config fields to the protected HTTP API inventory after the final unit gate identified the omission.
+
+#### Step 3.6-final-fix — Stabilize full-suite browser fixtures
+
+Align legacy browser fixtures with project-scoped routes, detached-checkout semantics, deterministic no-PR dry-run policy, and Streamdown's current token-variable contract; split commit-detail settling across navigation and lazy rendering.
