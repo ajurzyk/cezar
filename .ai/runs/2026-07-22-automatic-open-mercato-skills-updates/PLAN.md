@@ -19,6 +19,7 @@ PR: https://github.com/open-mercato/cezar/pull/613
 | 3 | 3.2 | Add accessible navigation update marker | done | 6891c74 |
 | 3 | 3.3 | Add Manage skills update workflow and states | done | 5f19845 |
 | 3 | 3.4 | Add end-to-end coverage and visual evidence | done | 0eac053 |
+| 3 | 3.5-final-fix | Inventory the new protected API routes | done | 7be9b78 |
 
 ## Goal
 
@@ -92,3 +93,7 @@ Add the update card, check/apply/retry/current/partial states, catalog refresh, 
 #### Step 3.4 — Add end-to-end coverage and visual evidence
 
 Exercise degraded, scoped, mixed-source, preference, manual-update, and concurrency flows; run the full UI smoke suite and capture Settings, navigation, success, failure, and mobile evidence.
+
+#### Step 3.5-final-fix — Inventory the new protected API routes
+
+Add the workspace skills-update routes and additive workspace-config fields to the protected HTTP API inventory after the final unit gate identified the omission.
