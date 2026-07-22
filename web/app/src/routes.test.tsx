@@ -9,7 +9,7 @@ import type { ProjectsResponse } from './api/types'
 import { AppearanceProvider } from './components/appearance-provider'
 import { ListViewProvider } from './components/list-view'
 import { ThemeProvider } from './components/theme-provider'
-import { AppRoutes } from './routes'
+import { AppRoutes, pageTitleContext } from './routes'
 import { resetDraft } from './routes/new-task-draft'
 
 // The `/` overview fetches `/api/runs` on mount. A never-answering fetch keeps every route
@@ -128,6 +128,37 @@ function currentSearch(): string | null {
 function currentHash(): string | null {
   return screen.getByTestId('location').getAttribute('data-hash')
 }
+
+describe('pageTitleContext', () => {
+  it.each([
+    ['/p/cezar/', 'Tasks'],
+    ['/new', 'New task'],
+    ['/p/cezar/compare/group-1', 'Compare'],
+    ['/p/cezar/git', 'Git'],
+    ['/p/cezar/git/commits/abc123', 'Git'],
+    ['/p/cezar/github/issues/543', 'GitHub'],
+    ['/p/cezar/skills', 'Skills'],
+    ['/p/cezar/inbox', 'Inbox'],
+    ['/p/cezar/workflows/quick-task', 'Workflows'],
+    ['/p/cezar/settings/agents', 'Settings'],
+    ['/settings/global/projects', 'Settings'],
+  ])('labels %s as %s', (pathname, pageLabel) => {
+    expect(pageTitleContext(pathname)).toEqual({ pageLabel, taskId: null })
+  })
+
+  it.each([
+    '/p/cezar/tasks/run-1',
+    '/p/cezar/tasks/run-1/changes',
+    '/p/cezar/tasks/run-1/files',
+    '/p/cezar/tasks/run-1/commits/abc123',
+  ])('returns the task lookup key for %s', (pathname) => {
+    expect(pageTitleContext(pathname)).toEqual({ pageLabel: null, taskId: 'run-1' })
+  })
+
+  it('does not invent a label for an unknown route', () => {
+    expect(pageTitleContext('/p/cezar/not-a-route')).toEqual({ pageLabel: null, taskId: null })
+  })
+})
 
 /** The URL contract from the spec's "Routing — every surface is a URL" section, now under the
  *  `/p/:projectId` prefix (multi-project spec, step 3.2). These paths are pasteable links;
