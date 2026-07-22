@@ -5,8 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
 import { workspaceQueryKeys } from '@/api/queries'
-import type { HealthResponse, RunRecord } from '@/api/types'
-import { AppShellContainer, repoChipOf } from '@/components/app-shell-container'
+import type { HealthResponse, RunRecord, SkillsUpdateState } from '@/api/types'
+import { AppShellContainer, repoChipOf, skillsUpdateMarkerOf } from '@/components/app-shell-container'
 import { ThemeProvider } from '@/components/theme-provider'
 
 const fetchMock = vi.fn<typeof fetch>()
@@ -118,6 +118,24 @@ describe('repoChipOf', () => {
   it('is null while health is unknown, and outside a git repo', () => {
     expect(repoChipOf(undefined)).toBeNull()
     expect(repoChipOf({ ...HEALTH, repo: null })).toBeNull()
+  })
+})
+
+const UPDATE: SkillsUpdateState = {
+  status: 'available', available: true, autoUpdateEnabled: true, inherited: true,
+  checkedAt: '2026-07-22T00:00:00.000Z', updatedAt: null, scopes: [], needsUpgradeNotes: false,
+}
+
+describe('skillsUpdateMarkerOf', () => {
+  it.each([
+    ['loading', undefined, false],
+    ['available', UPDATE, true],
+    ['proven available with an error', { ...UPDATE, status: 'error' as const }, true],
+    ['current', { ...UPDATE, status: 'current' as const, available: false }, false],
+    ['unavailable', { ...UPDATE, status: 'unavailable' as const, available: false }, false],
+    ['updating', { ...UPDATE, status: 'updating' as const }, false],
+  ])('%s → %s', (_name, state, expected) => {
+    expect(skillsUpdateMarkerOf(state)).toBe(expected)
   })
 })
 

@@ -16,7 +16,7 @@ PR: https://github.com/open-mercato/cezar/pull/613
 | 2 | 2.2 | Add safe update execution and lifecycle scheduling | done | 2308284 |
 | 2 | 2.3 | Expose guarded manual apply behavior | done | 97c98f1 |
 | 3 | 3.1 | Add global Skills settings surface | done | 2ab458d |
-| 3 | 3.2 | Add accessible navigation update marker | todo | — |
+| 3 | 3.2 | Add accessible navigation update marker | done | 6891c74 |
 | 3 | 3.3 | Add Manage skills update workflow and states | todo | — |
 | 3 | 3.4 | Add end-to-end coverage and visual evidence | todo | — |
 
