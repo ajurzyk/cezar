@@ -28,7 +28,7 @@ import {
 } from '../workflows/types.js';
 import { planChain, slugify } from '../planner.js';
 import { discoverSkills } from '../skills.js';
-import { SkillsUpdateService, type SkillsUpdateState } from '../skills-update.js';
+import { SkillsUpdateCoordinator, SkillsUpdateService, type SkillsUpdateState } from '../skills-update.js';
 import { getTeamSkillsCached, refreshTeamSkills, waitForTeamSkills } from '../skills-remote.js';
 import { appendHandoffHeartbeat, handoffProgressExcerpt, readHandoff } from '../handoff.js';
 import { markStarted, onTodosChanged, readTodos, removeTodo, todoTaskText, type TodoItem } from '../todos.js';
@@ -3157,17 +3157,41 @@ export function createApp(deps: ServerDeps): Hono {
 }
 
 export function startServer(deps: ServerDeps, port: number): ServerType {
-  const app = createApp(deps);
+  const workspaceEvents = deps.workspaceEvents ?? new WorkspaceEventBus();
+  const skillsUpdate = deps.skillsUpdate ?? new SkillsUpdateService({ invalidateCatalog: refreshTeamSkills });
+  const app = createApp({ ...deps, workspaceEvents, skillsUpdate });
   // SECURITY: default to loopback. This server executes agents locally and its endpoints are
   // same-origin-trusted (only /api/health is CORS-open); binding to a non-loopback host would
   // expose an agent-executing box to the network. `bindHost` exists only for a deliberate
   // hosted/VPS deployment (which also flips CEZ_REMOTE to gate the local-handoff endpoints) —
   // src/index.ts never passes it, so the loopback guarantee holds for the normal CLI.
-  return serve({
+  const server = serve({
     fetch: app.fetch,
     port,
     hostname: deps.bindHost ?? '127.0.0.1',
   });
+  const coordinator = new SkillsUpdateCoordinator(skillsUpdate, async () =>
+    effectiveSkillsAutoUpdate(await loadWorkspaceConfig()));
+  const unsubscribe = workspaceEvents.on((event, data) => {
+    if (event === 'project-added') {
+      const project = (data as { project?: { id?: unknown; root?: unknown; status?: unknown } }).project;
+      if (project && typeof project.id === 'string' && typeof project.root === 'string' && project.status !== 'missing') {
+        coordinator.add(project.id, project.root);
+      }
+    } else if (event === 'project-removed') {
+      const id = (data as { id?: unknown }).id;
+      if (typeof id === 'string') coordinator.remove(id);
+    }
+  });
+  server.once('listening', () => {
+    void listProjects().then((projects) => {
+      const all = projects.some((project) => project.root === deps.repoRoot)
+        ? projects : [{ id: deps.bootProjectId ?? 'default', root: deps.repoRoot, status: 'ok' as const }, ...projects];
+      coordinator.start(all);
+    }).catch(() => undefined);
+  });
+  server.once('close', () => { unsubscribe(); coordinator.stop(); });
+  return server;
 }
 
 /** The bare hostname of a `Host` header — see `normalizeHostname`. `''` when the

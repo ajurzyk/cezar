@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { isOpenMercatoSkillsSource, SkillsUpdateService } from './skills-update.js';
+import { isOpenMercatoSkillsSource, SkillsUpdateCoordinator, SkillsUpdateService } from './skills-update.js';
 
 const oldDryRun = process.env.CEZ_DRY_RUN;
 afterEach(() => { if (oldDryRun === undefined) delete process.env.CEZ_DRY_RUN; else process.env.CEZ_DRY_RUN = oldDryRun; });
@@ -81,6 +81,17 @@ describe('SkillsUpdateService', () => {
     expect(await a).toBe(await b); await service.check(repo); expect(run).toHaveBeenCalledTimes(1);
   });
 
+  it('checks the machine-global installation once across project roots within the TTL', async () => {
+    const lock = { skills: { om: { source: 'open-mercato/skills' } } };
+    const { home, repo } = await fixture(lock, lock);
+    const other = join(home, 'other'); await mkdir(other); await writeFile(join(other, 'skills-lock.json'), JSON.stringify(lock));
+    const run = vi.fn(async (_file: string, _args: readonly string[]) => ({ stdout: '', stderr: '' }));
+    const service = new SkillsUpdateService({ homeDir: home, run, resolveNpx: async () => 'npx' });
+    await service.check(repo); await service.check(other);
+    expect(run.mock.calls.filter((call) => call[1].includes('-g'))).toHaveLength(1);
+    expect(run.mock.calls.filter((call) => call[1].includes('-p'))).toHaveLength(2);
+  });
+
   it('uses an exclusive cache lock across service instances', async () => {
     const { home, repo } = await fixture({ skills: { om: { source: 'open-mercato/skills' } } });
     let release!: () => void; const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -107,5 +118,95 @@ describe('SkillsUpdateService', () => {
     await new SkillsUpdateService({ homeDir: home, run, resolveNpx: async () => 'npx' }).check(repo);
     expect(run).toHaveBeenCalledOnce();
     await expect(readFile(lockPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('updates only sorted lock-authorized names with exact fixed arguments, then rechecks and invalidates', async () => {
+    const lock = { skills: { zed: { source: 'open-mercato/skills' }, alpha: { sourceUrl: 'https://github.com/open-mercato/skills' }, manual: { source: 'other/repo' } } };
+    const { home, repo } = await fixture(lock, lock);
+    const calls: string[][] = [];
+    const invalidateCatalog = vi.fn(async () => undefined);
+    const run = vi.fn(async (_file: string, args: readonly string[]) => {
+      calls.push([...args]);
+      return { stdout: args[2] === 'check' && calls.length <= 2 ? 'alpha update available\nzed update available' : '', stderr: '' };
+    });
+    const service = new SkillsUpdateService({ homeDir: home, resolveNpx: async () => '/safe/npx', run, invalidateCatalog });
+    await service.check(repo);
+    const state = await service.update(repo);
+    expect(calls).toEqual([
+      ['--yes','skills','check','alpha','zed','-p'],
+      ['--yes','skills','check','alpha','zed','-g'],
+      ['--yes','skills','update','alpha','zed','-p','-y'],
+      ['--yes','skills','update','alpha','zed','-g','-y'],
+      ['--yes','skills','check','alpha','zed','-p'],
+      ['--yes','skills','check','alpha','zed','-g'],
+    ]);
+    expect(JSON.stringify(calls)).not.toContain('manual');
+    expect(JSON.stringify(calls)).not.toContain('gh');
+    expect(invalidateCatalog).toHaveBeenCalledOnce();
+    expect(state).toMatchObject({ status: 'current', available: false, needsUpgradeNotes: true });
+    expect(state.scopes.every((scope) => scope.updatedAt !== null)).toBe(true);
+  });
+
+  it('preserves per-scope partial update outcomes', async () => {
+    const lock = { skills: { alpha: { source: 'open-mercato/skills' } } };
+    const { home, repo } = await fixture(lock, lock);
+    const run = vi.fn(async (_file: string, args: readonly string[]) => {
+      if (args[2] === 'update' && args.includes('-g')) throw new Error('failed secret');
+      return { stdout: args[2] === 'check' ? 'alpha update available' : '', stderr: '' };
+    });
+    const service = new SkillsUpdateService({ homeDir: home, resolveNpx: async () => 'npx', run });
+    await service.check(repo);
+    const state = await service.update(repo);
+    expect(state.status).toBe('error');
+    expect(state.scopes[0]).toMatchObject({ scope: 'project', updatedAt: expect.any(String) });
+    expect(state.scopes[1]).toMatchObject({ scope: 'global', status: 'error', reason: 'update check failed' });
+    expect(JSON.stringify(state)).not.toContain('secret');
+  });
+
+  it('deduplicates concurrent update calls and dry-run never executes', async () => {
+    const lock = { skills: { alpha: { source: 'open-mercato/skills' } } };
+    const { home, repo } = await fixture(lock);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const run = vi.fn(async (_file: string, args: readonly string[]) => {
+      if (args[2] === 'update') await gate;
+      return { stdout: args[2] === 'check' ? 'alpha update available' : '', stderr: '' };
+    });
+    const service = new SkillsUpdateService({ homeDir: home, resolveNpx: async () => 'npx', run });
+    await service.check(repo);
+    const one = service.update(repo); const two = service.update(repo); release();
+    expect(await one).toBe(await two);
+    expect(run.mock.calls.filter((call) => call[1][2] === 'update')).toHaveLength(1);
+
+    process.env.CEZ_DRY_RUN = '1';
+    const dryRun = vi.fn();
+    const dry = new SkillsUpdateService({ run: dryRun, resolveNpx: async () => 'npx' });
+    expect((await dry.update(repo)).needsUpgradeNotes).toBe(true);
+    expect(dryRun).not.toHaveBeenCalled();
+  });
+});
+
+describe('SkillsUpdateCoordinator', () => {
+  it('queues lifecycle work, excludes missing/removed projects, owns auto apply, and swallows failures', async () => {
+    const service = {
+      check: vi.fn(async (root: string) => {
+        if (root === '/bad') throw new Error('offline');
+        return { available: true };
+      }),
+      update: vi.fn(async () => ({ available: false })),
+      evict: vi.fn(),
+    } as unknown as SkillsUpdateService;
+    const coordinator = new SkillsUpdateCoordinator(service, async () => true);
+    coordinator.start([{ id: 'gone', root: '/gone', status: 'missing' }, { id: 'bad', root: '/bad' }]);
+    coordinator.add('later', '/later');
+    coordinator.add('removed', '/removed');
+    coordinator.remove('removed');
+    await expect(coordinator.settled()).resolves.toBeUndefined();
+    expect(service.check).toHaveBeenCalledWith('/bad');
+    expect(service.check).toHaveBeenCalledWith('/later');
+    expect(service.check).not.toHaveBeenCalledWith('/gone');
+    expect(service.check).not.toHaveBeenCalledWith('/removed');
+    expect(service.update).toHaveBeenCalledTimes(1);
+    expect(service.evict).toHaveBeenCalledWith('/removed');
   });
 });

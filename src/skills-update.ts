@@ -42,6 +42,7 @@ export interface SkillsUpdateServiceOptions {
   timeoutMs?: number;
   run?: (file: string, args: readonly string[], cwd: string, timeoutMs: number) => Promise<CommandResult>;
   resolveNpx?: () => Promise<string | null>;
+  invalidateCatalog?: (repoRoot: string) => Promise<unknown> | unknown;
 }
 
 type LockRead = { kind: 'ok'; names: string[] } | { kind: 'missing' } | { kind: 'invalid' };
@@ -122,8 +123,10 @@ export class SkillsUpdateService {
   private readonly timeoutMs: number;
   private readonly runCommand: NonNullable<SkillsUpdateServiceOptions['run']>;
   private readonly resolveNpx: NonNullable<SkillsUpdateServiceOptions['resolveNpx']>;
+  private readonly invalidateCatalog: NonNullable<SkillsUpdateServiceOptions['invalidateCatalog']>;
   private readonly states = new Map<string, SkillsUpdateState>();
   private readonly pending = new Map<string, Promise<SkillsUpdateState>>();
+  private globalScopeCache?: SkillsUpdateScopeState;
   private operationTail: Promise<void> = Promise.resolve();
 
   constructor(options: SkillsUpdateServiceOptions = {}) {
@@ -132,6 +135,7 @@ export class SkillsUpdateService {
     this.timeoutMs = options.timeoutMs ?? COMMAND_TIMEOUT_MS;
     this.runCommand = options.run ?? defaultRun;
     this.resolveNpx = options.resolveNpx ?? defaultResolveNpx;
+    this.invalidateCatalog = options.invalidateCatalog ?? (() => undefined);
   }
 
   snapshot(repoRoot: string): SkillsUpdateState {
@@ -143,9 +147,24 @@ export class SkillsUpdateService {
     if (!force && cached?.checkedAt && this.now() - Date.parse(cached.checkedAt) < CHECK_TTL_MS) return Promise.resolve(cached);
     const active = this.pending.get(repoRoot);
     if (active) return active;
-    const task = this.serialized(() => this.performCheck(repoRoot)).finally(() => this.pending.delete(repoRoot));
+    const task = this.serialized(() => this.performCheck(repoRoot, force)).finally(() => this.pending.delete(repoRoot));
     this.pending.set(repoRoot, task);
     return task;
+  }
+
+  /** Apply only names proven available by the latest check. Browser callers
+   * cannot widen this list: ownership is re-read from the lock immediately
+   * before each fixed-argument invocation. */
+  update(repoRoot: string): Promise<SkillsUpdateState> {
+    const active = this.pending.get(repoRoot);
+    if (active) return active;
+    const task = this.serialized(() => this.performUpdate(repoRoot)).finally(() => this.pending.delete(repoRoot));
+    this.pending.set(repoRoot, task);
+    return task;
+  }
+
+  evict(repoRoot: string): void {
+    this.states.delete(repoRoot);
   }
 
   private async serialized<T>(operation: () => Promise<T>): Promise<T> {
@@ -161,7 +180,7 @@ export class SkillsUpdateService {
       checkedAt: null, updatedAt: null, scopes, needsUpgradeNotes: false };
   }
 
-  private async performCheck(repoRoot: string): Promise<SkillsUpdateState> {
+  private async performCheck(repoRoot: string, force = false): Promise<SkillsUpdateState> {
     if (process.env.CEZ_DRY_RUN === '1') {
       const checkedAt = new Date(this.now()).toISOString();
       const scopes = [blankScope('project'), blankScope('global')].map((scope) => ({ ...scope, status: 'current' as const, checkedAt }));
@@ -179,7 +198,16 @@ export class SkillsUpdateService {
         ['global', join(this.home, '.agents', '.skill-lock.json')],
       ];
       const scopes: SkillsUpdateScopeState[] = [];
-      for (const [scope, path] of pairs) scopes.push(await this.checkScope(scope, path, repoRoot, npx));
+      for (const [scope, path] of pairs) {
+        if (scope === 'global' && !force && this.globalScopeCache?.checkedAt
+          && this.now() - Date.parse(this.globalScopeCache.checkedAt) < CHECK_TTL_MS) {
+          scopes.push(this.globalScopeCache);
+        } else {
+          const result = await this.checkScope(scope, path, repoRoot, npx);
+          if (scope === 'global') this.globalScopeCache = result;
+          scopes.push(result);
+        }
+      }
       const available = scopes.some((scope) => scope.available);
       const checkedAt = new Date(this.now()).toISOString();
       const status: SkillsUpdateStatus = available ? 'available'
@@ -194,6 +222,69 @@ export class SkillsUpdateService {
       const state = { ...this.makeState(scopes), status: 'unavailable' as const, checkedAt };
       this.states.set(repoRoot, state); return state;
     } finally { await release?.(); }
+  }
+
+  private async performUpdate(repoRoot: string): Promise<SkillsUpdateState> {
+    if (process.env.CEZ_DRY_RUN === '1') {
+      const updatedAt = new Date(this.now()).toISOString();
+      const scopes = [blankScope('project'), blankScope('global')].map((scope) => ({ ...scope, status: 'current' as const, checkedAt: updatedAt, updatedAt }));
+      const state = { ...this.makeState(scopes), status: 'current' as const, checkedAt: updatedAt, updatedAt, needsUpgradeNotes: true };
+      this.states.set(repoRoot, state);
+      return state;
+    }
+    let current = this.states.get(repoRoot);
+    if (!current?.checkedAt) current = await this.performCheck(repoRoot);
+    if (!current.available) return current;
+
+    const lockPath = join(this.home, '.cache', 'cez', 'skills-update.lock');
+    let release: (() => Promise<void>) | undefined;
+    const completed = new Set<SkillsUpdateScope>();
+    const outcomes: SkillsUpdateScopeState[] = [];
+    try {
+      release = await this.acquireLock(lockPath);
+      const npx = await this.resolveNpx();
+      if (!npx) throw Object.assign(new Error('missing executable'), { code: 'ENOENT' });
+      for (const scope of ['project', 'global'] as const) {
+        const prior = current.scopes.find((entry) => entry.scope === scope) ?? blankScope(scope);
+        if (!prior.available || prior.skills.length === 0) { outcomes.push(prior); continue; }
+        const path = scope === 'project' ? join(repoRoot, 'skills-lock.json') : join(this.home, '.agents', '.skill-lock.json');
+        const owned = await readLock(path);
+        const names = owned.kind === 'ok' ? prior.skills.filter((name) => owned.names.includes(name)).sort() : [];
+        if (names.length === 0) {
+          outcomes.push({ ...prior, status: 'unavailable', reason: 'installation metadata is unsupported' });
+          continue;
+        }
+        try {
+          await this.runCommand(npx, ['--yes', 'skills', 'update', ...names, scope === 'project' ? '-p' : '-g', '-y'], repoRoot, this.timeoutMs);
+          completed.add(scope);
+          outcomes.push({ ...prior, status: 'current', available: false, skills: [], updatedAt: new Date(this.now()).toISOString(), reason: undefined });
+        } catch (error) {
+          outcomes.push({ ...prior, status: 'error', reason: reasonFor(error) });
+        }
+      }
+    } catch (error) {
+      const reason = reasonFor(error);
+      for (const scope of ['project', 'global'] as const) {
+        const prior = current.scopes.find((entry) => entry.scope === scope) ?? blankScope(scope);
+        outcomes.push({ ...prior, status: prior.available ? 'error' : prior.status, reason: prior.available ? reason : prior.reason });
+      }
+    } finally {
+      await release?.();
+    }
+
+    // Recheck after releasing the cross-process lock: performCheck owns the
+    // same lock and must observe the files written by every successful scope.
+    this.states.set(repoRoot, { ...current, scopes: outcomes, status: outcomes.some((s) => s.status === 'error') ? 'error' : 'current' });
+    if (completed.size > 0) await Promise.resolve(this.invalidateCatalog(repoRoot)).catch(() => undefined);
+    const checked = await this.performCheck(repoRoot, true);
+    const failedByScope = new Map(outcomes.filter((s) => s.status === 'error').map((s) => [s.scope, s]));
+    const scopes = checked.scopes.map((scope) => failedByScope.get(scope.scope) ?? (completed.has(scope.scope) ? { ...scope, updatedAt: outcomes.find((s) => s.scope === scope.scope)?.updatedAt ?? null } : scope));
+    const available = scopes.some((scope) => scope.available);
+    const status: SkillsUpdateStatus = scopes.some((scope) => scope.status === 'error') ? 'error' : available ? 'available' : 'current';
+    const updatedAt = completed.size > 0 ? new Date(this.now()).toISOString() : current.updatedAt;
+    const final = { ...checked, scopes, available, status, updatedAt, needsUpgradeNotes: current.needsUpgradeNotes || completed.size > 0 };
+    this.states.set(repoRoot, final);
+    return final;
   }
 
   private async checkScope(scope: SkillsUpdateScope, path: string, cwd: string, npx: string): Promise<SkillsUpdateScopeState> {
@@ -238,4 +329,50 @@ export class SkillsUpdateService {
       catch (error) { return { timestamp, alive: (error as NodeJS.ErrnoException).code === 'EPERM' }; }
     } catch { return { timestamp: fallback, alive: false }; }
   }
+}
+
+export interface SkillsUpdateProject { id: string; root: string; status?: string }
+
+/** Post-listen owner for background checks. Its tail deliberately swallows
+ * failures: update availability can never reject or delay server startup. */
+export class SkillsUpdateCoordinator {
+  private readonly roots = new Map<string, string>();
+  private tail: Promise<void> = Promise.resolve();
+  private stopped = false;
+
+  constructor(
+    private readonly service: SkillsUpdateService,
+    private readonly autoUpdateEnabled: () => Promise<boolean>,
+  ) {}
+
+  start(projects: readonly SkillsUpdateProject[]): void {
+    for (const project of projects) {
+      if (project.status !== 'missing') this.add(project.id, project.root);
+    }
+  }
+
+  add(id: string, root: string): void {
+    if (this.stopped) return;
+    this.roots.set(id, root);
+    this.tail = this.tail.then(async () => {
+      if (this.stopped || this.roots.get(id) !== root) return;
+      const state = await this.service.check(root);
+      if (state.available && await this.autoUpdateEnabled()) await this.service.update(root);
+    }).catch(() => undefined);
+  }
+
+  remove(id: string): void {
+    const root = this.roots.get(id);
+    this.roots.delete(id);
+    if (root) this.service.evict(root);
+  }
+
+  stop(): void {
+    this.stopped = true;
+    for (const root of this.roots.values()) this.service.evict(root);
+    this.roots.clear();
+  }
+
+  /** Test/lifecycle hook: resolves after all work queued so far. */
+  settled(): Promise<void> { return this.tail; }
 }
