@@ -607,6 +607,15 @@ export function useSkillsUpdate(projectId: string, enabled = true) {
     queryKey: workspaceQueryKeys.skillsUpdate(projectId),
     queryFn: ({ signal }) => getSkillsUpdate(projectId, { signal }),
     enabled,
+    // GET deliberately answers the current snapshot and starts a stale check in the
+    // background. Poll only while that snapshot is transient so an initial `idle`
+    // response converges without turning every open cockpit into a permanent poller.
+    refetchInterval: (query) => {
+      const status = query.state.data?.status
+      return status === undefined || status === 'idle' || status === 'checking' || status === 'updating'
+        ? 1_000
+        : false
+    },
   })
 }
 
