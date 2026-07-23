@@ -369,6 +369,28 @@ describe('mapCodexNotification edge cases', () => {
     });
   });
 
+  it('labels imageView items with the inspected path', () => {
+    const [imageView] = mapCodexNotification(
+      {
+        method: 'item/completed',
+        params: { item: { type: 'imageView', id: 'item_image', path: '/tmp/checkout-preview.png' } },
+      },
+      state,
+    ).events;
+    expect(imageView).toEqual({
+      type: 'item.completed',
+      item: {
+        kind: 'tool',
+        id: 'item_image',
+        name: 'imageView',
+        toolKind: 'read',
+        title: 'View image /tmp/checkout-preview.png',
+        status: 'completed',
+        input: { type: 'imageView', id: 'item_image', path: '/tmp/checkout-preview.png' },
+      },
+    });
+  });
+
   // The pair is ONE span of work: mapped literally it would be two childless task
   // items, which the Agents dock reads as two sub-agents that each did nothing (#474).
   describe('review mode folds into one task item', () => {

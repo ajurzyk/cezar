@@ -13,7 +13,7 @@
  *  - claude:   Bash, Edit, Write, NotebookEdit, Read, Glob, Grep, WebFetch,
  *              WebSearch, Task, Agent, Skill, TodoWrite, TaskCreate,
  *              TaskUpdate, TaskList, mcp__server__tool
- *  - codex:    commandExecution, fileChange, mcpToolCall, webSearch, plan
+ *  - codex:    commandExecution, fileChange, imageView, mcpToolCall, webSearch, plan
  *              (codex's checklist arrives as the `turn/plan/updated`
  *              notification, not as a tool call — `todoList` is kept below only
  *              as tolerance for its non-app-server transports)
@@ -121,6 +121,8 @@ export function toolDisplay(name: string, input?: unknown): ToolDisplay {
 
     case 'read':
       return { toolKind: 'read', title: titled('Read', field(input, 'file_path', 'filePath', 'path')) };
+    case 'imageview':
+      return { toolKind: 'read', title: titled('View image', field(input, 'path')) };
     case 'glob':
     case 'grep':
       return {
