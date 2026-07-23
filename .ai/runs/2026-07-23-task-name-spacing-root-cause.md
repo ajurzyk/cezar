@@ -44,6 +44,8 @@ The persisted NDJSON contains a valid standalone marker, `CEZ:TITLE=linking per-
 
 ## Progress
 
+PR: #636
+
 > Convention: `- [ ]` pending, `- [x]` done. Append ` — <commit sha>` when a step lands. Do not rename step titles.
 
 ### Phase 1: Preserve assistant message boundaries
@@ -54,4 +56,4 @@ The persisted NDJSON contains a valid standalone marker, `CEZ:TITLE=linking per-
 ### Phase 2: Verify compatibility and delivery
 
 - [x] 2.1 Run targeted tests and the full configured validation gate — aaaf6f9
-- [ ] 2.2 Complete the authoritative PR review, record verification evidence, and finalize the PR
+- [x] 2.2 Complete the authoritative PR review, record verification evidence, and finalize the PR — 21bac17
