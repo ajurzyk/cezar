@@ -78,7 +78,8 @@ export const MODELS_BY_RUNNER: Record<Runner, readonly ModelPreset[]> = {
   ],
 }
 
-/** Keep recognized presets from another backend out of a runner's custom-model escape hatch.
+/** Keep recognized presets from another backend out of a runner's custom-model escape hatch
+ * (#480).
  * Unknown ids remain valid custom models; only a known cross-runner mismatch is discarded. */
 export function modelConflictsWithRunner(model: string, runner: Runner): boolean {
   if (!model || MODELS_BY_RUNNER[runner].some((preset) => preset.id === model)) return false
