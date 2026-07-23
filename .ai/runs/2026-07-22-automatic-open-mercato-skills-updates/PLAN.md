@@ -23,7 +23,7 @@ PR: https://github.com/open-mercato/cezar/pull/613
 | 3 | 3.6-final-fix | Stabilize full-suite browser fixtures | done | e47f5f0 |
 | 3 | 3.7-final-fix | Finish detached-HEAD and teardown stabilization | done | addf3fd |
 | 3 | 3.8-final-fix | Wait for asynchronous branch settings state | done | 1c341be |
-| 4 | 4.1 | Offer a confirmed upgrade-notes session after update | todo | |
+| 4 | 4.1 | Offer a confirmed upgrade-notes session after update | done | d6126fd |
 
 ## Goal
 
