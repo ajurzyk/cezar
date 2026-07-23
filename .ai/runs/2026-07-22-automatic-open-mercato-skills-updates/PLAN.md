@@ -24,6 +24,7 @@ PR: https://github.com/open-mercato/cezar/pull/613
 | 3 | 3.7-final-fix | Finish detached-HEAD and teardown stabilization | done | addf3fd |
 | 3 | 3.8-final-fix | Wait for asynchronous branch settings state | done | 1c341be |
 | 4 | 4.1 | Offer a confirmed upgrade-notes session after update | done | d6126fd |
+| 4 | 4.2-final-fix | Prompt only when the update timestamp advances | done | 5417668 |
 
 ## Goal
 
@@ -119,3 +120,7 @@ Wait for the base-branch control's repository query to settle before asserting t
 #### Step 4.1 — Offer a confirmed upgrade-notes session after update
 
 After a successful manual skills update, show a Yes/No dialog. Start a project-scoped run backed by `om-apply-upgrade-notes` only when the user confirms, navigate to the new session, retain the persistent reminder, and cover both confirmation paths with UI tests.
+
+#### Step 4.2-final-fix — Prompt only when the update timestamp advances
+
+Carry the pre-apply update timestamp with the mutation and open the confirmation dialog only when the response advances it, so a failed retry cannot reuse an older successful timestamp and claim fresh success.
