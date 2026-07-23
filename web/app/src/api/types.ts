@@ -117,6 +117,8 @@ export interface RunRecord {
   /** The PR/issue number this task is ABOUT (task auto-naming spec) — display tier only. */
   prNumber?: number
   issueNumber?: number
+  /** Server-side provenance: referenced-issue discovery currently owns `issueNumber`. */
+  referencedIssueNumberSeeded?: boolean
   /** 'user' = renamed via PATCH, never auto-overwritten; 'marker' = agent-declared
    *  via CEZ:TITLE (spec 2026-07-18-task-ref-markers); 'auto' = namer-owned. */
   titleOrigin?: 'user' | 'auto' | 'marker'

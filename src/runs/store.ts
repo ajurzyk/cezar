@@ -123,6 +123,10 @@ const runRecordSchema = z.object({
    *  cross-checked output. Display tier — never gates actions. */
   prNumber: z.number().optional(),
   issueNumber: z.number().optional(),
+  /** Provenance for an `issueNumber` seeded by referenced-issue discovery.
+   *  Persisted so ambiguity can revoke only the janitor's own value, including
+   *  after a restart. Any prompt, namer, or marker write clears this flag. */
+  referencedIssueNumberSeeded: z.boolean().optional(),
   /** Who owns the display title: `user` (PATCH rename — never auto-overwritten),
    *  `marker` (agent-declared via `CEZ:TITLE`, spec 2026-07-18-task-ref-markers —
    *  beats the namer, silences live refresh) or `auto` (namer-owned — a later
@@ -399,6 +403,9 @@ export class RunStore extends EventEmitter {
   updateRun(id: string, patch: Partial<Omit<RunRecord, 'id' | 'steps'>>): RunRecord | undefined {
     const run = this.runs.get(id);
     if (!run) return undefined;
+    if (Object.prototype.hasOwnProperty.call(patch, 'issueNumber')) {
+      delete run.referencedIssueNumberSeeded;
+    }
     Object.assign(run, this.redactPatch(patch));
     this.touch(run);
     return run;
@@ -572,12 +579,15 @@ export class RunStore extends EventEmitter {
     if (run.markerRefs?.issue === undefined) {
       if (run.referencedIssueUrl && run.issueNumber === undefined) {
         const n = Number(run.referencedIssueUrl.split('/').pop());
-        if (Number.isInteger(n) && n > 0) run.issueNumber = n;
-      } else if (!run.referencedIssueUrl && prev && run.issueNumber === Number(prev.split('/').pop())) {
+        if (Number.isInteger(n) && n > 0) {
+          run.issueNumber = n;
+          run.referencedIssueNumberSeeded = true;
+        }
+      } else if (!run.referencedIssueUrl && prev && run.referencedIssueNumberSeeded) {
         // Ambiguity revoked the resolution — take back the number this janitor
-        // seeded from it (a namer-written number that happens to match is the
-        // documented residual). No chip beats a wrong chip.
+        // seeded from it. No chip beats a wrong chip.
         delete run.issueNumber;
+        delete run.referencedIssueNumberSeeded;
       }
     }
     return true;
@@ -600,7 +610,10 @@ export class RunStore extends EventEmitter {
       ...(refs.issue !== undefined ? { issue: refs.issue } : {}),
     };
     if (refs.pr !== undefined) run.prNumber = refs.pr;
-    if (refs.issue !== undefined) run.issueNumber = refs.issue;
+    if (refs.issue !== undefined) {
+      run.issueNumber = refs.issue;
+      delete run.referencedIssueNumberSeeded;
+    }
     if (run.markerRefs.pr !== undefined) {
       run.referencedPullRequestUrl = resolveReferencedRef(
         run.referencedPrCandidates ?? [],
