@@ -743,6 +743,32 @@ describe('RunStore — referenced-issue discovery (spec 2026-07-21-report-ref-di
     expect(loaded?.issueNumber).toBe(433);
   });
 
+  it('keeps issue links from tool output display-only until the agent names them', () => {
+    const { store, run } = freshRun();
+    const issueUrl = 'https://github.com/open-mercato/cezar/issues/99';
+    store.appendEvent(run.id, {
+      type: 'item.completed',
+      item: {
+        kind: 'tool',
+        id: 't1',
+        name: 'Bash',
+        toolKind: 'execute',
+        title: 'Ran gh pr view',
+        status: 'completed',
+        input: { command: 'gh pr view 1' },
+        output: `PR body: Fixes ${issueUrl}`,
+      },
+    });
+    expect(store.getRun(run.id)?.referencedIssueUrl).toBe(issueUrl);
+    expect(store.getRun(run.id)?.issueNumber).toBeUndefined();
+
+    store.appendEvent(run.id, {
+      type: 'result',
+      result: `This run is about ${issueUrl}.`,
+    });
+    expect(store.getRun(run.id)?.issueNumber).toBe(99);
+  });
+
   it('seeds an issue link while the run is still queued', () => {
     const { store, run } = freshRun('Fix https://github.com/open-mercato/cezar/issues/554');
     const loaded = store.getRun(run.id);
