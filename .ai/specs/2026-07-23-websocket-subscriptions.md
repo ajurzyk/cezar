@@ -87,8 +87,10 @@ Server → client:
 
 ```jsonc
 { "type": "event", "topic": "health", "data": { /* topic payload */ } }
-{ "type": "error", "topic": "health", "error": "unknown topic" }  // topic omitted for malformed frames
-{ "type": "ping" }                                                // liveness beat (see Liveness)
+{ "type": "error", "topic": "health", "error": "unknown topic" }    // no such topic registered
+{ "type": "error", "topic": "run-x",  "error": "forbidden topic" }  // untrusted conn, non-public topic (see Security)
+{ "type": "error", "error": "malformed frame: …" }                  // topic omitted for malformed frames
+{ "type": "ping" }                                                  // liveness beat (see Liveness)
 ```
 
 A `subscribe` is answered immediately with a fresh **snapshot** `event`, so a subscriber never
@@ -120,6 +122,18 @@ in `server.ts`). Topic names carry workspace-level data, so the hub is single-mo
 and never mirrored under `/api/p/:projectId`. `attach` is boot-time wiring like `registerTopic`:
 calling it twice throws rather than silently orphaning the first heartbeat interval.
 
+A third argument controls who may read the topic — and its default is the safe one:
+
+```ts
+// Default (omit the options): TRUSTED connections only — the cockpit itself, a
+// no-Origin native client, or a dev proxy the browser vouched for. This is what
+// any topic carrying run/repo/PR content wants.
+deps.socketHub?.registerTopic('run-changes:<id>', publisher)
+
+// Opt in ONLY for data already safe for any local page (see the security section):
+deps.socketHub?.registerTopic('health', publisher, { loopbackReadable: true })
+```
+
 **If a topic's snapshot shares a cache with an HTTP route, bound the staleness.** The `health`
 cache is stale-while-revalidate with *two* numbers, and the second one is the load-bearing one:
 `HEALTH_TTL_MS` decides how often a revalidation is kicked off, but the revalidation is
@@ -129,17 +143,31 @@ subscriber**, and then nothing refreshes it at all, so a GET an hour later would
 boot pre-warm's payload. `HEALTH_MAX_STALE_MS` is the ceiling past which the read waits for a real
 compute instead of serving the cache. Any future topic that fronts a route needs the same pair.
 
-**Security caveat on what a topic may carry.** The upgrade guard (`verifyWsUpgrade`, `server.ts`)
-admits the cockpit itself (same authority), and — because WebSocket is not subject to CORS and the
-Vite dev proxy runs on another localhost port — a **loopback** origin against a loopback Host.
-`Sec-Fetch-Site` is honored when the browser sends it (Chromium does on a WS handshake, and page
-JS cannot forge it), so an explicit `cross-site`/`same-site` handshake is refused even between two
-loopback ports; it cannot be *required*, because Safari sends no `Sec-Fetch-*` at all and that
-would lock the dev proxy out. So on a browser that omits the header, a page on another local port
-can still subscribe. Every registered topic must therefore be safe for any local page to read.
-`health` qualifies (it is the same payload the CORS-open `GET /api/health` already exposes, #431).
-A topic carrying run content or repo secrets requires tightening the guard to strict same-origin
-**first**.
+**Security — the topic-safety invariant is mechanical, not a rule to remember.** The upgrade
+guard (`verifyWsUpgrade`, `server.ts`) admits the cockpit itself (same authority), and — because
+WebSocket is not subject to CORS and the Vite dev proxy runs on another localhost port — a
+**loopback** origin against a loopback Host. `Sec-Fetch-Site` is honored when the browser sends it
+(Chromium does on a WS handshake, and page JS cannot forge it), so an explicit `cross-site` /
+`same-site` handshake is refused even between two loopback ports; it cannot be *required*, because
+Safari sends no `Sec-Fetch-*` at all and that would lock the dev proxy out. So on a browser that
+omits the header, a page on another local port is still admitted.
+
+That residual admission is why the guard doesn't return a bare boolean — it returns a **trust**
+verdict, and the hub enforces it per subscription:
+
+- **Trusted** = provably the cockpit: a same-authority Origin, a no-Origin native client, or a dev
+  proxy the browser vouches for via `Sec-Fetch-Site: same-origin`. May read any topic.
+- **Untrusted** = admitted by the loopback fallback on a no-`Sec-Fetch` browser (indistinguishable
+  from a foreign local page). May read **only** topics registered `{ loopbackReadable: true }`; any
+  other `subscribe` gets an `{ type: 'error', topic, error: 'forbidden topic' }` and never starts a
+  publisher.
+
+Because `loopbackReadable` **defaults to `false`**, a new topic carrying run/repo/PR content is
+safe the moment it is registered — a foreign local page cannot read it and no one had to remember
+to tighten anything. `health` is the one topic that opts in (`{ loopbackReadable: true }`), because
+it is the same payload the CORS-open `GET /api/health` already exposes (#431). This is the
+mechanical form of what used to be a written caveat: adding a sensitive topic requires *doing
+nothing* special; exposing one to any local page requires an *explicit* opt-in.
 
 ## Consuming a topic on the frontend
 

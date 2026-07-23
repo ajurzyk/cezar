@@ -78,7 +78,7 @@ import { reviewGateEnabled } from '../runs/review-gate.js';
 import { readUiState, uiStatePath } from '../ui-state.js';
 import { expandTilde } from '../paths.js';
 import { isLoopbackHostHeader, normalizeHostname, resolveCapabilities } from './capabilities.js';
-import { createSocketHub, type SocketHub } from './ws.js';
+import { createSocketHub, type SocketHub, type WsUpgradeVerdict } from './ws.js';
 import { browseDirectory, isInsideBrowseRoot, isLexicallyInsideBrowseRoot, resolveBrowseRoot } from './fs-browse.js';
 import { resolveForge } from './forge/index.js';
 import { fetchGithub, fetchGithubComments } from './github.js';
@@ -1128,18 +1128,26 @@ export function createApp(deps: ServerDeps): Hono {
   // interval stays the honest mechanism; it just lives behind the socket now
   // instead of N tabs × 5 s HTTP polls. Every tick and every subscriber read
   // goes through the cache above, so N subscribers still cost one compute.
-  deps.socketHub?.registerTopic('health', {
-    snapshot: readHealth,
-    start: (publish) => {
-      publishHealth = publish;
-      const timer = setInterval(() => void refreshHealth(), HEALTH_TTL_MS);
-      timer.unref?.();
-      return () => {
-        clearInterval(timer);
-        publishHealth = () => {};
-      };
+  deps.socketHub?.registerTopic(
+    'health',
+    {
+      snapshot: readHealth,
+      start: (publish) => {
+        publishHealth = publish;
+        const timer = setInterval(() => void refreshHealth(), HEALTH_TTL_MS);
+        timer.unref?.();
+        return () => {
+          clearInterval(timer);
+          publishHealth = () => {};
+        };
+      },
     },
-  });
+    // health IS the CORS-open discovery payload (#431), so it is the one topic
+    // safe for any local page — including a cross-port page admitted by the
+    // loopback fallback on a no-Sec-Fetch browser. Every other (future) topic
+    // keeps the default: trusted connections only.
+    { loopbackReadable: true },
+  );
   // Pre-warm on the live-server path only (startServer injects the hub; a bare
   // app in tests does not, so tests never spawn the probes here): the cache
   // fills while the browser is still downloading the bundle, so its first
@@ -3360,20 +3368,24 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
  *      back to the loopback rule. Best available, not fail-open.
  *      No Origin at all is a non-browser client — same stance as the HTTP guard.
  *
- * CAVEAT the loopback-origin fallback still creates: on a browser that sends no
- * `Sec-Fetch-Site`, a page served from ANOTHER loopback port may subscribe.
- * Every topic on the hub must therefore be safe for any local page to read —
- * `health` qualifies (it is the deliberately CORS-open discovery payload,
- * #431). Registering a topic that carries run or repo content requires
- * tightening this to strict same-authority first.
+ * The loopback-origin fallback still admits, on a browser that sends no
+ * `Sec-Fetch-Site`, a page served from ANOTHER loopback port. That is no longer
+ * a caveat the caller must remember: the verdict carries a `trusted` flag, and
+ * the hub only lets an UNtrusted connection subscribe to topics a publisher
+ * marked `loopbackReadable`. `health` is flagged so (the CORS-open discovery
+ * payload, #431); every other topic stays trusted-only by default, so a topic
+ * carrying run or repo content is mechanically unreachable from a foreign local
+ * page without any per-topic vigilance. A connection is `trusted` when it is
+ * provably the cockpit itself: a same-authority Origin, a no-Origin native
+ * client, or a dev proxy the browser vouches for via `Sec-Fetch-Site`.
  */
-export function verifyWsUpgrade(req: IncomingMessage, bindHost?: string): boolean {
+export function verifyWsUpgrade(req: IncomingMessage, bindHost?: string): WsUpgradeVerdict {
   const host = req.headers.host;
   const hostName = hostnameOfHost(host);
   const hosted = !resolveCapabilities(process.env, bindHost).localHandoff;
   if (!hosted && !isLoopbackHostHeader(hostName)) return false;
   const origin = req.headers.origin;
-  if (origin === undefined) return true;
+  if (origin === undefined) return { trusted: true }; // non-browser client — no Origin to spoof
   // Scheme-checked, like the HTTP guard's comparison: `authorityOfOrigin` is
   // null for anything that is not an http(s) URL, so the opaque `"null"` origin
   // of a sandboxed iframe AND a `ftp://127.0.0.1`-shaped one both stay out
@@ -3381,15 +3393,19 @@ export function verifyWsUpgrade(req: IncomingMessage, bindHost?: string): boolea
   const originAuthority = authorityOfOrigin(origin);
   const originHost = hostnameOfOrigin(origin);
   if (originAuthority === null || !originHost) return false;
-  if (originAuthority === authorityOfHost(host)) return true;
-  // The dev-proxy fallback. `same-origin` is the proxy (Vite fetched it from
-  // the page's own origin); an explicit `cross-site`/`same-site` is an attacker
+  if (originAuthority === authorityOfHost(host)) return { trusted: true }; // the cockpit itself
+  // The dev-proxy fallback. An explicit `cross-site`/`same-site` is an attacker
   // page on another local port and is refused even though both ends are
-  // loopback; an ABSENT header is a browser that does not ship the metadata, so
-  // loopback-on-both-ends remains the test.
+  // loopback; anything else needs loopback on both ends to get in at all.
   const fetchSite = req.headers['sec-fetch-site'];
   if (fetchSite !== undefined && fetchSite !== 'same-origin') return false;
-  return isLoopbackHostHeader(originHost) && isLoopbackHostHeader(hostName);
+  if (!isLoopbackHostHeader(originHost) || !isLoopbackHostHeader(hostName)) return false;
+  // Loopback on both ends, admitted. If the browser vouches it is same-origin
+  // (`Sec-Fetch-Site: same-origin`, unforgeable by page JS), this is the dev
+  // proxy on Chromium → trust it. An ABSENT header is a browser that ships no
+  // metadata (Safari/Firefox), where the dev proxy and a foreign local page are
+  // indistinguishable: admit as UNTRUSTED so only `loopbackReadable` topics show.
+  return { trusted: fetchSite === 'same-origin' };
 }
 
 /** The bare hostname of a `Host` header — see `normalizeHostname`. `''` when the

@@ -4,7 +4,14 @@ import type { AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import WebSocket from 'ws';
 import { verifyWsUpgrade } from './server.js';
-import { createSocketHub, WS_PATH, type SocketHub, type TopicPublisher } from './ws.js';
+import {
+  createSocketHub,
+  WS_PATH,
+  type SocketHub,
+  type TopicOptions,
+  type TopicPublisher,
+  type WsUpgradeVerdict,
+} from './ws.js';
 
 /**
  * The hub is exercised over REAL sockets — a Node http server plus the `ws`
@@ -51,15 +58,16 @@ function makeTopic(snapshot: unknown = { tick: 0 }) {
 
 async function boot(
   publisher: TopicPublisher,
-  verify: (req: IncomingMessage) => boolean = () => true,
+  verify: (req: IncomingMessage) => WsUpgradeVerdict = () => ({ trusted: true }),
   heartbeatMs?: number,
+  topicOptions?: TopicOptions,
 ): Promise<{ base: string; url: string }> {
   const server = createServer((_req, res) => {
     res.statusCode = 404;
     res.end();
   });
   const hub = createSocketHub(heartbeatMs === undefined ? {} : { heartbeatMs });
-  hub.registerTopic('ticker', publisher);
+  hub.registerTopic('ticker', publisher, topicOptions);
   hub.attach(server, verify);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   servers.push(server);
@@ -198,6 +206,29 @@ describe('createSocketHub', () => {
     });
   });
 
+  it('refuses an untrusted connection a topic that is not loopbackReadable', async () => {
+    const { state, publisher } = makeTopic();
+    const { url } = await boot(publisher, () => ({ trusted: false })); // admitted, not trusted
+    const client = await connect(url);
+
+    client.send({ type: 'subscribe', topic: 'ticker' }); // default topic — trusted-only
+    expect(await client.next()).toEqual({ type: 'error', topic: 'ticker', error: 'forbidden topic' });
+    expect(state.started).toBe(0); // never subscribed, so the publisher never started
+    client.ws.close();
+  });
+
+  it('lets an untrusted connection subscribe to a loopbackReadable topic', async () => {
+    const { state, publisher } = makeTopic({ ok: true });
+    // Untrusted verdict, but the topic is flagged public (like `health`).
+    const { url } = await boot(publisher, () => ({ trusted: false }), undefined, { loopbackReadable: true });
+    const client = await connect(url);
+
+    client.send({ type: 'subscribe', topic: 'ticker' });
+    expect(await client.next()).toEqual({ type: 'event', topic: 'ticker', data: { ok: true } });
+    expect(state.started).toBe(1);
+    client.ws.close();
+  });
+
   it('refuses a duplicate topic registration', () => {
     const hub = createSocketHub();
     const { publisher } = makeTopic();
@@ -211,13 +242,13 @@ describe('createSocketHub', () => {
     const server = createServer();
     servers.push(server);
     hubs.push(hub);
-    hub.attach(server, () => true);
-    expect(() => hub.attach(server, () => true)).toThrow(/already attached/);
+    hub.attach(server, () => ({ trusted: true }));
+    expect(() => hub.attach(server, () => ({ trusted: true }))).toThrow(/already attached/);
   });
 
   it('emits an app-level heartbeat ping the client can watch', async () => {
     const { publisher } = makeTopic();
-    const { url } = await boot(publisher, () => true, 40); // fast beat
+    const { url } = await boot(publisher, () => ({ trusted: true }), 40); // fast beat
     const client = await connect(url); // no subscription — heartbeat is connection-wide
 
     expect(await client.next()).toEqual({ type: 'ping' });
@@ -226,7 +257,7 @@ describe('createSocketHub', () => {
 
   it('reaps a client that stops answering the protocol ping', async () => {
     const { state, publisher } = makeTopic();
-    const { url } = await boot(publisher, () => true, 40);
+    const { url } = await boot(publisher, () => ({ trusted: true }), 40);
     // autoPong:false — this socket never answers the server's protocol ping, so after a beat
     // the hub considers it dead. It stays connected at the TCP level (a real silent-death would
     // too), which is exactly the case a FIN-based close would miss.
@@ -260,16 +291,22 @@ describe('verifyWsUpgrade', () => {
     else process.env.CEZ_REMOTE = savedRemote;
   });
 
-  it('admits a loopback Host with no Origin (non-browser client)', () => {
-    expect(verifyWsUpgrade(req({ host: '127.0.0.1:4321' }))).toBe(true);
+  it('trusts a loopback Host with no Origin (non-browser client)', () => {
+    expect(verifyWsUpgrade(req({ host: '127.0.0.1:4321' }))).toEqual({ trusted: true });
   });
 
-  it('admits the cockpit itself (same-authority Origin)', () => {
-    expect(verifyWsUpgrade(req({ host: '127.0.0.1:4321', origin: 'http://127.0.0.1:4321' }))).toBe(true);
+  it('trusts the cockpit itself (same-authority Origin)', () => {
+    expect(verifyWsUpgrade(req({ host: '127.0.0.1:4321', origin: 'http://127.0.0.1:4321' }))).toEqual({
+      trusted: true,
+    });
   });
 
-  it('admits the Vite dev proxy (loopback Origin on another port, loopback Host)', () => {
-    expect(verifyWsUpgrade(req({ host: '127.0.0.1:4321', origin: 'http://localhost:5173' }))).toBe(true);
+  it('admits the Vite dev proxy but UNtrusted without a Sec-Fetch vouch (Safari/Firefox)', () => {
+    // Loopback Origin on another port, loopback Host, no Sec-Fetch-Site: indistinguishable from a
+    // foreign local page, so it gets on the socket but may read only `loopbackReadable` topics.
+    expect(verifyWsUpgrade(req({ host: '127.0.0.1:4321', origin: 'http://localhost:5173' }))).toEqual({
+      trusted: false,
+    });
   });
 
   it('rejects a non-loopback Host — DNS rebinding (#426)', () => {
@@ -314,19 +351,19 @@ describe('verifyWsUpgrade', () => {
     ).toBe(false);
   });
 
-  it('admits the Vite dev proxy when it announces same-origin', () => {
+  it('TRUSTS the Vite dev proxy when the browser vouches same-origin', () => {
     expect(
       verifyWsUpgrade(
         req({ host: '127.0.0.1:4321', origin: 'http://localhost:5173', 'sec-fetch-site': 'same-origin' }),
       ),
-    ).toBe(true);
+    ).toEqual({ trusted: true });
   });
 
-  it('the cockpit itself passes on authority alone, whatever Sec-Fetch-Site says', () => {
+  it('the cockpit itself passes trusted on authority alone, whatever Sec-Fetch-Site says', () => {
     expect(
       verifyWsUpgrade(
         req({ host: '127.0.0.1:4321', origin: 'http://127.0.0.1:4321', 'sec-fetch-site': 'same-origin' }),
       ),
-    ).toBe(true);
+    ).toEqual({ trusted: true });
   });
 });

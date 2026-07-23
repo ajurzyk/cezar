@@ -57,6 +57,29 @@ export interface TopicPublisher {
   start(publish: (data: unknown) => void): () => void;
 }
 
+export interface TopicOptions {
+  /** Whether an ADMITTED-BUT-UNTRUSTED connection may subscribe (see
+   *  `WsUpgradeVerdict`). Defaults to `false` — the safe default that makes the
+   *  topic-safety invariant mechanical: a topic carrying run/repo/PR content is
+   *  legible only to the cockpit itself unless a publisher explicitly opts in.
+   *  Set `true` only for data already safe for any local page (e.g. `health`,
+   *  the CORS-open discovery payload). */
+  loopbackReadable?: boolean;
+}
+
+/**
+ * The upgrade guard's verdict: reject, or admit at a trust level.
+ *
+ * `false` — reject the handshake (403). A `trusted` connection is provably the
+ * cockpit itself — a same-authority Origin, a no-Origin native client, or a dev
+ * proxy the browser vouches for via `Sec-Fetch-Site` — and may subscribe to any
+ * topic. A NON-`trusted` connection was admitted by the loopback-origin fallback
+ * on a browser that ships no `Sec-Fetch` metadata, where the dev proxy and a
+ * foreign page on another local port are indistinguishable at the handshake: it
+ * may subscribe ONLY to topics a publisher flagged `loopbackReadable`.
+ */
+export type WsUpgradeVerdict = false | { trusted: boolean };
+
 /** The minimal server surface `attach` needs — satisfied by the `http.Server`
  *  that `@hono/node-server`'s `serve()` returns. */
 export interface UpgradeCapableServer {
@@ -66,12 +89,15 @@ export interface UpgradeCapableServer {
 
 export interface SocketHub {
   /** Register a topic clients may subscribe to. Registration is boot-time
-   *  wiring (createApp), so a duplicate name is a programming error: throw. */
-  registerTopic(name: string, publisher: TopicPublisher): void;
+   *  wiring (createApp), so a duplicate name is a programming error: throw.
+   *  `options.loopbackReadable` defaults to `false` (topic legible to trusted
+   *  connections only) — see `TopicOptions`. */
+  registerTopic(name: string, publisher: TopicPublisher, options?: TopicOptions): void;
   /** Start accepting `WS_PATH` upgrades on `server`. `verifyUpgrade` is the
-   *  request-origin guard — `false` answers 403 before the handshake. Boot-time
+   *  request-origin guard — `false` answers 403 before the handshake, otherwise
+   *  its `trusted` flag decides which topics the connection may read. Boot-time
    *  wiring like `registerTopic`: attaching twice throws. */
-  attach(server: UpgradeCapableServer, verifyUpgrade: (req: IncomingMessage) => boolean): void;
+  attach(server: UpgradeCapableServer, verifyUpgrade: (req: IncomingMessage) => WsUpgradeVerdict): void;
   /** Stop publishers, terminate clients, clear timers. Idempotent; also runs
    *  on the attached server's own `close`. */
   close(): void;
@@ -82,12 +108,17 @@ interface TopicState {
   subscribers: Set<WebSocket>;
   /** Non-null exactly while the publisher runs (≥1 subscriber). */
   stop: (() => void) | null;
+  /** `TopicOptions.loopbackReadable`, resolved (default `false`). */
+  loopbackReadable: boolean;
 }
 
 interface ClientState {
   /** Flipped by `pong`, cleared before each `ping` — two silent beats = dead. */
   alive: boolean;
   topics: Set<string>;
+  /** The upgrade verdict's trust flag (see `WsUpgradeVerdict`). An untrusted
+   *  connection may subscribe only to `loopbackReadable` topics. */
+  trusted: boolean;
 }
 
 export interface SocketHubOptions {
@@ -113,6 +144,15 @@ export function createSocketHub(options: SocketHubOptions = {}): SocketHub {
     const state = topics.get(topic);
     if (!state) {
       send(ws, { type: 'error', topic, error: 'unknown topic' });
+      return;
+    }
+    if (!state.loopbackReadable && !client.trusted) {
+      // Admitted by the loopback-origin fallback (a browser with no Sec-Fetch,
+      // so indistinguishable from a foreign local page): only topics explicitly
+      // marked safe for any local page are legible. This is the mechanical half
+      // of the topic-safety invariant — the guard opens the door, the flag says
+      // which rooms an unproven caller may enter.
+      send(ws, { type: 'error', topic, error: 'forbidden topic' });
       return;
     }
     if (client.topics.has(topic)) return; // idempotent — a re-sent frame must not double anything
@@ -152,8 +192,10 @@ export function createSocketHub(options: SocketHubOptions = {}): SocketHub {
     clients.delete(ws);
   };
 
-  wss.on('connection', (ws: WebSocket) => {
-    const client: ClientState = { alive: true, topics: new Set() };
+  wss.on('connection', (ws: WebSocket, _req: IncomingMessage, trusted?: boolean) => {
+    // `trusted` is emitted by `attach` from the upgrade verdict; default false is
+    // the safe read for any path that reaches here without one.
+    const client: ClientState = { alive: true, topics: new Set(), trusted: trusted === true };
     clients.set(ws, client);
     ws.on('pong', () => {
       client.alive = true;
@@ -181,9 +223,14 @@ export function createSocketHub(options: SocketHubOptions = {}): SocketHub {
   });
 
   const hub: SocketHub = {
-    registerTopic(name, publisher) {
+    registerTopic(name, publisher, options) {
       if (topics.has(name)) throw new Error(`ws topic already registered: ${name}`);
-      topics.set(name, { publisher, subscribers: new Set(), stop: null });
+      topics.set(name, {
+        publisher,
+        subscribers: new Set(),
+        stop: null,
+        loopbackReadable: options?.loopbackReadable ?? false,
+      });
     },
 
     attach(server, verifyUpgrade) {
@@ -202,12 +249,15 @@ export function createSocketHub(options: SocketHubOptions = {}): SocketHub {
           socket.destroy();
           return;
         }
-        if (!verifyUpgrade(req)) {
+        const verdict = verifyUpgrade(req);
+        if (!verdict) {
           socket.write('HTTP/1.1 403 Forbidden\r\nconnection: close\r\n\r\n');
           socket.destroy();
           return;
         }
-        wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+        // Carry the verdict's trust flag onto the connection — `subscribe` reads
+        // it to gate non-`loopbackReadable` topics.
+        wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req, verdict.trusted));
       });
       server.on('close', () => hub.close());
       heartbeat = setInterval(() => {
