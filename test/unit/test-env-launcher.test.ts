@@ -2,13 +2,22 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { afterEach, test } from 'node:test';
 
 const repoRoot = resolve(import.meta.dirname, '../..');
 const fixtures: string[] = [];
+const launchedPids = new Set<number>();
 
 afterEach(() => {
+  for (const pid of launchedPids) {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {
+      // The down script already stopped the fixture process.
+    }
+  }
+  launchedPids.clear();
   for (const fixture of fixtures.splice(0)) rmSync(fixture, { recursive: true, force: true });
 });
 
@@ -93,6 +102,7 @@ for (const withSetsid of [true, false]) {
     assert.match(cold.stdout, /TEST_ENV_REUSED=0/);
 
     const first = descriptor(fixture.root);
+    launchedPids.add(first.app.pid);
     if (withSetsid) {
       const callerPid = Number(readFileSync(callerPidFile, 'utf8').trim());
       try {
@@ -115,5 +125,6 @@ for (const withSetsid of [true, false]) {
     assert.equal(stopped.status, 0, stopped.stderr);
     assert.match(stopped.stdout, /TEST_ENV_STATUS=stopped/);
     assert.throws(() => process.kill(first.app.pid, 0));
+    launchedPids.delete(first.app.pid);
   });
 }
