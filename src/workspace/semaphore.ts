@@ -65,8 +65,15 @@ export interface SemaphoreParticipant {
   /** Slots this manager currently holds. The #347 exemption lives in the
    *  participant's own accounting: `waiting` runs are already subtracted. */
   busySlots(): number;
-  /** Kick the manager's queue — capacity may have appeared. */
-  pump(): void;
+  /** Kick the manager's queue — capacity may have appeared. Awaited by
+   *  `release()` so the manager taking a freed slot has registered it before
+   *  the next participant evaluates capacity. */
+  pump(): void | Promise<void>;
+  /** Epoch ms of this manager's oldest queued run, or null when its queue is
+   *  empty — `release()`'s ordering key, so a freed slot goes to the
+   *  workspace's longest-waiting run instead of whichever manager happens to
+   *  have registered first. */
+  oldestQueuedAt(): number | null;
 }
 
 const DEFAULT_LIMITS: WorkspaceResourceLimits = { maxParallel: 2, memoryLimitMb: null };
@@ -103,6 +110,11 @@ export class WorkspaceSemaphore {
   private readonly participants = new Set<SemaphoreParticipant>();
   private readonly load: () => Promise<WorkspaceResourceLimits>;
   private limits: WorkspaceResourceLimits;
+  /** A `release()` sweep is in flight — see `pendingRelease`. */
+  private broadcasting = false;
+  /** A slot freed DURING a sweep. The in-flight sweep may already have pumped
+   *  the manager that should get it, so re-run rather than drop the wakeup. */
+  private pendingRelease = false;
 
   constructor(options: WorkspaceSemaphoreOptions = {}) {
     this.load = options.load ?? loadResourceLimits;
@@ -135,6 +147,48 @@ export class WorkspaceSemaphore {
   }
 
   /**
+   * A slot came free somewhere in the workspace: pump EVERY manager,
+   * longest-waiting-queue first.
+   *
+   * This is the counterpart to `busy()` being workspace-wide. A `RunManager`
+   * only ever pumps itself, so before this existed a freed slot reached
+   * exactly one project's queue: a run queued in project B stayed `queued`
+   * while project A's runs came and went, until B happened to start or finish
+   * a run of its own (or someone saved the workspace config). Every
+   * slot-freeing transition — a run settling, a session parking at `waiting`
+   * — routes here instead.
+   *
+   * Pumps are awaited in turn so the manager that takes the slot has it
+   * counted (`starting`) before the next manager evaluates capacity — two
+   * managers pumping concurrently could both read the same free slot and
+   * overshoot `maxParallel`. Ordering is best-effort fairness, not a global
+   * FIFO gate: a manager whose head-of-queue can't start (non-git root,
+   * spec 006 degradation) must never block the rest of the workspace.
+   */
+  async release(): Promise<void> {
+    if (this.broadcasting) {
+      this.pendingRelease = true;
+      return;
+    }
+    this.broadcasting = true;
+    try {
+      do {
+        this.pendingRelease = false;
+        const ordered = [...this.participants]
+          .map((participant) => ({
+            participant,
+            // Empty queues sort last — they have nothing to claim the slot with.
+            since: participant.oldestQueuedAt() ?? Number.MAX_SAFE_INTEGER,
+          }))
+          .sort((a, b) => a.since - b.since);
+        for (const { participant } of ordered) await participant.pump();
+      } while (this.pendingRelease);
+    } finally {
+      this.broadcasting = false;
+    }
+  }
+
+  /**
    * The effective per-project concurrency cap for a manager's repo root: the
    * project's own `maxParallel` if set in the registry, else the workspace cap
    * (`maxParallel()`). Answered from the cached snapshot — the class's
@@ -162,6 +216,7 @@ export class WorkspaceSemaphore {
     } catch {
       // keep the last good snapshot
     }
-    for (const participant of [...this.participants]) participant.pump();
+    // A raised cap is capacity appearing everywhere at once — same sweep.
+    await this.release();
   }
 }
