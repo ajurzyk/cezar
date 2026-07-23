@@ -170,7 +170,8 @@ an empty value, and an unset variable all preserve the default multi-project beh
 
 - **Intentionally narrowed under the flag**: `GET /api/health` and `GET /api/projects` expose only
   the launch project; `POST /api/projects`, `POST /api/projects/checkout`,
-  `DELETE /api/projects/:projectId`, and `GET /api/fs/browse` answer `409` before side effects.
+  `PATCH /api/projects/:projectId`, `DELETE /api/projects/:projectId`, and
+  `GET /api/fs/browse` answer `409` before side effects.
   The equivalent `cezar projects add` and `cezar projects remove` commands refuse with exit code 1.
   The cockpit consequently omits cross-project navigation, add-project controls, the global
   Projects settings section, and the New Task project picker.

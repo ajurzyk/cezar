@@ -561,6 +561,22 @@ describe('workspace projects API', () => {
       };
     };
 
+    it('refuses edits in single-project mode before registry or semaphore side effects', async () => {
+      const other = await registerProject(otherRoot);
+      const before = readFileSync(workspaceConfigPath(), 'utf8');
+      const { semaphore, refreshes } = countingSemaphore();
+      process.env.CEZ_SINGLE_PROJECT = '1';
+
+      const { status, body } = await patch(other.id, { maxParallel: 1 }, { semaphore });
+
+      expect(status).toBe(409);
+      expect(body).toEqual({
+        error: 'single-project mode is enabled; editing projects is disabled',
+      });
+      expect(readFileSync(workspaceConfigPath(), 'utf8')).toBe(before);
+      expect(refreshes()).toBe(0);
+    });
+
     it('sets the per-project value, persists it, and refreshes the semaphore', async () => {
       const other = await registerProject(otherRoot);
       const { semaphore, refreshes } = countingSemaphore();
