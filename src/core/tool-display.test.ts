@@ -81,6 +81,11 @@ describe('toolDisplay', () => {
         expected: { toolKind: 'read', title: 'Read src/index.ts' },
       },
       {
+        name: 'imageView',
+        input: { path: '/tmp/checkout-preview.png' },
+        expected: { toolKind: 'read', title: 'View image /tmp/checkout-preview.png' },
+      },
+      {
         name: 'Glob',
         input: { pattern: 'src/**/*.ts' },
         expected: { toolKind: 'search', title: 'Search src/**/*.ts', subtitle: undefined },

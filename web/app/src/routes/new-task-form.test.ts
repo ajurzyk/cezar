@@ -162,6 +162,7 @@ describe('buildCreateRunBody — the exact POST /api/runs payloads legacy sends'
       model: 'sonnet',
       runner: 'claude',
       runnerCount: 2,
+      defaultRunner: 'codex',
       variants: 1,
       images: [],
     })
@@ -173,12 +174,20 @@ describe('buildCreateRunBody — the exact POST /api/runs payloads legacy sends'
     })
   })
 
-  it('runner is sent ONLY when the host offers a choice (legacy: runnersAvailable.length > 1)', () => {
+  it('sends the only available runner when it differs from the unavailable server default', () => {
     const single = buildCreateRunBody({
       task: 't', source: { source: 'workflow', ref: 'quick-task' }, model: '',
-      runner: 'codex', runnerCount: 1, variants: 1, images: [],
+      runner: 'claude', runnerCount: 1, defaultRunner: 'codex', variants: 1, images: [],
     })
-    expect(single.runner).toBeUndefined()
+    expect(single.runner).toBe('claude')
+  })
+
+  it('still omits the runner when it matches the server default', () => {
+    const body = buildCreateRunBody({
+      task: 't', source: { source: 'workflow', ref: 'quick-task' }, model: '',
+      runner: 'claude', runnerCount: 2, defaultRunner: 'claude', variants: 1, images: [],
+    })
+    expect(body.runner).toBeUndefined()
   })
 
   it('worktree=false is sent only for a single run; on/variants keep it implicit', () => {

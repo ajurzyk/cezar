@@ -215,6 +215,20 @@ describe('cezar projects CLI', () => {
       ).toBe(0);
       expect((await loadWorkspaceConfig()).projects.map((project) => project.id)).toEqual(['existing', 'allowed']);
     });
+
+    it('does not expose the registry when boot project identity is unavailable', async () => {
+      await registerProject(makeRepo('hidden'));
+
+      expect(
+        await runProjectsCommand(['list'], {
+          defaultRoot: repos,
+          env: { CEZ_SINGLE_PROJECT: '1' },
+          io,
+        }),
+      ).toBe(0);
+      expect(io.out.join('\n')).toContain('no projects registered yet');
+      expect(io.out.join('\n')).not.toContain('hidden');
+    });
   });
 
   it('exits 1 with the usage block on an unknown subcommand', async () => {

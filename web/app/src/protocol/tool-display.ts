@@ -123,6 +123,8 @@ export function toolDisplay(name: string, input?: unknown): ToolDisplay {
 
     case 'read':
       return { toolKind: 'read', title: titled('Read', field(input, 'file_path', 'filePath', 'path')) }
+    case 'imageview':
+      return { toolKind: 'read', title: titled('View image', field(input, 'path')) }
     case 'glob':
     case 'grep':
       return {

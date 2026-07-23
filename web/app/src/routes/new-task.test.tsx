@@ -7,7 +7,7 @@ import { createQueryClient } from '@/api/query-client'
 import type { HealthResponse, RepoResponse, Skill, WorkflowsResponse } from '@/api/types'
 import { resetToasts, Toaster } from '@/components/ui/toaster'
 
-import { resetDraft } from './new-task-draft'
+import { resetDraft, writeDraft } from './new-task-draft'
 import { NewTaskRoute } from './new-task'
 
 /**
@@ -290,6 +290,22 @@ describe('picker data flows', () => {
     expect(labels.some((l) => l.includes('opus'))).toBe(false)
   })
 
+  it('drops a persisted model preset that belongs to another runner', async () => {
+    writeDraft({
+      text: '', source: null, runner: 'codex', model: 'claude-opus-4-8', variants: 1,
+      planFirst: false, worktree: null, autonomous: null, generateFollowups: null,
+    })
+    serve({ health: HEALTH_MULTI })
+    renderNewTask()
+    await pillReady()
+
+    const modelPill = document.querySelector('[data-slot="model-pill"]') as HTMLElement
+    await waitFor(() => expect(modelPill.textContent).toContain('auto'))
+    fireEvent.pointerDown(modelPill)
+    const options = await screen.findAllByRole('menuitemradio')
+    expect(options.some((option) => option.textContent?.includes('claude-opus-4-8'))).toBe(false)
+  })
+
   it('gates variants on git: no repo → pill disabled with the honest reason, base pill gone', async () => {
     serve({ health: HEALTH_NO_GIT, repo: REPO_NO_GIT })
     renderNewTask()
@@ -476,13 +492,22 @@ describe('submit', () => {
     await waitFor(() => expect(location()).toBe('/tasks/v-a'))
   })
 
-  it('single-backend hosts never send `runner` (the server defaults it)', async () => {
+  it('single-backend hosts omit `runner` when it matches the server default', async () => {
     serve()
     renderNewTask()
     await pillReady()
     fireEvent.change(textarea(), { target: { value: 'no runner key' } })
     await startTask()
     expect((postedBody() as Record<string, unknown>).runner).toBeUndefined()
+  })
+
+  it('sends the fallback runner when the configured default is temporarily unavailable', async () => {
+    serve({ health: { ...HEALTH, defaultRunner: 'codex' } })
+    renderNewTask()
+    await pillReady()
+    fireEvent.change(textarea(), { target: { value: 'pin the healthy backend' } })
+    await startTask()
+    expect(postedBody()).toMatchObject({ runner: 'claude' })
   })
 
   it('defaults follow-up generation on, but posts and remembers an explicit opt-out', async () => {
