@@ -23,6 +23,7 @@ PR: https://github.com/open-mercato/cezar/pull/613
 | 3 | 3.6-final-fix | Stabilize full-suite browser fixtures | done | e47f5f0 |
 | 3 | 3.7-final-fix | Finish detached-HEAD and teardown stabilization | done | addf3fd |
 | 3 | 3.8-final-fix | Wait for asynchronous branch settings state | done | 1c341be |
+| 4 | 4.1 | Offer a confirmed upgrade-notes session after update | todo | |
 
 ## Goal
 
@@ -112,3 +113,9 @@ Treat a reported branch as current only when it exists in the rendered branch li
 #### Step 3.8-final-fix — Wait for asynchronous branch settings state
 
 Wait for the base-branch control's repository query to settle before asserting the Settings → Agents surface.
+
+### Phase 4 — Confirmed post-update migration
+
+#### Step 4.1 — Offer a confirmed upgrade-notes session after update
+
+After a successful manual skills update, show a Yes/No dialog. Start a project-scoped run backed by `om-apply-upgrade-notes` only when the user confirms, navigate to the new session, retain the persistent reminder, and cover both confirmation paths with UI tests.

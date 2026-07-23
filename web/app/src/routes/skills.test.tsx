@@ -55,12 +55,14 @@ function serve({
   importable = [],
   workspaceUiState = {},
   skillsUpdate,
+  appliedSkillsUpdate,
 }: {
   skills?: Skill[]
   refreshed?: Skill[]
   importable?: { name: string; description?: string }[]
   workspaceUiState?: Record<string, unknown>
   skillsUpdate?: SkillsUpdateState
+  appliedSkillsUpdate?: SkillsUpdateState
 } = {}) {
   requests = []
   // The selection lives in the GLOBAL ui-state (`/api/workspace/ui-state`), whose PUT answers the
@@ -88,9 +90,14 @@ function serve({
         global = { ...global, ...(body as Record<string, unknown>) }
         return json(global)
       }
+      if (url === '/api/runs' && method === 'POST') {
+        return json({ id: 'upgrade-notes-run', status: 'queued', task: 'Apply upgrade notes' })
+      }
       if (url === '/api/workspace/skills-update?projectId=boot') return json(skillsUpdate ?? UPDATE_CURRENT)
       if (url === '/api/workspace/skills-update/check' && method === 'POST') return json(skillsUpdate ?? UPDATE_CURRENT)
-      if (url === '/api/workspace/skills-update/apply' && method === 'POST') return json(skillsUpdate ?? UPDATE_CURRENT)
+      if (url === '/api/workspace/skills-update/apply' && method === 'POST') {
+        return json(appliedSkillsUpdate ?? skillsUpdate ?? UPDATE_CURRENT)
+      }
       return new Promise<never>(() => {})
     }),
   )
@@ -315,6 +322,72 @@ describe('the Manage skills panel (opt-out OM skills)', () => {
     await waitFor(() => expect(document.querySelector('[data-slot="skills-upgrade-notes"]')).not.toBeNull())
     await act(async () => releaseCheck(json(UPDATE_CURRENT)))
     expect(client.getQueryData<SkillsUpdateState>(workspaceQueryKeys.skillsUpdate('boot'))?.needsUpgradeNotes).toBe(true)
+  })
+
+  it('offers to start the upgrade-notes skill after a successful update', async () => {
+    serve({
+      importable: IMPORTABLE,
+      skillsUpdate: {
+        ...UPDATE_CURRENT,
+        status: 'available',
+        available: true,
+        scopes: [{ ...UPDATE_CURRENT.scopes[0]!, status: 'available', available: true }],
+      },
+      appliedSkillsUpdate: {
+        ...UPDATE_CURRENT,
+        updatedAt: '2026-07-23T16:00:00.000Z',
+        needsUpgradeNotes: true,
+      },
+    })
+    renderAt('/skills?skill=__import')
+
+    await waitFor(() => expect(document.querySelector('[data-action="skills-update-apply"]')).not.toBeNull())
+    fireEvent.click(document.querySelector('[data-action="skills-update-apply"]')!)
+    await waitFor(() =>
+      expect(document.querySelector('[data-slot="skills-upgrade-notes-dialog"]')?.textContent).toContain(
+        'Apply the upgrade notes now?',
+      ),
+    )
+
+    fireEvent.click(Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'Yes, start session')!)
+    await waitFor(() =>
+      expect(
+        requests.find((request) => request.method === 'POST' && request.url === '/api/runs')?.body,
+      ).toMatchObject({
+        steps: [
+          {
+            skill: 'om-apply-upgrade-notes',
+            prompt: '{{task}}',
+          },
+        ],
+      }),
+    )
+  })
+
+  it('lets the user decline the upgrade-notes session', async () => {
+    serve({
+      importable: IMPORTABLE,
+      skillsUpdate: {
+        ...UPDATE_CURRENT,
+        status: 'available',
+        available: true,
+        scopes: [{ ...UPDATE_CURRENT.scopes[0]!, status: 'available', available: true }],
+      },
+      appliedSkillsUpdate: {
+        ...UPDATE_CURRENT,
+        updatedAt: '2026-07-23T16:00:00.000Z',
+        needsUpgradeNotes: true,
+      },
+    })
+    renderAt('/skills?skill=__import')
+
+    await waitFor(() => expect(document.querySelector('[data-action="skills-update-apply"]')).not.toBeNull())
+    fireEvent.click(document.querySelector('[data-action="skills-update-apply"]')!)
+    await waitFor(() => expect(document.querySelector('[data-slot="skills-upgrade-notes-dialog"]')).not.toBeNull())
+    fireEvent.click(Array.from(document.querySelectorAll('button')).find((button) => button.textContent === 'No')!)
+
+    await waitFor(() => expect(document.querySelector('[data-slot="skills-upgrade-notes-dialog"]')).toBeNull())
+    expect(requests.some((request) => request.method === 'POST' && request.url === '/api/runs')).toBe(false)
   })
 
   it('shows the pinned "Manage skills" entry only when a vendor repo has default skills', async () => {

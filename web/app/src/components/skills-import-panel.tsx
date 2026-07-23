@@ -2,14 +2,24 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { CheckCircle2Icon, RefreshCwIcon, SparklesIcon, TriangleAlertIcon } from 'lucide-react'
 import { useCallback, useMemo, useRef, useState } from 'react'
 
-import { applySkillsUpdate, checkSkillsUpdate, putWorkspaceUiState } from '@/api/client'
+import { applySkillsUpdate, checkSkillsUpdate, createRun, putWorkspaceUiState } from '@/api/client'
 import { queryKeys, useImportableSkills, useSkillsUpdate, useWorkspaceUiState, workspaceQueryKeys } from '@/api/queries'
 import type { SkillsUpdateState, WorkspaceUiState } from '@/api/types'
 import { Button } from '@/components/ui/button'
 import { CenteredState } from '@/components/centered-state'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { toast } from '@/components/ui/toaster'
+import { useNavigate } from '@/lib/project-router'
 import { cn } from '@/lib/utils'
+import { startedRunPath } from '@/routes/new-task-form'
 
 const SKILLS_REPO_URL = 'https://github.com/open-mercato/skills'
 
@@ -256,7 +266,28 @@ function SkillsUpdateCard({
   loadError: Error | null
 }) {
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
   const latestAction = useRef(0)
+  const [showUpgradeNotesPrompt, setShowUpgradeNotesPrompt] = useState(false)
+  const startUpgradeNotes = useMutation({
+    mutationFn: () =>
+      createRun({
+        task: 'Apply the upgrade notes after updating the installed Open Mercato skills.',
+        steps: [
+          {
+            id: 'apply-upgrade-notes',
+            name: 'Apply upgrade notes',
+            skill: 'om-apply-upgrade-notes',
+            prompt: '{{task}}',
+          },
+        ],
+      }),
+    onSuccess: (created) => {
+      setShowUpgradeNotesPrompt(false)
+      void navigate(startedRunPath(created))
+    },
+    onError: (error: Error) => toast(error.message, { tone: 'danger' }),
+  })
   const accept = (result: SkillsUpdateState, request: { action: 'check' | 'apply'; seq: number }) => {
       // A forced check may finish after an apply. Only the newest user intent owns the cache.
       if (request.seq !== latestAction.current) return
@@ -264,6 +295,7 @@ function SkillsUpdateCard({
       if (request.action === 'apply' && result.updatedAt) {
         void queryClient.invalidateQueries({ queryKey: queryKeys.skills })
         toast(result.status === 'error' ? 'Some skill updates failed.' : 'Open Mercato skills updated.')
+        setShowUpgradeNotesPrompt(true)
       }
   }
   const reject = (error: Error, request: { action: 'check' | 'apply'; seq: number }) => {
@@ -300,7 +332,8 @@ function SkillsUpdateCard({
   else if (state?.status === 'error') message = 'The update did not finish for every installation.'
 
   return (
-    <section data-slot="skills-update-card" aria-live="polite" className="mt-4 rounded-lg border border-border bg-muted/30 p-3">
+    <>
+      <section data-slot="skills-update-card" aria-live="polite" className="mt-4 rounded-lg border border-border bg-muted/30 p-3">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
           <p className="text-[13px] font-medium text-foreground">{message}</p>
@@ -325,6 +358,38 @@ function SkillsUpdateCard({
       </div>
       {(state?.status === 'unavailable' || loadError) ? <div className="mt-2 text-xs text-soft-foreground">Manual examples: <code>npx skills update -p</code> · <code>npx skills update -g</code>. These broad commands may update other tracked sources.</div> : null}
       {state?.needsUpgradeNotes ? <div data-slot="skills-upgrade-notes" className="mt-3 flex gap-2 rounded-md border border-primary/30 bg-background p-2.5 text-xs text-foreground"><CheckCircle2Icon aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 text-primary" /><span>Skill files were updated. Run <code>/om-apply-upgrade-notes</code> in each configured repository to apply descriptor migrations while preserving local edits.</span></div> : null}
-    </section>
+      </section>
+      <Dialog
+        open={showUpgradeNotesPrompt}
+        onOpenChange={(open) => (startUpgradeNotes.isPending ? undefined : setShowUpgradeNotesPrompt(open))}
+      >
+        <DialogContent data-slot="skills-upgrade-notes-dialog" showCloseButton={false}>
+          <DialogHeader>
+            <DialogTitle>Apply the upgrade notes now?</DialogTitle>
+            <DialogDescription>
+              The skill files were updated successfully. Start a new session with{' '}
+              <code>/om-apply-upgrade-notes</code> to sync repository descriptors while preserving local edits?
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={startUpgradeNotes.isPending}
+              onClick={() => setShowUpgradeNotesPrompt(false)}
+            >
+              No
+            </Button>
+            <Button
+              type="button"
+              disabled={startUpgradeNotes.isPending}
+              onClick={() => startUpgradeNotes.mutate()}
+            >
+              {startUpgradeNotes.isPending ? 'Starting…' : 'Yes, start session'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   )
 }

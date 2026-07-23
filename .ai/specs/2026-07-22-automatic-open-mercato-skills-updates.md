@@ -11,7 +11,7 @@ cezar should detect updates for locally installed skills that came from `open-me
 | Q1 | Is the preference project-scoped or machine-wide? | Machine-wide in `~/.cezar/config.json`. | Global installations and PR #603's skill selection already follow the user across projects. | ok |
 | Q2 | What does “automatically update” mean? | Check in the background, then apply a detected update automatically when enabled; disabled mode still checks and offers the manual button. | This makes the checkbox useful without hiding available updates from users who opt out. | ok |
 | Q3 | Which installations may cezar modify? | Only project/global entries tracked by the upstream skills CLI with source `open-mercato/skills`; never untracked folders or other sources. | Preserves manually maintained skills and local precedence while supporting normal manual `npx skills add` installations. | ok |
-| Q4 | When is the post-update migration skill run? | Never silently; after a successful file update, show that `/om-apply-upgrade-notes` is the required next action. | That playbook can change generated repository descriptors and must preserve local edits in an agent-driven run. | ok |
+| Q4 | When is the post-update migration skill run? | Never silently; after a successful file update, ask whether to start a new `/om-apply-upgrade-notes` session. | That playbook can change generated repository descriptors, so the user explicitly confirms the agent-driven run. | ok |
 
 ## Problem Statement
 
@@ -36,7 +36,7 @@ The service reads the upstream skills lock metadata rather than inferring owners
 
 Detection is background-only. It starts after the server is listening, is deduplicated across project contexts, and refreshes at a conservative six-hour TTL plus explicit user refresh. Automatic application runs once per newly observed remote version/hash when enabled. Manual update is available whenever detection reports an update or a previous automatic attempt failed.
 
-After a successful update, cezar refreshes its skill catalog and presents a persistent, non-blocking follow-up explaining that `/om-apply-upgrade-notes` applies repository descriptor migrations while preserving local edits. cezar does not launch that skill automatically.
+After a successful update, cezar refreshes its skill catalog, presents a persistent follow-up explaining that `/om-apply-upgrade-notes` applies repository descriptor migrations while preserving local edits, and asks whether to start that skill in a new session. Declining has no side effects.
 
 Alternatives rejected:
 
@@ -173,7 +173,7 @@ At the top of PR #603's Manage skills detail panel, add a compact update card ab
 - `current`: “Installed Open Mercato skills are up to date,” with last-check time and **Check again**.
 - `unavailable`: neutral explanation such as “Automatic updates aren’t available because npx could not be found.” Keep manual command examples (`npx skills update -p` / `-g`) copyable, but do not claim they are safe for unrelated sources.
 - partial/error: name the successful and failed scopes, keep **Retry**, and never discard the usable catalog.
-- success: refresh the skills list, clear the sidebar marker, toast the result, and show a persistent callout: “Skill files were updated. Run `/om-apply-upgrade-notes` in each configured repository to apply descriptor migrations while preserving local edits.”
+- success: refresh the skills list, clear the sidebar marker, toast the result, show a persistent callout, and open a Yes/No dialog asking whether to start `/om-apply-upgrade-notes` in a new session. Yes creates the skill-backed run for the active project and opens it; No closes the dialog without starting a run.
 
 The existing skill checkboxes remain solely catalog curation. Explain the distinction: “These checkboxes choose what cezar shows; updates refresh installed skill files.” The update button is shown only when tracked Open Mercato installations exist and an update is available or retryable.
 
@@ -198,7 +198,7 @@ Illustrative mockups:
 | Server exits mid-update | Upstream command owns file-level behavior; stale lock recovery permits a later retry. Never synthesize success. |
 | Upstream output/lock schema changes | Treat unrecognized data as unavailable and preserve files; fixture tests pin accepted shapes. |
 | Read-only home/cache | Preference write returns existing route error; check/update degrades without changing boot behavior. |
-| Automatic update succeeds but upgrade notes remain | Clear “update available,” set process-local `needsUpgradeNotes`, and retain the follow-up callout until server restart; never claim to detect completion and never auto-run an agent task. |
+| Automatic update succeeds but upgrade notes remain | Clear “update available,” set process-local `needsUpgradeNotes`, retain the follow-up callout until server restart, and ask before starting an agent task; never claim to detect completion. |
 | `CEZ_DRY_RUN=1` | Use a deterministic mock state and never invoke `npx` or network, so UI/E2E tests stay offline. |
 
 ## Risks & Impact Review
