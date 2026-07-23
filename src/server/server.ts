@@ -28,7 +28,7 @@ import {
 } from '../workflows/types.js';
 import { planChain, slugify } from '../planner.js';
 import { discoverSkills } from '../skills.js';
-import { refreshTeamSkills, waitForTeamSkills } from '../skills-remote.js';
+import { getTeamSkillsCached, refreshTeamSkills, waitForTeamSkills } from '../skills-remote.js';
 import { appendHandoffHeartbeat, handoffProgressExcerpt, readHandoff } from '../handoff.js';
 import { markStarted, onTodosChanged, readTodos, removeTodo, todoTaskText, type TodoItem } from '../todos.js';
 import type { RunEvent, RunRecord, RunStatus, RunStore } from '../runs/store.js';
@@ -48,7 +48,7 @@ import {
   pushCurrentBranch,
   readWorktreePath,
 } from './git-changes.js';
-import { loadConfig, resolveWorktreeRetention, type CezConfig } from '../config.js';
+import { gatedSkillsRepos, loadConfig, resolveWorktreeRetention, type CezConfig } from '../config.js';
 import { findConfigFile } from '../agent-config/catalog.js';
 import { readConfigFile, writeConfigFile } from '../agent-config/files.js';
 import { listAgentConfig } from '../agent-config/service.js';
@@ -237,6 +237,15 @@ export interface RegisterProjectResponse {
 export interface RemoveProjectResponse {
   removed: true;
   id: string;
+}
+
+/** `PATCH /api/projects/:projectId` (spec 2026-07-22-per-project-concurrency)
+ *  — sets or clears a project's per-project `maxParallel`. The entry carries
+ *  the same `status`/`branch` probe `GET /api/projects` attaches, so the
+ *  cockpit sees one project shape. `null` in the request clears the override
+ *  back to "inherit the workspace cap". */
+export interface UpdateProjectResponse {
+  project: ProjectListEntry;
 }
 
 /** `GET/PUT /api/workspace/config` (multi-project spec, step 2.7) — the
@@ -435,6 +444,18 @@ const workspaceUiStateSchema = z
       })
       .passthrough()
       .optional(),
+    // The user's curated selection of default (vendor) skills — `open-mercato/skills` — so the
+    // catalog is no longer forced in full. GLOBAL (here, not per-repo) because "which skills I
+    // want" describes the person, not a checkout, and must not depend on where cezar was launched
+    // (multi-project workspace). Tri-state, enforced in `discoverSkills`: an ABSENT key means "not
+    // curated" and every default skill still shows (opt-out default — no silent break on upgrade);
+    // a PRESENT array (even `[]`) shows only those names. Bounded like the `skillUsage` map: the
+    // file is GET/PUT wholesale, so an unbounded array is an unbounded write. Names match
+    // `lastTask.ref` (`.min(1).max(200)`). The client PUTs the whole array (shallow top-level merge).
+    importedSkills: z
+      .array(z.string().min(1).max(200))
+      .max(SKILL_USAGE_MAX_ENTRIES)
+      .optional(),
   })
   .passthrough();
 
@@ -507,6 +528,9 @@ const uiStateSchema = z
       .optional(),
     // Skills promo banner (#391): set once the cockpit banner is dismissed, never unset.
     // Server-persisted (not a cookie) so the "shown once" promise holds across browsers.
+    // Retained for backward compatibility — the banner is gone, replaced by the workspace-level
+    // `importedSkills` curation (see `workspaceUiStateSchema`); `.passthrough()` would preserve
+    // the key regardless, but keep it typed.
     dismissedSkillsBanner: z.boolean().optional(),
   })
   .passthrough();
@@ -1308,6 +1332,72 @@ export function createApp(deps: ServerDeps): Hono {
     return c.json(body);
   });
 
+  // Edit one field of an existing registry entry (spec
+  // 2026-07-22-per-project-concurrency): the per-project concurrency ceiling.
+  // A PATCH (not PUT) because it touches a single field, and a distinct route
+  // from POST (register-a-folder) to keep register vs. edit semantics clear.
+  // `maxParallel: null` clears the override back to "inherit the workspace
+  // cap". Bounds mirror `workspaceProjectSchema` (config.ts) exactly, so a
+  // value this route accepts can never be degraded away by the next load's
+  // `.catch`.
+  const updateProjectSchema = z.object({
+    maxParallel: z.number().int().min(1).max(16).nullable(),
+  });
+  app.patch('/api/projects/:projectId', async (c) => {
+    const raw = c.req.param('projectId');
+    // Same gate + 404 wording as DELETE: a malformed id is an unknown project.
+    if (!projectIdSchema.safeParse(raw).success) {
+      return c.json({ error: `unknown project: ${raw}` }, 404);
+    }
+    const parsed = updateProjectSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
+    }
+    // `default` is the boot alias the cockpit is allowed to use everywhere else.
+    const id = raw === 'default' ? await resolveBootProject() : raw;
+    const { maxParallel } = parsed.data;
+
+    // Read-first (mirroring DELETE, server.ts:1252-1258): a well-formed but
+    // unknown id must 404 WITHOUT rewriting the config — otherwise it would both
+    // do a needless full-config tmp+rename and, on a read-only home, surface the
+    // write failure as a 500 where the honest answer is 404.
+    let known = false;
+    try {
+      known = (await loadWorkspaceConfig()).projects.some((p) => p.id === id);
+    } catch {
+      // unreadable workspace — treat as unknown; the read-only case answers 404,
+      // not a 500 the caller cannot act on (same reasoning as DELETE).
+    }
+    if (!known) return c.json({ error: `unknown project: ${id}` }, 404);
+
+    let updated: WorkspaceProject | undefined;
+    try {
+      await mergeWriteWorkspaceConfig((config) => {
+        const entry = config.projects.find((p) => p.id === id);
+        if (!entry) return; // lost a race with a concurrent remove — answered below
+        // null clears the override; a number sets it. Mutated in place so
+        // `.passthrough()` keys on the entry survive.
+        if (maxParallel === null) delete entry.maxParallel;
+        else entry.maxParallel = maxParallel;
+        updated = entry;
+      });
+    } catch (err) {
+      // e.g. a read-only home — nothing was persisted (atomic tmp+rename).
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+    // Raced with a concurrent removal between the read and the write.
+    if (!updated) return c.json({ error: `unknown project: ${id}` }, 404);
+
+    // The new ceiling takes effect WITHOUT a restart: refresh the shared
+    // semaphore's snapshot and pump every manager — the same live-apply hook
+    // `PUT /api/workspace/config` fires for a workspace-cap change.
+    await deps.semaphore?.refresh();
+    const body: UpdateProjectResponse = {
+      project: { ...updated, ...(await probeProjectStatus(updated.root)) },
+    };
+    return c.json(body);
+  });
+
   // ---- GUI clone (multi-project spec, step 4.3) ----------------------------
   // "Add project → Clone from GitHub": clone into the checkout root, then
   // register the result through `registerFolder` above (same guards, same
@@ -1499,6 +1589,22 @@ export function createApp(deps: ServerDeps): Hono {
     // cache converges without polling or a manual reload (spec 005 / #555).
     if (c.req.query('wait') === '1') await waitForTeamSkills(repoRoot);
     return c.json(await discoverSkills(repoRoot));
+  });
+
+  // The opt-in catalog for the "Import skills" panel: every skill a default
+  // (vendor) repo offers — `open-mercato/skills` — regardless of import state,
+  // so the panel can present them all with a per-skill toggle. Empty once a repo
+  // configures its own `skillsRepos` (nothing is gated then). `wait=1` lets the
+  // panel wait out a cold team-skill cache, same as `GET /skills` (spec 005).
+  api.get('/skills/importable', async (c) => {
+    const repoRoot = c.get('project').root;
+    const gated = await gatedSkillsRepos(repoRoot);
+    if (gated.size === 0) return c.json([]);
+    if (c.req.query('wait') === '1') await waitForTeamSkills(repoRoot);
+    const importable = getTeamSkillsCached(repoRoot)
+      .filter((skill) => skill.team && gated.has(skill.team.repo))
+      .map((skill) => ({ name: skill.name, description: skill.description }));
+    return c.json(importable);
   });
 
   // ---- GUI prefs (ui-state.json) --------------------------------------------

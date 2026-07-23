@@ -1,16 +1,18 @@
-import { QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { QueryClientProvider, type QueryClient } from '@tanstack/react-query'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
-import type { HealthResponse } from '@/api/types'
+import { workspaceQueryKeys } from '@/api/queries'
+import type { HealthResponse, RunRecord } from '@/api/types'
 import { AppShellContainer, repoChipOf } from '@/components/app-shell-container'
 import { ThemeProvider } from '@/components/theme-provider'
 
 const fetchMock = vi.fn<typeof fetch>()
 
 beforeEach(() => {
+  document.title = 'cezar'
   vi.stubGlobal('fetch', fetchMock)
   // jsdom ships no matchMedia; the shell's breakpoint effect and the theme toggle need one.
   vi.stubGlobal(
@@ -65,18 +67,37 @@ function serve(routes: Record<string, unknown>): void {
   })
 }
 
-function renderShell() {
-  return render(
-    <QueryClientProvider client={createQueryClient()}>
+function renderShell(entry = '/', client: QueryClient = createQueryClient()) {
+  return {
+    client,
+    ...render(
+    <QueryClientProvider client={client}>
       <ThemeProvider>
-        <MemoryRouter initialEntries={['/']}>
+        <MemoryRouter initialEntries={[entry]}>
           <AppShellContainer>
             <p>route content</p>
           </AppShellContainer>
         </MemoryRouter>
       </ThemeProvider>
     </QueryClientProvider>,
-  )
+    ),
+  }
+}
+
+function run(overrides: Partial<RunRecord> = {}): RunRecord {
+  return {
+    id: 'run-1',
+    title: 'Raw task prompt',
+    titleSummary: 'Implement page titles',
+    workflow: 'quick-task',
+    task: 'Implement page titles',
+    status: 'running',
+    createdAt: '2026-07-21T12:00:00.000Z',
+    tokensUsed: 0,
+    archived: false,
+    steps: [],
+    ...overrides,
+  }
 }
 
 const repoChip = () => document.querySelector('[data-slot="repo-chip"]')
@@ -258,5 +279,99 @@ describe('sidebar wiring', () => {
     await waitFor(() => expect(versionChip()).not.toBeNull())
     expect(versionChip()?.textContent).toBe('v0.1.3')
     expect(repoChip()).toBeNull()
+  })
+})
+
+describe('document title wiring', () => {
+  const REGISTRY = {
+    projects: [PROJECT],
+    bootProject: 'cezar',
+    projectsDir: '/home/me/cezar/projects',
+  }
+  const HEALTH_WITH_BOOT = { ...HEALTH, bootProject: 'cezar' }
+
+  it('combines the selected project with scoped page context', async () => {
+    serve({
+      '/api/health': HEALTH_WITH_BOOT,
+      '/api/todos': [],
+      '/api/projects': {
+        ...REGISTRY,
+        projects: [{ ...PROJECT, id: 'shop', name: 'Storefront' }],
+      },
+      '/api/runs': [],
+    })
+    renderShell('/p/shop/git')
+
+    await waitFor(() => expect(document.title).toBe('Storefront — Git · cezar'))
+  })
+
+  it('falls back to the boot repository name when the registry is unavailable', async () => {
+    serve({ '/api/health': HEALTH_WITH_BOOT, '/api/todos': [], '/api/runs': [] })
+    renderShell('/p/cezar/')
+
+    await waitFor(() => expect(document.title).toBe('cezar — Tasks · cezar'))
+  })
+
+  it('keeps global settings and a no-repo task route free of invented project context', async () => {
+    serve({
+      '/api/health': { ...HEALTH_WITH_BOOT, repo: null },
+      '/api/todos': [],
+      '/api/projects': REGISTRY,
+      '/api/runs': [],
+    })
+    const global = renderShell('/settings/global/projects')
+
+    await waitFor(() => expect(document.title).toBe('Settings · cezar'))
+    global.unmount()
+
+    renderShell('/tasks/missing')
+    await waitFor(() => expect(document.title).toBe('cezar'))
+  })
+
+  it('updates after in-app navigation without remounting the shell', async () => {
+    serve({
+      '/api/health': HEALTH_WITH_BOOT,
+      '/api/todos': [],
+      '/api/projects': REGISTRY,
+      '/api/runs': [],
+    })
+    renderShell('/p/cezar/')
+
+    await waitFor(() => expect(document.title).toBe('cezar — Tasks · cezar'))
+    fireEvent.click(screen.getByRole('link', { name: 'Git' }))
+    await waitFor(() => expect(document.title).toBe('cezar — Git · cezar'))
+  })
+
+  it('reacts to live project and task title cache updates', async () => {
+    const initialRun = run()
+    serve({
+      '/api/health': HEALTH_WITH_BOOT,
+      '/api/todos': [],
+      '/api/projects': {
+        ...REGISTRY,
+        projects: [{ ...PROJECT, id: 'shop', name: 'Storefront' }],
+      },
+      '/api/runs': [],
+      '/api/p/shop/runs': [initialRun],
+    })
+    const { client } = renderShell('/p/shop/tasks/run-1')
+
+    await waitFor(() =>
+      expect(document.title).toBe('Storefront — Implement page titles · cezar'),
+    )
+
+    act(() => {
+      client.setQueryData(workspaceQueryKeys.projects, {
+        ...REGISTRY,
+        projects: [{ ...PROJECT, id: 'shop', name: 'Renamed storefront' }],
+      })
+      client.setQueryData(['shop', 'runs', 'list'], [
+        { ...initialRun, titleSummary: 'Rename browser titles' },
+      ])
+    })
+
+    await waitFor(() =>
+      expect(document.title).toBe('Renamed storefront — Rename browser titles · cezar'),
+    )
   })
 })

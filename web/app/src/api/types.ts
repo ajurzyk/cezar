@@ -286,6 +286,9 @@ export interface ProjectListEntry {
   status: 'ok' | 'missing' | 'not-git'
   /** Current branch when cheaply available (omitted e.g. on an unborn HEAD). */
   branch?: string
+  /** Per-project cap on concurrently running tasks (spec 2026-07-22). Omitted =
+   *  inherit the workspace `resources.maxParallel`; a number pins this project. */
+  maxParallel?: number
 }
 
 /** `GET /api/projects` — the workspace registry. Workspace-level: never 404s, never scoped. */
@@ -311,6 +314,18 @@ export interface RegisterProjectResponse {
 export interface RemoveProjectResponse {
   removed: true
   id: string
+}
+
+/** `PATCH /api/projects/:projectId` (spec 2026-07-22-per-project-concurrency) — set or clear a
+ *  project's per-project concurrency ceiling. `null` clears the override back to "inherit the
+ *  workspace cap"; an integer `1..16` pins it. */
+export interface UpdateProjectInput {
+  maxParallel: number | null
+}
+
+/** `PATCH /api/projects/:projectId` — the updated entry, same shape `GET /api/projects` attaches. */
+export interface UpdateProjectResponse {
+  project: ProjectListEntry
 }
 
 /** `POST /api/projects/checkout` (multi-project spec, step 4.3) — the clone-from-GitHub body.
@@ -375,6 +390,13 @@ export interface WorkspaceUiState {
   /** Settings → Notifications, GLOBAL since step 3.5 — one answer for the whole workspace,
    *  since the delivering browser is one browser whichever project you are looking at. */
   notifications?: { enabled?: boolean }
+  /** The user's curated selection of default (vendor) skills — `open-mercato/skills`. GLOBAL, not
+   *  per-repo: "which skills I want" describes the person, not a checkout, and must not depend on
+   *  the launch directory. Tri-state: ABSENT means "not curated", so every default skill shows
+   *  (opt-out default; existing installs are never silently emptied on upgrade); a PRESENT array
+   *  (even `[]`) means only those names show from that repo. The gate lives server-side in
+   *  `discoverSkills`; the Skills page's Manage panel writes the whole array (shallow top-level merge). */
+  importedSkills?: string[]
   [key: string]: unknown
 }
 
@@ -789,10 +811,18 @@ export interface UiState {
    *  present (even `[]`) is the user's own edited list from Settings → Prompt templates.
    *  `skills` (optional) are the skill names the template auto-applies for. */
   promptTemplates?: { id: string; label: string; text: string; skills?: string[] }[]
-  /** The open-mercato/skills promo banner (#391), dismissed for good. Set once true, never
-   *  unset — server-persisted rather than a cookie so "shown once" holds across browsers. */
+  /** The open-mercato/skills promo banner (#391), dismissed for good. Legacy — the banner is
+   *  gone, replaced by the workspace-level `importedSkills` curation (see `WorkspaceUiState`);
+   *  retained so old ui-state.json round-trips. */
   dismissedSkillsBanner?: boolean
   [key: string]: unknown
+}
+
+/** One row in the "Manage skills" panel — a skill a default (vendor) repo offers,
+ *  from `GET /api/skills/importable`, independent of whether it is currently kept. */
+export interface ImportableSkill {
+  name: string
+  description?: string
 }
 
 // ---- request bodies ------------------------------------------------------------------------------

@@ -1,5 +1,6 @@
 import { Suspense, lazy } from 'react'
 import {
+  matchPath,
   Navigate,
   Outlet,
   Route,
@@ -10,7 +11,7 @@ import {
 
 import { useHealth, useProjects } from './api/queries'
 import { ProjectScopeProvider } from './api/project-scope-context'
-import { Navigate as ScopedNavigate } from './lib/project-router'
+import { Navigate as ScopedNavigate, stripProjectPrefix } from './lib/project-router'
 import { CompareLoading } from './routes/compare-loading'
 import { GithubLoading } from './routes/github/github-loading'
 import { InboxRoute } from './routes/inbox'
@@ -188,7 +189,10 @@ function ProjectScopeRoute() {
 
   return (
     <ProjectScopeProvider projectId={scopeId}>
-      <Outlet />
+      {/* React Router keeps the matched child mounted when only this parent param changes.
+          Project-local queries and mount-time state must instead start from the project the URL
+          now names. Key the child boundary (not the provider, whose unmount resets API scope). */}
+      <Outlet key={projectId} />
     </ProjectScopeProvider>
   )
 }
@@ -232,6 +236,35 @@ function LegacyPathRedirect() {
       replace
     />
   )
+}
+
+export interface PageTitleContext {
+  pageLabel: string | null
+  taskId: string | null
+}
+
+const PAGE_TITLE_ROUTES = [
+  { pattern: '/', pageLabel: 'Tasks' },
+  { pattern: '/new', pageLabel: 'New task' },
+  { pattern: '/compare/:groupId', pageLabel: 'Compare' },
+  { pattern: '/git/*', pageLabel: 'Git' },
+  { pattern: '/github/*', pageLabel: 'GitHub' },
+  { pattern: '/skills', pageLabel: 'Skills' },
+  { pattern: '/inbox', pageLabel: 'Inbox' },
+  { pattern: '/workflows/*', pageLabel: 'Workflows' },
+  { pattern: '/settings/*', pageLabel: 'Settings' },
+] as const
+
+/** Browser-title context from the project-relative route map; raw ids are lookup keys only. */
+export function pageTitleContext(pathname: string): PageTitleContext {
+  const projectPath = stripProjectPrefix(pathname)
+  const task = matchPath({ path: '/tasks/:id/*', end: true }, projectPath)
+  if (task) return { pageLabel: null, taskId: task.params.id ?? null }
+
+  const route = PAGE_TITLE_ROUTES.find(({ pattern }) =>
+    matchPath({ path: pattern, end: true }, projectPath),
+  )
+  return { pageLabel: route?.pageLabel ?? null, taskId: null }
 }
 
 /** The route map from the spec's "Routing — every surface is a URL" section.

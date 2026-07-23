@@ -70,8 +70,9 @@ export type AppShellProps = {
   /** Single-project capability gating: hides workspace-expansion affordances. Defaults off so
    *  standalone and older callers preserve the multi-project shell. */
   singleProject?: boolean
-  /** Global chrome banner (#391's `SkillsBanner`), rendered in its own row above the scroller.
-   *  Absent renders nothing — the slot is generic, not skills-specific. */
+  /** Global chrome banner, rendered in its own row above the scroller. Absent renders nothing —
+   *  the slot is generic and currently unused (the #391 skills promo it once held is gone,
+   *  replaced by the opt-in Import panel on the Skills page). */
   banner?: ReactNode
   /** Step 3.3's multi-project sidebar: one collapsible group per registered project, each
    *  carrying its own nav + task list. When present it REPLACES the flat nav and the

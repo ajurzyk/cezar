@@ -38,6 +38,8 @@ import type {
   ProjectsResponse,
   RegisterProjectResponse,
   RemoveProjectResponse,
+  UpdateProjectInput,
+  UpdateProjectResponse,
   RemoveTodoResponse,
   RepoBranchResponse,
   RepoCommitPayload,
@@ -53,6 +55,7 @@ import type {
   SetConfigResponse,
   SetAgentConfigInput,
   SetWorkspaceConfigInput,
+  ImportableSkill,
   Skill,
   StartTodoResponse,
   TodoItem,
@@ -268,6 +271,18 @@ export function refreshSkills(): Promise<Skill[]> {
   return mutate<Skill[]>('POST', '/api/skills/refresh')
 }
 
+/** The default (vendor) repo's full skill list — every skill the "Import skills" panel can
+ *  offer, regardless of import state. Empty once a repo configures its own `skillsRepos`. */
+export function getImportableSkills(opts?: ReadOptions): Promise<ImportableSkill[]> {
+  return get<ImportableSkill[]>('/api/skills/importable', opts)
+}
+
+/** Wait for the server's already-started team-skill load before listing importable skills —
+ *  the same cold-cache convergence as `getSkillsWhenReady`, off the panel's first render. */
+export function getImportableSkillsWhenReady(opts?: ReadOptions): Promise<ImportableSkill[]> {
+  return get<ImportableSkill[]>('/api/skills/importable?wait=1', opts)
+}
+
 export function getTodos(opts?: ReadOptions): Promise<TodoItem[]> {
   return get<TodoItem[]>('/api/todos', opts)
 }
@@ -440,6 +455,17 @@ export function checkoutProject(input: CheckoutProjectInput): Promise<RegisterPr
  */
 export function removeProject(projectId: string): Promise<RemoveProjectResponse> {
   return mutate<RemoveProjectResponse>('DELETE', `/api/projects/${encodeURIComponent(projectId)}`)
+}
+
+/**
+ * Set or clear a project's per-project concurrency ceiling
+ * (`PATCH /api/projects/:projectId`, spec 2026-07-22). `maxParallel: null`
+ * clears the override back to "inherit the workspace cap"; an integer pins it.
+ * The server applies the new ceiling live (semaphore refresh), so the answer is
+ * the updated entry the pane swaps into its list.
+ */
+export function updateProject(projectId: string, input: UpdateProjectInput): Promise<UpdateProjectResponse> {
+  return mutate<UpdateProjectResponse>('PATCH', `/api/projects/${encodeURIComponent(projectId)}`, input)
 }
 
 // ---- run mutations ------------------------------------------------------------------------

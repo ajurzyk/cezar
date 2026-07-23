@@ -442,7 +442,7 @@ Useful environment variables:
 | `CEZ_TITLE_UPDATES=0` | Turn off the live task-title refresh (namer re-runs on each turn end). The Settings → Agents toggle overrides this default. |
 | `CEZ_AUTONAME=0` | Disable ALL LLM task naming (creation + live) — titles stay heuristic (`437: /om-auto-review-pr`). Under `CEZ_DRY_RUN=1` naming is already off unless forced with `CEZ_AUTONAME=1`. |
 | `CEZ_REVIEW_GATE=1` | Turn ON the optional diff-first review gate (#489): a successful, non-autonomous run with changes parks at `review` (Accept / Send back / Draft PR) instead of finishing. Off by default — changed runs settle to `done` with the diff left in the worktree. Only `1` enables. The Settings → Agents toggle overrides this; autonomous runs always skip it. |
-| `CEZ_NO_BANNER=1` | Skip the `open-mercato/skills` banner on `cezar serve` startup. Dismissing the same banner in the cockpit silences the terminal one too. |
+| `CEZ_NO_BANNER=1` | Skip the `open-mercato/skills` banner on `cezar serve` startup. (The cockpit no longer shows a banner — its skills now live on the Skills page's Manage panel — so this env var is the terminal banner's only switch.) |
 
 ---
 
@@ -521,9 +521,24 @@ On `ubuntu-vps` a single host can run several independent cockpits — add
 `--domain <host>` and each gets its own port, nginx site, login and service; a
 new domain never resumes or clobbers the first install.
 
+**Already running a reverse proxy?** If Dokploy, Coolify, Caddy or your own
+nginx already owns `:80/:443`, cezar's would fight it for the ports. Install the
+service only and let your proxy front it:
+
+```bash
+npx cezar-cli server-install --platform ubuntu-vps \
+  --external-proxy --domain cezar.example.com --bind-host 172.17.0.1
+```
+
+`--bind-host` is only needed when the proxy runs in a **container** (Traefik
+can't reach the host's loopback); a host-installed proxy uses the `127.0.0.1`
+default. In this mode **your proxy must enforce authentication** — cezar has
+none of its own. [Details →](docs/server-install/ubuntu-vps.md#the-box-already-has-a-reverse-proxy-dokploy-coolify-caddy)
+
 | Provider | `--platform` | Public front | Guide |
 |----------|--------------|--------------|-------|
 | Ubuntu / Debian VPS | `ubuntu-vps` | nginx + Let's Encrypt HTTPS, htpasswd login, systemd | [Step-by-step →](docs/server-install/ubuntu-vps.md) |
+| Ubuntu + existing proxy | `ubuntu-vps --external-proxy` | your Dokploy/Traefik/Caddy front; cezar ships the service only | [Step-by-step →](docs/server-install/ubuntu-vps.md#the-box-already-has-a-reverse-proxy-dokploy-coolify-caddy) |
 | macOS + ngrok | `macosx-ngrok` | ngrok tunnel + `--basic-auth`, launchd | [Step-by-step →](docs/server-install/macosx-ngrok.md) |
 
 See the **[Remote access overview](docs/server-install/README.md)** for how it

@@ -1,14 +1,18 @@
 import type { ReactNode } from 'react'
+import { useLocation } from 'react-router'
 
-import { useHealth, useProjects, useTodos } from '@/api/queries'
+import { useHealth, useProjectRuns, useProjects, useTodos } from '@/api/queries'
 import type { HealthResponse } from '@/api/types'
 import { AppShell, type RepoChip } from '@/components/app-shell'
 import { CommandPalette } from '@/components/command-palette'
 import { ListViewProvider } from '@/components/list-view'
 import { ProjectGroups } from '@/components/project-groups'
-import { SkillsBanner } from '@/components/skills-banner'
 import { TaskQuickListContainer } from '@/components/task-quick-list'
 import { ToolsMenu } from '@/components/tools-menu'
+import { useDocumentTitle } from '@/lib/use-document-title'
+import { useActiveProjectId } from '@/lib/project-router'
+import { runTitle } from '@/lib/task-groups'
+import { pageTitleContext } from '@/routes'
 
 /**
  * Derive the sidebar's repo chip from `/api/health`.
@@ -42,12 +46,41 @@ export function repoChipOf(health: HealthResponse | undefined): RepoChip | null 
  * reconcile — not a change here.
  */
 export function AppShellContainer({ children }: { children: ReactNode }) {
+  const { pathname } = useLocation()
+  const projectId = useActiveProjectId()
   const health = useHealth()
   // The global inbox is opt-in (#471). With the capability off there is no Inbox nav item to
   // badge and the endpoint can only answer [], so the query parks rather than polls.
   const inboxAvailable = health.data?.capabilities.followups === true
   const todos = useTodos(inboxAvailable)
   const registry = useProjects().data
+  const titleContext = pageTitleContext(pathname)
+  const bootProjectId = registry?.bootProject ?? health.data?.bootProject ?? null
+  const isBootProject = projectId !== null && projectId === bootProjectId
+  const activeProject = registry?.projects.find((project) => project.id === projectId)
+  const titleRuns = useProjectRuns(
+    projectId ?? '',
+    // Wait for the registry to identify the project before choosing the boot/non-boot cache
+    // key. Health can arrive first; fetching then would briefly populate a project-scoped key
+    // for the boot project before switching to the authoritative `default` key.
+    activeProject !== undefined && titleContext.taskId !== null,
+    registry?.bootProject === projectId,
+  ).data
+
+  // Global settings intentionally has no selected project. Everywhere else the URL id selects
+  // the authoritative registry entry; health may name only the CONFIRMED boot project while
+  // the registry is unavailable, never a non-boot project whose root health does not describe.
+  const globalSettings = pathname === '/settings/global' || pathname.startsWith('/settings/global/')
+  const projectName = globalSettings
+    ? null
+    : (activeProject?.name ??
+      (isBootProject ? (repoChipOf(health.data)?.name ?? null) : null))
+  const titleRun = titleContext.taskId
+    ? titleRuns?.find((run) => run.id === titleContext.taskId)
+    : undefined
+  const pageLabel = titleRun ? runTitle(titleRun) : titleContext.pageLabel
+
+  useDocumentTitle({ projectName, pageLabel })
 
   // Multi-project sidebar only from the SECOND project on (multi-project spec, "Sidebar").
   // With one registered project — or with the registry still loading, or unreachable — the
@@ -95,7 +128,6 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
           ) : undefined
         }
         toolsMenu={<ToolsMenu health={health.data} />}
-        banner={<SkillsBanner />}
       >
         {children}
       </AppShell>
