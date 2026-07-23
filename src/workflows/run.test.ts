@@ -7,7 +7,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import type { ContentBlock } from '../core/agent-runner.js';
 import { createWorktree } from '../git-worktree.js';
 import { RunStore, type RunRecord } from '../runs/store.js';
-import { RunManager } from './run.js';
+import { parseTaskMarkers } from '../runs/task-markers.js';
+import { appendTurnText, RunManager } from './run.js';
 import type { WorkflowDef } from './types.js';
 
 const run = promisify(execFile);
@@ -15,6 +16,28 @@ const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
 
 const TURN_TEXT =
   "I'll catch the AuthError in the login handler so wrong passwords answer 401.\n\nDetails follow.";
+
+describe('appendTurnText', () => {
+  it.each(['initial execution', 'resumed execution'])(
+    'preserves a marker boundary before later commentary during %s',
+    () => {
+      const turnText = appendTurnText(
+        'Issue claimed.\n\nCEZ:PR=635\nCEZ:TITLE=linking per-project limits',
+        'The verification gate confirms the defect.',
+      );
+
+      expect(turnText).toContain('CEZ:TITLE=linking per-project limits\nThe verification');
+      expect(turnText).not.toContain('limitsThe');
+      expect(parseTaskMarkers(turnText).title).toBe('linking per-project limits');
+    },
+  );
+
+  it('matches runner result assembly for empty blocks and multiple complete text blocks', () => {
+    expect(appendTurnText('', 'first')).toBe('first');
+    expect(appendTurnText('first', '')).toBe('first');
+    expect(appendTurnText(appendTurnText('', 'first'), 'second')).toBe('first\nsecond');
+  });
+});
 
 /**
  * Turn-end bookkeeping (#389, task auto-naming spec) against a REAL fixture
