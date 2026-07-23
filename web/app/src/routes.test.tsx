@@ -1,6 +1,6 @@
 import { QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
-import { MemoryRouter, useLocation } from 'react-router'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { MemoryRouter, useLocation, useNavigate } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from './api/query-client'
@@ -40,7 +40,7 @@ const HEALTH = {
   checks: [],
   defaultRunner: 'claude',
   forge: null,
-  capabilities: { localHandoff: true, followups: true },
+  capabilities: { localHandoff: true, followups: true, singleProject: false },
   projects: [{ id: BOOT, name: 'cezar' }],
   bootProject: BOOT,
 }
@@ -84,16 +84,21 @@ function LocationProbe() {
   )
 }
 
+function ProjectNavigationProbe() {
+  const navigate = useNavigate()
+  return <button onClick={() => navigate('/p/other/')}>Switch project</button>
+}
+
 /** Cold-load the router at a URL, exactly as a pasted deep link would — under the same providers
  *  the app shell supplies. With `seed` (the default) the health + registry answers the redirect
  *  gates need are already cached, the way a warm app has them; `seed: false` is the cold state
  *  where the boot id is still unknown. */
-function renderAt(entry: string, { seed = true }: { seed?: boolean } = {}) {
+function renderAt(entry: string, { seed = true, health = HEALTH }: { seed?: boolean; health?: typeof HEALTH } = {}) {
   const client = createQueryClient()
   if (seed) {
     // Scope is unset while seeding, so `queryKeys.health` is the unscoped `['default','health']`
     // key the legacy-redirect gate reads.
-    client.setQueryData(queryKeys.health, HEALTH)
+    client.setQueryData(queryKeys.health, health)
     client.setQueryData(workspaceQueryKeys.projects, REGISTRY)
   }
   render(
@@ -252,6 +257,46 @@ describe('scoped route map (/p/:projectId)', () => {
     const link = document.querySelector('[data-slot="settings-index"] a[data-section="agents"]')
     expect(link?.getAttribute('href')).toBe(`/p/${BOOT}/settings/agents`)
   })
+
+  it('remounts the same page and loads its new scope when the project param changes', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/runs' || path === '/api/p/other/runs') {
+        return new Response('[]', { headers: { 'content-type': 'application/json' } })
+      }
+      return new Promise<never>(() => {})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = createQueryClient()
+    client.setQueryData(queryKeys.health, HEALTH)
+    client.setQueryData(workspaceQueryKeys.projects, REGISTRY)
+    render(
+      <QueryClientProvider client={client}>
+        <ThemeProvider>
+          <AppearanceProvider>
+            <MemoryRouter initialEntries={[`/p/${BOOT}/`]}>
+              <ListViewProvider>
+                <AppRoutes />
+                <ProjectNavigationProbe />
+              </ListViewProvider>
+            </MemoryRouter>
+          </AppearanceProvider>
+        </ThemeProvider>
+      </QueryClientProvider>,
+    )
+
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some(([path]) => String(path) === '/api/runs')).toBe(true),
+    )
+    fireEvent.change(screen.getByLabelText('Search tasks'), { target: { value: 'stale filter' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Switch project' }))
+
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some(([path]) => String(path) === '/api/p/other/runs')).toBe(true),
+    )
+    expect((screen.getByLabelText('Search tasks') as HTMLInputElement).value).toBe('')
+  })
 })
 
 /**
@@ -277,6 +322,14 @@ describe('the global settings area (/settings/global)', () => {
       expect(screen.getByRole('heading', { level: 1 }).textContent).toBe(title)
     })
   }
+
+  it('omits the Projects route when single-project mode is active', () => {
+    renderAt('/settings/global/projects', {
+      health: { ...HEALTH, capabilities: { ...HEALTH.capabilities, singleProject: true } },
+    })
+    expect(routeName()).not.toBe('settings-global-projects')
+    expect(screen.queryByRole('heading', { level: 1, name: 'Projects' })).toBeNull()
+  })
 
   // A moved section's old URL, in both spellings a bookmark can have it.
   for (const id of ['appearance', 'notifications', 'resources']) {

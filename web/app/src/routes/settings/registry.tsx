@@ -13,6 +13,7 @@ import {
 } from 'lucide-react'
 import type { ComponentType, SVGProps } from 'react'
 
+import type { Capabilities } from '@/api/types'
 import { CenteredState } from '@/components/centered-state'
 import { AgentConfigSection } from './agent-config-section'
 import { AgentsSection } from './agents-section'
@@ -184,6 +185,14 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
  * entirely, and so does everything belonging to the OTHER scope. The two areas are rendered by
  * the same shell, so this filter is the only thing keeping them apart.
  */
-export function visibleSettingsSections(scope: SettingsScope): SettingsSection[] {
-  return SETTINGS_SECTIONS.filter((section) => !section.hidden && section.scope === scope)
+export function visibleSettingsSections(
+  scope: SettingsScope,
+  capabilities?: Pick<Capabilities, 'singleProject'>,
+): SettingsSection[] {
+  return SETTINGS_SECTIONS.filter(
+    (section) =>
+      !section.hidden &&
+      section.scope === scope &&
+      !(capabilities?.singleProject === true && section.id === 'projects'),
+  )
 }

@@ -245,10 +245,13 @@ export interface ForgeInfo {
  *  (Terminal, editor, `cd …` hints) must disappear, not disable.
  *  `followups: false` (the default — the inbox is opt-in via `CEZ_FOLLOWUPS=1`, #471) means
  *  this server has no follow-up inbox: the Inbox nav item and the composer's follow-up
- *  toggle disappear the same way. The per-task handoff journal is unrelated and always on. */
+ *  toggle disappear the same way. The per-task handoff journal is unrelated and always on.
+ *  `singleProject: true` means `CEZ_SINGLE_PROJECT=1` constrained the workspace to its
+ *  launch project and all multi-project affordances must be omitted. */
 export interface Capabilities {
   localHandoff: boolean
   followups: boolean
+  singleProject: boolean
 }
 
 export interface HealthResponse {
@@ -283,6 +286,9 @@ export interface ProjectListEntry {
   status: 'ok' | 'missing' | 'not-git'
   /** Current branch when cheaply available (omitted e.g. on an unborn HEAD). */
   branch?: string
+  /** Per-project cap on concurrently running tasks (spec 2026-07-22). Omitted =
+   *  inherit the workspace `resources.maxParallel`; a number pins this project. */
+  maxParallel?: number
 }
 
 /** `GET /api/projects` — the workspace registry. Workspace-level: never 404s, never scoped. */
@@ -308,6 +314,18 @@ export interface RegisterProjectResponse {
 export interface RemoveProjectResponse {
   removed: true
   id: string
+}
+
+/** `PATCH /api/projects/:projectId` (spec 2026-07-22-per-project-concurrency) — set or clear a
+ *  project's per-project concurrency ceiling. `null` clears the override back to "inherit the
+ *  workspace cap"; an integer `1..16` pins it. */
+export interface UpdateProjectInput {
+  maxParallel: number | null
+}
+
+/** `PATCH /api/projects/:projectId` — the updated entry, same shape `GET /api/projects` attaches. */
+export interface UpdateProjectResponse {
+  project: ProjectListEntry
 }
 
 /** `POST /api/projects/checkout` (multi-project spec, step 4.3) — the clone-from-GitHub body.

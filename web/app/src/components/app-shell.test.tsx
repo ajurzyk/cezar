@@ -133,6 +133,20 @@ describe('AppShell', () => {
     })
   })
 
+  describe('Add project menu', () => {
+    it('is shown by default', () => {
+      renderShell()
+      expect(within(sidebar()).getByRole('button', { name: 'Add project' })).toBeTruthy()
+    })
+
+    it('is omitted in single-project mode while normal navigation remains', () => {
+      renderShell('/', { singleProject: true })
+      expect(within(sidebar()).queryByRole('button', { name: 'Add project' })).toBeNull()
+      expect(within(nav()).getByRole('link', { name: 'Tasks' })).toBeTruthy()
+      expect(within(sidebar()).getByRole('link', { name: /New task/ })).toBeTruthy()
+    })
+  })
+
   it('puts the theme toggle in the sidebar footer', () => {
     renderShell()
     expect(within(footer()).getByRole('button', { name: /^Theme:/ })).toBeTruthy()

@@ -114,6 +114,18 @@ describe('filterRuns', () => {
     expect(filterRuns(summarized, 'plz')).toEqual([])
   })
 
+  it('searches the same fallback title shown for a malformed legacy summary', () => {
+    const malformed = [
+      run({
+        id: 'legacy',
+        title: '476: verifying pr ui',
+        titleSummary: 'Reading the handoff file for context.The task is UI QA verification of PR #476',
+      }),
+    ]
+    expect(filterRuns(malformed, 'verifying pr ui').map((r) => r.id)).toEqual(['legacy'])
+    expect(filterRuns(malformed, 'handoff')).toEqual([])
+  })
+
   it('matches the branch', () => {
     expect(ids('e5f6')).toEqual(['b'])
   })

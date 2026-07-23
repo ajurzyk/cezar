@@ -244,6 +244,15 @@ export interface RemoveProjectResponse {
   id: string;
 }
 
+/** `PATCH /api/projects/:projectId` (spec 2026-07-22-per-project-concurrency)
+ *  — sets or clears a project's per-project `maxParallel`. The entry carries
+ *  the same `status`/`branch` probe `GET /api/projects` attaches, so the
+ *  cockpit sees one project shape. `null` in the request clears the override
+ *  back to "inherit the workspace cap". */
+export interface UpdateProjectResponse {
+  project: ProjectListEntry;
+}
+
 /** `GET/PUT /api/workspace/config` (multi-project spec, step 2.7) — the
  *  settings slice of `~/.cezar/config.json`: global knobs ONLY, never the
  *  project registry (that is `GET /api/projects`' job). */
@@ -733,14 +742,18 @@ export function createApp(deps: ServerDeps): Hono {
   }> => {
     try {
       const registry = (await loadWorkspaceConfig()).projects;
+      const bootProject = await resolveBootProject(registry);
+      const visible = capabilities().singleProject
+        ? registry.filter((project) => project.id === bootProject)
+        : registry;
       return {
         // Explicit picks, not a spread: the registry schema passes unknown
         // keys through, and `root` must never ride along onto health.
-        projects: registry.map((p) => ({
+        projects: visible.map((p) => ({
           id: p.id,
           name: p.name || basename(p.root),
         })),
-        bootProject: await resolveBootProject(registry),
+        bootProject,
       };
     } catch {
       return { projects: [], bootProject: await resolveBootProject([]) };
@@ -749,6 +762,9 @@ export function createApp(deps: ServerDeps): Hono {
   // Hosted-mode gate (spec §"Deployment modes") — read per request so
   // CEZ_REMOTE flips take effect live (and tests can toggle it).
   const capabilities = () => resolveCapabilities(process.env, bindHost);
+  const singleProjectRefusal = (
+    action: 'adding projects' | 'removing projects' | 'folder browsing',
+  ) => ({ error: `single-project mode is enabled; ${action} is disabled` });
   // Inbox live updates (spec 007). Opt-in (#471): no capability, no watcher —
   // and since step 2.3 the per-dataDir watch is created lazily by the first
   // SSE subscription (and torn down with the last), nothing to start here.
@@ -770,7 +786,15 @@ export function createApp(deps: ServerDeps): Hono {
   };
   // Non-boot projects build lazily on first scoped request; their managers
   // count against the same workspace semaphore as the boot manager (step 2.5).
-  const contexts = deps.contexts ?? new ProjectContexts({ listProjects, semaphore: deps.semaphore });
+  const contexts = deps.contexts ?? new ProjectContexts({
+    listProjects: async () => {
+      const selector = capabilities().singleProject
+        ? { projectId: await resolveBootProject() }
+        : undefined;
+      return listProjects(selector);
+    },
+    semaphore: deps.semaphore,
+  });
   // Workspace-level SSE bus (step 2.8) — the registry mutators and the
   // checkout flow (Phase 4) emit here; /api/workspace/events relays.
   const workspaceEvents = deps.workspaceEvents ?? new WorkspaceEventBus();
@@ -1069,7 +1093,10 @@ export function createApp(deps: ServerDeps): Hono {
     let projectsDir = defaultWorkspaceConfig().projectsDir;
     try {
       projectsDir = (await loadWorkspaceConfig()).projectsDir;
-      projects = await listProjects();
+      const selector = capabilities().singleProject
+        ? { projectId: await resolveBootProject() }
+        : undefined;
+      projects = await listProjects(selector);
     } catch {
       // unreadable workspace — degrade to the empty registry + defaults
     }
@@ -1102,6 +1129,9 @@ export function createApp(deps: ServerDeps): Hono {
     status: 200 | 400 | 409 | 500;
     body: RegisterProjectResponse | { error: string };
   }> => {
+    if (capabilities().singleProject) {
+      return { status: 409, body: singleProjectRefusal('adding projects') };
+    }
     // `~` is expanded for the same reason `/api/fs/browse` expands it: the
     // dialog hands back absolute paths, but a hand-written body (curl, a
     // future CLI) spells home the way a shell does.
@@ -1246,6 +1276,9 @@ export function createApp(deps: ServerDeps): Hono {
   };
 
   app.delete('/api/projects/:projectId', async (c) => {
+    if (capabilities().singleProject) {
+      return c.json(singleProjectRefusal('removing projects'), 409);
+    }
     const raw = c.req.param('projectId');
     // Same gate the scoped-route resolver applies, and the same 404 wording —
     // a malformed id is an unknown project, not a validation essay.
@@ -1363,6 +1396,72 @@ export function createApp(deps: ServerDeps): Hono {
     }
   });
 
+  // Edit one field of an existing registry entry (spec
+  // 2026-07-22-per-project-concurrency): the per-project concurrency ceiling.
+  // A PATCH (not PUT) because it touches a single field, and a distinct route
+  // from POST (register-a-folder) to keep register vs. edit semantics clear.
+  // `maxParallel: null` clears the override back to "inherit the workspace
+  // cap". Bounds mirror `workspaceProjectSchema` (config.ts) exactly, so a
+  // value this route accepts can never be degraded away by the next load's
+  // `.catch`.
+  const updateProjectSchema = z.object({
+    maxParallel: z.number().int().min(1).max(16).nullable(),
+  });
+  app.patch('/api/projects/:projectId', async (c) => {
+    const raw = c.req.param('projectId');
+    // Same gate + 404 wording as DELETE: a malformed id is an unknown project.
+    if (!projectIdSchema.safeParse(raw).success) {
+      return c.json({ error: `unknown project: ${raw}` }, 404);
+    }
+    const parsed = updateProjectSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      return c.json({ error: parsed.error.issues.map((i) => i.message).join('; ') }, 400);
+    }
+    // `default` is the boot alias the cockpit is allowed to use everywhere else.
+    const id = raw === 'default' ? await resolveBootProject() : raw;
+    const { maxParallel } = parsed.data;
+
+    // Read-first (mirroring DELETE, server.ts:1252-1258): a well-formed but
+    // unknown id must 404 WITHOUT rewriting the config — otherwise it would both
+    // do a needless full-config tmp+rename and, on a read-only home, surface the
+    // write failure as a 500 where the honest answer is 404.
+    let known = false;
+    try {
+      known = (await loadWorkspaceConfig()).projects.some((p) => p.id === id);
+    } catch {
+      // unreadable workspace — treat as unknown; the read-only case answers 404,
+      // not a 500 the caller cannot act on (same reasoning as DELETE).
+    }
+    if (!known) return c.json({ error: `unknown project: ${id}` }, 404);
+
+    let updated: WorkspaceProject | undefined;
+    try {
+      await mergeWriteWorkspaceConfig((config) => {
+        const entry = config.projects.find((p) => p.id === id);
+        if (!entry) return; // lost a race with a concurrent remove — answered below
+        // null clears the override; a number sets it. Mutated in place so
+        // `.passthrough()` keys on the entry survive.
+        if (maxParallel === null) delete entry.maxParallel;
+        else entry.maxParallel = maxParallel;
+        updated = entry;
+      });
+    } catch (err) {
+      // e.g. a read-only home — nothing was persisted (atomic tmp+rename).
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+    }
+    // Raced with a concurrent removal between the read and the write.
+    if (!updated) return c.json({ error: `unknown project: ${id}` }, 404);
+
+    // The new ceiling takes effect WITHOUT a restart: refresh the shared
+    // semaphore's snapshot and pump every manager — the same live-apply hook
+    // `PUT /api/workspace/config` fires for a workspace-cap change.
+    await deps.semaphore?.refresh();
+    const body: UpdateProjectResponse = {
+      project: { ...updated, ...(await probeProjectStatus(updated.root)) },
+    };
+    return c.json(body);
+  });
+
   // ---- GUI clone (multi-project spec, step 4.3) ----------------------------
   // "Add project → Clone from GitHub": clone into the checkout root, then
   // register the result through `registerFolder` above (same guards, same
@@ -1380,6 +1479,9 @@ export function createApp(deps: ServerDeps): Hono {
     checkoutId: z.string().trim().max(128).optional(),
   });
   app.post('/api/projects/checkout', async (c) => {
+    if (capabilities().singleProject) {
+      return c.json(singleProjectRefusal('adding projects'), 409);
+    }
     const parsed = checkoutSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: 'url must be a GitHub repository' }, 400);
     const { url, name, checkoutId } = parsed.data;
@@ -1532,6 +1634,9 @@ export function createApp(deps: ServerDeps): Hono {
   // it is realpath-based. The independently configured browse root is read per
   // request, so a successful settings save applies without a restart.
   app.get('/api/fs/browse', async (c) => {
+    if (capabilities().singleProject) {
+      return c.json(singleProjectRefusal('folder browsing'), 409);
+    }
     const root = resolveBrowseRoot(await workspaceBrowseRoot());
     const result = await browseDirectory({
       root,
