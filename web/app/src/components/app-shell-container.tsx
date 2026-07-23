@@ -108,6 +108,7 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
         // Hidden unless health reports the opt-in inbox (#471) — same honesty rule as above:
         // the nav must not offer an Inbox this server will never fill.
         inboxAvailable={inboxAvailable}
+        singleProject={health.data?.capabilities.singleProject === true}
         taskQuickList={<TaskQuickListContainer />}
         // Present only in a multi-project workspace; `AppShell` renders the flat nav and the
         // quick-list above whenever this slot is absent.

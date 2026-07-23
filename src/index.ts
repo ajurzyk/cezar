@@ -112,7 +112,15 @@ async function main(): Promise<void> {
       return;
     case 'projects':
       // Registry-only (no server, no HTTP) — see workspace/projects-cli.ts.
-      process.exitCode = await runProjectsCommand(positionals.slice(1), { defaultRoot: repoRoot });
+      // In single-project mode a listing is a launch-context read: register
+      // the boot repo through the normal self-healing path and pin the output
+      // to that explicit identity. Mutations are left to their own guards.
+      const projectArgs = positionals.slice(1);
+      const isList = projectArgs.length === 0 || projectArgs[0] === 'list';
+      const bootProjectId = process.env.CEZ_SINGLE_PROJECT === '1' && isList
+        ? await initWorkspace(repoRoot)
+        : undefined;
+      process.exitCode = await runProjectsCommand(projectArgs, { defaultRoot: repoRoot, bootProjectId });
       return;
     case 'server-install':
       await serverCommand('install', repoRoot, values.platform, {

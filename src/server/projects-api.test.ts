@@ -17,9 +17,10 @@ import type { RunManager } from '../workflows/run.js';
 import { allocateProjectSlug, clearProjectProbeCache, listProjects, registerProject } from '../workspace/projects.js';
 import { ProjectContexts } from './project-context.js';
 import { apiRequest } from './loopback-request.testkit.js';
-import { mergeWriteWorkspaceConfig } from '../workspace/config.js';
+import { loadWorkspaceConfig, mergeWriteWorkspaceConfig } from '../workspace/config.js';
 import { workspaceConfigPath } from '../paths.js';
 import { WorkspaceSemaphore } from '../workspace/semaphore.js';
+import type { CloneRunner } from './checkout.js';
 import {
   WorkspaceEventBus,
   createApp,
@@ -43,7 +44,7 @@ interface HealthBody {
   checks: unknown[];
   defaultRunner?: string;
   forge: unknown;
-  capabilities: { localHandoff: boolean; followups: boolean };
+  capabilities: { localHandoff: boolean; followups: boolean; singleProject: boolean };
   projects: { id: string; name: string }[];
   bootProject: string;
 }
@@ -52,6 +53,7 @@ describe('workspace projects API', () => {
   const savedHome = process.env.CEZ_HOME;
   const savedRemote = process.env.CEZ_REMOTE;
   const savedFollowups = process.env.CEZ_FOLLOWUPS;
+  const savedSingleProject = process.env.CEZ_SINGLE_PROJECT;
   const savedDryRun = process.env.CEZ_DRY_RUN;
   let home: string;
   let repoRoot: string;
@@ -66,6 +68,7 @@ describe('workspace projects API', () => {
     store = RunStore.open(join(repoRoot, '.ai/cezar'));
     delete process.env.CEZ_REMOTE;
     delete process.env.CEZ_FOLLOWUPS;
+    delete process.env.CEZ_SINGLE_PROJECT;
     // Deterministic on any machine: no network, no real agent CLIs.
     process.env.CEZ_DRY_RUN = '1';
     clearProjectProbeCache();
@@ -80,6 +83,8 @@ describe('workspace projects API', () => {
     else process.env.CEZ_REMOTE = savedRemote;
     if (savedFollowups === undefined) delete process.env.CEZ_FOLLOWUPS;
     else process.env.CEZ_FOLLOWUPS = savedFollowups;
+    if (savedSingleProject === undefined) delete process.env.CEZ_SINGLE_PROJECT;
+    else process.env.CEZ_SINGLE_PROJECT = savedSingleProject;
     if (savedDryRun === undefined) delete process.env.CEZ_DRY_RUN;
     else process.env.CEZ_DRY_RUN = savedDryRun;
   });
@@ -140,6 +145,20 @@ describe('workspace projects API', () => {
       expect(body.projectsDir).toBe('~/cezar/projects');
     });
 
+    it('pins flagged reads to the boot project without pruning stored projects', async () => {
+      const boot = await registerProject(repoRoot);
+      const other = await registerProject(otherRoot);
+      process.env.CEZ_SINGLE_PROJECT = '1';
+
+      const body = await getProjects({ bootProjectId: boot.id });
+      expect(body.projects.map((project) => project.id)).toEqual([boot.id]);
+      expect(body.bootProject).toBe(boot.id);
+      expect((await loadWorkspaceConfig()).projects.map((project) => project.id)).toEqual([
+        boot.id,
+        other.id,
+      ]);
+    });
+
     it('reports a deleted root as missing', async () => {
       const other = await registerProject(otherRoot);
       rmSync(otherRoot, { recursive: true, force: true });
@@ -168,6 +187,43 @@ describe('workspace projects API', () => {
     });
   });
 
+  describe('single-project management guards', () => {
+    it('refuses checkout before clone or registry side effects', async () => {
+      let cloneCalls = 0;
+      const cloneRunner: CloneRunner = async () => {
+        cloneCalls += 1;
+        return { ok: false, error: 'must not run' };
+      };
+      process.env.CEZ_SINGLE_PROJECT = '1';
+
+      const res = await apiRequest(makeApp({ cloneRunner }), '/api/projects/checkout', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ url: 'open-mercato/cezar' }),
+      });
+
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({
+        error: 'single-project mode is enabled; adding projects is disabled',
+      });
+      expect(cloneCalls).toBe(0);
+      expect((await loadWorkspaceConfig()).projects).toEqual([]);
+    });
+
+    it('refuses filesystem browsing with the stable error', async () => {
+      process.env.CEZ_SINGLE_PROJECT = '1';
+      const res = await apiRequest(
+        makeApp(),
+        `/api/fs/browse?path=${encodeURIComponent(otherRoot)}`,
+      );
+
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({
+        error: 'single-project mode is enabled; folder browsing is disabled',
+      });
+    });
+  });
+
   describe('POST /api/projects — the folder-browser dialog (step 4.2)', () => {
     const post = async (body: unknown, over: Partial<ServerDeps> = {}) => {
       const res = await apiRequest(makeApp(over), '/api/projects', {
@@ -182,6 +238,25 @@ describe('workspace projects API', () => {
         },
       };
     };
+
+    it('refuses registration in single-project mode before registry or event side effects', async () => {
+      const existing = await registerProject(repoRoot);
+      const bus = new WorkspaceEventBus();
+      const seen: string[] = [];
+      bus.on((event) => seen.push(event));
+      process.env.CEZ_SINGLE_PROJECT = '1';
+
+      const { status, body } = await post({ root: otherRoot }, { workspaceEvents: bus });
+
+      expect(status).toBe(409);
+      expect(body).toEqual({
+        error: 'single-project mode is enabled; adding projects is disabled',
+      });
+      expect((await loadWorkspaceConfig()).projects.map((project) => project.id)).toEqual([
+        existing.id,
+      ]);
+      expect(seen).toEqual([]);
+    });
 
     it('registers a NON-GIT folder and answers the entry — the spec\'s "any folder works"', async () => {
       // A plain temp dir with no `.git`: selectable in the dialog, registerable
@@ -344,6 +419,24 @@ describe('workspace projects API', () => {
       walk(dir, '');
       return out;
     };
+
+    it('refuses removal in single-project mode before registry or context side effects', async () => {
+      const other = await registerProject(otherRoot);
+      const contexts = new ProjectContexts({ listProjects });
+      process.env.CEZ_SINGLE_PROJECT = '1';
+
+      const { status, body } = await del(other.id, { contexts });
+
+      expect(status).toBe(409);
+      expect(body).toEqual({
+        error: 'single-project mode is enabled; removing projects is disabled',
+      });
+      expect((await loadWorkspaceConfig()).projects.map((project) => project.id)).toEqual([
+        other.id,
+      ]);
+      expect(contexts.peek(other.id)).toBeUndefined();
+      contexts.disposeAll();
+    });
 
     const del = async (id: string, over: Partial<ServerDeps> = {}) => {
       const res = await apiRequest(makeApp(over), `/api/projects/${id}`, {
@@ -522,6 +615,16 @@ describe('workspace projects API', () => {
   });
 
   describe('GET /api/health — additive projects + bootProject', () => {
+    it('pins flagged health listings to the explicit boot identity', async () => {
+      const boot = await registerProject(repoRoot);
+      await registerProject(otherRoot);
+      process.env.CEZ_SINGLE_PROJECT = '1';
+
+      const body = await getHealth({ bootProjectId: boot.id });
+      expect(body.projects).toEqual([{ id: boot.id, name: boot.name }]);
+      expect(body.bootProject).toBe(boot.id);
+    });
+
     it('keeps the pre-workspace shape byte-identical and adds only projects + bootProject', async () => {
       const boot = await registerProject(repoRoot);
       const other = await registerProject(otherRoot);
@@ -552,6 +655,7 @@ describe('workspace projects API', () => {
       expect(body.capabilities).toEqual({
         localHandoff: true,
         followups: false,
+        singleProject: false,
       });
       // New fields: registered projects enumerated, boot project named.
       expect(body.projects.map((p) => p.id).sort()).toEqual([boot.id, other.id].sort());

@@ -162,6 +162,28 @@ rule in section 1, taken on the repo owner's explicit instruction rather than si
 - **No deprecation alias**: the flag *is* the migration path — one env var restores the old
   behavior wholesale, which the "keep the old spelling for a minor release" rule exists to provide.
 
+## Single-project workspace mode — opt-in narrowing, 2026-07-21
+
+`CEZ_SINGLE_PROJECT=1` deliberately narrows the multi-project workspace to the repository passed
+to `cezar serve`. Activation is strict: only the exact string `1` enables the mode; `true`, `yes`,
+an empty value, and an unset variable all preserve the default multi-project behavior.
+
+- **Intentionally narrowed under the flag**: `GET /api/health` and `GET /api/projects` expose only
+  the launch project; `POST /api/projects`, `POST /api/projects/checkout`,
+  `DELETE /api/projects/:projectId`, and `GET /api/fs/browse` answer `409` before side effects.
+  The equivalent `cezar projects add` and `cezar projects remove` commands refuse with exit code 1.
+  The cockpit consequently omits cross-project navigation, add-project controls, the global
+  Projects settings section, and the New Task project picker.
+- **Unchanged by default**: without the exact opt-in, every section 2 route, response, CLI command,
+  registry behavior, and cockpit affordance retains its multi-project contract. This is a
+  capability mode, not a new default or a persisted workspace setting.
+- **Non-destructive rollback**: the mode never deletes, rewrites, or migrates project rows in
+  `~/.cezar/config.json`. Unset `CEZ_SINGLE_PROJECT` and restart the server to reveal the full
+  registry again; no manual repair or state migration is required.
+- **No deprecation alias**: no previously accepted input or default behavior changed. The explicit
+  flag is the boundary authorizing the narrower protected surface, and removing it restores the
+  protected default wholesale, so an old-spelling compatibility window would serve no purpose.
+
 ## When in doubt
 
 If a change might break any surface above, say so in the PR description, label the PR `risk-high`, and route it through the review + QA gates in `SDLC.md`. A silent break found in review is a blocker per `CODE_REVIEW.md`.

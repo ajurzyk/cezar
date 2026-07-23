@@ -49,7 +49,7 @@ const HEALTH_MULTI: HealthResponse = {
   forge: null,
   // `followups` became a required capability in #471 (merged from main): irrelevant to the
   // Continue pills these tests drive, but the shape must be whole.
-  capabilities: { localHandoff: true, followups: true },
+  capabilities: { localHandoff: true, followups: true, singleProject: false },
 }
 
 type Recorded = { method: string; url: string; body?: unknown }

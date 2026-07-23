@@ -67,6 +67,9 @@ export type AppShellProps = {
   /** Inbox gating (#471): `false` drops the Inbox nav item and its badge — the global inbox is
    *  opt-in via `CEZ_FOLLOWUPS=1`. Defaults to shown for the same reason as `forgeAvailable`. */
   inboxAvailable?: boolean
+  /** Single-project capability gating: hides workspace-expansion affordances. Defaults off so
+   *  standalone and older callers preserve the multi-project shell. */
+  singleProject?: boolean
   /** Global chrome banner, rendered in its own row above the scroller. Absent renders nothing —
    *  the slot is generic and currently unused (the #391 skills promo it once held is gone,
    *  replaced by the opt-in Import panel on the Skills page). */
@@ -123,6 +126,7 @@ export function AppShell({
   toolsMenu,
   forgeAvailable = true,
   inboxAvailable = true,
+  singleProject = false,
   banner,
   projectGroups,
 }: AppShellProps) {
@@ -176,6 +180,7 @@ export function AppShell({
     taskQuickList,
     toolsMenu,
     projectGroups,
+    singleProject,
   }
 
   return (
@@ -228,6 +233,7 @@ type NavProps = {
   taskQuickList?: ReactNode
   toolsMenu?: ReactNode
   projectGroups?: ReactNode
+  singleProject: boolean
 }
 
 /** The desktop frame: a fixed 264px column, from `md` up. */
@@ -299,6 +305,7 @@ function SidebarContent({
   taskQuickList,
   toolsMenu,
   projectGroups,
+  singleProject,
   onNavigate,
   headerAction,
 }: NavProps & {
@@ -352,7 +359,7 @@ function SidebarContent({
             </kbd>
           </Link>
         </Button>
-        <AddProjectMenu />
+        {singleProject ? null : <AddProjectMenu />}
       </div>
 
       {projectGroups ? (

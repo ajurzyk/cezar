@@ -733,14 +733,18 @@ export function createApp(deps: ServerDeps): Hono {
   }> => {
     try {
       const registry = (await loadWorkspaceConfig()).projects;
+      const bootProject = await resolveBootProject(registry);
+      const visible = capabilities().singleProject
+        ? registry.filter((project) => project.id === bootProject)
+        : registry;
       return {
         // Explicit picks, not a spread: the registry schema passes unknown
         // keys through, and `root` must never ride along onto health.
-        projects: registry.map((p) => ({
+        projects: visible.map((p) => ({
           id: p.id,
           name: p.name || basename(p.root),
         })),
-        bootProject: await resolveBootProject(registry),
+        bootProject,
       };
     } catch {
       return { projects: [], bootProject: await resolveBootProject([]) };
@@ -749,6 +753,9 @@ export function createApp(deps: ServerDeps): Hono {
   // Hosted-mode gate (spec §"Deployment modes") — read per request so
   // CEZ_REMOTE flips take effect live (and tests can toggle it).
   const capabilities = () => resolveCapabilities(process.env, bindHost);
+  const singleProjectRefusal = (
+    action: 'adding projects' | 'removing projects' | 'folder browsing',
+  ) => ({ error: `single-project mode is enabled; ${action} is disabled` });
   // Inbox live updates (spec 007). Opt-in (#471): no capability, no watcher —
   // and since step 2.3 the per-dataDir watch is created lazily by the first
   // SSE subscription (and torn down with the last), nothing to start here.
@@ -770,7 +777,15 @@ export function createApp(deps: ServerDeps): Hono {
   };
   // Non-boot projects build lazily on first scoped request; their managers
   // count against the same workspace semaphore as the boot manager (step 2.5).
-  const contexts = deps.contexts ?? new ProjectContexts({ listProjects, semaphore: deps.semaphore });
+  const contexts = deps.contexts ?? new ProjectContexts({
+    listProjects: async () => {
+      const selector = capabilities().singleProject
+        ? { projectId: await resolveBootProject() }
+        : undefined;
+      return listProjects(selector);
+    },
+    semaphore: deps.semaphore,
+  });
   // Workspace-level SSE bus (step 2.8) — the registry mutators and the
   // checkout flow (Phase 4) emit here; /api/workspace/events relays.
   const workspaceEvents = deps.workspaceEvents ?? new WorkspaceEventBus();
@@ -1069,7 +1084,10 @@ export function createApp(deps: ServerDeps): Hono {
     let projectsDir = defaultWorkspaceConfig().projectsDir;
     try {
       projectsDir = (await loadWorkspaceConfig()).projectsDir;
-      projects = await listProjects();
+      const selector = capabilities().singleProject
+        ? { projectId: await resolveBootProject() }
+        : undefined;
+      projects = await listProjects(selector);
     } catch {
       // unreadable workspace — degrade to the empty registry + defaults
     }
@@ -1102,6 +1120,9 @@ export function createApp(deps: ServerDeps): Hono {
     status: 200 | 400 | 409 | 500;
     body: RegisterProjectResponse | { error: string };
   }> => {
+    if (capabilities().singleProject) {
+      return { status: 409, body: singleProjectRefusal('adding projects') };
+    }
     // `~` is expanded for the same reason `/api/fs/browse` expands it: the
     // dialog hands back absolute paths, but a hand-written body (curl, a
     // future CLI) spells home the way a shell does.
@@ -1246,6 +1267,9 @@ export function createApp(deps: ServerDeps): Hono {
   };
 
   app.delete('/api/projects/:projectId', async (c) => {
+    if (capabilities().singleProject) {
+      return c.json(singleProjectRefusal('removing projects'), 409);
+    }
     const raw = c.req.param('projectId');
     // Same gate the scoped-route resolver applies, and the same 404 wording —
     // a malformed id is an unknown project, not a validation essay.
@@ -1391,6 +1415,9 @@ export function createApp(deps: ServerDeps): Hono {
     checkoutId: z.string().trim().max(128).optional(),
   });
   app.post('/api/projects/checkout', async (c) => {
+    if (capabilities().singleProject) {
+      return c.json(singleProjectRefusal('adding projects'), 409);
+    }
     const parsed = checkoutSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: 'url must be a GitHub repository' }, 400);
     const { url, name, checkoutId } = parsed.data;
@@ -1538,6 +1565,9 @@ export function createApp(deps: ServerDeps): Hono {
   // it is realpath-based. The independently configured browse root is read per
   // request, so a successful settings save applies without a restart.
   app.get('/api/fs/browse', async (c) => {
+    if (capabilities().singleProject) {
+      return c.json(singleProjectRefusal('folder browsing'), 409);
+    }
     const root = resolveBrowseRoot(await workspaceBrowseRoot());
     const result = await browseDirectory({
       root,
