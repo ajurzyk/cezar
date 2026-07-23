@@ -1067,6 +1067,19 @@ export function createApp(deps: ServerDeps): Hono {
   // behind the response, and the cache is pre-warmed at boot so that first
   // request lands on a warm value instead of the cold compute.
   const HEALTH_TTL_MS = 5_000;
+  // The staleness CEILING, which is a different job from the TTL above. The TTL
+  // decides how often a revalidation is kicked off; on its own it bounds nothing,
+  // because the revalidation is fire-and-forget. While a cockpit holds the
+  // `health` topic the publisher's interval keeps the cache warm and the two are
+  // the same number — but the normal state of a background `cezar serve` is NO
+  // subscriber, and then nothing refreshes the cache at all: the next `GET
+  // /api/health`, an hour later, would answer with the boot pre-warm's payload
+  // and only the request AFTER it would see the truth. That endpoint is the
+  // bookmarklet contract (BACKWARD_COMPATIBILITY.md §2, "the most
+  // externally-depended-on JSON in the app") and `repo.branch` going stale is
+  // literally #369, so past this age correctness beats the latency win and the
+  // read waits for the compute. `refreshHealth` dedupes, so waiting costs one.
+  const HEALTH_MAX_STALE_MS = 60_000;
   let healthCache: { at: number; payload: Record<string, unknown>; body: string } | undefined;
   let healthInFlight: Promise<Record<string, unknown>> | undefined;
   // Set while the topic has a subscriber; a change a refresh detects is pushed
@@ -1099,7 +1112,9 @@ export function createApp(deps: ServerDeps): Hono {
   const readHealth = async (): Promise<Record<string, unknown>> => {
     if (!deps.socketHub) return healthSnapshot();
     if (!healthCache) return refreshHealth(); // first ever: nothing to serve yet
-    if (Date.now() - healthCache.at > HEALTH_TTL_MS) void refreshHealth(); // stale: refresh, don't wait on it
+    const age = Date.now() - healthCache.at;
+    if (age > HEALTH_MAX_STALE_MS) return refreshHealth(); // too old to serve — wait for the truth
+    if (age > HEALTH_TTL_MS) void refreshHealth(); // stale: refresh, don't wait on it
     return healthCache.payload;
   };
 
@@ -3336,16 +3351,21 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
  *      same-authority Origin is the cockpit itself. A LOOPBACK origin with a
  *      loopback Host is also admitted — that is the `npm run dev` Vite proxy
  *      (`changeOrigin` rewrites Host, the browser's `localhost:5173` Origin
- *      survives), and unlike the HTTP write guard we cannot lean on
- *      `Sec-Fetch-Site` here (WS handshake metadata support is too uneven to
- *      fail closed on). No Origin at all is a non-browser client — same
- *      stance as the HTTP guard.
+ *      survives). Unlike the HTTP write guard we cannot REQUIRE `Sec-Fetch-Site`
+ *      here — Safari sends no `Sec-Fetch-*` at all and requiring it would lock
+ *      the dev proxy out of it — but we do honor it when it is there: Chromium
+ *      does send it on a WS handshake, and page JS cannot forge it (forbidden
+ *      header name), so a cross-port attacker page announcing `same-site` is
+ *      rejected on the browser that ships it while Safari/Firefox still fall
+ *      back to the loopback rule. Best available, not fail-open.
+ *      No Origin at all is a non-browser client — same stance as the HTTP guard.
  *
- * CAVEAT the loopback-origin allowance creates: a page served from ANOTHER
- * loopback port may subscribe. Every topic on the hub must therefore be safe
- * for any local page to read — `health` qualifies (it is the deliberately
- * CORS-open discovery payload, #431). Registering a topic that carries run
- * or repo content requires tightening this to strict same-authority first.
+ * CAVEAT the loopback-origin fallback still creates: on a browser that sends no
+ * `Sec-Fetch-Site`, a page served from ANOTHER loopback port may subscribe.
+ * Every topic on the hub must therefore be safe for any local page to read —
+ * `health` qualifies (it is the deliberately CORS-open discovery payload,
+ * #431). Registering a topic that carries run or repo content requires
+ * tightening this to strict same-authority first.
  */
 export function verifyWsUpgrade(req: IncomingMessage, bindHost?: string): boolean {
   const host = req.headers.host;
@@ -3354,9 +3374,21 @@ export function verifyWsUpgrade(req: IncomingMessage, bindHost?: string): boolea
   if (!hosted && !isLoopbackHostHeader(hostName)) return false;
   const origin = req.headers.origin;
   if (origin === undefined) return true;
+  // Scheme-checked, like the HTTP guard's comparison: `authorityOfOrigin` is
+  // null for anything that is not an http(s) URL, so the opaque `"null"` origin
+  // of a sandboxed iframe AND a `ftp://127.0.0.1`-shaped one both stay out
+  // rather than reaching the loopback test below on hostname alone.
+  const originAuthority = authorityOfOrigin(origin);
   const originHost = hostnameOfOrigin(origin);
-  if (!originHost) return false; // opaque "null" / file:// origins stay out
-  if (authorityOfOrigin(origin) === authorityOfHost(host)) return true;
+  if (originAuthority === null || !originHost) return false;
+  if (originAuthority === authorityOfHost(host)) return true;
+  // The dev-proxy fallback. `same-origin` is the proxy (Vite fetched it from
+  // the page's own origin); an explicit `cross-site`/`same-site` is an attacker
+  // page on another local port and is refused even though both ends are
+  // loopback; an ABSENT header is a browser that does not ship the metadata, so
+  // loopback-on-both-ends remains the test.
+  const fetchSite = req.headers['sec-fetch-site'];
+  if (fetchSite !== undefined && fetchSite !== 'same-origin') return false;
   return isLoopbackHostHeader(originHost) && isLoopbackHostHeader(hostName);
 }
 

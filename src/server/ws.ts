@@ -69,7 +69,8 @@ export interface SocketHub {
    *  wiring (createApp), so a duplicate name is a programming error: throw. */
   registerTopic(name: string, publisher: TopicPublisher): void;
   /** Start accepting `WS_PATH` upgrades on `server`. `verifyUpgrade` is the
-   *  request-origin guard — `false` answers 403 before the handshake. */
+   *  request-origin guard — `false` answers 403 before the handshake. Boot-time
+   *  wiring like `registerTopic`: attaching twice throws. */
   attach(server: UpgradeCapableServer, verifyUpgrade: (req: IncomingMessage) => boolean): void;
   /** Stop publishers, terminate clients, clear timers. Idempotent; also runs
    *  on the attached server's own `close`. */
@@ -186,6 +187,11 @@ export function createSocketHub(options: SocketHubOptions = {}): SocketHub {
     },
 
     attach(server, verifyUpgrade) {
+      // Boot-time wiring like `registerTopic`, so a second call is a programming
+      // error rather than something to absorb: it would install a second
+      // `upgrade` listener and orphan the first heartbeat interval (`close`
+      // clears only the last one). Throw the same way registration does.
+      if (heartbeat !== undefined) throw new Error('ws hub already attached');
       server.on('upgrade', (req, socket, head) => {
         // `req.url` on an upgrade is the request path (+query); the base is
         // only there to satisfy URL parsing of a relative reference.

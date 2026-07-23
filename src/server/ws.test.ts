@@ -1,7 +1,7 @@
 import { createServer, type Server } from 'node:http';
 import type { IncomingMessage } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import WebSocket from 'ws';
 import { verifyWsUpgrade } from './server.js';
 import { createSocketHub, WS_PATH, type SocketHub, type TopicPublisher } from './ws.js';
@@ -206,6 +206,15 @@ describe('createSocketHub', () => {
     hub.close();
   });
 
+  it('refuses a second attach (it would orphan the first heartbeat interval)', async () => {
+    const hub = createSocketHub();
+    const server = createServer();
+    servers.push(server);
+    hubs.push(hub);
+    hub.attach(server, () => true);
+    expect(() => hub.attach(server, () => true)).toThrow(/already attached/);
+  });
+
   it('emits an app-level heartbeat ping the client can watch', async () => {
     const { publisher } = makeTopic();
     const { url } = await boot(publisher, () => true, 40); // fast beat
@@ -238,6 +247,19 @@ describe('createSocketHub', () => {
 describe('verifyWsUpgrade', () => {
   const req = (headers: Record<string, string | undefined>) => ({ headers }) as IncomingMessage;
 
+  // The guard reads deployment mode off the environment, and its whole Host half is SKIPPED in
+  // hosted mode (a reverse proxy forwards the real public Host there). An ambient CEZ_REMOTE on
+  // the dev box must not decide what this table sees — without this the suite passes only when
+  // some earlier file in the same worker happened to delete the var.
+  const savedRemote = process.env.CEZ_REMOTE;
+  beforeEach(() => {
+    delete process.env.CEZ_REMOTE;
+  });
+  afterEach(() => {
+    if (savedRemote === undefined) delete process.env.CEZ_REMOTE;
+    else process.env.CEZ_REMOTE = savedRemote;
+  });
+
   it('admits a loopback Host with no Origin (non-browser client)', () => {
     expect(verifyWsUpgrade(req({ host: '127.0.0.1:4321' }))).toBe(true);
   });
@@ -265,5 +287,46 @@ describe('verifyWsUpgrade', () => {
 
   it('rejects an opaque "null" Origin (sandboxed iframe, file://)', () => {
     expect(verifyWsUpgrade(req({ host: '127.0.0.1:4321', origin: 'null' }))).toBe(false);
+  });
+
+  it('rejects a non-http(s) Origin even when its hostname is loopback', () => {
+    // `hostnameOfOrigin` alone would hand back '127.0.0.1' here and pass the loopback test;
+    // the scheme check in `authorityOfOrigin` is what keeps it out.
+    expect(verifyWsUpgrade(req({ host: '127.0.0.1:4321', origin: 'ftp://127.0.0.1' }))).toBe(false);
+  });
+
+  // Sec-Fetch-Site is honored WHEN PRESENT (Chromium sends it on a WS handshake and page JS
+  // cannot forge it) and ignored when absent (Safari sends no Sec-Fetch-* at all, and the dev
+  // proxy has to keep working there).
+  it('rejects a cross-port loopback page that announces itself as same-site', () => {
+    expect(
+      verifyWsUpgrade(
+        req({ host: '127.0.0.1:4321', origin: 'http://localhost:5173', 'sec-fetch-site': 'same-site' }),
+      ),
+    ).toBe(false);
+  });
+
+  it('rejects an explicit cross-site handshake', () => {
+    expect(
+      verifyWsUpgrade(
+        req({ host: '127.0.0.1:4321', origin: 'http://localhost:5173', 'sec-fetch-site': 'cross-site' }),
+      ),
+    ).toBe(false);
+  });
+
+  it('admits the Vite dev proxy when it announces same-origin', () => {
+    expect(
+      verifyWsUpgrade(
+        req({ host: '127.0.0.1:4321', origin: 'http://localhost:5173', 'sec-fetch-site': 'same-origin' }),
+      ),
+    ).toBe(true);
+  });
+
+  it('the cockpit itself passes on authority alone, whatever Sec-Fetch-Site says', () => {
+    expect(
+      verifyWsUpgrade(
+        req({ host: '127.0.0.1:4321', origin: 'http://127.0.0.1:4321', 'sec-fetch-site': 'same-origin' }),
+      ),
+    ).toBe(true);
   });
 });

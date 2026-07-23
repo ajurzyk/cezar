@@ -57,6 +57,21 @@ If you find yourself wanting "just subscribe to everything at the top and filter
 component", stop: that is the bloat failure mode. Filter by **subscribing to the right topic**,
 not by receiving everything and ignoring most of it.
 
+### Why a WebSocket and not another SSE stream
+
+The repo already has SSE (`/api/workspace/events`), and reaching for a new server runtime
+dependency needs an answer (`CODE_REVIEW.md` priority 5). The answer is direction: the entire
+design is the **client telling the server what it currently needs**, and SSE is one-way. Over SSE
+each subscribe/unsubscribe would be a separate `POST` correlated to the stream by a connection id
+the server would have to mint, track and expire — a second protocol bolted onto the first, whose
+failure mode (a POST that lands after its stream died) is exactly the leaked publisher this design
+exists to prevent. A WebSocket makes subscribe/unsubscribe and the connection's own lifetime the
+same thing, so a dropped socket *is* an unsubscribe. `ws` is the cost of that, and it is why
+`CODE_REVIEW.md`'s dependency budget grew by one.
+
+The SSE stream stays where it is: it carries run/event traffic the client never opts out of.
+Use it for firehose-shaped signals; use a topic for anything whose demand comes and goes.
+
 ## Wire protocol
 
 One JSON frame per message, both directions.
@@ -102,15 +117,29 @@ deps.socketHub?.registerTopic('my-topic', {
 Rules: publish **only on change**; make `start`/stop symmetric (whatever `start` opens, the
 returned function must close); keep `snapshot` cheap (cache if it is not — see the `health` cache
 in `server.ts`). Topic names carry workspace-level data, so the hub is single-mount on `/api/ws`
-and never mirrored under `/api/p/:projectId`.
+and never mirrored under `/api/p/:projectId`. `attach` is boot-time wiring like `registerTopic`:
+calling it twice throws rather than silently orphaning the first heartbeat interval.
+
+**If a topic's snapshot shares a cache with an HTTP route, bound the staleness.** The `health`
+cache is stale-while-revalidate with *two* numbers, and the second one is the load-bearing one:
+`HEALTH_TTL_MS` decides how often a revalidation is kicked off, but the revalidation is
+fire-and-forget, so on its own it bounds nothing. While a cockpit holds the topic the publisher's
+interval keeps the cache warm — but the normal state of a background `cezar serve` is **no
+subscriber**, and then nothing refreshes it at all, so a GET an hour later would answer with the
+boot pre-warm's payload. `HEALTH_MAX_STALE_MS` is the ceiling past which the read waits for a real
+compute instead of serving the cache. Any future topic that fronts a route needs the same pair.
 
 **Security caveat on what a topic may carry.** The upgrade guard (`verifyWsUpgrade`, `server.ts`)
-admits the cockpit itself, the Vite dev proxy, and — deliberately — any **loopback** origin,
-because WebSocket is not subject to CORS and the dev proxy runs on another localhost port. That
-means a page on another local port could subscribe. Every registered topic must therefore be safe
-for any local page to read. `health` qualifies (it is the same payload the CORS-open
-`GET /api/health` already exposes, #431). A topic carrying run content or repo secrets requires
-tightening the guard to strict same-origin **first**.
+admits the cockpit itself (same authority), and — because WebSocket is not subject to CORS and the
+Vite dev proxy runs on another localhost port — a **loopback** origin against a loopback Host.
+`Sec-Fetch-Site` is honored when the browser sends it (Chromium does on a WS handshake, and page
+JS cannot forge it), so an explicit `cross-site`/`same-site` handshake is refused even between two
+loopback ports; it cannot be *required*, because Safari sends no `Sec-Fetch-*` at all and that
+would lock the dev proxy out. So on a browser that omits the header, a page on another local port
+can still subscribe. Every registered topic must therefore be safe for any local page to read.
+`health` qualifies (it is the same payload the CORS-open `GET /api/health` already exposes, #431).
+A topic carrying run content or repo secrets requires tightening the guard to strict same-origin
+**first**.
 
 ## Consuming a topic on the frontend
 
@@ -169,8 +198,15 @@ A dropped connection must not leave a publisher running server-side or a stale s
 
 - `src/server/ws.test.ts` drives the hub over real sockets: publisher start/stop on the
   subscriber count, broadcast fan-out, unknown/malformed frames, the 403 pre-handshake rejection,
-  the app-level heartbeat, and reaping a client that stops answering the protocol ping
-  (`autoPong: false`). `verifyWsUpgrade` has its own unit table.
+  the app-level heartbeat, reaping a client that stops answering the protocol ping
+  (`autoPong: false`), and the double-`attach` throw. `verifyWsUpgrade` has its own unit table —
+  which controls `CEZ_REMOTE`, because the guard's whole Host half is skipped in hosted mode and
+  an ambient var on the dev box must not decide what the table sees.
+- `src/server/health-topic.test.ts` covers the **live-server** path — the one `createApp` only
+  builds when a `socketHub` is injected, which every other server suite leaves untaken: the boot
+  pre-warm, the SWR window, the staleness ceiling, publish-only-on-change, stop-releases-the-timer,
+  the in-flight dedupe, and that a hub-less app still computes fresh per request. Inject a stub
+  hub that just records what `registerTopic` is handed; that is enough to drive the topic by hand.
 - `web/app/src/api/ws.test.ts` drives the client against a fake WebSocket with fake timers:
   lazy connect, per-topic ref-counting (one subscribe frame per topic), unsubscribe → idle close,
   reconnect on drop and on watchdog timeout, and the heartbeat resetting the watchdog.
