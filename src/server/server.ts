@@ -754,7 +754,7 @@ export function createApp(deps: ServerDeps): Hono {
   // CEZ_REMOTE flips take effect live (and tests can toggle it).
   const capabilities = () => resolveCapabilities(process.env, bindHost);
   const singleProjectRefusal = (
-    action: 'adding projects' | 'removing projects' | 'folder browsing',
+    action: 'adding projects' | 'editing projects' | 'removing projects' | 'folder browsing',
   ) => ({ error: `single-project mode is enabled; ${action} is disabled` });
   // Inbox live updates (spec 007). Opt-in (#471): no capability, no watcher —
   // and since step 2.3 the per-dataDir watch is created lazily by the first
@@ -1344,6 +1344,9 @@ export function createApp(deps: ServerDeps): Hono {
     maxParallel: z.number().int().min(1).max(16).nullable(),
   });
   app.patch('/api/projects/:projectId', async (c) => {
+    if (capabilities().singleProject) {
+      return c.json(singleProjectRefusal('editing projects'), 409);
+    }
     const raw = c.req.param('projectId');
     // Same gate + 404 wording as DELETE: a malformed id is an unknown project.
     if (!projectIdSchema.safeParse(raw).success) {
