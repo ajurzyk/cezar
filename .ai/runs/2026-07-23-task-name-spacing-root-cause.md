@@ -53,5 +53,5 @@ The persisted NDJSON contains a valid standalone marker, `CEZ:TITLE=linking per-
 
 ### Phase 2: Verify compatibility and delivery
 
-- [ ] 2.1 Run targeted tests and the full configured validation gate
+- [x] 2.1 Run targeted tests and the full configured validation gate — aaaf6f9
 - [ ] 2.2 Complete the authoritative PR review, record verification evidence, and finalize the PR
