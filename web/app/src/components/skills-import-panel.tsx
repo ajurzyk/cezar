@@ -288,17 +288,20 @@ function SkillsUpdateCard({
     },
     onError: (error: Error) => toast(error.message, { tone: 'danger' }),
   })
-  const accept = (result: SkillsUpdateState, request: { action: 'check' | 'apply'; seq: number }) => {
+  type UpdateRequest =
+    | { action: 'check'; seq: number }
+    | { action: 'apply'; seq: number; previousUpdatedAt: string | null }
+  const accept = (result: SkillsUpdateState, request: UpdateRequest) => {
       // A forced check may finish after an apply. Only the newest user intent owns the cache.
       if (request.seq !== latestAction.current) return
       queryClient.setQueryData(workspaceQueryKeys.skillsUpdate(projectId), result)
-      if (request.action === 'apply' && result.updatedAt) {
+      if (request.action === 'apply' && result.updatedAt && result.updatedAt !== request.previousUpdatedAt) {
         void queryClient.invalidateQueries({ queryKey: queryKeys.skills })
         toast(result.status === 'error' ? 'Some skill updates failed.' : 'Open Mercato skills updated.')
         setShowUpgradeNotesPrompt(true)
       }
   }
-  const reject = (error: Error, request: { action: 'check' | 'apply'; seq: number }) => {
+  const reject = (error: Error, request: UpdateRequest) => {
       if (request.seq === latestAction.current) toast(error.message, { tone: 'danger' })
   }
   const checkMutation = useMutation({
@@ -307,13 +310,14 @@ function SkillsUpdateCard({
     onError: (error: Error, request) => reject(error, request),
   })
   const applyMutation = useMutation({
-    mutationFn: (request: { action: 'apply'; seq: number }) => applySkillsUpdate(projectId).then((result) => ({ result, request })),
+    mutationFn: (request: Extract<UpdateRequest, { action: 'apply' }>) =>
+      applySkillsUpdate(projectId).then((result) => ({ result, request })),
     onSuccess: ({ result, request }) => accept(result, request),
     onError: (error: Error, request) => reject(error, request),
   })
   const run = (action: 'check' | 'apply') => {
     const seq = ++latestAction.current
-    if (action === 'apply') applyMutation.mutate({ action, seq })
+    if (action === 'apply') applyMutation.mutate({ action, seq, previousUpdatedAt: state?.updatedAt ?? null })
     else checkMutation.mutate({ action, seq })
   }
   const tracked = state?.scopes.some((scope) => scope.skills.length > 0) ?? false

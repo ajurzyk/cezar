@@ -390,6 +390,36 @@ describe('the Manage skills panel (opt-out OM skills)', () => {
     expect(requests.some((request) => request.method === 'POST' && request.url === '/api/runs')).toBe(false)
   })
 
+  it('does not claim a failed retry succeeded when its update timestamp is stale', async () => {
+    const previousUpdatedAt = '2026-07-23T16:00:00.000Z'
+    serve({
+      importable: IMPORTABLE,
+      skillsUpdate: {
+        ...UPDATE_CURRENT,
+        status: 'error',
+        updatedAt: previousUpdatedAt,
+        needsUpgradeNotes: true,
+        scopes: [{ ...UPDATE_CURRENT.scopes[0]!, status: 'error', available: true }],
+      },
+      appliedSkillsUpdate: {
+        ...UPDATE_CURRENT,
+        status: 'error',
+        updatedAt: previousUpdatedAt,
+        needsUpgradeNotes: true,
+        scopes: [{ ...UPDATE_CURRENT.scopes[0]!, status: 'error', available: true }],
+      },
+    })
+    renderAt('/skills?skill=__import')
+
+    await waitFor(() => expect(document.querySelector('[data-action="skills-update-apply"]')).not.toBeNull())
+    fireEvent.click(document.querySelector('[data-action="skills-update-apply"]')!)
+
+    await waitFor(() =>
+      expect(requests.some((request) => request.url === '/api/workspace/skills-update/apply')).toBe(true),
+    )
+    expect(document.querySelector('[data-slot="skills-upgrade-notes-dialog"]')).toBeNull()
+  })
+
   it('shows the pinned "Manage skills" entry only when a vendor repo has default skills', async () => {
     serve({ importable: IMPORTABLE })
     renderAt('/skills')
