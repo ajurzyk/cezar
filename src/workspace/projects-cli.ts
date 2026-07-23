@@ -49,7 +49,7 @@ export async function runProjectsCommand(
   const [sub = 'list', ...rest] = args;
   switch (sub) {
     case 'list':
-      return listCommand(io, opts.bootProjectId);
+      return listCommand(io, singleProject, opts.bootProjectId);
     case 'add':
       if (singleProject) {
         io.error(SINGLE_PROJECT_ADD_ERROR);
@@ -82,8 +82,16 @@ function statusMark(status: string): string {
   return status === 'missing' ? '✗' : status === 'not-git' ? '·' : '✓';
 }
 
-async function listCommand(io: ProjectsCommandIo, bootProjectId?: string): Promise<number> {
-  const projects = await listProjects(bootProjectId ? { projectId: bootProjectId } : undefined);
+async function listCommand(
+  io: ProjectsCommandIo,
+  singleProject: boolean,
+  bootProjectId?: string,
+): Promise<number> {
+  const projects = bootProjectId
+    ? await listProjects({ projectId: bootProjectId })
+    : singleProject
+      ? []
+      : await listProjects();
   if (projects.length === 0) {
     io.log('\n  no projects registered yet');
     io.log('  start the cockpit in a repo (npx cezar) or add one: cezar projects add <dir>\n');
