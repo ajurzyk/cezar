@@ -63,6 +63,17 @@ const DONE_MARKER_RE = /CEZ:DONE\s*$/;
  * backends can't split the marker across text events.
  */
 const MONITORING_MARKER_RE = /CEZ:MONITORING\s*$/;
+/**
+ * Preserve boundaries between complete assistant text blocks while a turn is
+ * accumulated for marker parsing. The runners join these same v1 blocks with
+ * newlines in `AgentRunResult`; matching that contract here prevents a
+ * trailing `CEZ:TITLE=` block from absorbing later commentary (#623).
+ */
+export function appendTurnText(current: string, next: string): string {
+  if (!current) return next;
+  if (!next) return current;
+  return `${current}\n${next}`;
+}
 /** Strip a trailing marker from one text event so transcripts stay free of
  *  protocol noise. Delta backends may split the marker across events — then
  *  it stays visible; detection above is unaffected. */
@@ -1321,7 +1332,7 @@ export class RunManager {
         return;
       }
       if (event.type === 'text') {
-        turnText += event.text;
+        turnText = appendTurnText(turnText, event.text);
         const text = stripAskMarker(stripTaskMarkers(stripMonitoringMarker(stripDoneMarker(event.text))));
         if (text) this.store.appendEvent(runId, { type: 'text', text, stepId });
         return;
@@ -1850,7 +1861,7 @@ export class RunManager {
         return;
       }
       if (event.type === 'text') {
-        turnText += event.text;
+        turnText = appendTurnText(turnText, event.text);
         const text = stripAskMarker(stripTaskMarkers(stripMonitoringMarker(stripDoneMarker(event.text))));
         if (text) emit({ type: 'text', text, stepId: step.id });
         return;
