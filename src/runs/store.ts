@@ -237,6 +237,25 @@ function eventTextFragments(event: Record<string, unknown>): string[] {
   return fragments;
 }
 
+/** Agent-authored event text, matching the trust boundary used by task markers.
+ * Tool titles, inputs, and outputs remain visible to the referenced-URL tier,
+ * but must never promote an issue into the shared `issueNumber` field (#538). */
+function eventAgentTextFragments(event: Record<string, unknown>): string[] {
+  const fragments: string[] = [];
+  for (const key of ['text', 'result'] as const) {
+    const value = event[key];
+    if (typeof value === 'string') fragments.push(value);
+  }
+  const item = event.item;
+  if (item && typeof item === 'object') {
+    const it = item as Record<string, unknown>;
+    if (it.kind === 'message' && it.role === 'assistant' && typeof it.text === 'string') {
+      fragments.push(it.text);
+    }
+  }
+  return fragments;
+}
+
 /**
  * The referenced tier's resolution rule, shared by the PR and issue janitors:
  * a marker-declared number (spec 2026-07-18-task-ref-markers) owns the answer
@@ -503,6 +522,7 @@ export class RunStore extends EventEmitter {
     // fields AND nested v2 `item.*` content (#407). A URL without the created
     // phrasing still feeds the referenced tier (the PR the task is about).
     const haystack = eventTextFragments(full).join(' ');
+    const agentHaystack = eventAgentTextFragments(full).join(' ');
     if (haystack.length > 0) {
       let changed = false;
       if (!run.pullRequestUrl) {
@@ -516,7 +536,10 @@ export class RunStore extends EventEmitter {
       // Issue links feed their own referenced tier regardless of PR state —
       // a task that created a PR can still be ABOUT an issue
       // (spec 2026-07-21-report-ref-discovery).
-      if (ISSUE_URL_RE.test(haystack) && this.trackReferencedIssues(run, haystack)) {
+      if (
+        ISSUE_URL_RE.test(haystack) &&
+        this.trackReferencedIssues(run, haystack, agentHaystack)
+      ) {
         changed = true;
       }
       if (changed) this.touch(run);
@@ -554,33 +577,42 @@ export class RunStore extends EventEmitter {
    * resolution also seeds `issueNumber` when nothing owns that field yet —
    * marker and namer both outrank this janitor and overwrite it freely.
    */
-  private trackReferencedIssues(run: RunRecord, haystack: string): boolean {
+  private trackReferencedIssues(
+    run: RunRecord,
+    haystack: string,
+    seedHaystack = haystack,
+  ): boolean {
     const seen = new Set(run.referencedIssueCandidates ?? []);
     const before = seen.size;
     for (const match of haystack.matchAll(new RegExp(ISSUE_URL_RE.source, 'g'))) {
       if (seen.size >= MAX_PR_CANDIDATES) break;
       seen.add(match[0]);
     }
-    if (seen.size === before) return false;
-    run.referencedIssueCandidates = [...seen];
+    const candidatesChanged = seen.size !== before;
+    if (candidatesChanged) run.referencedIssueCandidates = [...seen];
     const prev = run.referencedIssueUrl;
     run.referencedIssueUrl = resolveReferencedRef(
-      run.referencedIssueCandidates,
+      run.referencedIssueCandidates ?? [],
       run.task,
       run.markerRefs?.issue,
     );
-    if (run.markerRefs?.issue === undefined) {
+    let numberChanged = false;
+    if (run.markerRefs?.issue === undefined && ISSUE_URL_RE.test(seedHaystack)) {
       if (run.referencedIssueUrl && run.issueNumber === undefined) {
         const n = Number(run.referencedIssueUrl.split('/').pop());
-        if (Number.isInteger(n) && n > 0) run.issueNumber = n;
+        if (Number.isInteger(n) && n > 0) {
+          run.issueNumber = n;
+          numberChanged = true;
+        }
       } else if (!run.referencedIssueUrl && prev && run.issueNumber === Number(prev.split('/').pop())) {
         // Ambiguity revoked the resolution — take back the number this janitor
         // seeded from it (a namer-written number that happens to match is the
         // documented residual). No chip beats a wrong chip.
         delete run.issueNumber;
+        numberChanged = true;
       }
     }
-    return true;
+    return candidatesChanged || run.referencedIssueUrl !== prev || numberChanged;
   }
 
   /**
