@@ -129,7 +129,7 @@ describe('buildPlannedRunBody — the POST /api/runs wire contract for approved 
 
   it.each([
     { name: 'model rides when chosen', patch: { model: 'sonnet' }, key: 'model', expected: 'sonnet' },
-    { name: 'runner rides only on multi-backend hosts', patch: { runnerCount: 2 }, key: 'runner', expected: 'claude' },
+    { name: 'runner rides when it differs from the server default', patch: { defaultRunner: 'codex' as const }, key: 'runner', expected: 'claude' },
     { name: 'variants ride above ×1', patch: { variants: 3 }, key: 'variants', expected: 3 },
   ])('$name', ({ patch, key, expected }) => {
     const body = buildPlannedRunBody({ ...base, ...patch }) as unknown as Record<string, unknown>
