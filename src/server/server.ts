@@ -717,15 +717,16 @@ export function createApp(deps: ServerDeps): Hono {
   let bootProjectCache = bootProjectId;
   const resolveBootProject = async (projects?: readonly WorkspaceProject[]): Promise<string> => {
     if (bootProjectCache) return bootProjectCache;
+    let registry = projects ?? [];
     try {
-      const registry = projects ?? (await loadWorkspaceConfig()).projects;
+      registry = projects ?? (await loadWorkspaceConfig()).projects;
       const real = await realpath(bootRoot).catch(() => bootRoot);
       const match = registry.find((p) => p.root === real || p.root === bootRoot);
       if (match) bootProjectCache = match.id;
     } catch {
       // unreadable workspace — fall through to the slug fallback below
     }
-    return bootProjectCache ?? allocateProjectSlug(bootRoot, []);
+    return bootProjectCache ?? allocateProjectSlug(bootRoot, registry.map((project) => project.id));
   };
   // Health's workspace garnish: id+name ONLY — never `root` (#431, see the
   // health route). Reads only the registry file; no per-root status probes,
