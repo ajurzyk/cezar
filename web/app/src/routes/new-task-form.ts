@@ -78,6 +78,16 @@ export const MODELS_BY_RUNNER: Record<Runner, readonly ModelPreset[]> = {
   ],
 }
 
+/** Keep recognized presets from another backend out of a runner's custom-model escape hatch.
+ * Unknown ids remain valid custom models; only a known cross-runner mismatch is discarded. */
+export function modelConflictsWithRunner(model: string, runner: Runner): boolean {
+  if (!model || MODELS_BY_RUNNER[runner].some((preset) => preset.id === model)) return false
+  return Object.entries(MODELS_BY_RUNNER).some(
+    ([other, presets]) =>
+      other !== runner && presets.some((preset) => preset.id !== '' && preset.id === model),
+  )
+}
+
 export function modelsForRunner(
   runner: Runner,
   catalog?: RunnerModelCatalogResponse,
@@ -92,7 +102,7 @@ export function modelsForRunner(
     base.push({ id: model.id, label: model.label || model.id, desc: model.description })
   }
   for (const id of customIds) {
-    if (!id || seen.has(id)) continue
+    if (!id || seen.has(id) || modelConflictsWithRunner(id, runner)) continue
     seen.add(id)
     base.push({ id, label: id, desc: 'Custom or legacy model' })
   }
@@ -184,7 +194,7 @@ export function resolveSource(
  *  - a skill runs as a one-step inline chain (spec 008's API — the same shape the inbox and
  *    the bookmarklet auto-start use): `steps: [{ id: 'task', name, skill, prompt: '{{task}}' }]`;
  *  - a workflow goes by name;
- *  - `runner` only when the host actually offers a choice (single-backend hosts stay implicit);
+ *  - `runner` only when it differs from what the server would choose by default;
  *  - `model`/`variants`/`images` only when they say something (`''`/1/empty mean "default").
  */
 export function buildCreateRunBody(opts: {
@@ -193,6 +203,8 @@ export function buildCreateRunBody(opts: {
   model: string
   runner: Runner
   runnerCount: number
+  /** What an omitted runner resolves to on the server. */
+  defaultRunner?: Runner
   variants: number
   images: readonly ImageInput[]
   /** false → run in the repo working tree, no worktree (single runs only). Sent only when
@@ -213,7 +225,7 @@ export function buildCreateRunBody(opts: {
     source,
     model,
     runner,
-    runnerCount,
+    defaultRunner = runner,
     variants,
     images,
     worktree,
@@ -227,7 +239,7 @@ export function buildCreateRunBody(opts: {
       ? { steps: [{ id: 'task', name: source.ref, skill: source.ref, prompt: '{{task}}' }] }
       : { workflow: source.ref }),
     model: model || undefined,
-    runner: runnerCount > 1 ? runner : undefined,
+    runner: runner === defaultRunner ? undefined : runner,
     variants: variants > 1 ? variants : undefined,
     images: images.length > 0 ? [...images] : undefined,
     // Off only matters for a single run — variants always isolate.
