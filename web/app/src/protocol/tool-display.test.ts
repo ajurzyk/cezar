@@ -28,6 +28,11 @@ describe('protocol/tool-display — the mirror works under the bundle resolver',
       expected: { toolKind: 'search', title: 'Search AgentEvent', subtitle: 'src/core' },
     },
     {
+      name: 'imageView',
+      input: { path: '/tmp/checkout-preview.png' },
+      expected: { toolKind: 'read', title: 'View image /tmp/checkout-preview.png' },
+    },
+    {
       name: 'Task',
       input: { description: 'Explore the repo', subagent_type: 'Explore' },
       expected: { toolKind: 'task', title: 'Task: Explore the repo', subtitle: 'Explore' },
