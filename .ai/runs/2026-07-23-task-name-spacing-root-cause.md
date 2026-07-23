@@ -48,8 +48,8 @@ The persisted NDJSON contains a valid standalone marker, `CEZ:TITLE=linking per-
 
 ### Phase 1: Preserve assistant message boundaries
 
-- [ ] 1.1 Update both `RunManager` turn-text accumulators to retain a newline between separate text events without altering streaming chunks within an event
-- [ ] 1.2 Add focused regression coverage proving a title marker cannot absorb the following assistant message in initial and resumed execution
+- [x] 1.1 Update both `RunManager` turn-text accumulators to retain a newline between separate text events without altering streaming chunks within an event — aaaf6f9
+- [x] 1.2 Add focused regression coverage proving a title marker cannot absorb the following assistant message in initial and resumed execution — aaaf6f9
 
 ### Phase 2: Verify compatibility and delivery
 
