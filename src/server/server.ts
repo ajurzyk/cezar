@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
+import type { IncomingMessage } from 'node:http';
 import { access, constants as fsConstants, mkdir, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
@@ -79,6 +80,7 @@ import { reviewGateEnabled } from '../runs/review-gate.js';
 import { readUiState, uiStatePath } from '../ui-state.js';
 import { expandTilde } from '../paths.js';
 import { isLoopbackHostHeader, normalizeHostname, resolveCapabilities } from './capabilities.js';
+import { createSocketHub, type SocketHub, type WsUpgradeVerdict } from './ws.js';
 import { browseDirectory, isInsideBrowseRoot, isLexicallyInsideBrowseRoot, resolveBrowseRoot } from './fs-browse.js';
 import { resolveForge } from './forge/index.js';
 import { fetchGithub, fetchGithubComments } from './github.js';
@@ -139,6 +141,11 @@ export interface ServerDeps {
   /** Process-wide Open Mercato skills update detector. Injected in tests and
    * shared by every workspace route/project; createApp owns the default. */
   skillsUpdate?: SkillsUpdateService;
+  /** WebSocket subscription hub (`/api/ws`, src/server/ws.ts). `createApp`
+   *  only registers topics on it — `startServer` builds one and attaches it
+   *  to the HTTP server it binds. Optional so legacy callers/tests change
+   *  nothing: no hub, no topics, and the HTTP surface is byte-identical. */
+  socketHub?: SocketHub;
 }
 
 // ---- project-scoped routing (multi-project spec, step 2.2) -----------------
@@ -726,15 +733,16 @@ export function createApp(deps: ServerDeps): Hono {
   let bootProjectCache = bootProjectId;
   const resolveBootProject = async (projects?: readonly WorkspaceProject[]): Promise<string> => {
     if (bootProjectCache) return bootProjectCache;
+    let registry = projects ?? [];
     try {
-      const registry = projects ?? (await loadWorkspaceConfig()).projects;
+      registry = projects ?? (await loadWorkspaceConfig()).projects;
       const real = await realpath(bootRoot).catch(() => bootRoot);
       const match = registry.find((p) => p.root === real || p.root === bootRoot);
       if (match) bootProjectCache = match.id;
     } catch {
       // unreadable workspace — fall through to the slug fallback below
     }
-    return bootProjectCache ?? allocateProjectSlug(bootRoot, []);
+    return bootProjectCache ?? allocateProjectSlug(bootRoot, registry.map((project) => project.id));
   };
   // Health's workspace garnish: id+name ONLY — never `root` (#431, see the
   // health route). Reads only the registry file; no per-root status probes,
@@ -1016,7 +1024,10 @@ export function createApp(deps: ServerDeps): Hono {
     }
     await next();
   });
-  app.get('/api/health', async (c) => {
+  // One builder for both transports: `GET /api/health` (the authoritative,
+  // CORS-open discovery endpoint) and the `health` topic on `/api/ws` below
+  // push the byte-identical shape, so the two can never drift.
+  const healthSnapshot = async (): Promise<Record<string, unknown>> => {
     const [checks, repo, config, workspace] = await Promise.all([
       detectEnvironment(),
       getRepoInfo(bootRoot),
@@ -1027,7 +1038,7 @@ export function createApp(deps: ServerDeps): Hono {
     // externally-depended-on JSON in the app (BACKWARD_COMPATIBILITY.md §2).
     const forge = resolveForge(repo);
     const caps = capabilities();
-    return c.json({
+    return {
       version,
       latestVersion: update?.latest,
       // Health is CORS-open and, in hosted mode, reachable off the loopback —
@@ -1055,8 +1066,103 @@ export function createApp(deps: ServerDeps): Hono {
       // unreadable workspace degrades to `projects: []`.
       projects: workspace.projects,
       bootProject: workspace.bootProject,
-    });
-  });
+    };
+  };
+  // ---- server-side health cache (stale-while-revalidate) -------------------
+  // The snapshot is expensive: ~0.8 s of agent-CLI `--version` probes plus
+  // ~0.4 s of git. Paying that on the browser's FIRST `GET /api/health` is
+  // exactly the few-seconds-blank the cockpit showed at load. So on the live
+  // server the snapshot is computed at the server's OWN pace: both the GET and
+  // the WS `health` topic serve the cached value immediately and revalidate
+  // behind the response, and the cache is pre-warmed at boot so that first
+  // request lands on a warm value instead of the cold compute.
+  const HEALTH_TTL_MS = 5_000;
+  // The staleness CEILING, which is a different job from the TTL above. The TTL
+  // decides how often a revalidation is kicked off; on its own it bounds nothing,
+  // because the revalidation is fire-and-forget. While a cockpit holds the
+  // `health` topic the publisher's interval keeps the cache warm and the two are
+  // the same number — but the normal state of a background `cezar serve` is NO
+  // subscriber, and then nothing refreshes the cache at all: the next `GET
+  // /api/health`, an hour later, would answer with the boot pre-warm's payload
+  // and only the request AFTER it would see the truth. That endpoint is the
+  // bookmarklet contract (BACKWARD_COMPATIBILITY.md §2, "the most
+  // externally-depended-on JSON in the app") and `repo.branch` going stale is
+  // literally #369, so past this age correctness beats the latency win and the
+  // read waits for the compute. `refreshHealth` dedupes, so waiting costs one.
+  const HEALTH_MAX_STALE_MS = 60_000;
+  let healthCache: { at: number; payload: Record<string, unknown>; body: string } | undefined;
+  let healthInFlight: Promise<Record<string, unknown>> | undefined;
+  // Set while the topic has a subscriber; a change a refresh detects is pushed
+  // here (a noop when nobody is listening).
+  let publishHealth: (data: unknown) => void = () => {};
+
+  const refreshHealth = (): Promise<Record<string, unknown>> => {
+    // Dedupe: a GET's background revalidation and the topic's interval tick
+    // share ONE compute (and one set of CLI spawns) rather than racing two.
+    if (healthInFlight) return healthInFlight;
+    healthInFlight = (async () => {
+      try {
+        const payload = await healthSnapshot();
+        const body = JSON.stringify(payload);
+        const changed = body !== healthCache?.body;
+        healthCache = { at: Date.now(), payload, body };
+        if (changed) publishHealth(payload); // only a real change reaches the wire
+        return payload;
+      } finally {
+        healthInFlight = undefined;
+      }
+    })();
+    return healthInFlight;
+  };
+
+  // The read the GET and the topic snapshot share. On the live server (a hub is
+  // injected) it answers from cache instantly and revalidates behind the
+  // response; without a hub — a bare app in tests — there is no refresher
+  // keeping a cache coherent, so it computes fresh, exactly as before.
+  const readHealth = async (): Promise<Record<string, unknown>> => {
+    if (!deps.socketHub) return healthSnapshot();
+    if (!healthCache) return refreshHealth(); // first ever: nothing to serve yet
+    const age = Date.now() - healthCache.at;
+    if (age > HEALTH_MAX_STALE_MS) return refreshHealth(); // too old to serve — wait for the truth
+    if (age > HEALTH_TTL_MS) void refreshHealth(); // stale: refresh, don't wait on it
+    return healthCache.payload;
+  };
+
+  app.get('/api/health', async (c) => c.json(await readHealth()));
+
+  // The push twin of the poll it replaced (#369): while at least one cockpit
+  // holds the `health` topic the server re-reads the snapshot on the old 5 s
+  // cadence and broadcasts ONLY when it changed — a `git checkout` in a
+  // terminal reaches every open tab within a tick — and an idle workspace (no
+  // subscriber) runs no timer. Nothing server-side watches `.git/HEAD`, so the
+  // interval stays the honest mechanism; it just lives behind the socket now
+  // instead of N tabs × 5 s HTTP polls. Every tick and every subscriber read
+  // goes through the cache above, so N subscribers still cost one compute.
+  deps.socketHub?.registerTopic(
+    'health',
+    {
+      snapshot: readHealth,
+      start: (publish) => {
+        publishHealth = publish;
+        const timer = setInterval(() => void refreshHealth(), HEALTH_TTL_MS);
+        timer.unref?.();
+        return () => {
+          clearInterval(timer);
+          publishHealth = () => {};
+        };
+      },
+    },
+    // health IS the CORS-open discovery payload (#431), so it is the one topic
+    // safe for any local page — including a cross-port page admitted by the
+    // loopback fallback on a no-Sec-Fetch browser. Every other (future) topic
+    // keeps the default: trusted connections only.
+    { loopbackReadable: true },
+  );
+  // Pre-warm on the live-server path only (startServer injects the hub; a bare
+  // app in tests does not, so tests never spawn the probes here): the cache
+  // fills while the browser is still downloading the bundle, so its first
+  // `GET /api/health` reads a warm value instead of the cold ~1 s compute.
+  if (deps.socketHub) void refreshHealth();
 
   // Host capability, not project state: one installed/authenticated Codex CLI
   // and one in-memory cache are shared by every registered workspace.
@@ -3294,7 +3400,10 @@ export function createApp(deps: ServerDeps): Hono {
 export function startServer(deps: ServerDeps, port: number): ServerType {
   const workspaceEvents = deps.workspaceEvents ?? new WorkspaceEventBus();
   const skillsUpdate = deps.skillsUpdate ?? new SkillsUpdateService({ invalidateCatalog: refreshTeamSkills });
-  const app = createApp({ ...deps, workspaceEvents, skillsUpdate });
+  // The subscription hub rides the same HTTP server (one port, zero config):
+  // createApp registers the topics, the `upgrade` hook below owns the socket.
+  const socketHub = deps.socketHub ?? createSocketHub();
+  const app = createApp({ ...deps, workspaceEvents, skillsUpdate, socketHub });
   // SECURITY: default to loopback. This server executes agents locally and its endpoints are
   // same-origin-trusted (only /api/health is CORS-open); binding to a non-loopback host would
   // expose an agent-executing box to the network. `bindHost` exists only for a deliberate
@@ -3326,7 +3435,70 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
     }).catch(() => undefined);
   });
   server.once('close', () => { unsubscribe(); coordinator.stop(); });
+  socketHub.attach(server, (req) => verifyWsUpgrade(req, deps.bindHost));
   return server;
+}
+
+/**
+ * The WebSocket twin of the `/api/*` request-origin guard (#426), applied
+ * before the `/api/ws` handshake. WebSocket is NOT subject to CORS — any web
+ * page may open `ws://127.0.0.1:<port>/api/ws` and, unlike a forced HTTP GET,
+ * would get to READ what comes back — so this guard is load-bearing:
+ *
+ *   1. Host allowlist (local mode): a non-loopback Host is a DNS-rebound
+ *      request; kill it before the handshake. Same anchored
+ *      `isLoopbackHostHeader` rules as the HTTP guard.
+ *   2. Origin check: browsers always attach `Origin` to a WS handshake. A
+ *      same-authority Origin is the cockpit itself. A LOOPBACK origin with a
+ *      loopback Host is also admitted — that is the `npm run dev` Vite proxy
+ *      (`changeOrigin` rewrites Host, the browser's `localhost:5173` Origin
+ *      survives). Unlike the HTTP write guard we cannot REQUIRE `Sec-Fetch-Site`
+ *      here — Safari sends no `Sec-Fetch-*` at all and requiring it would lock
+ *      the dev proxy out of it — but we do honor it when it is there: Chromium
+ *      does send it on a WS handshake, and page JS cannot forge it (forbidden
+ *      header name), so a cross-port attacker page announcing `same-site` is
+ *      rejected on the browser that ships it while Safari/Firefox still fall
+ *      back to the loopback rule. Best available, not fail-open.
+ *      No Origin at all is a non-browser client — same stance as the HTTP guard.
+ *
+ * The loopback-origin fallback still admits, on a browser that sends no
+ * `Sec-Fetch-Site`, a page served from ANOTHER loopback port. That is no longer
+ * a caveat the caller must remember: the verdict carries a `trusted` flag, and
+ * the hub only lets an UNtrusted connection subscribe to topics a publisher
+ * marked `loopbackReadable`. `health` is flagged so (the CORS-open discovery
+ * payload, #431); every other topic stays trusted-only by default, so a topic
+ * carrying run or repo content is mechanically unreachable from a foreign local
+ * page without any per-topic vigilance. A connection is `trusted` when it is
+ * provably the cockpit itself: a same-authority Origin, a no-Origin native
+ * client, or a dev proxy the browser vouches for via `Sec-Fetch-Site`.
+ */
+export function verifyWsUpgrade(req: IncomingMessage, bindHost?: string): WsUpgradeVerdict {
+  const host = req.headers.host;
+  const hostName = hostnameOfHost(host);
+  const hosted = !resolveCapabilities(process.env, bindHost).localHandoff;
+  if (!hosted && !isLoopbackHostHeader(hostName)) return false;
+  const origin = req.headers.origin;
+  if (origin === undefined) return { trusted: true }; // non-browser client — no Origin to spoof
+  // Scheme-checked, like the HTTP guard's comparison: `authorityOfOrigin` is
+  // null for anything that is not an http(s) URL, so the opaque `"null"` origin
+  // of a sandboxed iframe AND a `ftp://127.0.0.1`-shaped one both stay out
+  // rather than reaching the loopback test below on hostname alone.
+  const originAuthority = authorityOfOrigin(origin);
+  const originHost = hostnameOfOrigin(origin);
+  if (originAuthority === null || !originHost) return false;
+  if (originAuthority === authorityOfHost(host)) return { trusted: true }; // the cockpit itself
+  // The dev-proxy fallback. An explicit `cross-site`/`same-site` is an attacker
+  // page on another local port and is refused even though both ends are
+  // loopback; anything else needs loopback on both ends to get in at all.
+  const fetchSite = req.headers['sec-fetch-site'];
+  if (fetchSite !== undefined && fetchSite !== 'same-origin') return false;
+  if (!isLoopbackHostHeader(originHost) || !isLoopbackHostHeader(hostName)) return false;
+  // Loopback on both ends, admitted. If the browser vouches it is same-origin
+  // (`Sec-Fetch-Site: same-origin`, unforgeable by page JS), this is the dev
+  // proxy on Chromium → trust it. An ABSENT header is a browser that ships no
+  // metadata (Safari/Firefox), where the dev proxy and a foreign local page are
+  // indistinguishable: admit as UNTRUSTED so only `loopbackReadable` topics show.
+  return { trusted: fetchSite === 'same-origin' };
 }
 
 /** The bare hostname of a `Host` header — see `normalizeHostname`. `''` when the

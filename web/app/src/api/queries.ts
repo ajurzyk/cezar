@@ -52,11 +52,13 @@ import {
 import { queryScope } from './project-scope'
 import type {
   CheckoutProjectInput,
+  HealthResponse,
   MessageInput,
   PatchRunInput,
   SetAgentConfigInput,
   UpdateProjectInput,
 } from './types'
+import { subscribeTopic } from './ws'
 
 /**
  * Query keys, in one place and exported, because they are a contract rather than an
@@ -282,21 +284,44 @@ export function useCheckoutProject() {
   })
 }
 
+/**
+ * The ONE session-long `health` topic subscription. Call it exactly once, at the app root
+ * (`GlobalEventsProvider`) — never from `useHealth`.
+ *
+ * Health is a SESSION-GLOBAL signal: it feeds the always-present shell (the repo/branch chip,
+ * the version chip, forge/inbox nav gating, the Tools menu), so its demand is the whole session,
+ * not any one view. Subscribing per `useHealth` consumer instead would tie that global signal to
+ * ~15 component lifecycles — the topic would flap `subscribe`/`unsubscribe` on every mount,
+ * unmount and StrictMode remount, and would drop entirely for any instant no consumer happened
+ * to be mounted. One root-level subscription keeps it live continuously, so the cockpit is
+ * always notified when health changes; the `useHealth` readers below just read the cache it fills.
+ *
+ * The cache key is read inside the callback (`queryKeys.health` is a scope-aware getter), so a
+ * project switch routes each pushed snapshot to the active scope's cache without re-subscribing.
+ */
+export function useHealthSubscription(): void {
+  const queryClient = useQueryClient()
+  useEffect(
+    () =>
+      subscribeTopic('health', (data) => {
+        queryClient.setQueryData(queryKeys.health, data as HealthResponse)
+      }),
+    [queryClient],
+  )
+}
+
 /** Version + update check + repo/branch + tool probes. Feeds the sidebar's repo and version
  *  chips and (Step 4.2) the Tools menu.
  *
- * Polled on a `useRunChanges`-style interval rather than left to reconnect/visibility alone
- * (#369): a `git checkout` in a terminal, in a foreground tab whose SSE connection never drops,
- * fires none of those triggers, so the branch chip would sit stale until something else woke the
- * query up. The stream still carries nothing for this — no server-side watcher on `.git/HEAD` —
- * so a light poll is the honest fix, the same trade `useRunChanges` already makes for the
- * Changes tab. `git rev-parse` is cheap enough that a few-second interval per open tab is not
- * worth a heavier watch mechanism. */
+ * A pure read: the HTTP query is the authoritative bootstrap and the reconcile target
+ * (global-events.tsx invalidates it on reconnect/visibility), and live updates arrive by the
+ * one `useHealthSubscription` at the root folding pushed `/api/ws` frames into this same cache
+ * (#369 — this replaced the old 5 s `refetchInterval` per tab). Safe to call from as many
+ * components as need health; they all read one cache and none of them touches the socket. */
 export function useHealth() {
   return useQuery({
     queryKey: queryKeys.health,
     queryFn: ({ signal }) => getHealth({ signal }),
-    refetchInterval: 5000,
   })
 }
 
