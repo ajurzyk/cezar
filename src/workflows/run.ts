@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { parseAskMarker, stripAskMarker, type AskRequest } from '../core/ask.js';
 import { type AgentSession } from '../core/claude-cli-runner.js';
 import { onUsage, registerRunProcess, unregisterRunProcess, type ProcessUsage } from '../core/process-usage.js';
@@ -2407,13 +2407,35 @@ export function makeRunTitle(task: string, workflow: WorkflowDef): string {
   return chars.length > 80 ? `${chars.slice(0, 79).join('').trimEnd()}…` : chars.join('');
 }
 
-/** Skill identity is context, while the Markdown body remains instructions. */
-export function skillSystemPrompt(skill: Pick<Skill, 'name' | 'description' | 'body'>): string {
-  return [
+/**
+ * Skill identity is context, while the Markdown body remains instructions.
+ *
+ * For an on-disk skill we also hand the agent the ABSOLUTE directory of the
+ * installed copy. A run executes in an isolated worktree that has no local
+ * `.agents/skills` (gitignored, absent in a fresh checkout), so without this
+ * the agent cannot read the skill's companion files (`references/*.md`) — or,
+ * worse, reads a stale copy materialized from the team-repo cache. The path
+ * resolves against the MAIN project root (`discoverSkills(repoRoot)`), i.e. the
+ * current `npx skills`-installed copy, so a worktree agent and the main
+ * checkout read the exact same, up-to-date files. Team skills are omitted here:
+ * they are materialized into the worktree separately (see the call site).
+ */
+export function skillSystemPrompt(
+  skill: Pick<Skill, 'name' | 'description' | 'body'> & Partial<Pick<Skill, 'path' | 'source'>>,
+): string {
+  const lines = [
     `Selected skill: /${skill.name}`,
     ...(skill.description ? [`Description: ${skill.description}`] : []),
-    '',
-    'Skill instructions:',
-    skill.body.trim(),
-  ].join('\n');
+  ];
+  if (skill.source && skill.source !== 'team' && skill.path) {
+    const dir = dirname(skill.path);
+    lines.push(
+      '',
+      `Skill files are installed on disk at: ${dir}`,
+      `Read any file this skill references (for example references/*.md) from that absolute directory. ` +
+        `It is the current installed copy — use it even though your working directory is a separate worktree that does not contain the skill.`,
+    );
+  }
+  lines.push('', 'Skill instructions:', skill.body.trim());
+  return lines.join('\n');
 }
