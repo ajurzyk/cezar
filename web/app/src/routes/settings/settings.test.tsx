@@ -109,7 +109,7 @@ afterEach(() => {
 })
 
 const PROJECT_SECTIONS = ['agents', 'agent-config', 'worktrees', 'bookmarklets', 'prompt-templates']
-const GLOBAL_SECTIONS = ['appearance', 'notifications', 'resources', 'projects']
+const GLOBAL_SECTIONS = ['appearance', 'notifications', 'resources', 'skills', 'projects']
 
 describe('the section registry', () => {
   it('declares the spec §Settings sections, later ones hidden', () => {
@@ -133,7 +133,7 @@ describe('the section registry', () => {
 
   it('hides Projects only when the single-project capability is active', () => {
     expect(visibleSettingsSections('global', { singleProject: true }).map((s) => s.id)).toEqual([
-      'appearance', 'notifications', 'resources',
+      'appearance', 'notifications', 'resources', 'skills',
     ])
     expect(visibleSettingsSections('global', { singleProject: false }).map((s) => s.id)).toEqual(GLOBAL_SECTIONS)
     expect(visibleSettingsSections('global').map((s) => s.id)).toEqual(GLOBAL_SECTIONS)
@@ -163,6 +163,9 @@ describe('the settings shell', () => {
     // target would not be a route at all.
     expect(nav.querySelector('[data-section="resources"]')?.getAttribute('href')).toBe(
       '/settings/global/resources',
+    )
+    expect(nav.querySelector('[data-section="skills"]')?.getAttribute('href')).toBe(
+      '/settings/global/skills',
     )
   })
 

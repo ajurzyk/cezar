@@ -36,6 +36,9 @@ import {
   getWorkflows,
   getWorkspaceConfig,
   getWorkspaceUiState,
+  getSkillsUpdate,
+  checkSkillsUpdate,
+  applySkillsUpdate,
   getWorktrees,
   editQueuedMessage,
   patchRun,
@@ -164,6 +167,7 @@ export const workspaceQueryKeys = {
   /** `~/.cezar/config.json`'s settings slice via `GET/PUT /api/workspace/config` (step 2.7):
    *  the global Resources knobs and the checkout root. */
   config: ['workspace', 'config'] as const,
+  skillsUpdate: (projectId: string) => ['workspace', 'skills-update', projectId] as const,
   /** One directory listing from `GET /api/fs/browse` (step 4.2's folder picker). Keyed by the
    *  browsed path — `null` is the browse root, whose absolute location only the server knows.
    *  Not scope-led: there is one filesystem behind the workspace, not one per project. */
@@ -650,6 +654,38 @@ export function useWorkspaceConfig() {
     queryKey: workspaceQueryKeys.config,
     queryFn: ({ signal }) => getWorkspaceConfig({ signal }),
   })
+}
+
+export function useSkillsUpdate(projectId: string, enabled = true) {
+  return useQuery({
+    queryKey: workspaceQueryKeys.skillsUpdate(projectId),
+    queryFn: ({ signal }) => getSkillsUpdate(projectId, { signal }),
+    enabled,
+    // GET deliberately answers the current snapshot and starts a stale check in the
+    // background. Poll only while that snapshot is transient so an initial `idle`
+    // response converges without turning every open cockpit into a permanent poller.
+    refetchInterval: (query) => {
+      const status = query.state.data?.status
+      return status === undefined || status === 'idle' || status === 'checking' || status === 'updating'
+        ? 1_000
+        : false
+    },
+  })
+}
+
+export function useCheckSkillsUpdate(projectId: string) {
+  const queryClient = useQueryClient()
+  const key = workspaceQueryKeys.skillsUpdate(projectId)
+  return useMutation({
+    mutationFn: () => checkSkillsUpdate(projectId),
+    onSuccess: (state) => queryClient.setQueryData(key, state),
+  })
+}
+
+export function useApplySkillsUpdate(projectId: string) {
+  const queryClient = useQueryClient()
+  const key = workspaceQueryKeys.skillsUpdate(projectId)
+  return useMutation({ mutationFn: () => applySkillsUpdate(projectId), onSuccess: (state) => queryClient.setQueryData(key, state) })
 }
 
 /** Rename a run (#389): `PATCH /api/runs/:id`. Invalidates `runs.*` so the list and the detail

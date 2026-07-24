@@ -17,6 +17,8 @@ import {
   useRunChanges,
   useRuns,
   useSkills,
+  useSkillsUpdate,
+  workspaceQueryKeys,
 } from './queries'
 
 const fetchMock = vi.fn<typeof fetch>()
@@ -190,6 +192,37 @@ describe('useSkills', () => {
       expect(result.current.data?.map((skill) => skill.name)).toEqual(['local', 'om-fix']),
     )
     expect(fetchMock.mock.calls.map(([path]) => path)).toEqual(['/api/skills', '/api/skills?wait=1'])
+  })
+})
+
+describe('useSkillsUpdate', () => {
+  it('polls a transient snapshot until the background server check converges', async () => {
+    fetchMock.mockResolvedValue(json({
+      status: 'idle',
+      available: false,
+      autoUpdateEnabled: false,
+      inherited: false,
+      checkedAt: null,
+      updatedAt: null,
+      scopes: [],
+      needsUpgradeNotes: false,
+    }))
+    const client = createQueryClient()
+    const key = workspaceQueryKeys.skillsUpdate('boot')
+    const { result } = renderHook(() => useSkillsUpdate('boot'), {
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      ),
+    })
+    await waitFor(() => expect(result.current.data?.status).toBe('idle'))
+
+    const query = client.getQueryCache().find({ queryKey: key })
+    const interval = query?.observers[0]?.options.refetchInterval
+    expect(typeof interval).toBe('function')
+    expect((interval as (current: typeof query) => number | false)(query)).toBe(1_000)
+
+    client.setQueryData(key, { ...result.current.data!, status: 'current' })
+    expect((interval as (current: typeof query) => number | false)(query)).toBe(false)
   })
 })
 

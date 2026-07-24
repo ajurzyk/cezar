@@ -410,6 +410,8 @@ export interface WorkspaceUiState {
 export interface WorkspaceConfigResponse {
   browseRoot: string
   projectsDir: string
+  skillsAutoUpdate: boolean | null
+  effectiveSkillsAutoUpdate: boolean
   resources: {
     maxParallel: number
     memoryLimitMb: number | null
@@ -423,6 +425,7 @@ export interface WorkspaceConfigResponse {
 export interface SetWorkspaceConfigInput {
   browseRoot?: string
   projectsDir?: string
+  skillsAutoUpdate?: boolean | null
   resources?: {
     maxParallel?: number
     memoryLimitMb?: number | null
@@ -1023,6 +1026,27 @@ export interface OpenTarget {
 /** `GET /api/open-targets` — the detected local apps; empty in hosted mode (CEZ_REMOTE). */
 export interface OpenTargetsResponse {
   targets: OpenTarget[]
+}
+
+export type SkillsUpdateStatus = 'idle' | 'checking' | 'available' | 'updating' | 'current' | 'unavailable' | 'error'
+export interface SkillsUpdateScopeState {
+  scope: 'project' | 'global'
+  status: SkillsUpdateStatus
+  available: boolean
+  skills: string[]
+  checkedAt: string | null
+  updatedAt: string | null
+  reason?: string
+}
+export interface SkillsUpdateState {
+  status: SkillsUpdateStatus
+  available: boolean
+  autoUpdateEnabled: boolean
+  inherited: boolean
+  checkedAt: string | null
+  updatedAt: string | null
+  scopes: SkillsUpdateScopeState[]
+  needsUpgradeNotes: boolean
 }
 
 // ---- mutation responses ---------------------------------------------------------------------------
