@@ -17,9 +17,22 @@ describe('resolveComposerRunMode', () => {
     planFirst: false,
     explicitAutonomous: null,
     explicitWorktree: null,
-    fallbackAutonomous: true,
-    fallbackWorktree: true,
+    configuredAutonomous: 'source-dependent' as const,
+    configuredWorktree: true,
+    source: 'workflow' as const,
   }
+
+  it('combines source fallback, configured policy, and explicit values', () => {
+    expect(resolveComposerRunMode(base)).toEqual({ autonomous: false, worktree: true })
+    expect(resolveComposerRunMode({ ...base, source: 'skill' })).toEqual({ autonomous: true, worktree: true })
+    expect(resolveComposerRunMode({
+      ...base,
+      configuredAutonomous: true,
+      configuredWorktree: false,
+      explicitAutonomous: false,
+      explicitWorktree: true,
+    })).toEqual({ autonomous: false, worktree: true })
+  })
 
   it('applies an interactive recommendation only to untouched fields', () => {
     expect(resolveComposerRunMode({ ...base, interactive: true })).toEqual({
@@ -33,27 +46,10 @@ describe('resolveComposerRunMode', () => {
     })).toEqual({ autonomous: true, worktree: false })
   })
 
-  it('keeps hard run-shape constraints authoritative', () => {
-    expect(resolveComposerRunMode({
-      ...base,
-      planFirst: true,
-      explicitAutonomous: true,
-    }).autonomous).toBe(false)
-    expect(resolveComposerRunMode({
-      ...base,
-      variants: 2,
-      interactive: true,
-      explicitWorktree: false,
-    }).worktree).toBe(true)
-    expect(resolveComposerRunMode({
-      ...base,
-      hasGit: false,
-      explicitWorktree: true,
-    }).worktree).toBe(false)
-  })
-
-  it('preserves historical fallbacks when no recommendation exists', () => {
-    expect(resolveComposerRunMode(base)).toEqual({ autonomous: true, worktree: true })
+  it('keeps plan, parallel, and no-git constraints authoritative', () => {
+    expect(resolveComposerRunMode({ ...base, planFirst: true, explicitAutonomous: true }).autonomous).toBe(false)
+    expect(resolveComposerRunMode({ ...base, variants: 2, explicitWorktree: false }).worktree).toBe(true)
+    expect(resolveComposerRunMode({ ...base, hasGit: false, explicitWorktree: true }).worktree).toBe(false)
   })
 })
 

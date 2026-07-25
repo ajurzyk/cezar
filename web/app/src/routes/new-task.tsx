@@ -25,6 +25,7 @@ import {
   useRunnerModels,
   useSkills,
   useUiState,
+  useWorkspaceConfig,
   useWorkflows,
 } from '@/api/queries'
 import type {
@@ -137,6 +138,7 @@ export function NewTaskRoute() {
   const uiState = useUiState()
   // Settings → Agents `defaultModels` (R6 1.5): the per-runner preset the Model pill starts on.
   const config = useConfig()
+  const workspaceConfig = useWorkspaceConfig()
 
   // The draft survives navigation (module store); explicit deep-link params beat it — a
   // pasted `/new?skill=&ref=` link states intent, a leftover draft only remembers it.
@@ -174,6 +176,9 @@ export function NewTaskRoute() {
   const sourcesReady =
     skills.data !== undefined && workflows.data !== undefined && !uiState.isPending
   const source = resolveSource([draft.source, uiState.data?.lastTask], skillList, workflowList)
+  const selectedWorkflow = source.source === 'workflow'
+    ? workflowList.find((workflow) => workflow.name === source.ref)
+    : undefined
   const selectedSkill = source.source === 'skill'
     ? skillList.find((skill) => skill.name === source.ref)
     : undefined
@@ -238,16 +243,34 @@ export function NewTaskRoute() {
   // Worktree opt-out (#worktree-toggle): only offered for a single skill run in a git repo —
   // workflows and variants always isolate, and a non-git repo already runs in place. The choice
   // is remembered (draft → last-used → default on).
-  const worktreeToggleShown = hasGit && source.source === 'skill' && variants <= 1
+  const singleStepSource = source.source === 'skill'
+    || source.ref === 'quick-task'
+    || selectedWorkflow?.steps.length === 1
+  const worktreeToggleShown = hasGit
+  const worktreeForced = !singleStepSource || variants > 1
+
+  // Autonomous (#autonomous): the run never pauses for the user. An explicit toggle this session
+  // wins; then an interactive skill recommends handing the ball back; otherwise the configured
+  // workspace default applies ('source-dependent' → skills default ON, everything else OFF).
+  // Plan-first forces it OFF (and disables the toggle): planning is inherently interactive, so
+  // the run must be able to hand the ball back.
   const runMode = resolveComposerRunMode({
     hasGit,
     variants,
+    forceWorktree: !singleStepSource,
     planFirst: draft.planFirst,
     explicitAutonomous: draft.autonomous,
     explicitWorktree: draft.worktree,
     interactive: selectedSkill?.interactive,
-    fallbackAutonomous: source.source === 'skill' ? true : (uiState.data?.lastAutonomous ?? false),
-    fallbackWorktree: uiState.data?.lastWorktree ?? true,
+    configuredAutonomous:
+      workspaceConfig.data?.composerDefaults?.autonomous
+      ?? workspaceConfig.data?.composerDefaults?.inheritedAutonomous
+      ?? 'source-dependent',
+    configuredWorktree:
+      workspaceConfig.data?.composerDefaults?.worktree
+      ?? workspaceConfig.data?.composerDefaults?.inheritedWorktree
+      ?? true,
+    source: source.source,
   })
   const worktreeOn = runMode.worktree
   const autonomousOn = runMode.autonomous
@@ -419,8 +442,6 @@ export function NewTaskRoute() {
     void putUiState({
       lastTask: source,
       recentSources: pushRecentSource(recentSources, source),
-      ...(worktreeToggleShown ? { lastWorktree: worktreeOn } : {}),
-      lastAutonomous: autonomousOn,
       ...(followupsToggleShown ? { lastGenerateFollowups: generateFollowupsOn } : {}),
       // Frequency sort (#408): only a SKILL pick counts — the map is keyed by skill name, and a
       // workflow choice here doesn't select one directly. Gated on the CURRENT map being known:
@@ -457,7 +478,7 @@ export function NewTaskRoute() {
           todoId: deepLink.todo, // #374: planning first must not lose the inbox entry
         }),
       )
-      // Only remember a choice the user was actually offered (#471, the `lastWorktree` rule):
+      // Run-mode choices live in the current draft; stable defaults come from workspace policy.
       // persisting the forced `false` would overwrite their real preference, so turning
       // CEZ_FOLLOWUPS back on later would silently come up off.
       if (followupsToggleShown) {
@@ -597,7 +618,14 @@ export function NewTaskRoute() {
                 ]}
               />
               {worktreeToggleShown ? (
-                <WorktreeToggle on={worktreeOn} onChange={(on) => update({ worktree: on })} />
+                <WorktreeToggle
+                  on={worktreeOn}
+                  disabled={worktreeForced}
+                  disabledReason={variants > 1
+                    ? 'Parallel variants always use isolated worktrees'
+                    : 'Multi-step workflows require an isolated worktree'}
+                  onChange={(on) => update({ worktree: on })}
+                />
               ) : null}
               <AutonomousToggle
                 on={autonomousOn}
@@ -674,16 +702,29 @@ export function NewTaskRoute() {
 
 /** Worktree opt-out toggle (#worktree-toggle): a checkbox-style chip for single skill runs.
  *  Checked = isolated worktree (the default); unchecked = run in the repo working tree. */
-function WorktreeToggle({ on, onChange }: { on: boolean; onChange: (on: boolean) => void }) {
+function WorktreeToggle({
+  on,
+  disabled,
+  disabledReason,
+  onChange,
+}: {
+  on: boolean
+  disabled?: boolean
+  disabledReason?: string
+  onChange: (on: boolean) => void
+}) {
   return (
     <button
       type="button"
       role="checkbox"
       aria-checked={on}
+      disabled={disabled}
       data-slot="worktree-toggle"
       onClick={() => onChange(!on)}
       title={
-        on
+        disabled
+          ? disabledReason
+          : on
           ? 'Runs in an isolated worktree — uncheck to run in the repo working tree'
           : 'Runs in the repo working tree — check to isolate in a worktree'
       }

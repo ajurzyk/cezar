@@ -445,6 +445,12 @@ export interface WorkspaceConfigResponse {
   projectsDir: string
   skillsAutoUpdate: boolean | null
   effectiveSkillsAutoUpdate: boolean
+  composerDefaults?: {
+    autonomous: boolean | null
+    worktree: boolean | null
+    inheritedAutonomous: boolean | 'source-dependent'
+    inheritedWorktree: boolean
+  }
   resources: {
     maxParallel: number
     maxMonitoringSessions?: number
@@ -461,6 +467,10 @@ export interface SetWorkspaceConfigInput {
   browseRoot?: string
   projectsDir?: string
   skillsAutoUpdate?: boolean | null
+  composerDefaults?: {
+    autonomous?: boolean | null
+    worktree?: boolean | null
+  }
   resources?: {
     maxParallel?: number
     maxMonitoringSessions?: number
