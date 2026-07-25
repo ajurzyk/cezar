@@ -129,6 +129,10 @@ export interface RunRecord {
   /** `monitoring` while `status === 'running'` and the agent is working on downstream work
    *  (spec 2026-07-18-subagent-monitoring-status, #490). Absent on old runs; cleared on resume/end. */
   activity?: RunActivity
+  /** Exact ISO-8601 deadline for the next automatic monitoring check. */
+  monitoringWakeAt?: string
+  /** The current live monitoring epoch exhausted its 40 automatic checks. */
+  monitoringWakeCapReached?: boolean
   createdAt: string
   startedAt?: string
   finishedAt?: string
@@ -443,6 +447,8 @@ export interface WorkspaceConfigResponse {
   effectiveSkillsAutoUpdate: boolean
   resources: {
     maxParallel: number
+    maxMonitoringSessions?: number
+    monitoringWakeIntervalMinutes?: number | null
     memoryLimitMb: number | null
     worktreeRetentionDefault: number
   }
@@ -457,6 +463,8 @@ export interface SetWorkspaceConfigInput {
   skillsAutoUpdate?: boolean | null
   resources?: {
     maxParallel?: number
+    maxMonitoringSessions?: number
+    monitoringWakeIntervalMinutes?: number | null
     memoryLimitMb?: number | null
     worktreeRetentionDefault?: number
   }
