@@ -1,6 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect } from 'react'
 
+import { mergeProviderStatusResponse } from '@/lib/provider-status'
+
 import {
   browseFs,
   checkoutProject,
@@ -8,11 +10,14 @@ import {
   getAgentConfigFile,
   getConfig,
   getGithub,
+  getGithubChecks,
   getGithubComments,
+  getGithubPrChanges,
   getGroup,
   getHealth,
   getLaunchKey,
   getOpenTargets,
+  getProviderStatus,
   getProjectRuns,
   getProjects,
   getRunnerModels,
@@ -36,6 +41,9 @@ import {
   getWorkflows,
   getWorkspaceConfig,
   getWorkspaceUiState,
+  getSkillsUpdate,
+  checkSkillsUpdate,
+  applySkillsUpdate,
   getWorktrees,
   editQueuedMessage,
   patchRun,
@@ -45,15 +53,20 @@ import {
   updateProject,
   sendMessage,
   putAgentConfigFile,
+  retryProviderAuth,
 } from './client'
 import { queryScope } from './project-scope'
 import type {
   CheckoutProjectInput,
+  HealthResponse,
   MessageInput,
   PatchRunInput,
+  ProviderId,
+  ProviderStatusResponse,
   SetAgentConfigInput,
   UpdateProjectInput,
 } from './types'
+import { subscribeTopic } from './ws'
 
 /**
  * Query keys, in one place and exported, because they are a contract rather than an
@@ -139,8 +152,13 @@ export const queryKeys = {
     return [queryScope(), 'worktrees'] as const
   },
   github: (params: { limit?: number } = {}) => [queryScope(), 'github', params.limit ?? null] as const,
+  /** Lazy PR checks glyphs (`GET /api/github/checks`, #664), keyed by the sorted PR numbers so the
+   *  same visible window de-dupes to one cache entry. */
+  githubChecks: (prNumbers: readonly number[]) =>
+    [queryScope(), 'github', 'checks', [...prNumbers].sort((a, b) => a - b).join(',')] as const,
   githubComments: (kind: 'issue' | 'pr', number: number) =>
     [queryScope(), 'github', 'comments', kind, number] as const,
+  githubMergeState: (number: number) => [queryScope(), 'github', 'merge-state', number] as const,
   get openTargets() {
     return [queryScope(), 'open-targets'] as const
   },
@@ -154,6 +172,7 @@ export const queryKeys = {
  */
 export const workspaceQueryKeys = {
   models: (runner: string) => ['workspace', 'models', runner] as const,
+  providerStatus: ['workspace', 'providers', 'status'] as const,
   projects: ['workspace', 'projects'] as const,
   /** `~/.cezar/ui-state.json` via `GET/PUT /api/workspace/ui-state` (step 2.7) — cross-project
    *  GUI prefs, e.g. the sidebar's per-project collapse map (step 3.3), and — since step 3.5 —
@@ -162,6 +181,7 @@ export const workspaceQueryKeys = {
   /** `~/.cezar/config.json`'s settings slice via `GET/PUT /api/workspace/config` (step 2.7):
    *  the global Resources knobs and the checkout root. */
   config: ['workspace', 'config'] as const,
+  skillsUpdate: (projectId: string) => ['workspace', 'skills-update', projectId] as const,
   /** One directory listing from `GET /api/fs/browse` (step 4.2's folder picker). Keyed by the
    *  browsed path — `null` is the browse root, whose absolute location only the server knows.
    *  Not scope-led: there is one filesystem behind the workspace, not one per project. */
@@ -177,6 +197,56 @@ export function useRunnerModels(enabled = true) {
     queryFn: ({ signal }) => getRunnerModels({ signal }),
     staleTime: 5 * 60 * 1_000,
     enabled,
+  })
+}
+
+export function useProviderStatus() {
+  const queryClient = useQueryClient()
+  return useQuery({
+    queryKey: workspaceQueryKeys.providerStatus,
+    queryFn: async ({ signal }) => {
+      const requestStart = queryClient.getQueryData<ProviderStatusResponse>(
+        workspaceQueryKeys.providerStatus,
+      )
+      const response = await getProviderStatus(false, { signal })
+      return mergeProviderStatusResponse(
+        requestStart,
+        queryClient.getQueryData(workspaceQueryKeys.providerStatus),
+        response,
+      )
+    },
+    refetchInterval: 30_000,
+    refetchOnWindowFocus: true,
+  })
+}
+
+export function useRefreshProviderStatus() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () => getProviderStatus(true),
+    onMutate: () => queryClient.getQueryData<ProviderStatusResponse>(workspaceQueryKeys.providerStatus),
+    onSuccess: (result, _variables, requestStart) => queryClient.setQueryData<ProviderStatusResponse>(
+      workspaceQueryKeys.providerStatus,
+      (cached) => mergeProviderStatusResponse(requestStart, cached, result),
+    ),
+  })
+}
+
+export function useRetryProviderAuth() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      provider,
+      authFailureId,
+    }: {
+      provider: ProviderId
+      authFailureId: string
+    }) => retryProviderAuth(provider, authFailureId),
+    onMutate: () => queryClient.getQueryData<ProviderStatusResponse>(workspaceQueryKeys.providerStatus),
+    onSuccess: (result, variables, requestStart) => {
+      queryClient.setQueryData<ProviderStatusResponse>(workspaceQueryKeys.providerStatus, (cached) =>
+        mergeProviderStatusResponse(requestStart, cached, result, variables.authFailureId))
+    },
   })
 }
 
@@ -278,21 +348,44 @@ export function useCheckoutProject() {
   })
 }
 
+/**
+ * The ONE session-long `health` topic subscription. Call it exactly once, at the app root
+ * (`GlobalEventsProvider`) — never from `useHealth`.
+ *
+ * Health is a SESSION-GLOBAL signal: it feeds the always-present shell (the repo/branch chip,
+ * the version chip, forge/inbox nav gating, the Tools menu), so its demand is the whole session,
+ * not any one view. Subscribing per `useHealth` consumer instead would tie that global signal to
+ * ~15 component lifecycles — the topic would flap `subscribe`/`unsubscribe` on every mount,
+ * unmount and StrictMode remount, and would drop entirely for any instant no consumer happened
+ * to be mounted. One root-level subscription keeps it live continuously, so the cockpit is
+ * always notified when health changes; the `useHealth` readers below just read the cache it fills.
+ *
+ * The cache key is read inside the callback (`queryKeys.health` is a scope-aware getter), so a
+ * project switch routes each pushed snapshot to the active scope's cache without re-subscribing.
+ */
+export function useHealthSubscription(): void {
+  const queryClient = useQueryClient()
+  useEffect(
+    () =>
+      subscribeTopic('health', (data) => {
+        queryClient.setQueryData(queryKeys.health, data as HealthResponse)
+      }),
+    [queryClient],
+  )
+}
+
 /** Version + update check + repo/branch + tool probes. Feeds the sidebar's repo and version
  *  chips and (Step 4.2) the Tools menu.
  *
- * Polled on a `useRunChanges`-style interval rather than left to reconnect/visibility alone
- * (#369): a `git checkout` in a terminal, in a foreground tab whose SSE connection never drops,
- * fires none of those triggers, so the branch chip would sit stale until something else woke the
- * query up. The stream still carries nothing for this — no server-side watcher on `.git/HEAD` —
- * so a light poll is the honest fix, the same trade `useRunChanges` already makes for the
- * Changes tab. `git rev-parse` is cheap enough that a few-second interval per open tab is not
- * worth a heavier watch mechanism. */
+ * A pure read: the HTTP query is the authoritative bootstrap and the reconcile target
+ * (global-events.tsx invalidates it on reconnect/visibility), and live updates arrive by the
+ * one `useHealthSubscription` at the root folding pushed `/api/ws` frames into this same cache
+ * (#369 — this replaced the old 5 s `refetchInterval` per tab). Safe to call from as many
+ * components as need health; they all read one cache and none of them touches the socket. */
 export function useHealth() {
   return useQuery({
     queryKey: queryKeys.health,
     queryFn: ({ signal }) => getHealth({ signal }),
-    refetchInterval: 5000,
   })
 }
 
@@ -627,6 +720,38 @@ export function useWorkspaceConfig() {
   })
 }
 
+export function useSkillsUpdate(projectId: string, enabled = true) {
+  return useQuery({
+    queryKey: workspaceQueryKeys.skillsUpdate(projectId),
+    queryFn: ({ signal }) => getSkillsUpdate(projectId, { signal }),
+    enabled,
+    // GET deliberately answers the current snapshot and starts a stale check in the
+    // background. Poll only while that snapshot is transient so an initial `idle`
+    // response converges without turning every open cockpit into a permanent poller.
+    refetchInterval: (query) => {
+      const status = query.state.data?.status
+      return status === undefined || status === 'idle' || status === 'checking' || status === 'updating'
+        ? 1_000
+        : false
+    },
+  })
+}
+
+export function useCheckSkillsUpdate(projectId: string) {
+  const queryClient = useQueryClient()
+  const key = workspaceQueryKeys.skillsUpdate(projectId)
+  return useMutation({
+    mutationFn: () => checkSkillsUpdate(projectId),
+    onSuccess: (state) => queryClient.setQueryData(key, state),
+  })
+}
+
+export function useApplySkillsUpdate(projectId: string) {
+  const queryClient = useQueryClient()
+  const key = workspaceQueryKeys.skillsUpdate(projectId)
+  return useMutation({ mutationFn: () => applySkillsUpdate(projectId), onSuccess: (state) => queryClient.setQueryData(key, state) })
+}
+
 /** Rename a run (#389): `PATCH /api/runs/:id`. Invalidates `runs.*` so the list and the detail
  *  view refetch the authoritative record. The run header's inline title edit sits on this. */
 export function usePatchRun(id: string) {
@@ -684,6 +809,20 @@ export function useGithub(params: { limit?: number } = {}, enabled = true) {
   })
 }
 
+/** Lazy PR checks glyphs (`/api/github/checks`, #664). The list call no longer ships
+ *  `statusCheckRollup`, so the PR row's checks glyph is hydrated here for the on-screen rows only.
+ *  `enabled` gates it to the PR view with a non-empty window; `staleTime` matches the 60 s server
+ *  cache so re-visiting the same window doesn't re-hit gh. Degrade is silent — an unavailable
+ *  payload just leaves rows without a glyph. */
+export function useGithubChecks(prNumbers: number[], enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.githubChecks(prNumbers),
+    queryFn: ({ signal }) => getGithubChecks(prNumbers, { signal }),
+    enabled: enabled && prNumbers.length > 0,
+    staleTime: 60_000,
+  })
+}
+
 /** The comment thread for one issue/PR (`/api/github/comments/…`, #499). Fetched only while a
  *  detail view is mounted (`enabled`); `staleTime` aligns with the 60 s server cache so switching
  *  back to an item doesn't re-hit gh. */
@@ -693,5 +832,15 @@ export function useGithubComments(kind: 'issue' | 'pr', number: number, enabled 
     queryFn: ({ signal }) => getGithubComments(kind, number, {}, { signal }),
     enabled,
     staleTime: 60_000,
+  })
+}
+
+export function useGithubPrChanges(number: number | undefined) {
+  return useQuery({
+    queryKey: ['github', 'pr-changes', number ?? 0],
+    queryFn: ({ signal }) => getGithubPrChanges(number as number, {}, { signal }),
+    enabled: number !== undefined,
+    staleTime: 60_000,
+    retry: false,
   })
 }
