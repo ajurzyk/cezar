@@ -364,21 +364,43 @@ export function useCheckoutProject() {
  * not any one view. Subscribing per `useHealth` consumer instead would tie that global signal to
  * ~15 component lifecycles — the topic would flap `subscribe`/`unsubscribe` on every mount,
  * unmount and StrictMode remount, and would drop entirely for any instant no consumer happened
- * to be mounted. One root-level subscription keeps it live continuously, so the cockpit is
- * always notified when health changes; the `useHealth` readers below just read the cache it fills.
+ * to be mounted. One root-level subscription keeps local cockpits live continuously, so they are
+ * always notified when health changes; remote cockpits stay on authenticated HTTP because browser
+ * WebSocket cannot carry proxy credentials explicitly. The `useHealth` readers below just read
+ * the cache either transport fills.
  *
  * The cache key is read inside the callback (`queryKeys.health` is a scope-aware getter), so a
  * project switch routes each pushed snapshot to the active scope's cache without re-subscribing.
  */
 export function useHealthSubscription(): void {
   const queryClient = useQueryClient()
-  useEffect(
-    () =>
-      subscribeTopic('health', (data) => {
-        queryClient.setQueryData(queryKeys.health, data as HealthResponse)
-      }),
-    [queryClient],
-  )
+  useEffect(() => {
+    let releaseTopic: (() => void) | undefined
+
+    const syncTransport = (): void => {
+      const health = queryClient.getQueryData<HealthResponse>(queryKeys.health)
+      const local = health?.capabilities?.localHandoff === true
+      if (local && releaseTopic === undefined) {
+        releaseTopic = subscribeTopic('health', (data) => {
+          queryClient.setQueryData(queryKeys.health, data as HealthResponse)
+        })
+      } else if (!local && releaseTopic !== undefined) {
+        releaseTopic()
+        releaseTopic = undefined
+      }
+    }
+
+    // Do not open a socket before the authenticated HTTP bootstrap tells us the deployment
+    // mode. Browser WebSocket has no credentials option, so a remote Basic Auth proxy can reject
+    // the upgrade and trigger ws.ts's three-second reconnect loop (and a login prompt each time).
+    // Local cockpits opt in after health arrives; remote/failed bootstraps fail closed to HTTP.
+    syncTransport()
+    const releaseCache = queryClient.getQueryCache().subscribe(syncTransport)
+    return () => {
+      releaseCache()
+      releaseTopic?.()
+    }
+  }, [queryClient])
 }
 
 /** Version + update check + repo/branch + tool probes. Feeds the sidebar's repo and version
@@ -386,7 +408,7 @@ export function useHealthSubscription(): void {
  *
  * A pure read: the HTTP query is the authoritative bootstrap and the reconcile target
  * (global-events.tsx invalidates it on reconnect/visibility), and live updates arrive by the
- * one `useHealthSubscription` at the root folding pushed `/api/ws` frames into this same cache
+ * one local-only `useHealthSubscription` at the root folding pushed `/api/ws` frames into this same cache
  * (#369 — this replaced the old 5 s `refetchInterval` per tab). Safe to call from as many
  * components as need health; they all read one cache and none of them touches the socket. */
 export function useHealth() {
