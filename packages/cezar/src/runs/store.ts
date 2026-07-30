@@ -165,11 +165,14 @@ const runRecordSchema = z.object({
   /** Distinct issue URLs spotted so far — the referenced-issue working set,
    *  persisted like `referencedPrCandidates`. Capped. */
   referencedIssueCandidates: z.array(z.string()).optional(),
-  /** Task worktree (spec 006) — absent when the run executed in the repo root. */
+  /** Explicit execution policy. `false` means the run intentionally uses the repo root;
+   *  absent on older runs and for the default isolated-worktree mode. */
+  worktree: z.literal(false).optional(),
+  /** Task worktree (spec 006) — absent for in-place runs and after explicit cleanup. */
   worktreePath: z.string().optional(),
   /** The task's own branch (`cez/<id8>`), created off `baseBranch`. */
   branch: z.string().optional(),
-  /** Branch (or commit, when HEAD was detached) the worktree was forked from. */
+  /** Stable baseline for session git views: a worktree's fork ref, or an in-place run's starting commit. */
   baseBranch: z.string().optional(),
   /** Set when count-based retention (#483) reclaimed this run's worktree
    *  *directory* (the `cez/<id8>` branch is kept). Presence means "materialized
@@ -415,6 +418,7 @@ export class RunStore extends EventEmitter {
     runner?: 'claude' | 'codex' | 'opencode';
     generateFollowups?: boolean;
     autonomous?: boolean;
+    worktree?: false;
     groupId?: string;
     variant?: string;
     steps: Array<Pick<StepState, 'id' | 'name' | 'kind'>>;
@@ -434,6 +438,7 @@ export class RunStore extends EventEmitter {
       runner: input.runner,
       generateFollowups: input.generateFollowups,
       autonomous: input.autonomous,
+      worktree: input.worktree,
       groupId: input.groupId,
       variant: input.variant,
       status: 'queued',

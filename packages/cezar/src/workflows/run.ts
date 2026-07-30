@@ -28,7 +28,7 @@ import { materializeSkillDir } from '../skills-remote.ts';
 import { seedAgentConfigLocalLayer } from '../agent-config/seed.ts';
 import { loadConfig, resolveWorktreeRetention } from '../config.ts';
 import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff, worktreeShortstat } from '../git-worktree.ts';
-import { getRepoInfo } from '../server/git.ts';
+import { getHeadCommit, getRepoInfo } from '../server/git.ts';
 import { loadWorkflows } from './load.ts';
 import type { QueuedMessage, RunRecord, RunStore } from '../runs/store.ts';
 import { reclaimWorktrees, rematerializeReclaimedWorktree } from '../runs/retention.ts';
@@ -489,6 +489,9 @@ export class RunManager {
       // auto-nudge reads `input.autonomous` (`execute`), but the record is the
       // only source those after-the-fact consumers have.
       autonomous: input.autonomous === true,
+      // Persist the explicit opt-out so queued-run restart recovery and the
+      // session Git routes can distinguish it from a removed isolated worktree.
+      worktree: !group && input.worktree === false ? false : undefined,
       groupId: group?.groupId,
       variant: group?.variant,
       steps: workflow.steps.map((s) => ({ id: s.id, name: s.name ?? s.id, kind: stepKind(s) })),
@@ -542,7 +545,7 @@ export class RunManager {
       (variant) => {
         const hint = VARIANT_HINTS[variant];
         const task = hint ? `${input.task}\n\n${hint}` : input.task;
-        return this.startRun(workflow, { ...input, task }, { groupId, variant });
+        return this.startRun(workflow, { ...input, task, worktree: undefined }, { groupId, variant });
       },
     );
   }
@@ -757,6 +760,9 @@ export class RunManager {
               // recovered queued autonomous run would run non-autonomously (no
               // auto-nudge) and later wrongly park at `review`.
               autonomous: run.autonomous,
+              // Preserve an explicit worktree opt-out across a queued restart.
+              // Missing on older records means the default isolated mode.
+              worktree: run.worktree,
             }),
           });
           this.queue.push(run.id);
@@ -1767,6 +1773,10 @@ export class RunManager {
     if (repo && input.worktree === false) {
       // Composer opt-out: run in the repo working tree, no branch/worktree. The
       // repository-root lease serializes these runs so workflows cannot overlap.
+      // Pin the starting commit: the session's Changes and Commits views use it
+      // as their stable lower bound while reading the current working copy.
+      const startingCommit = await getHeadCommit(repo.root);
+      if (startingCommit) this.store.updateRun(runId, { baseBranch: startingCommit });
       emit({ type: 'note', message: 'worktree off — running in the repo working tree' });
     } else if (repo) {
       emit({
