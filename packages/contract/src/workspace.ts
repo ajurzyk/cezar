@@ -210,6 +210,8 @@ export const configResponseSchema = z.object({
   defaultRunner: runnerSchema,
   systemPrompt: z.string().nullable(),
   defaultModels: runnerModelsSchema,
+  /** True when native coding-agent settings are authoritative and model picks are read-only. */
+  modelsLocked: z.boolean(),
   /** How many tasks run at once (1–16). */
   maxParallel: z.number(),
   /** Per-task memory ceiling in MiB (whole process tree); null = no limit. */

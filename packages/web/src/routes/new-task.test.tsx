@@ -143,6 +143,7 @@ const CONFIG: ConfigResponse = {
   defaultRunner: 'claude',
   systemPrompt: null,
   defaultModels: {},
+  modelsLocked: false,
   maxParallel: 2,
   memoryLimitMb: null,
   worktreeRetention: 10,
@@ -856,6 +857,39 @@ describe('submit', () => {
     await waitFor(() => expect(location()).toBe('/tasks/v-a'))
   })
 
+  it('shows a locked native default but omits it from the direct run request', async () => {
+    writeDraft({ ...readDraft(), model: 'opus' })
+    serve({
+      providerStatus: PROVIDERS_MULTI,
+      config: {
+        defaultModels: { claude: 'native-sonnet', codex: 'gpt-5.6-codex' },
+        modelsLocked: true,
+      },
+    })
+    renderNewTask()
+    await pillReady()
+
+    const modelPill = document.querySelector('[data-slot="model-pill"]') as HTMLElement
+    expect(modelPill.textContent).toContain('native-sonnet')
+    expect(modelPill.textContent).not.toContain('opus')
+    expect(modelPill.tagName).toBe('SPAN')
+    expect(modelPill.querySelector('svg')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Model' })).toBeNull()
+
+    fireEvent.pointerDown(screen.getByRole('button', { name: 'Runner' }))
+    const runnerOptions = await screen.findAllByRole('menuitemradio')
+    fireEvent.click(runnerOptions.find((option) => option.textContent?.includes('Codex')) as HTMLElement)
+    await waitFor(() => expect(modelPill.textContent).toContain('gpt-5.6-codex'))
+
+    fireEvent.change(textarea(), { target: { value: 'Use native settings' } })
+    await startTask()
+    expect(postedBody()).toEqual({
+      task: 'Use native settings',
+      workflow: 'quick-task',
+      runner: 'codex',
+    })
+  })
+
   it('single-backend hosts omit `runner` when it matches the server default', async () => {
     serve()
     renderNewTask()
@@ -1537,6 +1571,25 @@ describe('the plan flow', () => {
       ],
     })
     await waitFor(() => expect(location()).toBe('/tasks/planned-1'))
+  })
+
+  it('▶ Start omits a locked native default from the planned run request', async () => {
+    serve({
+      config: { defaultModels: { claude: 'native-sonnet' }, modelsLocked: true },
+      createRun: { id: 'planned-native' },
+    })
+    renderNewTask()
+    await planTask('Plan with native settings')
+    expect((document.querySelector('[data-slot="model-pill"]') as HTMLElement).textContent).toContain(
+      'native-sonnet',
+    )
+
+    fireEvent.click(document.querySelector('[data-slot="plan-start"]') as HTMLElement)
+    await waitFor(() => expect(postedBody()).toBeDefined())
+    expect(postedBody()).toEqual({
+      task: 'Plan with native settings',
+      steps: PLAN.steps,
+    })
   })
 
   it('▶ Start uses project config while boot health is still pending', async () => {

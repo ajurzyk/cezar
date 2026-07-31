@@ -91,6 +91,17 @@ describe('workspace config', () => {
     expect(raw.futureTopLevelKey).toEqual({ keep: true });
   });
 
+  it('keeps the global model lock optional and degrades a non-boolean value per key', async () => {
+    expect(defaultWorkspaceConfig().modelsLocked).toBeUndefined();
+    write({ modelsLocked: true, projectsDir: '/tmp/projects' });
+    expect((await loadWorkspaceConfig()).modelsLocked).toBe(true);
+
+    write({ modelsLocked: 'yes', projectsDir: '/tmp/projects' });
+    const config = await loadWorkspaceConfig();
+    expect(config.modelsLocked).toBeUndefined();
+    expect(config.projectsDir).toBe('/tmp/projects');
+  });
+
   it('takes zero-config roots from the environment while explicit stored values win', async () => {
     process.env.CEZ_BROWSE_ROOT = '~/source';
     process.env.CEZ_PROJECTS_DIR = '~/checkouts';

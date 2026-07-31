@@ -102,6 +102,20 @@ describe('loadConfig systemPrompt', () => {
     });
   });
 
+  describe('modelsLocked', () => {
+    it('is optional and preserves only boolean values', async () => {
+      expect((await loadConfig(repoRoot)).modelsLocked).toBeUndefined();
+
+      write({ modelsLocked: true });
+      expect((await loadConfig(repoRoot)).modelsLocked).toBe(true);
+
+      write({ modelsLocked: 'yes', defaultRunner: 'codex' });
+      const config = await loadConfig(repoRoot);
+      expect(config.modelsLocked).toBeUndefined();
+      expect(config.defaultRunner).toBe('codex');
+    });
+  });
+
   /** `worktreeRetention` (#483): count-based, always materialized (default 10),
    *  `.catch(10)` so a bad value degrades to the default. `0` = unlimited. */
   describe('worktreeRetention', () => {

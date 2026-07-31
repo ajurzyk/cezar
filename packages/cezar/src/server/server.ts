@@ -32,10 +32,12 @@ import type {
 } from '@open-mercato/cezar-contract';
 import { detectEnvironment } from '../core/backend-detect.ts';
 import type { ContentBlock } from '../core/agent-runner.ts';
+import { AGENT_MODELS_LOCKED_ERROR, agentModelsLocked } from '../core/agent-model-policy.ts';
 import { discoverCodexModels } from '../core/codex-model-catalog.ts';
 import {
   PROVIDER_IDS,
   ProviderAuthService,
+  providerAuthChecksDisabled,
   type ProviderId,
   type ProviderStatusResponse,
 } from '../core/provider-auth.ts';
@@ -79,6 +81,7 @@ import {
 import { gatedSkillsRepos, loadConfig, resolveWorktreeRetention, type CezConfig } from '../config.ts';
 import { findConfigFile } from '../agent-config/catalog.ts';
 import { readConfigFile, writeConfigFile } from '../agent-config/files.ts';
+import { readAgentModelDefaults } from '../agent-config/models.ts';
 import { listAgentConfig } from '../agent-config/service.ts';
 import {
   PROJECT_ID_RE,
@@ -977,6 +980,12 @@ export function createApp(deps: ServerDeps) {
     mergeWrite: mergeWriteWorkspaceConfig,
   };
   const providerStatus = async (options?: { refresh?: boolean }): Promise<ProviderStatusResponse> => {
+    if (providerAuthChecksDisabled()) {
+      return applyProviderEnablement(
+        await providerAuth.status(options?.refresh ? { refresh: true } : undefined),
+        [],
+      );
+    }
     const [discovered, workspace] = await Promise.all([
       providerAuth.status(options?.refresh ? { refresh: true } : undefined),
       workspaceConfig.load(),
@@ -2690,6 +2699,9 @@ export function createApp(deps: ServerDeps) {
     .post('/runs', jsonZodValidator(startRunSchema), async (c) => {
       const { root: repoRoot, dataDir, manager } = c.get('project');
       const parsed = { data: c.req.valid('json') };
+      if (agentModelsLocked(repoRoot) && parsed.data.model?.trim()) {
+        return c.json({ error: AGENT_MODELS_LOCKED_ERROR }, 409);
+      }
       let workflow: WorkflowDef | undefined;
       if (parsed.data.steps) {
         // Inline chain (spec 008): an approved plan runs as an ad-hoc workflow.
@@ -2943,13 +2955,16 @@ export function createApp(deps: ServerDeps) {
 
     // "Continue" (spec 003): reopen a finished run's session in-process.
     .post('/runs/:id/continue', jsonZodValidator(continueSchema, { absent: ({}) }), async (c) => {
-      const { store, manager } = c.get('project');
+      const { root: repoRoot, store, manager } = c.get('project');
       const id = c.req.param('id');
       const run = store.getRun(id);
       if (!run) return c.json({ error: 'not found' }, 404);
       // Bounded resume text (#429); an empty/absent body still just re-runs on the
       // run's current backend, and a runner/model override reopens on that engine (#401).
       const parsed = { data: c.req.valid('json') };
+      if (agentModelsLocked(repoRoot) && parsed.data.model?.trim()) {
+        return c.json({ error: AGENT_MODELS_LOCKED_ERROR }, 409);
+      }
       const blocked = await providerActionError([providerForExistingRun(run, parsed.data.runner)]);
       if (blocked) return c.json({ error: blocked }, 409);
       const result = manager.continueRun(id, {
@@ -3556,6 +3571,9 @@ export function createApp(deps: ServerDeps) {
         const id = c.req.param('id');
         const todo = c.get('todo');
         const parsed = { data: c.req.valid('json') };
+        if (agentModelsLocked(repoRoot) && parsed.data?.model?.trim()) {
+          return c.json({ error: AGENT_MODELS_LOCKED_ERROR }, 409);
+        }
         if (todo.startedTaskId) return c.json({ error: 'already started' }, 409);
 
         let task = todoTaskText(todo);
@@ -4036,30 +4054,45 @@ export function createApp(deps: ServerDeps) {
 
   // The Settings → Agents knobs in one read (R6 Step 1.5) — an ADDITIVE
   // sibling of PUT /api/config below; /api/health keeps its protected shape.
-  const configAnswer = (config: CezConfig) => ({
-    baseBranch: config.baseBranch ?? null,
-    defaultRunner: config.defaultRunner,
-    systemPrompt: config.systemPrompt ?? null,
-    defaultModels: config.defaultModels ?? {},
-    maxParallel: config.maxParallel,
-    memoryLimitMb: config.memoryLimitMb ?? null,
-    // Count-based worktree retention (#483): keep the last N finished worktrees
-    // on disk. 0 = unlimited. Always materialized (schema default 10).
-    worktreeRetention: config.worktreeRetention,
-    // Live title updates (task auto-naming spec): tri-state — null means "no
-    // config key, the CEZ_TITLE_UPDATES env default (ON) decides".
-    liveTitleUpdates: config.liveTitleUpdates ?? null,
-    // Optional review gate (#489): tri-state — null means "no config key, the
-    // CEZ_REVIEW_GATE env default (OFF) decides".
-    reviewGate: config.reviewGate ?? null,
-  });
+  const configAnswer = async (repoRoot: string, config: CezConfig) => {
+    const nativeModels = await readAgentModelDefaults(repoRoot);
+    const modelsLocked = agentModelsLocked(repoRoot);
+    return {
+      baseBranch: config.baseBranch ?? null,
+      defaultRunner: config.defaultRunner,
+      systemPrompt: config.systemPrompt ?? null,
+      // Native defaults seed each runner independently. A Cezar preset remains
+      // selectable unless the operator opts into the fixed-model policy.
+      defaultModels: modelsLocked
+        ? nativeModels
+        : { ...nativeModels, ...(config.defaultModels ?? {}) },
+      modelsLocked,
+      maxParallel: config.maxParallel,
+      memoryLimitMb: config.memoryLimitMb ?? null,
+      // Count-based worktree retention (#483): keep the last N finished worktrees
+      // on disk. 0 = unlimited. Always materialized (schema default 10).
+      worktreeRetention: config.worktreeRetention,
+      // Live title updates (task auto-naming spec): tri-state — null means "no
+      // config key, the CEZ_TITLE_UPDATES env default (ON) decides".
+      liveTitleUpdates: config.liveTitleUpdates ?? null,
+      // Optional review gate (#489): tri-state — null means "no config key, the
+      // CEZ_REVIEW_GATE env default (OFF) decides".
+      reviewGate: config.reviewGate ?? null,
+    };
+  };
   // ---- chained family: per-repo config (project-scoped) ----
   const configRoutes = new Hono<ProjectApiEnv>()
-    .get('/config', async (c) => c.json(configAnswer(await loadConfig(c.get('project').root))))
+    .get('/config', async (c) => {
+      const repoRoot = c.get('project').root;
+      return c.json(await configAnswer(repoRoot, await loadConfig(repoRoot)));
+    })
 
     .put('/config', jsonZodValidator(() => setConfigSchema), async (c) => {
       const { root: repoRoot, dataDir } = c.get('project');
       const parsed = { data: c.req.valid('json') };
+      if (agentModelsLocked(repoRoot) && parsed.data.defaultModels !== undefined) {
+        return c.json({ error: AGENT_MODELS_LOCKED_ERROR }, 409);
+      }
       const configPath = join(dataDir, 'config.json');
       let raw: Record<string, unknown> = {};
       try {
@@ -4125,7 +4158,7 @@ export function createApp(deps: ServerDeps) {
         return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
       }
       // Pre-R6 answer shape ({baseBranch, defaultRunner}) + additive R6 fields.
-      return c.json(configAnswer(await loadConfig(repoRoot)));
+      return c.json(await configAnswer(repoRoot, await loadConfig(repoRoot)));
     });
 
   // Set/clear the agents' config knobs (Settings → Agents; the Repo tab's

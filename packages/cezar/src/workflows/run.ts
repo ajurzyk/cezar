@@ -8,6 +8,7 @@ import { onUsage, registerRunProcess, unregisterRunProcess, type ProcessUsage } 
 import { createRunner } from '../core/runner-factory.ts';
 import type { RunnerId } from '../core/agent-runner.ts';
 import { modelConflictsWithRunner } from '../core/model-presets.ts';
+import { AGENT_MODELS_LOCKED_ERROR, agentModelsLocked } from '../core/agent-model-policy.ts';
 import {
   ModelIdentityError,
   formatModelIdentity,
@@ -26,6 +27,7 @@ import type { AgentEvent, ContentBlock } from '../core/agent-runner.ts';
 import { discoverSkills, type Skill } from '../skills.ts';
 import { materializeSkillDir } from '../skills-remote.ts';
 import { seedAgentConfigLocalLayer } from '../agent-config/seed.ts';
+import { readAgentModelProvider } from '../agent-config/models.ts';
 import { loadConfig, resolveWorktreeRetention } from '../config.ts';
 import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff, worktreeShortstat } from '../git-worktree.ts';
 import { getHeadCommit, getRepoInfo } from '../server/git.ts';
@@ -42,6 +44,13 @@ import type { UiEvent } from '../core/ui-events.ts';
 import { chainStepNote, DEFAULT_ALLOWED_TOOLS, stepKind, type WorkflowDef, type WorkflowStepDef } from './types.ts';
 
 const CHECK_OUTPUT_CAP = 20_000;
+
+async function configuredModelProvider(
+  backend: RunnerId,
+  repoRoot: string,
+): Promise<string | undefined> {
+  return readAgentModelProvider(backend, repoRoot).catch(() => undefined);
+}
 /** An interactive session that hears nothing from the user closes itself. */
 export const IDLE_TIMEOUT_MS = 15 * 60_000;
 /**
@@ -483,11 +492,16 @@ export class RunManager {
     input: StartRunInput,
     group?: { groupId: string; variant: string },
   ): RunRecord {
+    // Sanitize at the manager boundary so CLI runs, workflows, variants, and
+    // direct callers cannot bypass the HTTP policy.
+    const effectiveInput = agentModelsLocked(this.repoRoot)
+      ? { ...input, model: undefined }
+      : input;
     const run = this.store.createRun({
       title: makeRunTitle(input.task, workflow) + (group ? ` (${group.variant})` : ''),
       workflow: workflow.name,
       task: input.task,
-      model: input.model,
+      model: effectiveInput.model,
       runner: input.runner,
       // The global inbox is the ceiling on the per-run flag (#471). Enforced here rather than
       // at the HTTP route because `cezar run`, the inbox's own "▶ Run" and variants all reach
@@ -535,7 +549,7 @@ export class RunManager {
     // above shows instantly; the namer's short title replaces it when (and if)
     // the model answers. Never awaited, never fails the run.
     void this.autoNameRun(run.id, skillHint, input.task);
-    this.pendingJobs.set(run.id, { workflow, input });
+    this.pendingJobs.set(run.id, { workflow, input: effectiveInput });
     this.queue.push(run.id);
     void this.pump();
     return run;
@@ -1349,6 +1363,9 @@ export class RunManager {
      *  continuations are queued; an explicit user Continue remains immediate. */
     deferForCapacity = false,
   ): { ok: boolean; error?: string } {
+    if (agentModelsLocked(this.repoRoot) && opts.model?.trim()) {
+      return { ok: false, error: AGENT_MODELS_LOCKED_ERROR };
+    }
     if (this.active.has(runId)) return { ok: false, error: 'run is still active' };
     const run = this.store.getRun(runId);
     if (!run) return { ok: false, error: 'not found' };
@@ -1532,6 +1549,7 @@ export class RunManager {
 
     let stepCost = 0;
     let turnText = '';
+    let sessionError: string | undefined;
     const sink = this.makeUiSink(runId, stepId);
     const onEvent = (event: AgentEvent) => {
       if (event.type === 'image') {
@@ -1546,6 +1564,12 @@ export class RunManager {
         return;
       }
       this.store.appendEvent(runId, { ...event, stepId });
+      if (event.type === 'error') {
+        sessionError ??= event.message;
+        state.session?.interrupt();
+        return;
+      }
+      if (sessionError) return;
       if (event.type === 'session') {
         this.store.updateStep(runId, stepId, { sessionId: event.sessionId, backend });
       }
@@ -1637,7 +1661,11 @@ export class RunManager {
     // instead of `opus`). Fail loud here too rather than let the backend pick a default.
     let continueModel: string | undefined;
     try {
-      const normalized = normalizeModelForBackend(continueBackend, record?.model);
+      const normalized = normalizeModelForBackend(
+        continueBackend,
+        agentModelsLocked(this.repoRoot) ? undefined : record?.model,
+        { configuredProvider: await configuredModelProvider(continueBackend, state.cwd) },
+      );
       continueModel = normalized?.backendModel;
       this.store.updateRun(runId, {
         modelIdentity: normalized ? formatModelIdentity(normalized.identity) : undefined,
@@ -1699,6 +1727,7 @@ export class RunManager {
     const finishedAt = () => new Date().toISOString();
     try {
       await session.result;
+      if (sessionError) throw new Error(sessionError);
       sink.sessionEnded(state.cancelled ? 'cancelled' : 'end_turn');
       if (state.cancelled) {
         this.store.updateStep(runId, stepId, { status: 'cancelled', finishedAt: finishedAt() });
@@ -1760,7 +1789,11 @@ export class RunManager {
     // can still override below); the authoritative fail-loud gate is at spawn.
     let modelIdentity: string | undefined;
     try {
-      const normalized = normalizeModelForBackend(taskBackend, input.model);
+      const normalized = normalizeModelForBackend(
+        taskBackend,
+        agentModelsLocked(this.repoRoot) ? undefined : input.model,
+        { configuredProvider: await configuredModelProvider(taskBackend, this.repoRoot) },
+      );
       modelIdentity = normalized ? formatModelIdentity(normalized.identity) : undefined;
     } catch {
       // An unresolvable task-level model surfaces loudly at the step below; the
@@ -2076,6 +2109,7 @@ export class RunManager {
     const startTokens = stepRecord?.tokensUsed ?? 0;
     let stepCost = stepRecord?.costUsd ?? 0;
     let turnText = '';
+    let sessionError: string | undefined;
     const sink = this.makeUiSink(runId, step.id);
     const onEvent = (event: AgentEvent) => {
       if (event.type === 'image') {
@@ -2090,6 +2124,12 @@ export class RunManager {
         return;
       }
       emit({ ...event, stepId: step.id });
+      if (event.type === 'error') {
+        sessionError ??= event.message;
+        state.session?.interrupt();
+        return;
+      }
+      if (sessionError) return;
       if (event.type === 'session') {
         // Codex/OpenCode mint their own session id — persist it so resume works.
         this.store.updateStep(runId, step.id, { sessionId: event.sessionId, backend });
@@ -2169,7 +2209,11 @@ export class RunManager {
     // instead of letting the backend silently substitute its default.
     let backendModel: string | undefined;
     try {
-      const normalized = normalizeModelForBackend(stepBackend, step.model ?? input.model);
+      const normalized = normalizeModelForBackend(
+        stepBackend,
+        agentModelsLocked(this.repoRoot) ? undefined : step.model ?? input.model,
+        { configuredProvider: await configuredModelProvider(stepBackend, state.cwd) },
+      );
       backendModel = normalized?.backendModel;
       // Persist the identity of what ACTUALLY runs (#405, review M1). The run-start echo
       // (line ~993) is best-effort from `taskBackend`/`input.model`; a per-step `runner`/`model`
@@ -2230,6 +2274,10 @@ export class RunManager {
 
     try {
       const result = await session.result;
+      if (sessionError) {
+        sink.sessionEnded('error', sessionError);
+        return sessionError;
+      }
       // v2 counterpart of v1's `done` (spec: the mappers leave session-close
       // events to the RunManager — only it knows how the session settled).
       sink.sessionEnded(state.cancelled ? 'cancelled' : 'end_turn');

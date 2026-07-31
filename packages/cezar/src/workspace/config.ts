@@ -111,6 +111,9 @@ const workspaceConfigSchema = z
     /** Optional auto-update override. Absence inherits the environment/default
      *  and must stay absent on unrelated merge-writes. */
     skillsAutoUpdate: z.boolean().optional().catch(undefined),
+    /** Global opt-in model policy. The native coding-agent model becomes
+     * authoritative while runner choice remains available. */
+    modelsLocked: z.boolean().optional().catch(undefined),
     // Function-form default/catch: mutators (step 1.3's registerProject) edit
     // these objects in place, so parses must never share one reference.
     resources: resourcesSchema.prefault(() => ({})).catch(() => resourcesSchema.parse({})),

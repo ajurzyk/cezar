@@ -57,6 +57,7 @@ function serve({
     defaultRunner: 'claude',
     systemPrompt: null,
     defaultModels: {},
+    modelsLocked: false,
     maxParallel: 2,
     memoryLimitMb: null,
     worktreeRetention: 10,
@@ -338,6 +339,28 @@ describe('the agents form', () => {
     await waitFor(() => expect(puts()).toHaveLength(2))
     expect(puts()[1]?.body).toEqual({ defaultModels: { claude: null } })
     await waitFor(() => expect(claude.value).toBe(''))
+  })
+
+  it('shows native models as read-only values while keeping the runner selectable', async () => {
+    serve({
+      config: {
+        defaultRunner: 'claude',
+        defaultModels: { claude: 'native-sonnet', codex: 'gpt-5.6-codex' },
+        modelsLocked: true,
+      },
+    })
+    renderAt('/settings/agents')
+    await waitFor(() => expect(form()).not.toBeNull())
+
+    const claudeModel = screen.getByLabelText<HTMLOutputElement>('Default model for claude')
+    expect(claudeModel.tagName).toBe('OUTPUT')
+    expect(claudeModel.textContent).toContain('native-sonnet')
+    expect(screen.queryByRole('combobox', { name: 'Default model for claude' })).toBeNull()
+
+    fireEvent.click(screen.getByRole('radio', { name: 'codex' }))
+    await waitFor(() => expect(puts()).toHaveLength(1))
+    expect(puts()[0]?.body).toEqual({ defaultRunner: 'codex' })
+    expect(screen.getByLabelText('Default model for codex').textContent).toContain('gpt-5.6-codex')
   })
 
   it('system prompt saves trimmed on the explicit button, and an emptied box clears with null', async () => {

@@ -13,10 +13,10 @@ import type { AgentHomePaths } from './agent-config/catalog.ts';
  * first writer owns the file, later specs import it. Do not duplicate this
  * homedir logic elsewhere.
  */
-export function cezarHomeDir(): string {
+export function cezarHomeDir(env: NodeJS.ProcessEnv = process.env): string {
   // `|| undefined` so an EMPTY CEZ_HOME (e.g. `CEZ_HOME= cezar …`) falls back
   // to the default instead of yielding relative paths in the cwd.
-  return (process.env.CEZ_HOME || undefined) ?? join(homedir(), '.cezar');
+  return (env.CEZ_HOME || undefined) ?? join(homedir(), '.cezar');
 }
 
 /**
@@ -92,8 +92,8 @@ export function serverStatePath(instance: string = DEFAULT_SERVER_INSTANCE): str
  * been booted in. Lives directly under `cezarHomeDir()`, so the `CEZ_HOME`
  * override applies (tests/containers never touch a real home dir).
  */
-export function workspaceConfigPath(): string {
-  return join(cezarHomeDir(), 'config.json');
+export function workspaceConfigPath(env: NodeJS.ProcessEnv = process.env): string {
+  return join(cezarHomeDir(env), 'config.json');
 }
 
 /**
