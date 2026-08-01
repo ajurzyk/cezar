@@ -170,6 +170,31 @@ describe('TasksOverview — the table', () => {
     expect(diff?.querySelector('.text-success')?.textContent).toBe('+128')
     expect(diff?.querySelector('.text-danger')?.textContent).toBe('−14')
     expect(diff?.getAttribute('title')).toBe('+128 −14 across 6 files')
+    // Nothing was narrowed here, so nothing claims it was (#751).
+    expect(diff?.getAttribute('data-repointed')).toBeNull()
+  })
+
+  it('annotates the ± column when the stat covers uncommitted work only (#751)', () => {
+    renderOverview({
+      runs: [
+        run({
+          id: 'reviewer',
+          title: 'Review PR 694',
+          status: 'review',
+          branch: 'cez/d8ff6490',
+          diffStat: { adds: 1, dels: 0, files: 1, repointed: true },
+          createdAt: ago(20 * 60_000),
+        }),
+      ],
+    })
+
+    const diff = tableRow('reviewer')?.querySelector('[data-slot="diff-stat"]')
+    // The numbers stay the numbers — the column still reads as a diff pair.
+    expect(diff?.textContent).toBe('+1 −0')
+    expect(diff?.getAttribute('data-repointed')).toBe('true')
+    expect(diff?.getAttribute('title')).toBe(
+      "+1 −0 across 1 file — uncommitted changes only, measured with another branch checked out in this task's worktree"
+    )
   })
 
   it('removes token/cost headers and cells while preserving table and queue semantics', () => {

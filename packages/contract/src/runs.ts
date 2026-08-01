@@ -89,6 +89,12 @@ export const diffStatSchema = z.object({
   adds: z.number(),
   dels: z.number(),
   files: z.number(),
+  /** Additive since #751, and present ONLY when true: the numbers cover uncommitted work
+   *  alone, because the worktree's HEAD had been repointed off the task's own branch (every
+   *  review/QA run does this) and the merge-base anchor would otherwise have reported the
+   *  checked-out branch's entire diff as this task's. Absent on every normal run and on every
+   *  record written before #751 — a consumer that ignores it sees exactly the old shape. */
+  repointed: z.boolean().optional(),
 });
 export type DiffStat = z.infer<typeof diffStatSchema>;
 

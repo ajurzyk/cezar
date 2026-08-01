@@ -73,9 +73,19 @@ const runRecordSchema = z.object({
    *  `title` so edits always win). The UI shows `titleSummary ?? title`. */
   titleSummary: z.string().optional(),
   /** `git diff --shortstat` of the worktree vs its base, refreshed on every
-   *  turn-end (#389) — what the quick list / table shows without a git call. */
+   *  turn-end (#389) — what the quick list / table shows without a git call.
+   *  `repointed` (#751) is optional and only ever written as `true`: it marks the
+   *  runs whose numbers were narrowed to uncommitted work because the agent had
+   *  checked another branch out into the worktree. Optional is load-bearing here —
+   *  `runs.json` is `safeParse`d as one array, so a required addition would
+   *  silently drop every pre-existing run. */
   diffStat: z
-    .object({ adds: z.number(), dels: z.number(), files: z.number() })
+    .object({
+      adds: z.number(),
+      dels: z.number(),
+      files: z.number(),
+      repointed: z.boolean().optional(),
+    })
     .optional(),
   workflow: z.string(),
   task: z.string(),

@@ -120,6 +120,33 @@ describe('RunStore — titleSummary + diffStat (#389)', () => {
     expect(loaded?.diffStat).toEqual({ adds: 10, dels: 2, files: 3 });
   });
 
+  it('round-trips the repointed flag, and keeps it absent when it was never set (#751)', () => {
+    const store = RunStore.open(dataDir);
+    const narrowed = store.createRun({ title: 'review pr 694', workflow: 'quick-task', task: 'review', steps: [] });
+    const normal = store.createRun({ title: 'fix the login bug', workflow: 'quick-task', task: 'fix', steps: [] });
+    store.updateRun(narrowed.id, { diffStat: { adds: 1, dels: 0, files: 1, repointed: true } });
+    store.updateRun(normal.id, { diffStat: { adds: 10, dels: 2, files: 3 } });
+    store.flush();
+
+    const reopened = RunStore.open(dataDir);
+    expect(reopened.getRun(narrowed.id)?.diffStat).toEqual({ adds: 1, dels: 0, files: 1, repointed: true });
+    // The un-narrowed shape must survive byte-identically — no `repointed: false`
+    // materialized into the record of every task that behaved.
+    expect(reopened.getRun(normal.id)?.diffStat).toEqual({ adds: 10, dels: 2, files: 3 });
+    expect(reopened.getRun(normal.id)?.diffStat).not.toHaveProperty('repointed');
+  });
+
+  it('still loads a pre-#751 diffStat that has no repointed key', () => {
+    writeFileSync(
+      join(dataDir, 'runs.json'),
+      JSON.stringify([{ ...LEGACY_RUN, diffStat: { adds: 4, dels: 1, files: 2 } }]),
+      'utf8',
+    );
+    const run = RunStore.open(dataDir).getRun('legacy-1');
+    expect(run?.diffStat).toEqual({ adds: 4, dels: 1, files: 2 });
+    expect(run?.diffStat?.repointed).toBeUndefined();
+  });
+
   it('still loads an old runs.json that predates the fields', () => {
     writeFileSync(join(dataDir, 'runs.json'), JSON.stringify([LEGACY_RUN]), 'utf8');
     const store = RunStore.open(dataDir);

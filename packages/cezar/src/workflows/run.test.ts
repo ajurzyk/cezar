@@ -299,6 +299,52 @@ describe('RunManager.recordTurnEnd', () => {
     expect(later?.diffStat).toEqual({ adds: 4, dels: 1, files: 3 });
   });
 
+  /**
+   * #751: `recordTurnEnd` is the ONE place `RunRecord.diffStat` is written, so it
+   * is also the one place `run.branch` has to reach `worktreeShortstat` — without
+   * it, a review/QA run that checked another branch out into its worktree stores
+   * that branch's whole diff as this task's work.
+   */
+  it('stores only the uncommitted diff when the agent repointed the worktree HEAD', async () => {
+    const record = await makeWorktreeRun();
+    const wt = record.worktreePath as string;
+
+    // A branch with real commits on it, checked out into the task's worktree —
+    // exactly what a `review/pr-NNN` or QA run does.
+    await run('git', ['checkout', '-q', '-b', 'someone-elses-branch'], { cwd: wt });
+    writeFileSync(join(wt, 'theirs.txt'), 'a\nb\nc\nd\ne\nf\n'); // 6 lines that are NOT this task's
+    await run('git', ['add', '-A'], { cwd: wt });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'their work'], { cwd: wt });
+    writeFileSync(join(wt, 'mine.txt'), 'z\n'); // the 1 line this task produced
+
+    await manager.recordTurnEnd(record.id, TURN_TEXT);
+
+    // 1 uncommitted line, flagged — not the 6 committed ones the foreign branch carries
+    // (which, with `a.txt`'s edit and `new.txt`, would have read `+10 −1 / 4 files`).
+    expect(store.getRun(record.id)?.diffStat).toEqual({
+      adds: 1,
+      dels: 0,
+      files: 1,
+      repointed: true,
+    });
+  });
+
+  it('drops the repointed flag again once HEAD returns to the task branch', async () => {
+    const record = await makeWorktreeRun();
+    const wt = record.worktreePath as string;
+    await run('git', ['checkout', '-q', '-b', 'a-detour'], { cwd: wt });
+    await manager.recordTurnEnd(record.id, TURN_TEXT);
+    expect(store.getRun(record.id)?.diffStat?.repointed).toBe(true);
+
+    // `updateRun` replaces `diffStat` wholesale, so a stale `repointed: true` can
+    // never outlive the repoint that caused it.
+    await run('git', ['checkout', '-q', record.branch as string], { cwd: wt });
+    await manager.recordTurnEnd(record.id, TURN_TEXT);
+    const after = store.getRun(record.id);
+    expect(after?.diffStat).toEqual({ adds: 3, dels: 1, files: 2 });
+    expect(after?.diffStat).not.toHaveProperty('repointed');
+  });
+
   it('never overwrites a user-edited title (PATCH sets titleSummary too)', async () => {
     const record = await makeWorktreeRun();
     // What PATCH /api/v1/runs/:id does on a rename:
