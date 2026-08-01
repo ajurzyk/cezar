@@ -144,6 +144,36 @@ describe('ThreadView', () => {
     expect(bubbles[1]!.textContent).toContain('2 images attached')
   })
 
+  it('turns the screenshot-shaped provisional marker into option cards without exposing JSON', () => {
+    const questions = [
+      {
+        header: 'Who books',
+        question: 'Who should be able to create bookings in v1?',
+        multiSelect: false,
+        options: [
+          { label: 'Staff only', description: 'Backend/admin CRUD only for v1' },
+          { label: 'Staff + customer self-service', description: 'Also let customers book through the portal' },
+        ],
+      },
+    ]
+    const raw = `later:\n\nCEZ:ASK ${JSON.stringify({ questions })}`
+    const events = [
+      line(1, 'item.completed', {
+        item: { kind: 'message', id: 'ask-message', role: 'assistant', text: raw },
+      }),
+    ]
+    renderView(<ThreadView run={run('running')} thread={reduceThread(events, { activeTurn: true })} />)
+    expect(document.body.textContent).toContain('later:')
+    expect(document.body.textContent).not.toContain('CEZ:ASK')
+
+    cleanup()
+    const settled = [...events, line(2, 'ask.requested', { requestId: 'ask-screenshot', questions })]
+    renderView(<ThreadView run={run('waiting')} thread={reduceThread(settled)} />)
+    expect(document.body.textContent).not.toContain('CEZ:ASK')
+    expect(screen.getByText('Staff only')).not.toBeNull()
+    expect(screen.getByText('Staff + customer self-service')).not.toBeNull()
+  })
+
   it('renders assistant messages as markdown, not raw text', async () => {
     renderView(<ThreadView run={run('waiting')} thread={reduceThread(EVENTS)} />)
     // The ** marks became a strong element (Streamdown spells it as a data-tagged span) —

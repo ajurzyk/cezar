@@ -2,7 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { parseAskMarker, stripAskMarker, type AskRequest } from '../core/ask.ts';
+import {
+  parseAskMarkerResult,
+  stripAskMarker,
+  type AskMarkerParseResult,
+  type AskRequest,
+} from '../core/ask.ts';
 import { type AgentSession } from '../core/claude-cli-runner.ts';
 import { onUsage, registerRunProcess, unregisterRunProcess, type ProcessUsage } from '../core/process-usage.ts';
 import { createRunner } from '../core/runner-factory.ts';
@@ -100,6 +105,17 @@ function emitAskRequested(sink: UiEventSink, ask: AskRequest): string {
   const requestId = randomUUID();
   sink.handle({ type: 'ask.requested', requestId, questions: ask.questions });
   return requestId;
+}
+/** A persisted, non-fatal explanation for protocol-shaped text that could not
+ * become an ask card. Never include the raw payload in this diagnostic. */
+function askMarkerRejection(result: AskMarkerParseResult): string | undefined {
+  if (result.kind === 'invalid-json') {
+    return 'structured question ignored — CEZ:ASK payload is not valid JSON';
+  }
+  if (result.kind !== 'invalid-structure') return undefined;
+  const issue = result.issues[0];
+  const location = issue?.path.length ? ` at ${issue.path.join('.')}` : '';
+  return `structured question ignored — CEZ:ASK payload failed validation${location}${issue ? `: ${issue.message}` : ''}`;
 }
 /** Periodic "cezar autosave" commit in the task worktree (spec 006). */
 export const AUTOSAVE_INTERVAL_MS = 90_000;
@@ -1590,10 +1606,13 @@ export class RunManager {
         const done = sessionOpen && DONE_MARKER_RE.test(turnText.trimEnd());
         // `CEZ:ASK` → the user is genuinely blocked; wins over `CEZ:MONITORING`
         // (a pending question is always attention), loses to `CEZ:DONE` (#473).
-        const ask = sessionOpen && !done ? parseAskMarker(turnText) : null;
+        const askResult = sessionOpen && !done ? parseAskMarkerResult(turnText) : undefined;
+        const ask = askResult?.kind === 'valid' ? askResult.request : null;
+        const askRejection = askResult ? askMarkerRejection(askResult) : undefined;
         const monitoring =
           sessionOpen && !done && !ask && MONITORING_MARKER_RE.test(turnText.trimEnd());
         turnText = '';
+        if (askRejection) this.store.appendEvent(runId, { type: 'note', message: askRejection, stepId });
         if (done) {
           // Goal achieved (agent contract, #347) — same as in runAgentStep.
           this.store.appendEvent(runId, { type: 'lifecycle', message: 'goal achieved — session closed' });
@@ -2150,7 +2169,9 @@ export class RunManager {
         const done = interactive && sessionOpen && DONE_MARKER_RE.test(turnText.trimEnd());
         // `CEZ:ASK` → the user is blocked; wins over `CEZ:MONITORING`, loses to
         // `CEZ:DONE` (#473).
-        const ask = interactive && sessionOpen && !done ? parseAskMarker(turnText) : null;
+        const askResult = interactive && sessionOpen && !done ? parseAskMarkerResult(turnText) : undefined;
+        const ask = askResult?.kind === 'valid' ? askResult.request : null;
+        const askRejection = askResult ? askMarkerRejection(askResult) : undefined;
         const monitoring =
           interactive &&
           sessionOpen &&
@@ -2158,6 +2179,7 @@ export class RunManager {
           !ask &&
           MONITORING_MARKER_RE.test(turnText.trimEnd());
         turnText = '';
+        if (askRejection) emit({ type: 'note', stepId: step.id, message: askRejection });
         if (done) {
           // Goal achieved (agent contract, #347): close the session instead
           // of parking at `waiting` — the run completes and frees its slot.

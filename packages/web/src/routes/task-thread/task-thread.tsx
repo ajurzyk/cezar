@@ -69,7 +69,11 @@ export function TaskThreadRoute() {
   const { id } = useParams<{ id: string }>()
   const run = useRun(id)
   const events = useRunEvents(id)
-  const thread = useMemo(() => reduceThread(events), [events])
+  const runStatus = run.data?.status
+  const thread = useMemo(
+    () => reduceThread(events, { activeTurn: runStatus === 'running' }),
+    [events, runStatus],
+  )
   // The two feeds can drift: a record update lost on the workspace stream leaves the thread
   // showing Working… over a "run finished" transcript. The transcript is live here, so it
   // arbitrates — a session end with no session after it refetches a record still claiming one.
