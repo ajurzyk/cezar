@@ -15,7 +15,8 @@ import type {
   RunStatus,
 } from '@open-mercato/cezar-api-client'
 
-import { buildThreadRows, TaskThreadRoute, ThreadView } from './task-thread'
+import { TaskThreadRoute, ThreadView } from './task-thread'
+import { buildTranscriptRows, mainTranscriptSections } from './session-transcript'
 import { reduceThread } from './thread-state'
 
 afterEach(() => {
@@ -101,6 +102,9 @@ const EVENTS: RunEvent[] = [
   line(6, 'item.completed', { item: { kind: 'reasoning', id: 'item_2', text: 'Considering the layout…' } }),
   line(7, 'user-message', { text: 'Thanks!', imageCount: 2 }),
 ]
+
+const transcriptRows = (fixture: ApiRun, thread = reduceThread(EVENTS)) =>
+  buildTranscriptRows(mainTranscriptSections(fixture, thread), fixture.id)
 
 describe('ThreadView', () => {
   it('keeps provider authorization recovery visible after the run reaches done', () => {
@@ -319,12 +323,12 @@ describe('ThreadView', () => {
   /**
    * The no-regression assertion, at the row-builder level rather than the DOM:
    * an absent stack and an empty one must produce the same rows, and a run with
-   * no stack must produce exactly today's rows. Asserting on `buildThreadRows`
+   * no stack must produce exactly today's rows. Asserting on the shared row builder's
    * keys keeps this free of Radix's per-render generated ids.
    */
   it('builds the same rows whether the stack is absent or empty', () => {
     const keys = (extra: Partial<ApiRun>) =>
-      buildThreadRows(run('queued', extra), reduceThread(EVENTS)).map((r) => r.key)
+      transcriptRows(run('queued', extra)).map((r) => r.key)
 
     const absent = keys({})
     expect(absent[0]).toBe('task')
@@ -334,20 +338,19 @@ describe('ThreadView', () => {
   })
 
   it('inserts the stacked rows directly after the task row, in order', () => {
-    const keys = buildThreadRows(
+    const keys = transcriptRows(
       run('queued', {
         queuedMessages: [
           { id: 'm1', text: 'one', createdAt: '2026-07-21T10:00:00.000Z' },
           { id: 'm2', text: 'two', createdAt: '2026-07-21T10:01:00.000Z' },
         ],
       }),
-      reduceThread(EVENTS),
     ).map((r) => r.key)
 
     expect(keys.slice(0, 3)).toEqual(['task', 'queued:m1', 'queued:m2'])
     // …and the rest of the transcript is untouched behind them.
     expect(keys.slice(3)).toEqual(
-      buildThreadRows(run('queued'), reduceThread(EVENTS)).map((r) => r.key).slice(1),
+      transcriptRows(run('queued')).map((r) => r.key).slice(1),
     )
   })
 
@@ -367,8 +370,8 @@ describe('ThreadView', () => {
     const thread = reduceThread(EVENTS)
 
     // The row builder is pure: same inputs, same rows.
-    expect(buildThreadRows(fixture, thread).map((r) => r.key)).toEqual(
-      buildThreadRows(fixture, thread).map((r) => r.key),
+    expect(transcriptRows(fixture, thread).map((r) => r.key)).toEqual(
+      transcriptRows(fixture, thread).map((r) => r.key),
     )
 
     const { rerender } = renderView(<ThreadView run={fixture} thread={thread} />)
