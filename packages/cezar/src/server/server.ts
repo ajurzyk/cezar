@@ -3442,9 +3442,13 @@ export function createApp(deps: ServerDeps) {
   const runsRoutes = new Hono<ProjectApiEnv>()
     .get('/runs', (c) => c.json(c.get('project').store.listRuns().map(withUsage)))
 
-    // Registered before the `/:id/...` routes so "archive-finished" never
-    // matches as a run id.
+    // Registered before the `/:id/...` routes so "archive-finished" and "read-all"
+    // never match as a run id.
     .post('/runs/archive-finished', (c) => c.json({ archived: c.get('project').store.archiveFinished() }))
+
+    // The read-receipt sweep (#unread-done-items) — the mark-read twin of the archive
+    // sweep above, and under the same registration-order guard.
+    .post('/runs/read-all', (c) => c.json({ read: c.get('project').store.markAllRead() }))
 
     .post('/runs/:id/archive', jsonZodValidator(archiveSchema, { absent: ({}) }), async (c) => {
       const { store } = c.get('project');
@@ -3453,6 +3457,13 @@ export function createApp(deps: ServerDeps) {
       // to `{}` just as before, but a wrong-typed `archived` is now a 400 (#429).
       const parsed = { data: c.req.valid('json') };
       const run = store.setArchived(id, parsed.data.archived !== false);
+      return run ? c.json(run) : c.json({ error: 'not found' }, 404);
+    })
+
+    .post('/runs/:id/read', (c) => {
+      // No body: opening a thread marks it read, full stop. Stamps `seenAt = now` and
+      // returns the updated record (which also rides the `run` SSE via `touch`).
+      const run = c.get('project').store.setRead(c.req.param('id'));
       return run ? c.json(run) : c.json({ error: 'not found' }, 404);
     })
 

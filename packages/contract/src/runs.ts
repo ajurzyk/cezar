@@ -231,6 +231,11 @@ export const runRecordSchema = z.object({
   peakProcCount: z.number().optional(),
   archived: z.boolean(),
   archivedAt: z.string().optional(),
+  /** Read receipt (#unread-done-items): ISO time the cockpit last opened this run's
+   *  thread. A finished (`done`/`failed`) run reads as *unread* until seen since it
+   *  finished — see `isUnread()` in the cockpit's `lib/read-state.ts`. Absent on old
+   *  runs and on any run not yet opened, both of which count as unread. */
+  seenAt: z.string().optional(),
   currentStepId: z.string().optional(),
   error: z.string().optional(),
   steps: z.array(stepStateSchema),
@@ -281,6 +286,10 @@ export type CancelResponse = z.infer<typeof cancelResponseSchema>;
 /** `POST /runs/archive-finished` — how many runs the sweep archived. */
 export const archiveFinishedResponseSchema = z.object({ archived: z.number() });
 export type ArchiveFinishedResponse = z.infer<typeof archiveFinishedResponseSchema>;
+
+/** `POST /runs/read-all` — how many unread finished runs the sweep marked read. */
+export const markAllReadResponseSchema = z.object({ read: z.number() });
+export type MarkAllReadResponse = z.infer<typeof markAllReadResponseSchema>;
 
 /** `DELETE /runs/:id` — an active run is a 409 and an unknown one a 404, so this only ever
  *  reports success. */

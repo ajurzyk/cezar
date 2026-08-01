@@ -21,6 +21,7 @@ import type {
   AgentConfigListing,
   ApiRun,
   ArchiveFinishedResponse,
+  MarkAllReadResponse,
   CancelResponse,
   ChangesPayload,
   CheckoutProjectInput,
@@ -972,6 +973,27 @@ export async function archiveFinished(): Promise<ArchiveFinishedResponse> {
       param: { projectId: queryScope() },
     }),
     '/runs/archive-finished',
+  )
+}
+
+/** Read receipt (#unread-done-items): opening a task's thread marks it read. Bodyless —
+ *  the server stamps `seenAt = now` and answers with the updated record. */
+export async function markRunSeen(id: string): Promise<RunRecord> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].runs[':id'].read.$post({
+      param: { projectId: queryScope(), id: encodeURIComponent(id) },
+    }),
+    runPath(id, '/read'),
+  )
+}
+
+/** "Mark all read": stamp every currently-unread finished run in one call. */
+export async function markAllRunsSeen(): Promise<MarkAllReadResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].runs['read-all'].$post({
+      param: { projectId: queryScope() },
+    }),
+    '/runs/read-all',
   )
 }
 

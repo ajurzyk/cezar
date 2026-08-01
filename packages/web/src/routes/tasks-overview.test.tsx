@@ -42,6 +42,7 @@ function LocationProbe() {
 function renderOverview(props: Partial<ComponentProps<typeof TasksOverview>> = {}) {
   const onViewChange = props.onViewChange ?? vi.fn()
   const onArchiveFinished = props.onArchiveFinished ?? vi.fn()
+  const onMarkAllRead = props.onMarkAllRead ?? vi.fn()
   const onRename = props.onRename ?? vi.fn()
   const utils = render(
     <MemoryRouter initialEntries={['/']}>
@@ -57,6 +58,7 @@ function renderOverview(props: Partial<ComponentProps<typeof TasksOverview>> = {
               {...props}
               onViewChange={onViewChange}
               onArchiveFinished={onArchiveFinished}
+              onMarkAllRead={onMarkAllRead}
               onRename={onRename}
             />
           }
@@ -66,7 +68,7 @@ function renderOverview(props: Partial<ComponentProps<typeof TasksOverview>> = {
       </Routes>
     </MemoryRouter>
   )
-  return { ...utils, onViewChange, onArchiveFinished, onRename }
+  return { ...utils, onViewChange, onArchiveFinished, onMarkAllRead, onRename }
 }
 
 const location = () => screen.getByTestId('location').textContent
@@ -461,6 +463,7 @@ describe('TasksOverview — usage cells', () => {
               view="active"
               onViewChange={vi.fn()}
               onArchiveFinished={vi.fn()}
+              onMarkAllRead={vi.fn()}
               onRename={vi.fn()}
               now={NOW}
             />
@@ -531,6 +534,46 @@ describe('TasksOverview — header', () => {
     // Archived view → the sweep acts on the other tab; offering it here would be misleading.
     renderOverview({ runs: [run({ status: 'done' })], view: 'archived' })
     expect(screen.queryByRole('button', { name: /Archive finished/ })).toBeNull()
+  })
+
+  // Read/unread (#unread-done-items). The rule itself is table-tested in lib/read-state.test.ts;
+  // what these cover is the PAINT — that the table actually wears the marker the rule decides,
+  // and that the sweep control is offered exactly when there is unread history to sweep.
+  it('marks an unread done row with a violet dot and leaves read history unmarked', () => {
+    const FINISHED = ago(60_000)
+    renderOverview({
+      runs: [
+        run({ id: 'unread', status: 'done', finishedAt: FINISHED }),
+        run({ id: 'read', status: 'done', finishedAt: FINISHED, seenAt: ago(30_000) }),
+        // Cancelled is never unread — you stopped it yourself.
+        run({ id: 'cancelled', status: 'cancelled', finishedAt: FINISHED }),
+      ],
+    })
+    // Keyed on the aria-label, not on the violet tone alone: the attention pill's OWN dot is
+    // violet for the live states (running/waiting/review), so a tone-only selector would be
+    // matching two different signals and would quietly stop meaning what it says.
+    const unreadDot = (id: string) =>
+      tableRow(id)?.querySelector('[data-slot="status-dot"][aria-label="unread"]')
+    expect(unreadDot('unread')).not.toBeNull()
+    expect(unreadDot('unread')?.getAttribute('data-tone')).toBe('violet')
+    expect(unreadDot('read')).toBeNull()
+    expect(unreadDot('cancelled')).toBeNull()
+  })
+
+  it('offers Mark all read only while something is unread, and calls back on click', () => {
+    const FINISHED = ago(60_000)
+    const { onMarkAllRead, unmount } = renderOverview({
+      runs: [run({ status: 'done', finishedAt: FINISHED })],
+    })
+    fireEvent.click(screen.getByRole('button', { name: /Mark all read/ }))
+    expect(onMarkAllRead).toHaveBeenCalledTimes(1)
+    unmount()
+
+    // Everything already seen → nothing left to sweep, so no control.
+    renderOverview({
+      runs: [run({ status: 'done', finishedAt: FINISHED, seenAt: ago(30_000) })],
+    })
+    expect(screen.queryByRole('button', { name: /Mark all read/ })).toBeNull()
   })
 
   it('filters by title, branch and workflow through the search box', () => {

@@ -1,5 +1,5 @@
 import { MessageSquareTextIcon, SearchXIcon } from 'lucide-react'
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useLocation, useParams } from 'react-router'
 
 import { Link } from '@/lib/project-router'
@@ -7,6 +7,7 @@ import { Link } from '@/lib/project-router'
 import { ApiError } from '@/api/client'
 import {
   useEditQueuedMessage,
+  useMarkRunSeen,
   usePatchRun,
   useRemoveQueuedMessage,
   useRun,
@@ -21,6 +22,7 @@ import { Composer } from '@/components/composer/composer'
 import { StatusDot } from '@/components/status-dot'
 import { Button } from '@/components/ui/button'
 import { useKeyboardInsetVar } from '@/lib/keyboard-inset'
+import { isUnread } from '@/lib/read-state'
 import { taskIssueUrl, taskPrUrl } from '@/lib/tasks-table'
 import { cn, isHttpUrl } from '@/lib/utils'
 
@@ -74,6 +76,25 @@ export function TaskThreadRoute() {
     () => reduceThread(events, { activeTurn: runStatus === 'running' }),
     [events, runStatus],
   )
+
+  // Read receipt (#unread-done-items): opening a finished task's thread marks it read — the same
+  // "opening the mail clears the unread dot" move. Gated on `isUnread` so it fires only for a
+  // genuinely-unread done item, and keyed on the record's read-relevant fields so it converges:
+  // the optimistic `seenAt` flips `isUnread` false and the effect does not re-fire. A run that
+  // later resumes and re-finishes (its `finishedAt` moves past the receipt) marks read again.
+  const { mutate: markRunSeen } = useMarkRunSeen()
+  useEffect(() => {
+    if (run.data && isUnread(run.data)) markRunSeen(run.data.id)
+  }, [
+    markRunSeen,
+    run.data?.id,
+    run.data?.status,
+    run.data?.finishedAt,
+    run.data?.seenAt,
+    // `isUnread` reads `archived` too, so it belongs here: un-archiving an open thread makes the
+    // run unread again, and without this dep the effect would never fire to clear it.
+    run.data?.archived,
+  ])
   // The two feeds can drift: a record update lost on the workspace stream leaves the thread
   // showing Working… over a "run finished" transcript. The transcript is live here, so it
   // arbitrates — a session end with no session after it refetches a record still claiming one.
