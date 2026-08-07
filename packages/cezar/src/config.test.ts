@@ -102,6 +102,59 @@ describe('loadConfig systemPrompt', () => {
     });
   });
 
+  /** `forge?` (repo-config-driven forge recognition): the only way to declare a self-hosted
+   *  forge cezar cannot discover from the remote alone (git remote / API URL reachable from the
+   *  cezar process / web URL for a human are three independent addresses). Absent = today's
+   *  behavior unchanged (host-table recognition only); a bad value degrades per-key like
+   *  `systemPrompt`/`defaultModels` above. */
+  describe('forge', () => {
+    it('is undefined when no config file exists (zero-config default)', async () => {
+      const config = await loadConfig(repoRoot);
+      expect(config.forge).toBeUndefined();
+    });
+
+    it('round-trips a valid forgejo declaration', async () => {
+      write({ forge: { kind: 'forgejo', apiUrl: 'http://forgejo:3000', webUrl: 'http://q7010-dev:8929' } });
+      const config = await loadConfig(repoRoot);
+      expect(config.forge).toEqual({
+        kind: 'forgejo',
+        apiUrl: 'http://forgejo:3000',
+        webUrl: 'http://q7010-dev:8929',
+      });
+    });
+
+    it('round-trips a valid github declaration', async () => {
+      write({ forge: { kind: 'github', apiUrl: 'https://api.github.com', webUrl: 'https://github.com' } });
+      const config = await loadConfig(repoRoot);
+      expect(config.forge).toEqual({
+        kind: 'github',
+        apiUrl: 'https://api.github.com',
+        webUrl: 'https://github.com',
+      });
+    });
+
+    it('degrades a wrong-shaped value to unset per-key, keeping the rest', async () => {
+      write({ forge: 'yes', maxParallel: 6 });
+      const config = await loadConfig(repoRoot);
+      expect(config.forge).toBeUndefined();
+      expect(config.maxParallel).toBe(6);
+    });
+
+    it('degrades an invalid apiUrl to unset per-key, keeping the rest', async () => {
+      write({ forge: { kind: 'forgejo', apiUrl: 'not a url', webUrl: 'http://q7010-dev:8929' }, maxParallel: 5 });
+      const config = await loadConfig(repoRoot);
+      expect(config.forge).toBeUndefined();
+      expect(config.maxParallel).toBe(5);
+    });
+
+    it('degrades an unknown kind to unset per-key, keeping the rest', async () => {
+      write({ forge: { kind: 'gitlab', apiUrl: 'http://forgejo:3000', webUrl: 'http://q7010-dev:8929' }, maxParallel: 7 });
+      const config = await loadConfig(repoRoot);
+      expect(config.forge).toBeUndefined();
+      expect(config.maxParallel).toBe(7);
+    });
+  });
+
   describe('modelsLocked', () => {
     it('is optional and preserves only boolean values', async () => {
       expect((await loadConfig(repoRoot)).modelsLocked).toBeUndefined();

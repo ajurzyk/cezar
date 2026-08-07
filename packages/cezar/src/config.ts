@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
+import { FORGE_KINDS } from './server/forge/types.ts';
 import { loadWorkspaceConfig, type WorkspaceConfig } from './workspace/config.ts';
 
 /**
@@ -103,6 +104,29 @@ const configSchema = z.object({
    * false preserves the ordinary per-runner model selector.
    */
   modelsLocked: z.boolean().optional().catch(undefined),
+  /**
+   * A self-hosted forge (Forgejo, GitLab, …) the remote host table can't reveal. Tension with the
+   * "Zero config" rule in AGENTS.md is deliberate, not an exception to it: an absent key is
+   * EXACTLY today's behavior (GitHub recognized from the host table, every other remote → no
+   * forge, the cockpit degrades quietly) — this key is not a requirement, and setting it never
+   * replaces a working default. It is the only way to supply data that genuinely cannot be
+   * discovered: one self-hosted forge has three independent addresses (the git remote itself, the
+   * REST API as reachable from the cezar process — e.g. a docker-network hostname — and the web
+   * link base for a human), and none of them can be derived from either of the others, so "discover
+   * it, or default it" has nothing to discover from. See `ForgeSettings` in
+   * `server/forge/types.ts` for the canonical shape this schema mirrors — call sites that pass
+   * `config.forge` into `resolveForge` only compile because the two stay assignable.
+   * `.optional().catch(undefined)` keeps the key additive-safe like `systemPrompt`/`defaultModels`
+   * above: a malformed value degrades this one key to unset, never the rest of the config.
+   */
+  forge: z
+    .object({
+      kind: z.enum(FORGE_KINDS),
+      apiUrl: z.string().url(),
+      webUrl: z.string().url(),
+    })
+    .optional()
+    .catch(undefined),
 });
 
 export type CezConfig = z.infer<typeof configSchema>;

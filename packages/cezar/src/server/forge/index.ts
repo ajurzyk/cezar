@@ -1,13 +1,16 @@
 import type { RepoInfo } from '../git.ts';
 import { createGithubDriver } from './github.ts';
-import type { ForgeDriver, ForgeKind } from './types.ts';
+import type { ForgeDriver, ForgeKind, ForgeSettings } from './types.ts';
 
 /**
  * Forge resolution (cockpit-ui redesign spec §"Forge-driver seam"): map the
- * repo's origin remote to a driver — github.com → the GitHub driver, anything
- * else (GitLab, self-hosted, no remote, not a repo) → null. The health route
- * serializes the result as `forge: {kind, available, reason?} | null`; a null
- * forge means plain-git features only (diffs, commit, push, branches).
+ * repo's origin remote to a driver — recognized either from the host table
+ * (github.com → GitHub) or from a repo's own `.ai/cezar/config.json` `forge`
+ * key (self-hosted forges the host table can't reveal); the config wins when
+ * both apply. Anything else (GitLab, self-hosted with no config, no remote,
+ * not a repo) → null. The health route serializes the result as
+ * `forge: {kind, available, reason?} | null`; a null forge means plain-git
+ * features only (diffs, commit, push, branches).
  */
 
 export interface ParsedRemote {
@@ -52,22 +55,51 @@ const FORGE_HOSTS: Record<string, ForgeKind> = { 'github.com': 'github' };
  * Which forge a remote URL belongs to, without building a driver (#698): the
  * registry's per-project probe classifies each root from its remote alone —
  * plain string parsing, no `gh` shell-out — so the sidebar can gate each
- * project's GitHub tab on the project's own remote.
+ * project's GitHub tab on the project's own remote. `forge`, when given, is
+ * the repo's own `.ai/cezar/config.json` declaration and wins over the host
+ * table (it is the only way to name a self-hosted forge).
+ *
+ * A remote that doesn't parse to `{host, owner, repo}` stays `null` even with
+ * a config present: `parseRemote` is the only source of `owner`/`repo`, so
+ * `resolveForge` could never build a driver for it anyway — this probe must
+ * not claim a forge exists that the resolver can't act on.
  */
-export function forgeKindOfRemote(remote: string | undefined): ForgeKind | null {
+export function forgeKindOfRemote(remote: string | undefined, forge?: ForgeSettings): ForgeKind | null {
   const parsed = remote ? parseRemote(remote) : null;
-  return parsed ? (FORGE_HOSTS[parsed.host] ?? null) : null;
+  if (!parsed) return null;
+  return forge?.kind ?? FORGE_HOSTS[parsed.host] ?? null;
 }
 
-/** Remote host → driver | null. GitLab lands here later as one more case. */
-export function resolveForge(repoInfo: RepoInfo | null): ForgeDriver | null {
+/** Remote host (or a repo-config `ForgeSettings` override) → driver | null. GitLab lands here
+ *  later as one more host-table case. */
+export function resolveForge(repoInfo: RepoInfo | null, forge?: ForgeSettings): ForgeDriver | null {
   if (!repoInfo?.remote) return null;
   const parsed = parseRemote(repoInfo.remote);
   if (!parsed) return null;
-  if (FORGE_HOSTS[parsed.host] === 'github') {
+  const kind = forge?.kind ?? FORGE_HOSTS[parsed.host] ?? null;
+  if (kind === 'github') {
+    // `apiUrl`/`webUrl` are unused for `kind: 'github'` here: the GitHub driver speaks through
+    // `gh` and its `viewUrl` hardcodes the `https://github.com/` base (github.ts), so a repo
+    // config declaring `kind: 'github'` on a self-hosted host still produces github.com links.
+    // That is a driver limit, not this function's — parameterizing the driver's host is future
+    // work, not this recognition step.
     return createGithubDriver(repoInfo.root, { owner: parsed.owner, repo: parsed.repo });
+  }
+  if (kind === 'forgejo') {
+    // Recognition only: no Forgejo driver exists yet. `forge.apiUrl`/`forge.webUrl` are exactly
+    // what a future driver would consume — deliberately unread here. No stub, no throw: a
+    // consumer sees the same `null` it would for any other forge with no driver.
+    return null;
   }
   return null;
 }
 
-export type { ForgeDriver, ForgeAvailability, ForgeItem, ForgeKind, ForgePrStatus, ForgeRefKind } from './types.ts';
+export type {
+  ForgeDriver,
+  ForgeAvailability,
+  ForgeItem,
+  ForgeKind,
+  ForgePrStatus,
+  ForgeRefKind,
+  ForgeSettings,
+} from './types.ts';

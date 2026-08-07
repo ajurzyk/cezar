@@ -1482,7 +1482,10 @@ export function createApp(deps: ServerDeps) {
     ]);
     // Additive fields only below — the pre-forge shape is the most
     // externally-depended-on JSON in the app (BACKWARD_COMPATIBILITY.md §2).
-    const forge = resolveForge(repo);
+    // `config.forge`, when the repo declares one, wins over the host table — but for
+    // `kind: 'forgejo'` `resolveForge` still returns null (no driver yet), so this route keeps
+    // sending `forge: null` unchanged until a driver exists.
+    const forge = resolveForge(repo, config.forge);
     const caps = capabilities();
     return {
       version,
@@ -3204,7 +3207,7 @@ export function createApp(deps: ServerDeps) {
   const automationsRoutes = new Hono<ProjectApiEnv>()
     .get('/automations', async (c) => {
       const { root, automationStore } = c.get('project');
-      const forge = resolveForge(await getRepoInfo(root));
+      const forge = resolveForge(await getRepoInfo(root), (await loadConfig(root)).forge);
       // Annotated, so the two branches are ONE shape rather than a union of two: the fallback
       // literal always carries `reason`, the cached answer only sometimes does, and the route
       // type is what `contract/src/automations.ts` has to describe.
@@ -4739,7 +4742,7 @@ export function createApp(deps: ServerDeps) {
       async (c) => {
         const { root: repoRoot } = c.get('project');
         const parsed = { data: c.req.valid('param') };
-        const forge = resolveForge(await getRepoInfo(repoRoot));
+        const forge = resolveForge(await getRepoInfo(repoRoot), (await loadConfig(repoRoot)).forge);
         if (!forge?.prMergeState) return c.json({ available: false, reason: 'GitHub merge state is unavailable' });
         return c.json(await forge.prMergeState(parsed.data.number, { refresh: c.req.valid('query').refresh === '1' }));
       },
@@ -4753,7 +4756,7 @@ export function createApp(deps: ServerDeps) {
         const { root: repoRoot } = c.get('project');
         const parsedNumber = { data: c.req.valid('param') };
         const body = { data: c.req.valid('json') };
-        const forge = resolveForge(await getRepoInfo(repoRoot));
+        const forge = resolveForge(await getRepoInfo(repoRoot), (await loadConfig(repoRoot)).forge);
         if (!forge?.mergePR) return c.json({ error: 'GitHub merge is unavailable' }, 409);
         const result = await forge.mergePR(parsedNumber.data.number, body.data);
         if (result.merged) return c.json(result);

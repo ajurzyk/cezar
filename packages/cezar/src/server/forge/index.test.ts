@@ -1,10 +1,24 @@
 import { describe, expect, it } from 'vitest';
 import type { RepoInfo } from '../git.ts';
 import { forgeKindOfRemote, parseRemote, resolveForge } from './index.ts';
+import type { ForgeSettings } from './types.ts';
 
 /** Forge resolution (spec §"Forge-driver seam"): remote host → driver | null. */
 
 const info = (remote?: string): RepoInfo => ({ root: '/repo', branch: 'main', remote });
+
+/** A repo-config-declared self-hosted forge (repo-config-driven recognition) — wins over the host
+ *  table when present. */
+const forgejoSettings: ForgeSettings = {
+  kind: 'forgejo',
+  apiUrl: 'http://forgejo:3000',
+  webUrl: 'http://q7010-dev:8929',
+};
+const githubSettings: ForgeSettings = {
+  kind: 'github',
+  apiUrl: 'https://api.github.com',
+  webUrl: 'https://github.com',
+};
 
 describe('parseRemote', () => {
   it.each([
@@ -45,6 +59,30 @@ describe('forgeKindOfRemote', () => {
   ])('classifies %s as %s', (remote, expected) => {
     expect(forgeKindOfRemote(remote)).toBe(expected);
   });
+
+  it('a repo-config forge wins over the host table for a self-hosted remote', () => {
+    expect(forgeKindOfRemote('ssh://git@q7010-dev:2222/ajr/orakton.git', forgejoSettings)).toBe('forgejo');
+  });
+
+  it('a repo-config forge wins over the host table even on a github.com remote', () => {
+    expect(forgeKindOfRemote('https://github.com/acme/demo.git', forgejoSettings)).toBe('forgejo');
+  });
+
+  it('a github-kind repo config on a github.com remote still classifies as github', () => {
+    expect(forgeKindOfRemote('https://github.com/acme/demo.git', githubSettings)).toBe('github');
+  });
+
+  it('a github-kind repo config on a self-hosted remote still wins (config beats host)', () => {
+    expect(forgeKindOfRemote('ssh://git@q7010-dev:2222/ajr/orakton.git', githubSettings)).toBe('github');
+  });
+
+  it('an undefined remote stays null even with a repo config (nothing to parse owner/repo from)', () => {
+    expect(forgeKindOfRemote(undefined, forgejoSettings)).toBeNull();
+  });
+
+  it('a local-path remote stays null even with a repo config (unparseable — same reason)', () => {
+    expect(forgeKindOfRemote('/srv/git/demo.git', forgejoSettings)).toBeNull();
+  });
 });
 
 describe('resolveForge', () => {
@@ -74,6 +112,24 @@ describe('resolveForge', () => {
 
   it('returns null for a local-path remote', () => {
     expect(resolveForge(info('/srv/git/demo.git'))).toBeNull();
+  });
+
+  it('returns null for a repo-config forgejo declaration on a self-hosted remote (driver lands separately)', () => {
+    expect(resolveForge(info('ssh://git@q7010-dev:2222/ajr/orakton.git'), forgejoSettings)).toBeNull();
+  });
+
+  it('a repo-config forgejo declaration also wins on a github.com remote, deliberately dropping the GitHub driver', () => {
+    expect(resolveForge(info('https://github.com/acme/demo.git'), forgejoSettings)).toBeNull();
+  });
+
+  it('a repo-config github declaration builds the GitHub driver from a self-hosted remote', () => {
+    // owner/repo still come from parseRemote — viewUrl still hardcodes github.com (known limit,
+    // see the comment on the 'github' branch in resolveForge), so it is NOT asserted here.
+    expect(resolveForge(info('ssh://git@q7010-dev:2222/ajr/orakton.git'), githubSettings)?.kind).toBe('github');
+  });
+
+  it('a repo-config github declaration stays null without a parseable remote', () => {
+    expect(resolveForge(info(undefined), githubSettings)).toBeNull();
   });
 });
 
