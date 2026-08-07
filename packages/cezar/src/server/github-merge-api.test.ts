@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Hono } from 'hono';
@@ -75,6 +75,51 @@ describe('the GitHub merge API', () => {
     });
     expect(stale.status).toBe(409);
     expect(await stale.json()).toMatchObject({ code: 'stale-head', current: { number: 128 } });
+  });
+
+  it('resolves the driver from repo config when the remote is not a github.com host', async () => {
+    // #698: `resolveForge(repoInfo, config.forge)` — a repo config declaring `kind: 'github'`
+    // must make the PR merge routes work on a self-hosted remote, exactly like the github.com
+    // fixture above.
+    const selfHostedRoot = mkdtempSync(join(tmpdir(), 'cez-ghmerge-selfhosted-'));
+    mkdirSync(join(selfHostedRoot, '.ai/cezar'), { recursive: true });
+    execFileSync('git', ['init', '-b', 'main'], { cwd: selfHostedRoot });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: selfHostedRoot });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: selfHostedRoot });
+    execFileSync('git', ['commit', '--allow-empty', '-m', 'init'], { cwd: selfHostedRoot });
+    execFileSync('git', ['remote', 'add', 'origin', 'ssh://git@forge.internal:2222/acme/demo.git'], { cwd: selfHostedRoot });
+    writeFileSync(
+      join(selfHostedRoot, '.ai/cezar', 'config.json'),
+      JSON.stringify({ forge: { kind: 'github', apiUrl: 'https://api.github.com', webUrl: 'https://github.com' } }),
+      'utf8',
+    );
+    const selfHostedStore = RunStore.open(join(selfHostedRoot, '.ai/cezar'));
+    const selfHostedApp = createApp({
+      repoRoot: selfHostedRoot,
+      store: selfHostedStore,
+      manager: {} as RunManager,
+      version: '0.0.0-test',
+    });
+    try {
+      const stateResponse = await apiRequest(selfHostedApp, '/api/v1/github/prs/128/merge-state?refresh=1');
+      expect(stateResponse.status).toBe(200);
+      const state = (await stateResponse.json()) as {
+        available: true;
+        mergeState: { headSha: string };
+      };
+      expect(state.available).toBe(true);
+
+      const mergeResponse = await apiRequest(selfHostedApp, '/api/v1/github/prs/128/merge', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin: 'http://127.0.0.1:4321' },
+        body: JSON.stringify({ method: 'squash', expectedHeadSha: state.mergeState.headSha }),
+      });
+      expect(mergeResponse.status).toBe(200);
+      expect(await mergeResponse.json()).toMatchObject({ merged: true, number: 128, method: 'squash' });
+    } finally {
+      selfHostedStore.flush();
+      rmSync(selfHostedRoot, { recursive: true, force: true });
+    }
   });
 
   it('keeps the existing origin guard in front of the merge mutation', async () => {
