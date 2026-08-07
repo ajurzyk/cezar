@@ -108,8 +108,10 @@ const configSchema = z.object({
    * A self-hosted forge (Forgejo, GitLab, …) the remote host table can't reveal. Tension with the
    * "Zero config" rule in AGENTS.md is deliberate, not an exception to it: an absent key is
    * EXACTLY today's behavior (GitHub recognized from the host table, every other remote → no
-   * forge, the cockpit degrades quietly) — this key is not a requirement, and setting it never
-   * replaces a working default. It is the only way to supply data that genuinely cannot be
+   * forge, the cockpit degrades quietly) — this key is not a requirement. But once set it wins over
+   * the host table outright, even on a remote the table already recognizes: a github.com repo paired
+   * with `kind: 'forgejo'` loses the working github driver the table would have given it, pinned by
+   * `health-forge.test.ts`. It is the only way to supply data that genuinely cannot be
    * discovered: one self-hosted forge has three independent addresses (the git remote itself, the
    * REST API as reachable from the cezar process — e.g. a docker-network hostname — and the web
    * link base for a human), and none of them can be derived from either of the others, so "discover

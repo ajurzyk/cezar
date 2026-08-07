@@ -578,7 +578,7 @@ never blocks startup):
   "plannerModel": "sonnet",  // model the "Plan first" button uses to draft chains
   "baseBranch": "develop",   // branch worktrees fork from + PRs target (also settable in the Git tab)
   "forge": {                 // optional: declare a self-hosted forge, or override the host table
-    "kind": "forgejo",       // "github" (default: recognized from the github.com host table) · "forgejo"
+    "kind": "forgejo",       // "github" (the host table already recognizes github.com without this block) · "forgejo"
     "apiUrl": "http://forgejo:3000",       // REST API as reachable from the cezar process (e.g. docker network)
     "webUrl": "https://forge.example.com"  // link base for humans; git remote itself may be a third address (ssh)
   }
@@ -588,19 +588,30 @@ never blocks startup):
 The `forge` key currently enables recognition only (`forge: "forgejo"` on
 `GET /api/v1/projects`); the issues/PR tab for Forgejo ships in a later release.
 An explicit `"kind": "github"` here always wins over the host table, even on a
-remote whose host isn't `github.com` — a GitHub Enterprise repo, for example,
-still resolves to the `github` driver, which today speaks through `gh` and
-always links to `github.com`; `apiUrl`/`webUrl` are ignored for `kind: "github"`.
+remote whose host isn't `github.com` — but that override is only useful when
+the remote host actually is github.com. On any other host it is not a working
+GitHub Enterprise integration: the driver's links (`packages/cezar/src/server/forge/github.ts`)
+hardcode `https://github.com/<owner>/<repo>`, so a GitHub Enterprise remote
+gets links built from its own `owner/repo` and pointed at github.com anyway —
+someone else's repository, or none at all. Parametrizing the driver's own host
+is a later stage; `apiUrl`/`webUrl` are ignored for `kind: "github"` regardless.
 All three keys — `kind`, `apiUrl`, `webUrl` — are required together: an object
 missing any one of them, or carrying an invalid value (unknown `kind`, or a
 URL that isn't `http(s)`), degrades the *entire* `forge` key to unset, same as
 leaving it out. For `kind: "github"` both `apiUrl` and `webUrl` are still
 required by the schema even though the github driver doesn't read them today.
+The `forge` key is read only from the repo's own `.ai/cezar/config.json` — it
+has no `~/.cezar/config.json` machine-wide counterpart (unlike `modelsLocked`
+below), so it must be repeated in every registered repo pointing at the same
+forge instance. To confirm a `forge` key was accepted, check that project's
+entry on `GET /api/v1/projects`: `forge: "forgejo"` (or `"github"`) means it
+parsed; a missing field means it degraded silently — recheck `kind`, `apiUrl`
+and `webUrl` for typos.
 Known limitation: the automations tab's own availability check honors
 `config.forge`, but the automation poller and its manual "check now" action
 still hardcode `host === 'github.com'` — a project whose config declares
-`kind: "github"` on a self-hosted remote shows `available: true` there without
-the poller ever starting or the manual check succeeding.
+`kind: "github"` on a self-hosted remote shows `available: true` there, yet
+the poller never starts its schedule and the manual "check now" action fails.
 
 Put the same `"modelsLocked": true` key in `~/.cezar/config.json` to apply it
 to every registered project. When the key is absent or `false` in both config
