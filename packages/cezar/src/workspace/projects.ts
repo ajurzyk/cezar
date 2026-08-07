@@ -160,10 +160,13 @@ export interface ProjectListEntry extends WorkspaceProject {
   /** Current branch when cheaply available (omitted e.g. on an unborn HEAD). */
   branch?: string;
   /** Which forge the root's remote belongs to (#698) — classified from the remote URL against
-   *  the host table, or from the root's own `.ai/cezar/config.json` `forge` key when the host
-   *  table can't reveal it (e.g. a self-hosted Forgejo); no `gh` probe either way. Omitted when
-   *  neither source names a forge. The sidebar gates each project group's GitHub tab on this,
-   *  instead of on the boot folder's health-level forge answer. */
+   *  the host table, or from the root's own `.ai/cezar/config.json` `forge` key, which WINS over
+   *  the host table whenever it's set (not merely a fallback for a host the table can't reveal):
+   *  a `github.com` remote paired with a repo config `kind: 'forgejo'` classifies as `'forgejo'`.
+   *  The config's `forge` key is skipped when the remote doesn't parse into `{host, owner, repo}`,
+   *  even though it's declared. No `gh` probe either way. Omitted when neither source names a
+   *  forge. The sidebar gates each project group's GitHub tab on this, instead of on the boot
+   *  folder's health-level forge answer. */
   forge?: ForgeKind;
 }
 

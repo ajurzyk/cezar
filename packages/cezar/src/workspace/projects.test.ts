@@ -184,11 +184,11 @@ describe('workspace projects', () => {
 
     it('classifies a self-hosted remote as forgejo when the repo config declares it', async () => {
       const root = makeRepo('forgejo-repo');
-      execFileSync('git', ['remote', 'add', 'origin', 'ssh://git@q7010-dev:2222/ajr/orakton.git'], { cwd: root });
+      execFileSync('git', ['remote', 'add', 'origin', 'ssh://git@forge.internal:2222/acme/demo.git'], { cwd: root });
       mkdirSync(join(root, '.ai/cezar'), { recursive: true });
       writeFileSync(
         join(root, '.ai/cezar', 'config.json'),
-        JSON.stringify({ forge: { kind: 'forgejo', apiUrl: 'http://forgejo:3000', webUrl: 'http://q7010-dev:8929' } }),
+        JSON.stringify({ forge: { kind: 'forgejo', apiUrl: 'http://forgejo:3000', webUrl: 'http://forge.internal:8929' } }),
         'utf8',
       );
       await registerProject(root);

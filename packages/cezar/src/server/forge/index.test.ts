@@ -12,7 +12,7 @@ const info = (remote?: string): RepoInfo => ({ root: '/repo', branch: 'main', re
 const forgejoSettings: ForgeSettings = {
   kind: 'forgejo',
   apiUrl: 'http://forgejo:3000',
-  webUrl: 'http://q7010-dev:8929',
+  webUrl: 'http://forge.internal:8929',
 };
 const githubSettings: ForgeSettings = {
   kind: 'github',
@@ -61,7 +61,7 @@ describe('forgeKindOfRemote', () => {
   });
 
   it('a repo-config forge wins over the host table for a self-hosted remote', () => {
-    expect(forgeKindOfRemote('ssh://git@q7010-dev:2222/ajr/orakton.git', forgejoSettings)).toBe('forgejo');
+    expect(forgeKindOfRemote('ssh://git@forge.internal:2222/acme/demo.git', forgejoSettings)).toBe('forgejo');
   });
 
   it('a repo-config forge wins over the host table even on a github.com remote', () => {
@@ -73,7 +73,7 @@ describe('forgeKindOfRemote', () => {
   });
 
   it('a github-kind repo config on a self-hosted remote still wins (config beats host)', () => {
-    expect(forgeKindOfRemote('ssh://git@q7010-dev:2222/ajr/orakton.git', githubSettings)).toBe('github');
+    expect(forgeKindOfRemote('ssh://git@forge.internal:2222/acme/demo.git', githubSettings)).toBe('github');
   });
 
   it('an undefined remote stays null even with a repo config (nothing to parse owner/repo from)', () => {
@@ -115,7 +115,7 @@ describe('resolveForge', () => {
   });
 
   it('returns null for a repo-config forgejo declaration on a self-hosted remote (driver lands separately)', () => {
-    expect(resolveForge(info('ssh://git@q7010-dev:2222/ajr/orakton.git'), forgejoSettings)).toBeNull();
+    expect(resolveForge(info('ssh://git@forge.internal:2222/acme/demo.git'), forgejoSettings)).toBeNull();
   });
 
   it('a repo-config forgejo declaration also wins on a github.com remote, deliberately dropping the GitHub driver', () => {
@@ -125,7 +125,7 @@ describe('resolveForge', () => {
   it('a repo-config github declaration builds the GitHub driver from a self-hosted remote', () => {
     // owner/repo still come from parseRemote — viewUrl still hardcodes github.com (known limit,
     // see the comment on the 'github' branch in resolveForge), so it is NOT asserted here.
-    expect(resolveForge(info('ssh://git@q7010-dev:2222/ajr/orakton.git'), githubSettings)?.kind).toBe('github');
+    expect(resolveForge(info('ssh://git@forge.internal:2222/acme/demo.git'), githubSettings)?.kind).toBe('github');
   });
 
   it('a repo-config github declaration stays null without a parseable remote', () => {

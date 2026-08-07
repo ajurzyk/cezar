@@ -114,12 +114,12 @@ describe('loadConfig systemPrompt', () => {
     });
 
     it('round-trips a valid forgejo declaration', async () => {
-      write({ forge: { kind: 'forgejo', apiUrl: 'http://forgejo:3000', webUrl: 'http://q7010-dev:8929' } });
+      write({ forge: { kind: 'forgejo', apiUrl: 'http://forgejo:3000', webUrl: 'http://forge.internal:8929' } });
       const config = await loadConfig(repoRoot);
       expect(config.forge).toEqual({
         kind: 'forgejo',
         apiUrl: 'http://forgejo:3000',
-        webUrl: 'http://q7010-dev:8929',
+        webUrl: 'http://forge.internal:8929',
       });
     });
 
@@ -141,22 +141,22 @@ describe('loadConfig systemPrompt', () => {
     });
 
     it('degrades an invalid apiUrl to unset per-key, keeping the rest', async () => {
-      write({ forge: { kind: 'forgejo', apiUrl: 'not a url', webUrl: 'http://q7010-dev:8929' }, maxParallel: 5 });
+      write({ forge: { kind: 'forgejo', apiUrl: 'not a url', webUrl: 'http://forge.internal:8929' }, maxParallel: 5 });
       const config = await loadConfig(repoRoot);
       expect(config.forge).toBeUndefined();
       expect(config.maxParallel).toBe(5);
     });
 
     it('degrades an unknown kind to unset per-key, keeping the rest', async () => {
-      write({ forge: { kind: 'gitlab', apiUrl: 'http://forgejo:3000', webUrl: 'http://q7010-dev:8929' }, maxParallel: 7 });
+      write({ forge: { kind: 'gitlab', apiUrl: 'http://forgejo:3000', webUrl: 'http://forge.internal:8929' }, maxParallel: 7 });
       const config = await loadConfig(repoRoot);
       expect(config.forge).toBeUndefined();
       expect(config.maxParallel).toBe(7);
     });
 
-    /** `apiUrl`/`webUrl` are typed `z.string().url()`, which accepts any URL scheme —
-     *  `javascript:`, `file:`, `data:` included. Each degrades `forge` to unset per-key,
-     *  same as any other malformed value, keeping the rest of the config intact. */
+    /** `apiUrl`/`webUrl` are `z.string().url()` refined to require an `http(s)` scheme —
+     *  `javascript:`, `file:`, `data:` are all rejected. Each degrades `forge` to unset
+     *  per-key, same as any other malformed value, keeping the rest of the config intact. */
     it.each(['javascript:alert(1)', 'file:///etc/passwd', 'data:text/html,hi'])(
       'degrades a non-http(s) apiUrl (%s) to unset per-key, keeping the rest',
       async (badUrl) => {

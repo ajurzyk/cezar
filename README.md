@@ -591,6 +591,16 @@ An explicit `"kind": "github"` here always wins over the host table, even on a
 remote whose host isn't `github.com` — a GitHub Enterprise repo, for example,
 still resolves to the `github` driver, which today speaks through `gh` and
 always links to `github.com`; `apiUrl`/`webUrl` are ignored for `kind: "github"`.
+All three keys — `kind`, `apiUrl`, `webUrl` — are required together: an object
+missing any one of them, or carrying an invalid value (unknown `kind`, or a
+URL that isn't `http(s)`), degrades the *entire* `forge` key to unset, same as
+leaving it out. For `kind: "github"` both `apiUrl` and `webUrl` are still
+required by the schema even though the github driver doesn't read them today.
+Known limitation: the automations tab's own availability check honors
+`config.forge`, but the automation poller and its manual "check now" action
+still hardcode `host === 'github.com'` — a project whose config declares
+`kind: "github"` on a self-hosted remote shows `available: true` there without
+the poller ever starting or the manual check succeeding.
 
 Put the same `"modelsLocked": true` key in `~/.cezar/config.json` to apply it
 to every registered project. When the key is absent or `false` in both config
