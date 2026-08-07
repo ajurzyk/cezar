@@ -159,10 +159,11 @@ export interface ProjectListEntry extends WorkspaceProject {
   status: ProjectStatus;
   /** Current branch when cheaply available (omitted e.g. on an unborn HEAD). */
   branch?: string;
-  /** Which forge the root's remote belongs to (#698) — classified from the
-   *  remote URL alone, no `gh` probe. Omitted when there is no forge remote.
-   *  The sidebar gates each project group's GitHub tab on this, instead of on
-   *  the boot folder's health-level forge answer. */
+  /** Which forge the root's remote belongs to (#698) — classified from the remote URL against
+   *  the host table, or from the root's own `.ai/cezar/config.json` `forge` key when the host
+   *  table can't reveal it (e.g. a self-hosted Forgejo); no `gh` probe either way. Omitted when
+   *  neither source names a forge. The sidebar gates each project group's GitHub tab on this,
+   *  instead of on the boot folder's health-level forge answer. */
   forge?: ForgeKind;
 }
 
@@ -201,7 +202,8 @@ async function computeProbe(root: string): Promise<RootProbe> {
   // recognizable ONLY from an explicit repo declaration, never from the
   // remote URL alone. `loadConfig` (not a raw key read) so a malformed value
   // degrades per-key through the same zod boundary every other config read
-  // uses, at the cost of one extra small JSON read per probe — coalesced by
+  // uses, at the cost of two extra small JSON reads per probe (the repo config
+  // and `loadWorkspaceConfig`'s agent defaults it folds in) — coalesced by
   // the TTL cache below like everything else `computeProbe` does.
   const [info, config] = await Promise.all([getRepoInfo(root), loadConfig(root)]);
   const forge = forgeKindOfRemote(info?.remote, config.forge);

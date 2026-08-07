@@ -52,6 +52,17 @@ export function parseRemote(remote: string): ParsedRemote | null {
 const FORGE_HOSTS: Record<string, ForgeKind> = { 'github.com': 'github' };
 
 /**
+ * The one precedence rule both `forgeKindOfRemote` and `resolveForge` must apply identically: a
+ * repo-config `forge.kind`, when given, wins over the host table (it is the only way to name a
+ * self-hosted forge); otherwise the host table decides; otherwise `null`. Pulled into its own
+ * function rather than left as a repeated expression so the "probe and resolver must agree"
+ * invariant is enforced by the compiler sharing one call site, not just asserted in a comment.
+ */
+function classifyForgeKind(host: string, forge?: ForgeSettings): ForgeKind | null {
+  return forge?.kind ?? FORGE_HOSTS[host] ?? null;
+}
+
+/**
  * Which forge a remote URL belongs to, without building a driver (#698): the
  * registry's per-project probe classifies each root from its remote alone —
  * plain string parsing, no `gh` shell-out — so the sidebar can gate each
@@ -67,7 +78,7 @@ const FORGE_HOSTS: Record<string, ForgeKind> = { 'github.com': 'github' };
 export function forgeKindOfRemote(remote: string | undefined, forge?: ForgeSettings): ForgeKind | null {
   const parsed = remote ? parseRemote(remote) : null;
   if (!parsed) return null;
-  return forge?.kind ?? FORGE_HOSTS[parsed.host] ?? null;
+  return classifyForgeKind(parsed.host, forge);
 }
 
 /** Remote host (or a repo-config `ForgeSettings` override) → driver | null. GitLab lands here
@@ -76,7 +87,7 @@ export function resolveForge(repoInfo: RepoInfo | null, forge?: ForgeSettings): 
   if (!repoInfo?.remote) return null;
   const parsed = parseRemote(repoInfo.remote);
   if (!parsed) return null;
-  const kind = forge?.kind ?? FORGE_HOSTS[parsed.host] ?? null;
+  const kind = classifyForgeKind(parsed.host, forge);
   if (kind === 'github') {
     // `apiUrl`/`webUrl` are unused for `kind: 'github'` here: the GitHub driver speaks through
     // `gh` and its `viewUrl` hardcodes the `https://github.com/` base (github.ts), so a repo

@@ -577,16 +577,20 @@ never blocks startup):
   "modelsLocked": true,      // optional: native per-runner model is fixed/read-only; runner stays selectable
   "plannerModel": "sonnet",  // model the "Plan first" button uses to draft chains
   "baseBranch": "develop",   // branch worktrees fork from + PRs target (also settable in the Git tab)
-  "forge": {                 // optional: declare a self-hosted forge the remote host can't reveal
-    "kind": "forgejo",       // "github" (default via github.com host table) · "forgejo"
-    "apiUrl": "http://forgejo:3000",   // REST API as reachable from the cezar process (e.g. docker network)
-    "webUrl": "http://q7010-dev:8929"  // link base for humans; git remote itself may be a third address (ssh)
+  "forge": {                 // optional: declare a self-hosted forge, or override the host table
+    "kind": "forgejo",       // "github" (default: recognized from the github.com host table) · "forgejo"
+    "apiUrl": "http://forgejo:3000",       // REST API as reachable from the cezar process (e.g. docker network)
+    "webUrl": "https://forge.example.com"  // link base for humans; git remote itself may be a third address (ssh)
   }
 }
 ```
 
 The `forge` key currently enables recognition only (`forge: "forgejo"` on
 `GET /api/v1/projects`); the issues/PR tab for Forgejo ships in a later release.
+An explicit `"kind": "github"` here always wins over the host table, even on a
+remote whose host isn't `github.com` — a GitHub Enterprise repo, for example,
+still resolves to the `github` driver, which today speaks through `gh` and
+always links to `github.com`; `apiUrl`/`webUrl` are ignored for `kind: "github"`.
 
 Put the same `"modelsLocked": true` key in `~/.cezar/config.json` to apply it
 to every registered project. When the key is absent or `false` in both config
