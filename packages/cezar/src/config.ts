@@ -122,8 +122,12 @@ const configSchema = z.object({
   forge: z
     .object({
       kind: z.enum(FORGE_KINDS),
-      apiUrl: z.string().url(),
-      webUrl: z.string().url(),
+      // `.url()` alone accepts any scheme a `new URL()` parses — `javascript:`, `file:`,
+      // `data:` included. Both fields become driver-facing addresses (a REST base and a link
+      // base), so pin them to http/https now rather than let a resource-owned config carry a
+      // scheme no consumer of this key was ever meant to receive.
+      apiUrl: z.string().url().refine((value) => /^https?:\/\//i.test(value)),
+      webUrl: z.string().url().refine((value) => /^https?:\/\//i.test(value)),
     })
     .optional()
     .catch(undefined),

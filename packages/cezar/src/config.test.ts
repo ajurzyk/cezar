@@ -153,6 +153,29 @@ describe('loadConfig systemPrompt', () => {
       expect(config.forge).toBeUndefined();
       expect(config.maxParallel).toBe(7);
     });
+
+    /** `apiUrl`/`webUrl` are typed `z.string().url()`, which accepts any URL scheme —
+     *  `javascript:`, `file:`, `data:` included. Each degrades `forge` to unset per-key,
+     *  same as any other malformed value, keeping the rest of the config intact. */
+    it.each(['javascript:alert(1)', 'file:///etc/passwd', 'data:text/html,hi'])(
+      'degrades a non-http(s) apiUrl (%s) to unset per-key, keeping the rest',
+      async (badUrl) => {
+        write({ forge: { kind: 'forgejo', apiUrl: badUrl, webUrl: 'http://forgejo:3000' }, maxParallel: 5 });
+        const config = await loadConfig(repoRoot);
+        expect(config.forge).toBeUndefined();
+        expect(config.maxParallel).toBe(5);
+      },
+    );
+
+    it.each(['javascript:alert(1)', 'file:///etc/passwd', 'data:text/html,hi'])(
+      'degrades a non-http(s) webUrl (%s) to unset per-key, keeping the rest',
+      async (badUrl) => {
+        write({ forge: { kind: 'forgejo', apiUrl: 'http://forgejo:3000', webUrl: badUrl }, maxParallel: 5 });
+        const config = await loadConfig(repoRoot);
+        expect(config.forge).toBeUndefined();
+        expect(config.maxParallel).toBe(5);
+      },
+    );
   });
 
   describe('modelsLocked', () => {
