@@ -33,8 +33,12 @@ export const projectListEntrySchema = z.object({
   /** Current branch when cheaply available (omitted e.g. on an unborn HEAD). */
   branch: z.string().optional(),
   /** Which forge this project's remote belongs to (#698) — classified server-side from the
-   *  remote URL alone. Gates the project group's GitHub nav item; omitted = no forge remote. */
-  forge: z.literal('github').optional(),
+   *  remote URL alone. Gates the project group's GitHub nav item; omitted = no forge remote.
+   *  `'forgejo'` comes from the repo's own `.ai/cezar/config.json` `forge` key (repo-config-driven
+   *  recognition), never from the host table — additive, a consumer that ignores the field sees no
+   *  change. The list is deliberately literal here (the contract cannot import from the service);
+   *  `contract-parity.workspace.test.ts` catches drift against the service's `FORGE_KINDS`. */
+  forge: z.enum(['github', 'forgejo']).optional(),
   /** Per-project cap on concurrently running tasks (spec 2026-07-22). Omitted = inherit the
    *  workspace `resources.maxParallel`; a number pins this project. */
   maxParallel: z.number().optional(),

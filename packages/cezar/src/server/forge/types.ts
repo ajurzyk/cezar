@@ -9,7 +9,26 @@ import type { RunRecord } from '../../runs/store.ts';
  * driver file behind `resolveForge`, no route or UI changes.
  */
 
-export type ForgeKind = 'github';
+/** The forge kinds `resolveForge` can recognize. The one list on the cezar side of the seam —
+ *  `config.ts` builds its `z.enum` from this, so adding a forge here propagates to the config
+ *  schema in one place. The `packages/contract` copies stay literal (the contract cannot import
+ *  from the service — the dependency direction is the other way); `contract-parity*.test.ts`
+ *  catches drift between the two lists. */
+export const FORGE_KINDS = ['github', 'forgejo'] as const;
+export type ForgeKind = (typeof FORGE_KINDS)[number];
+
+/** Canonical shape of the `forge` key in `.ai/cezar/config.json` (repo-config-driven forge
+ *  recognition): a self-hosted forge has three independent addresses — the git remote, the REST
+ *  API as reachable from the cezar process (e.g. a docker-network hostname), and the web link
+ *  base for a human — and none of them can be derived from the others, which is why
+ *  `apiUrl`/`webUrl` are separate fields rather than one URL. Lives here (not in `config.ts`)
+ *  because `types.ts` is a leaf: its only import (`RunRecord`, line 1) is type-only, so
+ *  `config.ts` can pull `FORGE_KINDS` in without creating an import cycle. */
+export interface ForgeSettings {
+  kind: ForgeKind;
+  apiUrl: string;
+  webUrl: string;
+}
 
 /** Availability probe result — mirrors the tab's quiet degradation contract:
  *  no CLI, no remote, offline all land on `available:false` + a human hint. */
