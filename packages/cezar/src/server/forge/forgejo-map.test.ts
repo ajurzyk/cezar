@@ -231,6 +231,18 @@ describe('mergeMethodsFromRepository', () => {
     expect(result.doFor).toEqual({ rebase: 'rebase' });
   });
 
+  it('resolves the default when allow_rebase maps to "rebase" but the repo default is "rebase-merge"', () => {
+    // Gitea/Forgejo ships with BOTH rebase flags on, so `allow_rebase` wins the else-if and
+    // records doFor.rebase = 'rebase' — which never string-matches a 'rebase-merge' default.
+    // Both spellings mean the same button, so the default must still resolve.
+    const result = mergeMethodsFromRepository(
+      repo({ allow_rebase: true, allow_rebase_explicit: true, default_merge_style: 'rebase-merge' }),
+    );
+    expect(result.methods).toEqual(['rebase']);
+    expect(result.doFor).toEqual({ rebase: 'rebase' });
+    expect(result.defaultMethod).toBe('rebase');
+  });
+
   it('falls back to allow_rebase_explicit ("rebase-merge") only when allow_rebase is false', () => {
     const result = mergeMethodsFromRepository(
       repo({ allow_rebase: false, allow_rebase_explicit: true, default_merge_style: 'rebase-merge' }),

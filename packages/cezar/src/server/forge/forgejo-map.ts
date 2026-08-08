@@ -328,6 +328,14 @@ export function mergeMethodsFromRepository(repo: ForgejoRepository): {
       break;
     }
   }
+  // `allow_rebase` and `allow_rebase_explicit` are two Forgejo spellings of the SAME UI button
+  // ('rebase'), but only the second one records `doFor.rebase = 'rebase-merge'`. When both flags
+  // are set (Gitea's own default) `allow_rebase` wins the else-if above, so a repo whose
+  // `default_merge_style` is the OTHER spelling matches nothing in the loop — even though the
+  // method it names is plainly present. Both spellings therefore resolve to the same method here.
+  if (defaultMethod === null && repo.default_merge_style === 'rebase-merge' && methods.includes('rebase')) {
+    defaultMethod = 'rebase';
+  }
   if (defaultMethod === null && repo.default_merge_style === 'fast-forward-only') {
     defaultMethod = methods[0] ?? null;
   }
