@@ -589,12 +589,13 @@ never blocks startup):
 Declaring `"kind": "forgejo"` now wires up a real REST driver
 (`packages/cezar/src/server/forge/forgejo.ts`, behind `resolveForge`) instead of
 recognition-only. Health and the automations tab's availability check both call
-into it today and report the repo's true reachability. The PR merge-state probe
-and merge route already dispatch through the same driver seam too, but the driver
-fills those two methods in incrementally — until it does, each answers the same
-quiet-degrade shape any undriven forge gets (`available: false` / a 502), never a
-crash. The issues/PR tab's own listing and the PR-diff view are further out still:
-their routes in `server.ts` call the GitHub-only code paths directly and don't go
+into it today and report the repo's true reachability, and so does the PR
+merge-state probe (mergeability, review decision, checks, eligibility). The
+merge route dispatches through the same driver seam too, but the driver fills
+that one method in incrementally — until it does, it answers the same
+quiet-degrade shape any undriven forge gets (a 502), never a crash. The
+issues/PR tab's own listing and the PR-diff view are further out still: their
+routes in `server.ts` call the GitHub-only code paths directly and don't go
 through `resolveForge` at all yet, so a Forgejo repo sees no listing there
 regardless of what the driver itself can already do. See the automations caveat
 below for the one other known gap.

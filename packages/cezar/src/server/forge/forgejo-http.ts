@@ -26,6 +26,12 @@ export interface ForgejoHttpDeps {
    *  every request" — a token set/cleared mid-test-run must be observed immediately, not cached at
    *  construction time. */
   token?: string | null;
+  /** Injected delay, defaulted (in `forgejo.ts`) to a real `setTimeout`-backed promise. Not used by
+   *  this module itself — `createForgejoHttp` never sleeps — but threaded through the same `deps`
+   *  bag `createForgejoDriver` already accepts so `prMergeState`'s pułapka-5 retry
+   *  (`normalizeForgejoMergeState`'s doc comment) can be tested with zero real wall-clock wait: a
+   *  test passes `sleep: async () => {}` instead of reaching for `vi.useFakeTimers`. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /** Thrown by `getJson`/`getText`/`paginate` on any non-2xx response (3xx included — see the

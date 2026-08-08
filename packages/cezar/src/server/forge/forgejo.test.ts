@@ -47,9 +47,9 @@ function mockPush(result: { ok: boolean; stderr?: string }): void {
 
 /**
  * The Forgejo driver: `kind`, `detect`/`detectCached` (the two call sites that already exist,
- * `server.ts:1511`/`:3214`), `viewUrl`, `rebaseToWebUrl`, `listIssues`, `listPRs` and `prStatus`
- * are real; `createPR`/`prMergeState`/`mergePR`/`prDiff` remain degraded stubs whose real bodies
- * land as follow-up changes. `fetch` is injected via `deps.fetch`; nothing here touches the
+ * `server.ts:1511`/`:3214`), `viewUrl`, `rebaseToWebUrl`, `listIssues`, `listPRs`, `prStatus`,
+ * `createPR` and `prMergeState` are real; `mergePR`/`prDiff` remain degraded stubs whose real
+ * bodies land as follow-up changes. `fetch` is injected via `deps.fetch`; nothing here touches the
  * network.
  */
 
@@ -685,16 +685,160 @@ describe('createPR', () => {
   });
 });
 
-describe('stubbed methods (real bodies land as follow-up changes) never touch the network', () => {
-  const repoRoot = '/repo/stubs';
+describe('prMergeState', () => {
+  const repoRoot = '/repo/merge-state';
 
-  it('prMergeState degrades to {available:false, reason}', async () => {
+  afterEach(() => {
+    delete process.env.CEZ_DRY_RUN;
+  });
+
+  function branchRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      protected: false,
+      required_approvals: 0,
+      enable_status_check: false,
+      status_check_contexts: [],
+      user_can_merge: true,
+      ...overrides,
+    };
+  }
+
+  function mergePullRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    // `overrides` spread LAST — `pullRow()` and the `mergeable`/`base` defaults below must not be
+    // able to shadow a caller's override (e.g. `mergePullRow({ mergeable: false })`).
+    return { ...pullRow(), mergeable: true, base: { ref: 'main' }, ...overrides };
+  }
+
+  /** Routes every request this method can issue: `GET pulls/9`, the combined commit status, the
+   *  branch, the paginated reviews walk, and (cold `detectCache`) `GET repos/acme/demo` for merge
+   *  methods. One shared router keeps every test below to its actual point of difference. */
+  function router(overrides: Partial<{ pull: unknown; status: unknown; branch: unknown; reviews: unknown; repo: unknown }> = {}) {
+    return vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.endsWith('/pulls/9')) return Promise.resolve(jsonResponse(overrides.pull ?? mergePullRow()));
+      if (s.includes('/commits/')) return Promise.resolve(jsonResponse(overrides.status ?? { statuses: null }));
+      if (s.includes('/branches/main')) return Promise.resolve(jsonResponse(overrides.branch ?? branchRow()));
+      if (s.includes('/pulls/9/reviews')) return Promise.resolve(jsonResponse(overrides.reviews ?? [], { headers: { 'x-total-count': '0' } }));
+      if (s.endsWith('/repos/acme/demo')) return Promise.resolve(jsonResponse(overrides.repo ?? { default_branch: 'main', allow_merge_commits: true }));
+      throw new Error(`unexpected url ${s}`);
+    });
+  }
+
+  it('CEZ_DRY_RUN=1 returns a mock, available mergeState without calling fetch', async () => {
+    process.env.CEZ_DRY_RUN = '1';
     const fetchMock = vi.fn();
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
-    const result = await driver.prMergeState?.(1);
-    expect(result).toEqual({ available: false, reason: expect.any(String) });
+
+    const result = await driver.prMergeState?.(9);
+    expect(result?.available).toBe(true);
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it('happy path assembles a ready mergeState from pull + status + branch + reviews + repository', async () => {
+    const fetchMock = router();
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.prMergeState?.(9);
+    expect(result?.available).toBe(true);
+    expect(result?.available && result.mergeState.eligibility).toBe('ready');
+    expect(result?.available && result.mergeState.methods).toEqual(['merge']);
+    expect(result?.available && result.mergeState.number).toBe(5);
+  });
+
+  it('a failed GET /branches/{base} reports branch.readable:false -> rules-unknown, never throws', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/branches/main')) return Promise.resolve(jsonResponse({ message: 'not found' }, { status: 404 }));
+      return router()(url);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.prMergeState?.(9);
+    expect(result?.available).toBe(true);
+    expect(result?.available && result.mergeState.eligibility).toBe('unknown');
+    expect(result?.available && result.mergeState.blockers).toEqual([{ code: 'rules-unknown', message: expect.any(String) }]);
+  });
+
+  it('retries mergeable:false exactly once on the refresh:true path before reporting conflicting', async () => {
+    let pullCalls = 0;
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.endsWith('/pulls/9')) {
+        pullCalls += 1;
+        return Promise.resolve(jsonResponse(mergePullRow({ mergeable: false })));
+      }
+      return router()(url);
+    });
+    let slept = 0;
+    const driver = createForgejoDriver(makeCtx(repoRoot), {
+      fetch: fetchMock,
+      token: null,
+      sleep: async (ms: number) => {
+        slept = ms;
+      },
+    });
+
+    const result = await driver.prMergeState?.(9, { refresh: true });
+    expect(pullCalls).toBe(2); // one probe, one retry — pułapka 5: a wrong first read closes canOverride
+    expect(slept).toBeGreaterThan(0);
+    expect(result?.available && result.mergeState.mergeable).toBe('conflicting');
+  });
+
+  it('does NOT retry outside the refresh:true path', async () => {
+    let pullCalls = 0;
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.endsWith('/pulls/9')) {
+        pullCalls += 1;
+        return Promise.resolve(jsonResponse(mergePullRow({ mergeable: false })));
+      }
+      return router()(url);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    await driver.prMergeState?.(9);
+    expect(pullCalls).toBe(1);
+  });
+
+  it('caches for 15s; refresh:true bypasses the cache', async () => {
+    const fetchMock = router();
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    await driver.prMergeState?.(9);
+    const callsAfterFirst = fetchMock.mock.calls.length;
+    await driver.prMergeState?.(9);
+    expect(fetchMock.mock.calls.length).toBe(callsAfterFirst);
+
+    await driver.prMergeState?.(9, { refresh: true });
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(callsAfterFirst);
+  });
+
+  it('a network/HTTP failure degrades to {available:false, reason}, never throws', async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error('network down'));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    await expect(driver.prMergeState?.(9)).resolves.toEqual({ available: false, reason: expect.any(String) });
+  });
+
+  it('without a token, user_can_merge:false is unknown/ready, never unauthorized (pułapka 12)', async () => {
+    const fetchMock = router({ branch: branchRow({ user_can_merge: false }) });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.prMergeState?.(9);
+    expect(result?.available && result.mergeState.eligibility).not.toBe('unauthorized');
+  });
+
+  it('with a token, user_can_merge:false is unauthorized', async () => {
+    const fetchMock = router({ branch: branchRow({ user_can_merge: false }) });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: 'secret-token' });
+
+    const result = await driver.prMergeState?.(9);
+    expect(result?.available && result.mergeState.eligibility).toBe('unauthorized');
+  });
+});
+
+describe('stubbed methods (real bodies land as follow-up changes) never touch the network', () => {
+  const repoRoot = '/repo/stubs';
 
   it('mergePR degrades to a 502 merged:false result', async () => {
     const fetchMock = vi.fn();

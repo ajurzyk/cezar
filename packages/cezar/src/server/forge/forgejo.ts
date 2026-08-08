@@ -12,11 +12,14 @@ import {
 } from './forgejo-http.ts';
 import {
   combinedStatusToChecks,
+  forgejoBranchSchema,
   forgejoPullSchema,
   forgejoRepositorySchema,
   mapForgejoIssue,
   mapForgejoPull,
+  normalizeForgejoMergeState,
   rebaseToWebUrl,
+  type ForgejoBranchInfo,
   type ForgejoPull,
   type ForgejoRepository,
 } from './forgejo-map.ts';
@@ -45,7 +48,7 @@ import type {
  * `github.ts`, but speaks REST directly through `forgejo-http.ts` instead of shelling out to a
  * CLI. `kind`, `detect`/`detectCached` (the two call sites that already exist, `server.ts:1511`
  * health and `:3214` automations-availability), `viewUrl`, `rebaseToWebUrl`, `listIssues`,
- * `listPRs`, `prStatus` and `createPR` are real; `prMergeState`, `mergePR` and `prDiff` remain
+ * `listPRs`, `prStatus`, `createPR` and `prMergeState` are real; `mergePR` and `prDiff` remain
  * degraded stubs whose real bodies land as follow-up changes, each with its own tests. A stub with
  * no caller yet is expected shape here, not a defect: `github.ts` itself implements every optional
  * method even though several of its own call sites were wired up separately, over time.
@@ -108,6 +111,19 @@ interface PrStatusCacheEntry {
 const prStatusCache = new Map<string, PrStatusCacheEntry>();
 const PR_STATUS_CACHE_MAX = 50;
 
+interface MergeStateCacheEntry {
+  at: number;
+  value: ForgePrMergeStateResult;
+}
+
+/** Keyed `repoRoot\0apiBase\0number` — a SHORTER TTL (15s, not the 60s every other cache in this
+ *  module uses) because a merge-state read feeds a merge DECISION: a human staring at "ready to
+ *  merge" for a stale minute is a worse failure mode than one every-15s extra round-trip. Mirrors
+ *  `github.ts`'s own `mergeStateCache`/`MERGE_CACHE_MS`. */
+const mergeStateCache = new Map<string, MergeStateCacheEntry>();
+const MERGE_STATE_CACHE_MS = 15_000;
+const MERGE_STATE_CACHE_MAX = 500;
+
 function cacheKey(repoRoot: string, apiBase: string): string {
   return `${repoRoot}\0${apiBase}`;
 }
@@ -120,6 +136,10 @@ function prStatusCacheKey(repoRoot: string, apiBase: string, branch: string): st
   return `${repoRoot}\0${apiBase}\0${branch}`;
 }
 
+function mergeStateCacheKey(repoRoot: string, apiBase: string, number: number): string {
+  return `${repoRoot}\0${apiBase}\0${number}`;
+}
+
 function evictOldest(cache: Map<string, unknown>, max: number): void {
   while (cache.size > max) {
     const oldest = cache.keys().next().value;
@@ -129,12 +149,13 @@ function evictOldest(cache: Map<string, unknown>, max: number): void {
 }
 
 /** Clears every cache this module owns. Grows as more caches are added alongside new methods
- *  (`mergeStateCache`/`prDiffCache`) — tests call this in `beforeEach` so one test's warm cache
- *  can never leak into the next. */
+ *  (`prDiffCache` lands in a follow-up package) — tests call this in `beforeEach` so one test's warm
+ *  cache can never leak into the next. */
 export function __clearForgejoCachesForTests(): void {
   detectCache.clear();
   listCache.clear();
   prStatusCache.clear();
+  mergeStateCache.clear();
 }
 
 function describeError(err: unknown): string {
@@ -173,24 +194,37 @@ async function detectForgejo(
   return result;
 }
 
-/** `Repository.default_branch`, read from the warm `detectCache` entry when one exists (avoids a
- *  second request) and falling back to one fresh `GET repos/{owner}/{repo}` when the cache is
- *  cold. Used only by `prStatus`'s `/pulls/{base}/{head}` fallback, which needs `base` before it
- *  can even build the request path. */
+/** `Repository`, read from the warm `detectCache` entry when one exists (avoids a second request)
+ *  and falling back to one fresh `GET repos/{owner}/{repo}` when the cache is cold. Shared by
+ *  `resolveDefaultBranch` (`createPR`'s base-branch fallback, `prStatus`'s `/pulls/{base}/{head}`
+ *  fallback) and `prMergeState` (needs the whole body for `methods`/`defaultMethod`, not just
+ *  `default_branch`) — one fetch-or-cache path instead of two copies that could drift. */
+async function resolveRepository(
+  repoRoot: string,
+  http: ForgejoHttp,
+  owner: string,
+  repo: string,
+): Promise<ForgejoRepository | null> {
+  const hit = detectCache.get(cacheKey(repoRoot, http.apiBase));
+  if (hit?.repository) return hit.repository;
+  try {
+    const raw = await http.getJson(`repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`);
+    return forgejoRepositorySchema.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+/** Used only by `prStatus`'s `/pulls/{base}/{head}` fallback and `createPR`'s base-branch fallback,
+ *  which both need `base` before they can even build the request path. */
 async function resolveDefaultBranch(
   repoRoot: string,
   http: ForgejoHttp,
   owner: string,
   repo: string,
 ): Promise<string | null> {
-  const hit = detectCache.get(cacheKey(repoRoot, http.apiBase));
-  if (hit?.repository) return hit.repository.default_branch;
-  try {
-    const raw = await http.getJson(`repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`);
-    return forgejoRepositorySchema.parse(raw).default_branch;
-  } catch {
-    return null;
-  }
+  const repository = await resolveRepository(repoRoot, http, owner, repo);
+  return repository?.default_branch ?? null;
 }
 
 /**
@@ -428,6 +462,168 @@ async function forgejoPrStatus(
   return data;
 }
 
+/** `GET /repos/{o}/{r}/branches/{ref}` — every field here is readable anonymously (measured); the
+ * SEPARATE `branch_protections` endpoint 401s without a token and is deliberately never called.
+ * `readable: false` on ANY failure (404, network, malformed body) is the sole signal
+ * `normalizeForgejoMergeState` uses to raise the `rules-unknown` blocker — this function must never
+ * synthesize `readable: true` from a partial/defaulted parse just because `forgejoBranchSchema`'s
+ * fields are all individually optional. */
+async function fetchForgejoBranchInfo(http: ForgejoHttp, owner: string, repo: string, ref: string): Promise<ForgejoBranchInfo> {
+  try {
+    const raw = await http.getJson(`repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/branches/${encodeRefSegments(ref)}`);
+    const b = forgejoBranchSchema.parse(raw);
+    return {
+      readable: true,
+      protected: b.protected,
+      requiredApprovals: b.required_approvals,
+      enableStatusCheck: b.enable_status_check,
+      statusCheckContexts: b.status_check_contexts,
+      userCanMerge: b.user_can_merge,
+    };
+  } catch {
+    return { readable: false };
+  }
+}
+
+/** `GET /repos/{o}/{r}/commits/{sha}/status` — `null` on ANY failure (never thrown further), which
+ *  `normalizeForgejoMergeState`/`combinedStatusToPrChecks` already treat identically to "no CI
+ *  configured" (an empty `checks[]`, not a blocker). A CI probe that failed to answer must degrade
+ *  the same way as a repo that has no CI at all — neither should ever fail the whole merge-state
+ *  read the way `GET /pulls/{n}` failing does. */
+async function fetchForgejoCombinedStatus(http: ForgejoHttp, owner: string, repo: string, sha: string): Promise<unknown | null> {
+  try {
+    return await http.getJson(`repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeRefSegments(sha)}/status`);
+  } catch {
+    return null;
+  }
+}
+
+/** Walks `GET /pulls/{n}/reviews`, capped the same way every other list walk in this driver is
+ *  (`FJ_MAX_LIST_LIMIT`, parity with `GH_MAX_LIMIT`). Degrades to `[]` on any failure — an unreadable
+ *  review list must not fail the whole merge-state read; `computeReviewDecision([], ...)` already
+ *  produces a safe `'unknown'`/`'review-required'` answer for an empty list, never a false approval. */
+async function fetchForgejoReviews(http: ForgejoHttp, owner: string, repo: string, number: number): Promise<unknown[]> {
+  const encOwner = encodeURIComponent(owner);
+  const encRepo = encodeURIComponent(repo);
+  try {
+    const page = await http.paginate((p, l) => `repos/${encOwner}/${encRepo}/pulls/${number}/reviews?page=${p}&limit=${l}`, {
+      want: FJ_MAX_LIST_LIMIT,
+    });
+    return page.rows;
+  } catch {
+    return [];
+  }
+}
+
+/** ~1.5s, matching the brief's measured window (pułapka 5: `mergeable:false` on Gitea can mean the
+ *  async mergeability check is still "Checking", not a real conflict). Only worth paying on the
+ *  `refresh:true` path — `mergePR`'s own preflight always calls with `refresh:true`, which is
+ *  exactly the one call site where a false "conflicting" reading has a real cost (it flips
+ *  `canOverride` to `false`, closing the user's only escape hatch). */
+const MERGE_STATE_RETRY_DELAY_MS = 1_500;
+
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const DRY_RUN_MERGE_STATE_FIXTURE = {
+  pullRaw: {
+    number: 777,
+    title: 'Dry-run pull request',
+    html_url: 'http://forgejo:3000/mock/repo/pulls/777',
+    created_at: '2026-01-01T00:00:00Z',
+    draft: false,
+    additions: 1,
+    deletions: 1,
+    state: 'open',
+    merged: false,
+    mergeable: true,
+    head: { ref: 'feat/dry-run', sha: '0'.repeat(40) },
+    base: { ref: 'main' },
+  },
+  statusRaw: { statuses: [{ status: 'success', context: 'ci/build' }] },
+  branch: { readable: true, protected: false, requiredApprovals: 0, enableStatusCheck: false, statusCheckContexts: [], userCanMerge: true } as ForgejoBranchInfo,
+  repository: null,
+  reviewsRaw: [] as unknown[],
+};
+
+/**
+ * Assembles `ForgePrMergeState` from four independent reads (`GET pulls/{n}`, the combined commit
+ * status, the branch, and the paginated review list) plus the repository body `resolveRepository`
+ * either serves from `detectCache` or fetches fresh — mirrors `fetchPrMergeState`
+ * (github.ts:1698-1748) structurally; all forge-specific mapping lives in
+ * `normalizeForgejoMergeState`/`computeReviewDecision` (`forgejo-map.ts`), this function is I/O
+ * only. `sleep` defaults to a real timer (`defaultSleep`) but is threaded through from `deps` so
+ * the pułapka-5 retry below is testable with zero real wall-clock wait.
+ */
+async function forgejoPrMergeState(
+  repoRoot: string,
+  http: ForgejoHttp,
+  owner: string,
+  repo: string,
+  webUrl: string,
+  number: number,
+  opts: { refresh?: boolean } | undefined,
+  sleep: (ms: number) => Promise<void>,
+): Promise<ForgePrMergeStateResult> {
+  if (process.env.CEZ_DRY_RUN === '1') {
+    return {
+      available: true,
+      mergeState: normalizeForgejoMergeState({ ...DRY_RUN_MERGE_STATE_FIXTURE, webUrl, hasToken: http.hasToken() }),
+    };
+  }
+
+  const key = mergeStateCacheKey(repoRoot, http.apiBase, number);
+  if (!opts?.refresh) {
+    const hit = mergeStateCache.get(key);
+    if (hit && Date.now() - hit.at < MERGE_STATE_CACHE_MS) return hit.value;
+  }
+
+  const encOwner = encodeURIComponent(owner);
+  const encRepo = encodeURIComponent(repo);
+  try {
+    let pullRaw = await http.getJson(`repos/${encOwner}/${encRepo}/pulls/${number}`);
+    let pull = forgejoPullSchema.parse(pullRaw);
+
+    // Pułapka 5, the retry half: only on the refresh path (mergePR's preflight always refreshes),
+    // and only when the FIRST read looks like a genuine "Checking -> false" ambiguity — a terminal
+    // or draft PR's `mergeable:false` is already known-meaningless (normalizeForgejoMergeState maps
+    // it to 'unknown' regardless), so retrying there would just burn a request for nothing.
+    if (opts?.refresh && pull.state === 'open' && !pull.draft && pull.mergeable === false) {
+      await sleep(MERGE_STATE_RETRY_DELAY_MS);
+      pullRaw = await http.getJson(`repos/${encOwner}/${encRepo}/pulls/${number}`);
+      pull = forgejoPullSchema.parse(pullRaw);
+    }
+
+    const [statusRaw, branch, reviewsRaw, repository] = await Promise.all([
+      pull.head?.sha ? fetchForgejoCombinedStatus(http, owner, repo, pull.head.sha) : Promise.resolve(null),
+      pull.base?.ref ? fetchForgejoBranchInfo(http, owner, repo, pull.base.ref) : Promise.resolve<ForgejoBranchInfo>({ readable: false }),
+      fetchForgejoReviews(http, owner, repo, number),
+      resolveRepository(repoRoot, http, owner, repo),
+    ]);
+
+    const mergeState = normalizeForgejoMergeState({
+      pullRaw,
+      statusRaw,
+      branch,
+      repository,
+      webUrl,
+      hasToken: http.hasToken(),
+      reviewsRaw,
+    });
+    const value: ForgePrMergeStateResult = { available: true, mergeState };
+    mergeStateCache.set(key, { at: Date.now(), value });
+    evictOldest(mergeStateCache, MERGE_STATE_CACHE_MAX);
+    return value;
+  } catch (err) {
+    // `GET pulls/{n}` failing (404 — bad PR number, network, timeout) is the one failure this
+    // method cannot degrade past: without the PR body there is no `ForgePrMergeState` to build.
+    // Every OTHER read above (status/branch/reviews/repository) already degrades to its own safe
+    // default instead of throwing, exactly so a CI hiccup can never take down the whole method.
+    return { available: false, reason: describeError(err) };
+  }
+}
+
 const PR_PUSH_TIMEOUT_MS = 60_000;
 
 /** Same guard as `github.ts`'s own base-branch handling (github.ts:1447): a raw sha (a
@@ -580,6 +776,7 @@ export function createForgejoDriver(ctx: ForgejoDriverCtx, deps?: ForgejoHttpDep
   const { repoRoot, owner, repo, settings } = ctx;
   const http = createForgejoHttp(settings.apiUrl, deps);
   const webUrl = settings.webUrl;
+  const sleep = deps?.sleep ?? defaultSleep;
 
   return {
     kind: 'forgejo',
@@ -593,14 +790,12 @@ export function createForgejoDriver(ctx: ForgejoDriverCtx, deps?: ForgejoHttpDep
 
     createPR: (input: DraftPrInput) => createForgejoPr(repoRoot, http, owner, repo, webUrl, input),
 
-    // Every method below is still a degraded stub — real bodies land as follow-up changes, each
-    // with its own tests. None of them call `http`, which is exactly what `forgejo.test.ts` pins
-    // down (fetch is never invoked by any stub).
-    prMergeState: async (_number: number, _opts?: { refresh?: boolean }): Promise<ForgePrMergeStateResult> => ({
-      available: false,
-      reason: 'Forgejo merge-state reporting is not implemented yet.',
-    }),
+    prMergeState: (number: number, opts?: { refresh?: boolean }) =>
+      forgejoPrMergeState(repoRoot, http, owner, repo, webUrl, number, opts, sleep),
 
+    // Still a degraded stub — the real body (mutex, preflight against prMergeState above, status-
+    // code mapping) lands as a follow-up change with its own tests. Never calls `http`, which is
+    // exactly what `forgejo.test.ts`'s "stubbed methods" suite pins down.
     mergePR: async (_number: number, _input: ForgeMergeInput): Promise<ForgeMergeResult> => ({
       merged: false,
       status: 502,

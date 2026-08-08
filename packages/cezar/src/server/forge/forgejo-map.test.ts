@@ -1,15 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import {
   combinedStatusToChecks,
+  computeReviewDecision,
   FJ_BODY_CAP,
   forgejoRepositorySchema,
   mapChangedFileStatus,
   mapForgejoIssue,
   mapForgejoPull,
   mergeMethodsFromRepository,
+  normalizeForgejoMergeState,
   normalizeForgejoTimestamp,
   rebaseToWebUrl,
   stripWipTitle,
+  type ForgejoBranchInfo,
   type ForgejoRepository,
 } from './forgejo-map.ts';
 
@@ -267,5 +270,396 @@ describe('rebaseToWebUrl', () => {
     expect(rebaseToWebUrl('http://forgejo:3000/acme/demo/pulls/1?tab=files', webUrl)).toBe(
       'https://forge.example.com/acme/demo/pulls/1?tab=files',
     );
+  });
+});
+
+function reviewRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    state: 'APPROVED',
+    dismissed: false,
+    official: true,
+    stale: false,
+    submitted_at: '2026-08-01T00:00:00Z',
+    user: { login: 'reviewer1' },
+    ...overrides,
+  };
+}
+
+const unreadableBranch: ForgejoBranchInfo = { readable: false };
+const unprotectedBranch: ForgejoBranchInfo = {
+  readable: true,
+  protected: false,
+  requiredApprovals: 0,
+  enableStatusCheck: false,
+  statusCheckContexts: [],
+  userCanMerge: true,
+};
+function protectedBranch(overrides: Partial<Extract<ForgejoBranchInfo, { readable: true }>> = {}): ForgejoBranchInfo {
+  return {
+    readable: true,
+    protected: true,
+    requiredApprovals: 1,
+    enableStatusCheck: false,
+    statusCheckContexts: [],
+    userCanMerge: true,
+    ...overrides,
+  };
+}
+
+describe('computeReviewDecision', () => {
+  // Rule 0: an unrecognized, non-empty review state must win over EVERY other rule below,
+  // including the protected:false shortcut to 'unknown' — 'unknown' is not a blocking eligibility
+  // state, so silently dropping a review we can't interpret would let a
+  // request-changes-shaped-but-misspelled review through to 'ready'.
+  it('an unrecognized non-empty state forces review-required, even alongside an APPROVED and even at protected:false', () => {
+    const reviews = [reviewRow({ state: 'APPROVED' }), reviewRow({ state: 'FUTURE_STATE', user: { login: 'reviewer2' } })];
+    expect(computeReviewDecision(reviews, unprotectedBranch)).toBe('review-required');
+  });
+
+  it('an unrecognized state still wins when the branch is unreadable', () => {
+    expect(computeReviewDecision([reviewRow({ state: 'SOMETHING_NEW' })], unreadableBranch)).toBe('review-required');
+  });
+
+  it('the empty string state is a known "no signal" value, not an unrecognized one', () => {
+    expect(computeReviewDecision([reviewRow({ state: '' })], unprotectedBranch)).toBe('unknown');
+  });
+
+  it('drops a dismissed review entirely', () => {
+    const reviews = [reviewRow({ state: 'REQUEST_CHANGES', dismissed: true })];
+    expect(computeReviewDecision(reviews, protectedBranch())).toBe('review-required'); // no active review at all
+  });
+
+  it('drops PENDING and REQUEST_REVIEW rows (not yet a real verdict)', () => {
+    const reviews = [reviewRow({ state: 'PENDING' }), reviewRow({ state: 'REQUEST_REVIEW', user: { login: 'r2' } })];
+    expect(computeReviewDecision(reviews, protectedBranch())).toBe('review-required');
+  });
+
+  it('keeps only official reviews once at least one official row exists', () => {
+    const reviews = [
+      reviewRow({ state: 'REQUEST_CHANGES', official: false, user: { login: 'drive-by' } }),
+      reviewRow({ state: 'APPROVED', official: true }),
+    ];
+    expect(computeReviewDecision(reviews, protectedBranch())).toBe('approved');
+  });
+
+  it('collapses to the latest row per reviewer by submitted_at — a later APPROVED supersedes an earlier REQUEST_CHANGES', () => {
+    const reviews = [
+      reviewRow({ state: 'REQUEST_CHANGES', submitted_at: '2026-08-01T00:00:00Z' }),
+      reviewRow({ state: 'APPROVED', submitted_at: '2026-08-02T00:00:00Z' }),
+    ];
+    expect(computeReviewDecision(reviews, protectedBranch())).toBe('approved');
+  });
+
+  it('any REQUEST_CHANGES after collapsing blocks with changes-requested', () => {
+    const reviews = [reviewRow({ state: 'APPROVED', user: { login: 'r1' } }), reviewRow({ state: 'REQUEST_CHANGES', user: { login: 'r2' } })];
+    expect(computeReviewDecision(reviews, protectedBranch())).toBe('changes-requested');
+  });
+
+  it('REQUEST_CHANGES blocks even when the branch is unreadable — it needs no branch-protection info', () => {
+    expect(computeReviewDecision([reviewRow({ state: 'REQUEST_CHANGES' })], unreadableBranch)).toBe('changes-requested');
+  });
+
+  it('an unprotected branch is "no requirements" — always unknown, never approved, regardless of approvals', () => {
+    expect(computeReviewDecision([reviewRow({ state: 'APPROVED' })], unprotectedBranch)).toBe('unknown');
+  });
+
+  it('a protected branch requiring 0 approvals is also "no requirements" — unknown, not approved', () => {
+    expect(computeReviewDecision([reviewRow({ state: 'APPROVED' })], protectedBranch({ requiredApprovals: 0 }))).toBe('unknown');
+  });
+
+  it('an unreadable branch (no requirements info at all) is unknown', () => {
+    expect(computeReviewDecision([reviewRow({ state: 'APPROVED' })], unreadableBranch)).toBe('unknown');
+  });
+
+  it('enough non-stale approvals on a protected branch requiring them satisfies review-required into approved', () => {
+    const reviews = [reviewRow({ state: 'APPROVED', user: { login: 'r1' } }), reviewRow({ state: 'APPROVED', user: { login: 'r2' } })];
+    expect(computeReviewDecision(reviews, protectedBranch({ requiredApprovals: 2 }))).toBe('approved');
+  });
+
+  it('a stale approval does not count toward the required_approvals threshold', () => {
+    const reviews = [reviewRow({ state: 'APPROVED', stale: true })];
+    expect(computeReviewDecision(reviews, protectedBranch({ requiredApprovals: 1 }))).toBe('review-required');
+  });
+
+  it('not enough approvals on a protected branch with a real requirement is review-required', () => {
+    expect(computeReviewDecision([], protectedBranch({ requiredApprovals: 1 }))).toBe('review-required');
+  });
+});
+
+function mergePullRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    number: 9,
+    title: 'add thing',
+    html_url: 'http://forgejo:3000/acme/demo/pulls/9',
+    user: { login: 'ajr' },
+    created_at: '2026-08-07T10:00:00Z',
+    labels: [],
+    body: '',
+    comments: 0,
+    draft: false,
+    additions: 3,
+    deletions: 1,
+    state: 'open',
+    merged: false,
+    mergeable: true,
+    head: { ref: 'feat/x', sha: 'a'.repeat(40) },
+    base: { ref: 'main' },
+    ...overrides,
+  };
+}
+
+const mergeStateRepo: ForgejoRepository = forgejoRepositorySchema.parse({
+  default_branch: 'main',
+  allow_merge_commits: true,
+  allow_squash_merge: true,
+});
+
+describe('normalizeForgejoMergeState', () => {
+  it('mergeable:false on a draft PR maps to mergeable:"unknown", never "conflicting" (drafts always report false)', () => {
+    const state = normalizeForgejoMergeState({
+      pullRaw: mergePullRow({ draft: true, mergeable: false }),
+      statusRaw: null,
+      branch: unprotectedBranch,
+      repository: mergeStateRepo,
+      webUrl,
+      hasToken: false,
+      reviewsRaw: [],
+    });
+    expect(state.mergeable).toBe('unknown');
+    expect(state.eligibility).toBe('blocked');
+    expect(state.blockers).toEqual([{ code: 'draft', message: expect.any(String) }]);
+  });
+
+  it('a null/absent wire mergeable on an open, non-draft PR (Gitea still "Checking") maps to "unknown", not "conflicting"', () => {
+    const state = normalizeForgejoMergeState({
+      pullRaw: mergePullRow({ mergeable: null }),
+      statusRaw: null,
+      branch: unprotectedBranch,
+      repository: mergeStateRepo,
+      webUrl,
+      hasToken: false,
+      reviewsRaw: [],
+    });
+    expect(state.mergeable).toBe('unknown');
+    // Not "conflicting" — the ladder only special-cases `mergeable === 'conflicting'`, so a
+    // "Checking"-shaped unknown falls through and can still reach 'ready' once every other check
+    // clears, exactly like a resolved 'mergeable' would.
+    expect(state.eligibility).toBe('ready');
+  });
+
+  it('a real conflict (open, non-draft, mergeable:false) maps to conflicting and blocks merging without override', () => {
+    const state = normalizeForgejoMergeState({
+      pullRaw: mergePullRow({ mergeable: false }),
+      statusRaw: null,
+      branch: unprotectedBranch,
+      repository: mergeStateRepo,
+      webUrl,
+      hasToken: false,
+      reviewsRaw: [],
+    });
+    expect(state.mergeable).toBe('conflicting');
+    expect(state.eligibility).toBe('blocked');
+    expect(state.blockers[0]?.code).toBe('conflicts');
+    expect(state.canOverride).toBe(false); // conflicts is the one blocker that closes the override door
+  });
+
+  it('an unprotected branch reports reviewDecision:"unknown" WITHOUT a rules-unknown blocker — the rules are known: there are none', () => {
+    const state = normalizeForgejoMergeState({
+      pullRaw: mergePullRow(),
+      statusRaw: null,
+      branch: unprotectedBranch,
+      repository: mergeStateRepo,
+      webUrl,
+      hasToken: false,
+      reviewsRaw: [],
+    });
+    expect(state.reviewDecision).toBe('unknown');
+    expect(state.blockers.some((b) => b.code === 'rules-unknown')).toBe(false);
+  });
+
+  it('rules-unknown fires ONLY when the branch fetch itself failed (branch.readable:false) — a deliberate divergence from github.ts', () => {
+    const state = normalizeForgejoMergeState({
+      pullRaw: mergePullRow(),
+      statusRaw: null,
+      branch: unreadableBranch,
+      repository: mergeStateRepo,
+      webUrl,
+      hasToken: false,
+      reviewsRaw: [],
+    });
+    expect(state.eligibility).toBe('unknown');
+    expect(state.blockers).toEqual([{ code: 'rules-unknown', message: expect.any(String) }]);
+  });
+
+  it('an unrecognized review state blocks with reviews/review-required even on an unprotected branch', () => {
+    const state = normalizeForgejoMergeState({
+      pullRaw: mergePullRow(),
+      statusRaw: null,
+      branch: unprotectedBranch,
+      repository: mergeStateRepo,
+      webUrl,
+      hasToken: false,
+      reviewsRaw: [reviewRow({ state: 'SOME_NEW_STATE' })],
+    });
+    expect(state.reviewDecision).toBe('review-required');
+    expect(state.eligibility).toBe('blocked');
+    expect(state.blockers[0]?.code).toBe('reviews');
+  });
+
+  it('statuses:null (no CI configured) maps to an empty checks array, not a failing/pending one', () => {
+    const state = normalizeForgejoMergeState({
+      pullRaw: mergePullRow(),
+      statusRaw: { state: '', total_count: 0, statuses: null },
+      branch: unprotectedBranch,
+      repository: mergeStateRepo,
+      webUrl,
+      hasToken: false,
+      reviewsRaw: [],
+    });
+    expect(state.checks).toEqual([]);
+    expect(state.eligibility).toBe('ready');
+  });
+
+  it('a "warning" status counts as failing and blocks with checks-failing', () => {
+    const state = normalizeForgejoMergeState({
+      pullRaw: mergePullRow(),
+      statusRaw: { statuses: [{ status: 'warning', context: 'ci/build', target_url: 'https://ci.example/1' }] },
+      branch: unprotectedBranch,
+      repository: mergeStateRepo,
+      webUrl,
+      hasToken: false,
+      reviewsRaw: [],
+    });
+    expect(state.checks).toEqual([{ name: 'ci/build', state: 'failing', required: false, url: 'https://ci.example/1' }]);
+    expect(state.blockers[0]?.code).toBe('checks-failing');
+  });
+
+  it('a check url (target_url) is used as-is, filtered to http(s), and NOT rebased onto webUrl — it names a third-party CI host', () => {
+    const state = normalizeForgejoMergeState({
+      pullRaw: mergePullRow(),
+      statusRaw: { statuses: [{ status: 'success', context: 'ci/build', target_url: 'http://ci.internal:9000/run/1' }] },
+      branch: unprotectedBranch,
+      repository: mergeStateRepo,
+      webUrl,
+      hasToken: false,
+      reviewsRaw: [],
+    });
+    expect(state.checks[0]?.url).toBe('http://ci.internal:9000/run/1');
+  });
+
+  it('a pending check maps to eligibility:pending when nothing else blocks', () => {
+    const state = normalizeForgejoMergeState({
+      pullRaw: mergePullRow(),
+      statusRaw: { statuses: [{ status: 'pending', context: 'ci/build' }] },
+      branch: unprotectedBranch,
+      repository: mergeStateRepo,
+      webUrl,
+      hasToken: false,
+      reviewsRaw: [],
+    });
+    expect(state.eligibility).toBe('pending');
+  });
+
+  it('a merged PR reports state:"merged" and eligibility:terminal, never a bare "closed"', () => {
+    const state = normalizeForgejoMergeState({
+      pullRaw: mergePullRow({ state: 'closed', merged: true }),
+      statusRaw: null,
+      branch: unprotectedBranch,
+      repository: mergeStateRepo,
+      webUrl,
+      hasToken: false,
+      reviewsRaw: [],
+    });
+    expect(state.state).toBe('merged');
+    expect(state.eligibility).toBe('terminal');
+    expect(state.blockers[0]?.code).toBe('terminal');
+  });
+
+  it('a genuinely closed (not merged) PR reports state:"closed"', () => {
+    const state = normalizeForgejoMergeState({
+      pullRaw: mergePullRow({ state: 'closed', merged: false }),
+      statusRaw: null,
+      branch: unprotectedBranch,
+      repository: mergeStateRepo,
+      webUrl,
+      hasToken: false,
+      reviewsRaw: [],
+    });
+    expect(state.state).toBe('closed');
+  });
+
+  it('userCanMerge:false is read as unauthorized only when a token is present — without a token it is unreadable-by-design', () => {
+    const branch = protectedBranch({ protected: false, requiredApprovals: 0, userCanMerge: false });
+    const withoutToken = normalizeForgejoMergeState({
+      pullRaw: mergePullRow(),
+      statusRaw: null,
+      branch,
+      repository: mergeStateRepo,
+      webUrl,
+      hasToken: false,
+      reviewsRaw: [],
+    });
+    expect(withoutToken.eligibility).not.toBe('unauthorized');
+    expect(withoutToken.eligibility).toBe('ready');
+
+    const withToken = normalizeForgejoMergeState({
+      pullRaw: mergePullRow(),
+      statusRaw: null,
+      branch,
+      repository: mergeStateRepo,
+      webUrl,
+      hasToken: true,
+      reviewsRaw: [],
+    });
+    expect(withToken.eligibility).toBe('unauthorized');
+    expect(withToken.blockers[0]?.code).toBe('unauthorized');
+  });
+
+  it('a fully clean PR is ready, and canMerge/canOverride follow eligibility:ready', () => {
+    const state = normalizeForgejoMergeState({
+      pullRaw: mergePullRow(),
+      statusRaw: { statuses: [{ status: 'success', context: 'ci/build' }] },
+      branch: unprotectedBranch,
+      repository: mergeStateRepo,
+      webUrl,
+      hasToken: false,
+      reviewsRaw: [],
+    });
+    expect(state.eligibility).toBe('ready');
+    expect(state.canMerge).toBe(true);
+    expect(state.canOverride).toBe(false); // nothing to override when already mergeable
+  });
+
+  it('rebases title (WIP-stripped) and url onto webUrl; carries head/base refs and sha, and methods/defaultMethod from the repository', () => {
+    const state = normalizeForgejoMergeState({
+      pullRaw: mergePullRow({ draft: true, mergeable: false, title: 'WIP: add thing' }),
+      statusRaw: null,
+      branch: unprotectedBranch,
+      repository: mergeStateRepo,
+      webUrl,
+      hasToken: false,
+      reviewsRaw: [],
+    });
+    expect(state.title).toBe('add thing');
+    expect(state.url).toBe('https://forge.example.com/acme/demo/pulls/9');
+    expect(state.headRef).toBe('feat/x');
+    expect(state.baseRef).toBe('main');
+    expect(state.headSha).toBe('a'.repeat(40));
+    expect(state.methods).toEqual(['merge', 'squash']);
+    expect(state.defaultMethod).toBeNull();
+  });
+
+  it('a repository:null still returns a mergeState — just with no merge methods available', () => {
+    const state = normalizeForgejoMergeState({
+      pullRaw: mergePullRow(),
+      statusRaw: null,
+      branch: unprotectedBranch,
+      repository: null,
+      webUrl,
+      hasToken: false,
+      reviewsRaw: [],
+    });
+    expect(state.methods).toEqual([]);
+    expect(state.defaultMethod).toBeNull();
   });
 });
