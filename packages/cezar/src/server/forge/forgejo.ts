@@ -997,7 +997,18 @@ async function createForgejoPr(
   // than silently assumed.
   const title = `WIP: ${run.title}`;
 
-  const res = await http.send('POST', `${repoPrefix}/pulls`, { head: branch, base, title, body });
+  // The branch is already pushed by this point, so a transport failure here is the ONE place this
+  // function can leave the remote ahead of the PR. It still must not throw — `ForgeDriver.createPR`
+  // is documented "Never throws" (types.ts:265) and `github.ts`'s sibling honours that by routing
+  // every call through `execTool`, which returns instead of rejecting. `http.send` has no such
+  // guarantee (it never try/catches `fetchImpl`, so a DNS failure, a refused connection or the
+  // request timeout all reject), so the guard lives here.
+  let res: Awaited<ReturnType<typeof http.send>>;
+  try {
+    res = await http.send('POST', `${repoPrefix}/pulls`, { head: branch, base, title, body });
+  } catch (err) {
+    return { ok: false, error: `pull request creation failed — ${describeError(err)}` };
+  }
 
   if (res.status === 201) {
     // The PR was genuinely created server-side by the time we get here — evict this project's

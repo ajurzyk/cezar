@@ -826,6 +826,20 @@ describe('createPR', () => {
     expect(result.ok === false && result.error).toContain('base branch');
   });
 
+  it('a network failure on POST /pulls degrades to {ok:false, error} — createPR never throws (types.ts:265)', async () => {
+    mockPush({ ok: true });
+    // `baseBranch` is supplied so the default-branch lookup is skipped entirely and the FIRST
+    // fetch this test rejects is the create POST itself — the one `await` that was unguarded.
+    const fetchMock = vi.fn().mockRejectedValue(new Error('ECONNREFUSED forgejo:3000'));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.createPR(input({ baseBranch: 'origin/main' }));
+
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toContain('pull request creation failed');
+    expect(fetchMock).toHaveBeenCalled();
+  });
+
   it('a failed push reports a git/SSH error, never mentions the token', async () => {
     mockPush({ ok: false, stderr: 'Permission denied (publickey).\nfatal: Could not read from remote repository.' });
     const fetchMock = vi.fn();
