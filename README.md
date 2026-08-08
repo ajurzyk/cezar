@@ -589,16 +589,19 @@ never blocks startup):
 Declaring `"kind": "forgejo"` now wires up a real REST driver
 (`packages/cezar/src/server/forge/forgejo.ts`, behind `resolveForge`) instead of
 recognition-only. Health and the automations tab's availability check both call
-into it today and report the repo's true reachability, and so does the PR
-merge-state probe (mergeability, review decision, checks, eligibility). The
-merge route dispatches through the same driver seam too, but the driver fills
-that one method in incrementally — until it does, it answers the same
-quiet-degrade shape any undriven forge gets (a 502), never a crash. The
-issues/PR tab's own listing and the PR-diff view are further out still: their
-routes in `server.ts` call the GitHub-only code paths directly and don't go
-through `resolveForge` at all yet, so a Forgejo repo sees no listing there
-regardless of what the driver itself can already do. See the automations caveat
-below for the one other known gap.
+into it today and report the repo's true reachability, and so do the PR
+merge-state probe (mergeability, review decision, checks, eligibility) and the
+merge route itself: merging a Forgejo pull request goes through the same
+mutex, optimistic-concurrency preflight and status-code mapping the driver
+already applies everywhere else, not a GitHub-only shortcut. The PR-diff
+method is the one still incremental — until its real body lands, the driver
+answers it with the same quiet-degrade shape any undriven forge gets
+(`available:false`), never a crash. The issues/PR tab's own listing and the
+PR-diff view are further out still on the route side: their routes in
+`server.ts` call the GitHub-only code paths directly and don't go through
+`resolveForge` at all yet, so a Forgejo repo sees no listing there regardless
+of what the driver itself can already do. See the automations caveat below for
+the one other known gap.
 
 **The key fills a gap; it never overrides.** cezar asks its host table first
 (`github.com` → the GitHub driver) and consults `forge.kind` only for a host

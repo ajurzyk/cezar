@@ -48,8 +48,8 @@ function mockPush(result: { ok: boolean; stderr?: string }): void {
 /**
  * The Forgejo driver: `kind`, `detect`/`detectCached` (the two call sites that already exist,
  * `server.ts:1511`/`:3214`), `viewUrl`, `rebaseToWebUrl`, `listIssues`, `listPRs`, `prStatus`,
- * `createPR` and `prMergeState` are real; `mergePR`/`prDiff` remain degraded stubs whose real
- * bodies land as follow-up changes. `fetch` is injected via `deps.fetch`; nothing here touches the
+ * `createPR`, `prMergeState` and `mergePR` are real; `prDiff` remains a degraded stub whose real
+ * body lands as a follow-up change. `fetch` is injected via `deps.fetch`; nothing here touches the
  * network.
  */
 
@@ -837,16 +837,259 @@ describe('prMergeState', () => {
   });
 });
 
-describe('stubbed methods (real bodies land as follow-up changes) never touch the network', () => {
-  const repoRoot = '/repo/stubs';
+describe('mergePR', () => {
+  const repoRoot = '/repo/merge-pr';
 
-  it('mergePR degrades to a 502 merged:false result', async () => {
+  afterEach(() => {
+    delete process.env.CEZ_DRY_RUN;
+  });
+
+  function branchRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      protected: false,
+      required_approvals: 0,
+      enable_status_check: false,
+      status_check_contexts: [],
+      user_can_merge: true,
+      ...overrides,
+    };
+  }
+
+  /** A PR #9 in the 'ready to merge' state: open, non-draft, mergeable, on an unprotected branch
+   *  with a passing check — the baseline every status-mapping/preflight test below starts from and
+   *  overrides only the one field it's testing. */
+  function readyPullRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return { ...pullRow(), mergeable: true, base: { ref: 'main' }, ...overrides };
+  }
+
+  /** Routes every request the preflight (`prMergeState(refresh:true)`) issues for PR #9, PLUS the
+   *  merge POST itself and the post-merge `GET pulls/9` used for `mergeCommitSha`. `mergeResponse`
+   *  lets a status-mapping test swap in exactly the response under test; `secondPullResponse` lets
+   *  the mergeCommitSha-readback tests distinguish the preflight GET from the post-merge one. */
+  function router(
+    overrides: Partial<{
+      pull: unknown;
+      status: unknown;
+      branch: unknown;
+      reviews: unknown;
+      repo: unknown;
+      mergeResponse: Response;
+      secondPullResponse: Response;
+    }> = {},
+  ) {
+    let pullGetCalls = 0;
+    return vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.endsWith('/pulls/9/merge')) return Promise.resolve(overrides.mergeResponse ?? jsonResponse(null, { status: 200 }));
+      if (s.endsWith('/pulls/9')) {
+        pullGetCalls += 1;
+        if (pullGetCalls === 2 && overrides.secondPullResponse) return Promise.resolve(overrides.secondPullResponse);
+        return Promise.resolve(jsonResponse(overrides.pull ?? readyPullRow()));
+      }
+      if (s.includes('/commits/')) return Promise.resolve(jsonResponse(overrides.status ?? { statuses: [{ status: 'success' }] }));
+      if (s.includes('/branches/main')) return Promise.resolve(jsonResponse(overrides.branch ?? branchRow()));
+      if (s.includes('/pulls/9/reviews')) return Promise.resolve(jsonResponse(overrides.reviews ?? [], { headers: { 'x-total-count': '0' } }));
+      if (s.endsWith('/repos/acme/demo'))
+        return Promise.resolve(jsonResponse(overrides.repo ?? { default_branch: 'main', allow_merge_commits: true, allow_squash_merge: true }));
+      throw new Error(`unexpected url ${s}`);
+    });
+  }
+
+  it('the mergeInflight mutex rejects a concurrent call on the same key with 409/concurrent', async () => {
+    const fetchMock = router();
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null, sleep: async () => {} });
+
+    // Deliberately NOT awaited yet: `mergeInflight.add(key)` happens synchronously before the first
+    // `await` inside `mergePR`, so the mutex is already held by the time this line returns control.
+    const firstCall = driver.mergePR?.(9, { method: 'merge', expectedHeadSha: 'a'.repeat(40) });
+    const secondResult = await driver.mergePR?.(9, { method: 'merge', expectedHeadSha: 'a'.repeat(40) });
+    expect(secondResult).toEqual({ merged: false, status: 409, error: expect.any(String), code: 'concurrent' });
+
+    const firstResult = await firstCall;
+    expect(firstResult?.merged).toBe(true);
+  });
+
+  it('preflight: a head-sha mismatch against the fresh prMergeState maps to 409/stale-head with current', async () => {
+    const fetchMock = router();
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null, sleep: async () => {} });
+
+    const result = await driver.mergePR?.(9, { method: 'merge', expectedHeadSha: 'f'.repeat(40) });
+    expect(result).toMatchObject({ merged: false, status: 409, code: 'stale-head' });
+    expect(result && !result.merged && result.current).toBeDefined();
+  });
+
+  it('preflight: a method absent from current.methods maps to 409/disabled-method with current', async () => {
+    // Repository only enables `merge` — `squash` is not in `current.methods`.
+    const fetchMock = router({ repo: { default_branch: 'main', allow_merge_commits: true } });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null, sleep: async () => {} });
+
+    const result = await driver.mergePR?.(9, { method: 'squash', expectedHeadSha: 'a'.repeat(40) });
+    expect(result).toMatchObject({ merged: false, status: 409, code: 'disabled-method' });
+    expect(result && !result.merged && result.current).toBeDefined();
+  });
+
+  it('preflight: mergePreflightAllowed rejection maps to 409 with code=eligibility and current', async () => {
+    const fetchMock = router({ status: { statuses: [{ status: 'failure', context: 'ci' }] } });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null, sleep: async () => {} });
+
+    const result = await driver.mergePR?.(9, { method: 'merge', expectedHeadSha: 'a'.repeat(40) });
+    // `current.eligibility` here is 'blocked' (the ladder's coarse state), NOT the finer-grained
+    // blocker code 'checks-failing' — `mergePreflightAllowed`'s failure branch reuses `eligibility`
+    // verbatim as `code`, mirroring github.ts:1787.
+    expect(result).toMatchObject({ merged: false, status: 409, code: 'blocked' });
+    expect(result && !result.merged && result.current).toBeDefined();
+  });
+
+  it('preflight: overrideRules:true lets a checks-failing (non-conflict) block through to the merge POST', async () => {
+    const fetchMock = router({ status: { statuses: [{ status: 'failure', context: 'ci' }] } });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null, sleep: async () => {} });
+
+    const result = await driver.mergePR?.(9, { method: 'merge', expectedHeadSha: 'a'.repeat(40), overrideRules: true });
+    expect(result?.merged).toBe(true);
+  });
+
+  it('CEZ_DRY_RUN=1 (after preflight) returns merged:true without ever calling fetch', async () => {
+    process.env.CEZ_DRY_RUN = '1';
     const fetchMock = vi.fn();
-    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
-    const result = await driver.mergePR?.(1, { method: 'merge', expectedHeadSha: 'a'.repeat(40) });
-    expect(result).toEqual({ merged: false, status: 502, error: expect.any(String) });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null, sleep: async () => {} });
+
+    // Matches the DRY_RUN merge-state fixture's own head sha and enabled methods — see
+    // `DRY_RUN_MERGE_STATE_FIXTURE` in `forgejo.ts`.
+    const result = await driver.mergePR?.(777, { method: 'merge', expectedHeadSha: '0'.repeat(40) });
+    expect(result).toMatchObject({ merged: true, number: 777, method: 'merge' });
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it('sends head_commit_id, force_merge, and both explicit-false flags in the merge POST body', async () => {
+    const fetchMock = router();
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null, sleep: async () => {} });
+
+    await driver.mergePR?.(9, { method: 'merge', expectedHeadSha: 'a'.repeat(40), overrideRules: true });
+
+    const mergeCall = fetchMock.mock.calls.find((call) => String(call[0]).endsWith('/pulls/9/merge'));
+    expect(mergeCall).toBeDefined();
+    const body = JSON.parse((mergeCall![1] as RequestInit).body as string);
+    expect(body).toEqual({
+      Do: 'merge',
+      head_commit_id: 'a'.repeat(40),
+      force_merge: true,
+      merge_when_checks_succeed: false,
+      delete_branch_after_merge: false,
+    });
+  });
+
+  it('force_merge is false when overrideRules is not set', async () => {
+    const fetchMock = router();
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null, sleep: async () => {} });
+
+    await driver.mergePR?.(9, { method: 'merge', expectedHeadSha: 'a'.repeat(40) });
+
+    const mergeCall = fetchMock.mock.calls.find((call) => String(call[0]).endsWith('/pulls/9/merge'));
+    const body = JSON.parse((mergeCall![1] as RequestInit).body as string);
+    expect(body.force_merge).toBe(false);
+  });
+
+  describe('merge-POST status-code mapping', () => {
+    it.each([
+      [401, 403, undefined],
+      [403, 403, undefined],
+      [404, 404, undefined],
+      [405, 409, 'forgejo-blocked'],
+      [409, 409, 'conflicts'],
+      [423, 409, 'archived'],
+      [413, 409, 'quota'],
+      [500, 502, undefined],
+    ] as const)('HTTP %d from the merge POST -> {status:%d, code:%s}', async (httpStatus, expectedStatus, expectedCode) => {
+      const fetchMock = router({ mergeResponse: jsonResponse({ message: 'nope' }, { status: httpStatus }) });
+      const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null, sleep: async () => {} });
+
+      const result = await driver.mergePR?.(9, { method: 'merge', expectedHeadSha: 'a'.repeat(40) });
+      if (!result || result.merged) throw new Error('expected a merged:false result');
+      expect(result.status).toBe(expectedStatus);
+      expect(result.code).toBe(expectedCode);
+      if (expectedStatus === 409) expect(result.current).toBeDefined();
+      else expect(result.current).toBeUndefined();
+    });
+
+    it('a network error from the merge POST maps to 502', async () => {
+      const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+        const s = String(url);
+        if (s.endsWith('/pulls/9/merge')) return Promise.reject(new Error('connection reset'));
+        return router()(url);
+      });
+      const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null, sleep: async () => {} });
+
+      const result = await driver.mergePR?.(9, { method: 'merge', expectedHeadSha: 'a'.repeat(40) });
+      expect(result).toEqual({ merged: false, status: 502, error: expect.any(String) });
+    });
+  });
+
+  it('200 success reads mergeCommitSha from a follow-up GET /pulls/9', async () => {
+    const fetchMock = router({ pull: readyPullRow({ merge_commit_sha: 'c'.repeat(40) }) });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null, sleep: async () => {} });
+
+    const result = await driver.mergePR?.(9, { method: 'merge', expectedHeadSha: 'a'.repeat(40) });
+    expect(result).toMatchObject({ merged: true, number: 9, mergeCommitSha: 'c'.repeat(40) });
+  });
+
+  it('200 success with a failed mergeCommitSha readback still reports merged:true, just omits the field', async () => {
+    const fetchMock = router({ secondPullResponse: jsonResponse({ message: 'gone' }, { status: 500 }) });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null, sleep: async () => {} });
+
+    const result = await driver.mergePR?.(9, { method: 'merge', expectedHeadSha: 'a'.repeat(40) });
+    expect(result?.merged).toBe(true);
+    expect(result && result.merged && 'mergeCommitSha' in result).toBe(false);
+  });
+
+  it('a successful merge evicts listCache, prStatusCache, and mergeStateCache for the whole project', async () => {
+    // PR #42 is deliberately a DIFFERENT pull than the one merged below — proves the eviction is
+    // project-wide (keyed on repoRoot+apiBase), not scoped to the merged PR's own number.
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/issues?')) return Promise.resolve(jsonResponse([], { headers: { 'x-total-count': '0' } }));
+      if (s.includes('/pulls?state=all')) return Promise.resolve(jsonResponse([], { headers: { 'x-total-count': '0' } }));
+      if (s.includes('/pulls/main/')) return Promise.resolve(jsonResponse({ message: 'not found' }, { status: 404 }));
+      if (s.endsWith('/pulls/42')) return Promise.resolve(jsonResponse(readyPullRow({ number: 42 })));
+      if (s.endsWith('/pulls/9/merge')) return Promise.resolve(jsonResponse(null, { status: 200 }));
+      if (s.endsWith('/pulls/9')) return Promise.resolve(jsonResponse(readyPullRow()));
+      if (s.includes('/commits/')) return Promise.resolve(jsonResponse({ statuses: [{ status: 'success' }] }));
+      if (s.includes('/branches/main')) return Promise.resolve(jsonResponse(branchRow()));
+      if (s.includes('/reviews')) return Promise.resolve(jsonResponse([], { headers: { 'x-total-count': '0' } }));
+      if (s.endsWith('/repos/acme/demo')) return Promise.resolve(jsonResponse({ default_branch: 'main', allow_merge_commits: true }));
+      throw new Error(`unexpected url ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null, sleep: async () => {} });
+
+    await driver.listIssues();
+    await driver.prStatus('feat/x');
+    await driver.prMergeState?.(42);
+
+    const callCount = (pathIncludes: string) => fetchMock.mock.calls.filter((c) => String(c[0]).includes(pathIncludes)).length;
+    const issuesBefore = callCount('/issues?');
+    const prStatusBefore = callCount('/pulls?state=all');
+    const pull42Before = callCount('/pulls/42');
+
+    // Warm caches must be free right now — proves they really were cached before the merge.
+    await driver.listIssues();
+    await driver.prStatus('feat/x');
+    await driver.prMergeState?.(42);
+    expect(callCount('/issues?')).toBe(issuesBefore);
+    expect(callCount('/pulls?state=all')).toBe(prStatusBefore);
+    expect(callCount('/pulls/42')).toBe(pull42Before);
+
+    await driver.mergePR?.(9, { method: 'merge', expectedHeadSha: 'a'.repeat(40) });
+
+    await driver.listIssues();
+    await driver.prStatus('feat/x');
+    await driver.prMergeState?.(42);
+    expect(callCount('/issues?')).toBeGreaterThan(issuesBefore);
+    expect(callCount('/pulls?state=all')).toBeGreaterThan(prStatusBefore);
+    expect(callCount('/pulls/42')).toBeGreaterThan(pull42Before);
+  });
+});
+
+describe('stubbed methods (real bodies land as follow-up changes) never touch the network', () => {
+  const repoRoot = '/repo/stubs';
 
   it('prDiff degrades to {available:false, reason}', async () => {
     const fetchMock = vi.fn();

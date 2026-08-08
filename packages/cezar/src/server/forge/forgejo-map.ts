@@ -114,6 +114,11 @@ export const forgejoPullSchema = z.object({
   mergeable: z.boolean().nullish(),
   /** Merge-state only, same reasoning as `mergeable` above — list/prStatus rows never read it. */
   base: z.object({ ref: z.string() }).nullish(),
+  /** `mergePR`-only: the merge POST's own 200 response is empty on a live instance, so the merge
+   *  commit sha is read back through a SEPARATE, follow-up `GET /pulls/{n}` that reuses this same
+   *  schema. `.nullish()` because every other caller of this schema (list rows, prStatus rows, the
+   *  pre-merge preflight read) either omits the field or doesn't care about it. */
+  merge_commit_sha: z.string().nullish(),
 });
 export type ForgejoPull = z.infer<typeof forgejoPullSchema>;
 

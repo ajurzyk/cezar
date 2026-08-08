@@ -17,16 +17,19 @@ import {
   forgejoRepositorySchema,
   mapForgejoIssue,
   mapForgejoPull,
+  mergeMethodsFromRepository,
   normalizeForgejoMergeState,
   rebaseToWebUrl,
   type ForgejoBranchInfo,
   type ForgejoPull,
   type ForgejoRepository,
 } from './forgejo-map.ts';
-// `buildPrBody` is the one function this driver reuses FROM `github.ts` (explicitly sanctioned —
-// see the module doc below): the PR body format (goal + progress skim + footer) has no
-// forge-specific content, so re-deriving it here would just be a second copy to keep in sync.
-import { buildPrBody } from './github.ts';
+// `buildPrBody` and `mergePreflightAllowed` are the two things this driver reuses FROM `github.ts`
+// (explicitly sanctioned — see the module doc below): the PR body format has no forge-specific
+// content, and the merge-eligibility formula (`canMerge || (overrideRules && canOverride)`) is
+// pure and forge-agnostic — both `ForgePrMergeState` fields it reads are already computed by
+// `normalizeForgejoMergeState` above. Neither import touches `github.ts`'s own driver logic.
+import { buildPrBody, mergePreflightAllowed } from './github.ts';
 import type {
   DraftPrInput,
   DraftPrOutcome,
@@ -48,14 +51,16 @@ import type {
  * `github.ts`, but speaks REST directly through `forgejo-http.ts` instead of shelling out to a
  * CLI. `kind`, `detect`/`detectCached` (the two call sites that already exist, `server.ts:1511`
  * health and `:3214` automations-availability), `viewUrl`, `rebaseToWebUrl`, `listIssues`,
- * `listPRs`, `prStatus`, `createPR` and `prMergeState` are real; `mergePR` and `prDiff` remain
- * degraded stubs whose real bodies land as follow-up changes, each with its own tests. A stub with
- * no caller yet is expected shape here, not a defect: `github.ts` itself implements every optional
+ * `listPRs`, `prStatus`, `createPR`, `prMergeState` and `mergePR` are real; `prDiff` remains a
+ * degraded stub whose real body lands as a follow-up change, with its own tests. A stub with no
+ * caller yet is expected shape here, not a defect: `github.ts` itself implements every optional
  * method even though several of its own call sites were wired up separately, over time.
- * `createPR` deliberately reuses two things straight from `github.ts` rather than re-deriving them:
- * `buildPrBody` (the PR body format has no forge-specific content) and, transitively through
+ * This driver deliberately reuses a few things straight from `github.ts` rather than re-deriving
+ * them: `buildPrBody` (the PR body format has no forge-specific content), `mergePreflightAllowed`
+ * (the eligibility formula is pure and forge-agnostic), and, transitively through
  * `git-worktree.ts`, `autosaveCommit` (the pre-publish flush is identical git plumbing regardless
- * of which forge the branch is headed to). Neither import touches `github.ts`'s own driver logic.
+ * of which forge the branch is headed to). None of these imports touch `github.ts`'s own driver
+ * logic (`fetchPrMergeState`/`mergePullRequest`/`createDraftPr` themselves are never imported).
  */
 
 export interface ForgejoDriverCtx {
@@ -124,6 +129,12 @@ const mergeStateCache = new Map<string, MergeStateCacheEntry>();
 const MERGE_STATE_CACHE_MS = 15_000;
 const MERGE_STATE_CACHE_MAX = 500;
 
+/** Mutex for `mergePR` — keyed IDENTICALLY to `mergeStateCache` (same `mergeStateCacheKey`
+ *  function), so "a merge for this exact PR is already running" and "the cached merge-state for
+ *  this exact PR" share one notion of identity. Holds no data, just membership: a key present means
+ *  a merge is in flight. Mirrors `github.ts`'s own `mergeInflight` (github.ts:1579). */
+const mergeInflight = new Set<string>();
+
 function cacheKey(repoRoot: string, apiBase: string): string {
   return `${repoRoot}\0${apiBase}`;
 }
@@ -148,14 +159,16 @@ function evictOldest(cache: Map<string, unknown>, max: number): void {
   }
 }
 
-/** Clears every cache this module owns. Grows as more caches are added alongside new methods
- *  (`prDiffCache` lands in a follow-up package) — tests call this in `beforeEach` so one test's warm
- *  cache can never leak into the next. */
+/** Clears every cache (and the merge mutex) this module owns. Grows as more caches are added
+ *  alongside new methods (`prDiffCache` lands in a follow-up package) — tests call this in
+ *  `beforeEach` so one test's warm cache, or a mutex left held by a test that never reached its
+ *  `finally`, can never leak into the next. */
 export function __clearForgejoCachesForTests(): void {
   detectCache.clear();
   listCache.clear();
   prStatusCache.clear();
   mergeStateCache.clear();
+  mergeInflight.clear();
 }
 
 function describeError(err: unknown): string {
@@ -543,7 +556,22 @@ const DRY_RUN_MERGE_STATE_FIXTURE = {
   },
   statusRaw: { statuses: [{ status: 'success', context: 'ci/build' }] },
   branch: { readable: true, protected: false, requiredApprovals: 0, enableStatusCheck: false, statusCheckContexts: [], userCanMerge: true } as ForgejoBranchInfo,
-  repository: null,
+  // A real (not `null`) repository: `mergePR`'s own CEZ_DRY_RUN path runs its preflight through
+  // THIS fixture (via `prMergeState`), and a preflight that reports `methods: []` would 409 every
+  // dry-run merge attempt with `disabled-method` before it ever reaches the dry-run success branch.
+  // `allow_merge_commits`/`allow_squash_merge`/`allow_rebase` all `true` so every `ForgeMergeMethod`
+  // a caller might exercise in dry-run mode is actually enabled.
+  repository: {
+    default_branch: 'main',
+    allow_merge_commits: true,
+    allow_squash_merge: true,
+    allow_rebase: true,
+    allow_rebase_explicit: false,
+    allow_fast_forward_only_merge: false,
+    default_merge_style: 'merge',
+    has_pull_requests: true,
+    archived: false,
+  } as ForgejoRepository,
   reviewsRaw: [] as unknown[],
 };
 
@@ -659,16 +687,19 @@ function tailLines(stderr: string): string {
 }
 
 /** Extracts a human message from a `send()` result that didn't 2xx. `send` never throws (unlike
- *  `getJson`/`getText`), so this is the createPR-local equivalent of `forgejo-http.ts`'s internal
- *  error-body reader — that one works off a raw `Response`, this one off the already-drained
- *  `{status, json, text}` shape `send` hands back, hence the small, deliberate duplication instead
- *  of a shared helper across the module boundary. */
-function sendErrorMessage(res: { status: number; json: unknown; text: string }): string {
+ *  `getJson`/`getText`), so this is the createPR/mergePR-local equivalent of `forgejo-http.ts`'s
+ *  internal error-body reader — that one works off a raw `Response`, this one off the
+ *  already-drained `{status, json, text}` shape `send` hands back, hence the small, deliberate
+ *  duplication instead of a shared helper across the module boundary. `fallback` is the action-
+ *  specific default when neither the JSON `message` field nor the raw text yields anything usable
+ *  (an empty body on an otherwise-unhandled status, say) — `createPR` and `mergePR` each want their
+ *  own wording here, not a generic one. */
+function sendErrorMessage(res: { status: number; json: unknown; text: string }, fallback: string): string {
   if (res.json && typeof res.json === 'object' && 'message' in res.json) {
     const m = (res.json as { message?: unknown }).message;
     if (typeof m === 'string' && m) return m;
   }
-  return firstLine(res.text) || `pull request creation failed (HTTP ${res.status})`;
+  return firstLine(res.text) || `${fallback} (HTTP ${res.status})`;
 }
 
 /**
@@ -769,7 +800,192 @@ async function createForgejoPr(
   if (res.status === 423) {
     return { ok: false, error: 'this repository is archived and cannot receive pull requests' };
   }
-  return { ok: false, error: sendErrorMessage(res) };
+  return { ok: false, error: sendErrorMessage(res, 'pull request creation failed') };
+}
+
+/** Clears every cache entry that belongs to one project (`repoRoot`+`apiBase` pair) after a
+ *  successful merge — a merge changes list membership (the merged PR should stop showing as open
+ *  in `listIssues`/`listPRs`), the merged PR's own merge-state (now `terminal`), and every OTHER
+ *  open PR's merge-state too (their `head`/`base` didn't move, but a merge can flip branch-
+ *  protection-derived fields that are shared across the whole repo — same reasoning `github.ts`'s
+ *  `evictGithubProjectCaches` applies at repo scope, not PR scope). Mirrors
+ *  `evictGithubProjectCaches` (github.ts:1757-1765); unlike GitHub's version this one also needs the
+ *  `apiBase` half of the key, since every cache in this module is keyed `repoRoot\0apiBase\0...`.
+ *  `detectCache` is deliberately NOT cleared here — a merge doesn't change the repository's own
+ *  merge-method flags or default branch, which is all that cache holds. A future `prDiffCache`
+ *  extends this same prefix-delete once that cache exists. */
+function evictForgejoProjectCaches(repoRoot: string, apiBase: string): void {
+  const prefix = `${repoRoot}\0${apiBase}\0`;
+  listCache.forEach((_value, key) => {
+    if (key.startsWith(prefix)) listCache.delete(key);
+  });
+  prStatusCache.forEach((_value, key) => {
+    if (key.startsWith(prefix)) prStatusCache.delete(key);
+  });
+  mergeStateCache.forEach((_value, key) => {
+    if (key.startsWith(prefix)) mergeStateCache.delete(key);
+  });
+}
+
+/** Fixed, obviously-fake sha for the `CEZ_DRY_RUN=1` merge success path — mirrors `github.ts`'s own
+ *  dry-run `mergeCommitSha` (github.ts:1791): a dry run never talks to Forgejo, so there is no real
+ *  commit to report, but the field's presence still exercises whatever UI renders it. */
+const DRY_RUN_MERGE_COMMIT_SHA = 'abcdef0123456789abcdef0123456789abcdef01';
+
+/**
+ * Merges a pull request: mutex → preflight → (dry-run short-circuit) → `POST .../merge` → status
+ * mapping. Mirrors `mergePullRequest` (github.ts:1767-1809) structurally; body/response shape is
+ * Forgejo-specific (see the inline comments at each divergence).
+ *
+ * The mutex and the preflight are two INDEPENDENT layers of protection against the same race (two
+ * merge clicks landing on the same PR near-simultaneously), not redundant: the mutex catches two
+ * calls from THIS process; `head_commit_id` in the POST body (below) catches a merge that happened
+ * from anywhere else (another cezar instance, the Forgejo web UI, a script) between the preflight
+ * read and this POST landing. Removing either layer re-opens a real race window, not a redundancy.
+ */
+async function forgejoMergePR(
+  repoRoot: string,
+  http: ForgejoHttp,
+  owner: string,
+  repo: string,
+  webUrl: string,
+  number: number,
+  input: ForgeMergeInput,
+  sleep: (ms: number) => Promise<void>,
+): Promise<ForgeMergeResult> {
+  const key = mergeStateCacheKey(repoRoot, http.apiBase, number);
+  if (mergeInflight.has(key)) {
+    return { merged: false, status: 409, error: 'A merge is already in progress for this pull request.', code: 'concurrent' };
+  }
+  mergeInflight.add(key);
+  try {
+    // Always `refresh: true` — a merge decision must never be made off a stale cached mergeState,
+    // and this call is also what re-populates `mergeStateCache` with the fresh read every OTHER
+    // reader (the merge-state panel refreshing after this call) will see.
+    const fresh = await forgejoPrMergeState(repoRoot, http, owner, repo, webUrl, number, { refresh: true }, sleep);
+    if (!fresh.available) return { merged: false, status: 502, error: fresh.reason };
+    const current = fresh.mergeState;
+
+    if (current.headSha !== input.expectedHeadSha) {
+      return {
+        merged: false,
+        status: 409,
+        error: 'The pull request head changed. Review the new commits before merging.',
+        code: 'stale-head',
+        current,
+      };
+    }
+    if (!current.methods.includes(input.method)) {
+      return { merged: false, status: 409, error: 'That merge method is no longer enabled.', code: 'disabled-method', current };
+    }
+    if (!mergePreflightAllowed(current, input.overrideRules)) {
+      return {
+        merged: false,
+        status: 409,
+        error: current.blockers[0]?.message ?? 'The pull request is not eligible to merge.',
+        code: current.eligibility,
+        current,
+      };
+    }
+
+    // DRY-RUN, checked AFTER every preflight gate above (parity github.ts:1789) — a dry run still
+    // exercises the full eligibility ladder against the fixture `prMergeState` served under
+    // CEZ_DRY_RUN, it just never issues the real POST.
+    if (process.env.CEZ_DRY_RUN === '1') {
+      evictForgejoProjectCaches(repoRoot, http.apiBase);
+      return { merged: true, number, url: current.url, method: input.method, mergeCommitSha: DRY_RUN_MERGE_COMMIT_SHA };
+    }
+
+    // `current.methods` (checked above) is derived from the SAME repository body this resolves —
+    // `resolveRepository` serves the warm `detectCache` entry `forgejoPrMergeState` just populated,
+    // so this is never a second network request in practice.
+    const repository = await resolveRepository(repoRoot, http, owner, repo);
+    const doValue = repository ? mergeMethodsFromRepository(repository).doFor[input.method] : undefined;
+    if (!doValue) {
+      // Defensive only — should be unreachable given the `current.methods.includes` check above
+      // (both derive from the same repository body). Kept as a typed guard, not a non-null
+      // assertion, so a future drift between the two derivations degrades instead of sending
+      // `Do: undefined` to the wire.
+      return { merged: false, status: 409, error: 'That merge method is no longer enabled.', code: 'disabled-method', current };
+    }
+
+    const encOwner = encodeURIComponent(owner);
+    const encRepo = encodeURIComponent(repo);
+    let res: { status: number; json: unknown; text: string };
+    try {
+      res = await http.send('POST', `repos/${encOwner}/${encRepo}/pulls/${number}/merge`, {
+        Do: doValue,
+        // Native optimistic-concurrency check on Forgejo's own side — ALWAYS sent, never made
+        // conditional on the preflight compare above. See this function's own doc comment for why
+        // the two are independent layers, not a redundant pair.
+        head_commit_id: input.expectedHeadSha,
+        force_merge: input.overrideRules === true,
+        // JAWNIE false — omitting this (or sending `true`) makes Forgejo SCHEDULE the merge for
+        // once checks pass instead of merging now, and this function would still return
+        // `merged:true` for a merge that has not actually happened yet. Do not drop this field to
+        // "simplify"; it is not a default worth inheriting.
+        merge_when_checks_succeed: false,
+        // JAWNIE false — do NOT inherit `Repository.default_delete_branch_after_merge`. Deleting
+        // the run's own branch out from under it, from the merge button, is destructive, and
+        // `github.ts`'s `mergePullRequest` does not do this either. Do not drop this field either.
+        delete_branch_after_merge: false,
+      });
+    } catch (err) {
+      // Network failure / timeout from the merge POST itself — nothing was necessarily mutated
+      // server-side (or it was, and the response just never arrived); either way this function has
+      // no way to know which, so it reports the one honest thing it can: the call failed.
+      return { merged: false, status: 502, error: describeError(err) };
+    }
+
+    if (res.status === 200) {
+      evictForgejoProjectCaches(repoRoot, http.apiBase);
+      // The 200 response body is empty on a live instance — `merge_commit_sha` is only obtainable
+      // through a SEPARATE, follow-up `GET /pulls/{n}`. Best-effort: the merge already happened, so
+      // a failure reading it back must never turn a real success into an error — it just omits the
+      // field (`ForgeMergeResult.mergeCommitSha` is optional for exactly this reason).
+      let mergeCommitSha: string | undefined;
+      try {
+        const raw = await http.getJson(`repos/${encOwner}/${encRepo}/pulls/${number}`);
+        mergeCommitSha = forgejoPullSchema.parse(raw).merge_commit_sha ?? undefined;
+      } catch {
+        mergeCommitSha = undefined;
+      }
+      return { merged: true, number, url: current.url, method: input.method, ...(mergeCommitSha ? { mergeCommitSha } : {}) };
+    }
+    if (res.status === 401 || res.status === 403) {
+      return { merged: false, status: 403, error: sendErrorMessage(res, 'Forgejo denied the merge') };
+    }
+    if (res.status === 404) {
+      return { merged: false, status: 404, error: sendErrorMessage(res, 'pull request or repository not found') };
+    }
+    if (res.status === 405) {
+      // Forgejo answers 405 for a request its own server-side rules refuse outright (distinct from
+      // a 409 conflict) — the contract's `ForgeMergeResult` union has no dedicated status for this,
+      // so it collapses onto 409 like the other three "forge said no, try something else" codes
+      // below; the `code` is what lets a caller tell them apart.
+      return { merged: false, status: 409, error: sendErrorMessage(res, 'Forgejo refused the merge'), code: 'forgejo-blocked', current };
+    }
+    if (res.status === 409) {
+      return { merged: false, status: 409, error: sendErrorMessage(res, 'the pull request has conflicts'), code: 'conflicts', current };
+    }
+    if (res.status === 423) {
+      return {
+        merged: false,
+        status: 409,
+        error: 'this repository is archived and cannot be merged into',
+        code: 'archived',
+        current,
+      };
+    }
+    if (res.status === 413) {
+      return { merged: false, status: 409, error: 'the repository has exceeded its storage quota', code: 'quota', current };
+    }
+    // Any other status (5xx, or anything this switch didn't anticipate) — Forgejo could not
+    // complete the merge and this driver has no more specific mapping to offer.
+    return { merged: false, status: 502, error: sendErrorMessage(res, 'Forgejo could not complete the merge') };
+  } finally {
+    mergeInflight.delete(key);
+  }
 }
 
 export function createForgejoDriver(ctx: ForgejoDriverCtx, deps?: ForgejoHttpDeps): ForgeDriver {
@@ -793,14 +1009,7 @@ export function createForgejoDriver(ctx: ForgejoDriverCtx, deps?: ForgejoHttpDep
     prMergeState: (number: number, opts?: { refresh?: boolean }) =>
       forgejoPrMergeState(repoRoot, http, owner, repo, webUrl, number, opts, sleep),
 
-    // Still a degraded stub — the real body (mutex, preflight against prMergeState above, status-
-    // code mapping) lands as a follow-up change with its own tests. Never calls `http`, which is
-    // exactly what `forgejo.test.ts`'s "stubbed methods" suite pins down.
-    mergePR: async (_number: number, _input: ForgeMergeInput): Promise<ForgeMergeResult> => ({
-      merged: false,
-      status: 502,
-      error: 'Forgejo merging is not implemented yet.',
-    }),
+    mergePR: (number: number, input: ForgeMergeInput) => forgejoMergePR(repoRoot, http, owner, repo, webUrl, number, input, sleep),
 
     prDiff: async (_number: number, _opts?: { refresh?: boolean }): Promise<ForgePrDiffResult> => ({
       available: false,
