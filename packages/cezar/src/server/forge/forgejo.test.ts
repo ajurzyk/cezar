@@ -491,6 +491,100 @@ describe('prStatus', () => {
     expect(walkCalls).toBe(2); // a failed read must not poison the 60s cache with "no PR"
   });
 
+  it('an unfinished walk (stoppedShort:true) with no match is NOT cached — a later call retries instead of serving a stale "no PR"', async () => {
+    // Page 1 is a full, non-matching page (so the walk does not throw and keeps what it collected —
+    // parity with `fetchForgejoReviews`'s stoppedShort test above); page 2 500s, tripping
+    // `stoppedShort:true` with the walk still unproven. The fallback could shadow a real match on the
+    // unread page, so this must stay unresolved, not settle into a cached "no PR".
+    const page1 = Array.from({ length: 50 }, (_, i) => pullRow({ number: i + 1, head: { ref: `other/${i}`, sha: 'a'.repeat(40) } }));
+    let walkCalls = 0;
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/pulls?state=all')) {
+        const page = Number(new URL(s).searchParams.get('page'));
+        if (page === 1) {
+          walkCalls += 1;
+          return Promise.resolve(jsonResponse(page1, { headers: { 'x-total-count': '100' } }));
+        }
+        return Promise.resolve(jsonResponse({ message: 'server error' }, { status: 500 }));
+      }
+      throw new Error(`unexpected url ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    await expect(driver.prStatus('feat/x')).resolves.toBeNull();
+    expect(walkCalls).toBe(1);
+    await expect(driver.prStatus('feat/x')).resolves.toBeNull();
+    expect(walkCalls).toBe(2); // a stopped-short walk must not poison the 60s cache with "no PR"
+  });
+
+  it('a failed default-branch lookup (the /pulls/{base}/{head} fallback cannot even be attempted) is NOT cached', async () => {
+    // The primary walk is exhausted (stoppedShort:false) but finds no match — a real gap the
+    // fallback normally closes by resolving `base` via GET /repos/{o}/{r}. That repo GET itself
+    // 500s here, so `base` cannot be resolved at all: this is a failed read, not a proven "no PR".
+    const walkRow = pullRow({ number: 7, state: 'closed', merged: true, head: { ref: 'refs/pull/7/head', sha: 'c'.repeat(40) } });
+    let repoCalls = 0;
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/pulls?state=all')) return Promise.resolve(jsonResponse([walkRow], { headers: { 'x-total-count': '1' } }));
+      if (s.endsWith('/repos/acme/demo')) {
+        repoCalls += 1;
+        return Promise.resolve(jsonResponse({ message: 'server error' }, { status: 500 }));
+      }
+      throw new Error(`unexpected url ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    await expect(driver.prStatus('feat/skipped-branch')).resolves.toBeNull();
+    expect(repoCalls).toBe(1);
+    await expect(driver.prStatus('feat/skipped-branch')).resolves.toBeNull();
+    expect(repoCalls).toBe(2); // an unresolved default branch must not poison the 60s cache with "no PR"
+  });
+
+  it('a /pulls/{base}/{head} fallback that fails with a non-404 is NOT cached — a later call retries', async () => {
+    // Distinguishes a genuine "no PR for this base/head pair" (404, proven, cacheable) from a
+    // transient forge failure on the SAME endpoint (500, unresolved, must not be cached).
+    const walkRow = pullRow({ number: 7, state: 'closed', merged: true, head: { ref: 'refs/pull/7/head', sha: 'c'.repeat(40) } });
+    let fallbackCalls = 0;
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/pulls?state=all')) return Promise.resolve(jsonResponse([walkRow], { headers: { 'x-total-count': '1' } }));
+      if (s.endsWith('/repos/acme/demo')) return Promise.resolve(jsonResponse({ default_branch: 'main' }));
+      if (s.includes('/pulls/main/')) {
+        fallbackCalls += 1;
+        return Promise.resolve(jsonResponse({ message: 'server error' }, { status: 500 }));
+      }
+      throw new Error(`unexpected url ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    await expect(driver.prStatus('feat/skipped-branch')).resolves.toBeNull();
+    expect(fallbackCalls).toBe(1);
+    await expect(driver.prStatus('feat/skipped-branch')).resolves.toBeNull();
+    expect(fallbackCalls).toBe(2); // a transient 500 on the fallback must not poison the 60s cache with "no PR"
+  });
+
+  it('a /pulls/{base}/{head} fallback that genuinely 404s IS cached — a proven "no PR" answer, unlike the 500 case above', async () => {
+    const walkRow = pullRow({ number: 7, state: 'closed', merged: true, head: { ref: 'refs/pull/7/head', sha: 'c'.repeat(40) } });
+    let fallbackCalls = 0;
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/pulls?state=all')) return Promise.resolve(jsonResponse([walkRow], { headers: { 'x-total-count': '1' } }));
+      if (s.endsWith('/repos/acme/demo')) return Promise.resolve(jsonResponse({ default_branch: 'main' }));
+      if (s.includes('/pulls/main/')) {
+        fallbackCalls += 1;
+        return Promise.resolve(jsonResponse({ message: 'not found' }, { status: 404 }));
+      }
+      throw new Error(`unexpected url ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    await expect(driver.prStatus('feat/skipped-branch')).resolves.toBeNull();
+    expect(fallbackCalls).toBe(1);
+    await expect(driver.prStatus('feat/skipped-branch')).resolves.toBeNull();
+    expect(fallbackCalls).toBe(1); // a proven 404 stays cached, same as before this fix
+  });
+
   it('a matched row with a non-absolute html_url degrades to null instead of throwing (rebaseToWebUrl cannot parse it)', async () => {
     const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
       const s = String(url);
@@ -502,6 +596,24 @@ describe('prStatus', () => {
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
 
     await expect(driver.prStatus('feat/x')).resolves.toBeNull();
+  });
+
+  it('a matched row with a non-absolute html_url is NOT cached — the PR was proven to exist, so the degrade must not pin "no PR" for 60s', async () => {
+    let walkCalls = 0;
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/pulls?state=all')) {
+        walkCalls += 1;
+        return Promise.resolve(jsonResponse([pullRow({ html_url: 'not-a-url' })], { headers: { 'x-total-count': '1' } }));
+      }
+      return Promise.resolve(jsonResponse({ statuses: null }));
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    await expect(driver.prStatus('feat/x')).resolves.toBeNull();
+    expect(walkCalls).toBe(1);
+    await expect(driver.prStatus('feat/x')).resolves.toBeNull();
+    expect(walkCalls).toBe(2); // a proven match that only failed to RENDER must not poison the 60s cache with "no PR"
   });
 
   it('a /pulls/{base}/{head} fallback match with a non-absolute html_url degrades to null instead of throwing', async () => {
@@ -955,6 +1067,28 @@ describe('prMergeState', () => {
     const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
       const s = String(url);
       if (s.includes('/pulls/9/reviews')) return Promise.resolve(jsonResponse({ message: 'server error' }, { status: 500 }));
+      return router()(url);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.prMergeState?.(9);
+    expect(result?.available).toBe(true);
+    expect(result?.available && result.mergeState.eligibility).toBe('unknown');
+    expect(result?.available && result.mergeState.blockers).toEqual([{ code: 'reviews-unknown', message: expect.any(String) }]);
+  });
+
+  it('a reviews walk that stops short (a later page failed) reports reviews-unknown, never silently reads the partial page as "no changes requested" (ready)', async () => {
+    // Page 1 returns a full page (50 rows, matching x-total-count:100, none REQUEST_CHANGES) so the
+    // walk does not throw and keeps what it collected — `stoppedShort` only trips on page 2. A
+    // REQUEST_CHANGES review sitting on that unread page 2 must never be silently treated as absent.
+    const page1 = Array.from({ length: 50 }, () => ({ state: 'APPROVED', official: true, user: { login: 'a' } }));
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/pulls/9/reviews')) {
+        const page = Number(new URL(s).searchParams.get('page'));
+        if (page === 1) return Promise.resolve(jsonResponse(page1, { headers: { 'x-total-count': '100' } }));
+        return Promise.resolve(jsonResponse({ message: 'server error' }, { status: 500 }));
+      }
       return router()(url);
     });
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });

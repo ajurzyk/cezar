@@ -468,14 +468,19 @@ async function pullRowToStatus(
  * sharing the same head, the fallback endpoint picks an arbitrary one, so `merged` vs `closed`
  * might describe the wrong one of the two.
  */
-/** Distinguishes "the primary walk itself failed" (page 1 of `pulls?state=all` errored — no rows
- *  collected, nothing proven) from a genuine, proven "no PR" answer. `forgejoPrStatus` below reads
- *  this to skip `prStatusCache.set` for exactly this case — the SAME reasoning `listForgejo`'s own
+/** Distinguishes "this read taught us nothing" from a genuine, proven "no PR" answer — every place
+ *  `resolveForgejoPrStatus` below cannot tell "no PR exists" apart from "the read that would have
+ *  proven it failed" returns this instead of `null`: a page-1 throw (nothing collected), a later
+ *  page failing (`stoppedShort`, rows kept but the walk unproven — the fallback below could shadow a
+ *  match on the unread remainder), an unresolvable default branch (the fallback could not even be
+ *  attempted), a non-404 failure on the fallback lookup itself, and a matched row that failed to
+ *  RENDER (`pullRowToStatus` throwing on an already-proven match). `forgejoPrStatus` below reads this
+ *  to skip `prStatusCache.set` for exactly these cases — the SAME reasoning `listForgejo`'s own
  *  `catch` already applies (that function's `catch` never touches `listCache` either): a transient
  *  forge outage must not pin "no PR" onto a branch for the next 60s. A module-level `Symbol` (not a
  *  discriminated union) so this one, narrow "don't cache this" signal never has to be threaded
- *  through `resolveForgejoPrStatus`'s other, already-decided `null` returns (a proven "no PR", or a
- *  degrade after a real match was found) — those stay ordinary `null`, exactly as before. */
+ *  through `resolveForgejoPrStatus`'s one remaining ordinary `null`: a fallback lookup that 404s,
+ *  the API's own proven "no PR for this base/head pair" answer. */
 const FORGEJO_PR_STATUS_UNRESOLVED = Symbol('forgejo-pr-status-unresolved');
 
 async function resolveForgejoPrStatus(
@@ -525,24 +530,40 @@ async function resolveForgejoPrStatus(
     // non-absolute `html_url` — a read must never throw past this function. The `/pulls/{base}/{head}`
     // fallback just below needs the SAME protection for the SAME reason; both `try`s must `await`
     // the `pullRowToStatus` call, not just wrap it, or the rejection skips the `catch` entirely.
+    // UNRESOLVED, never a proven `null`: `found` means the PR's EXISTENCE is already proven by this
+    // walk — the throw only means it could not be fully rendered, so caching this as "no PR" would
+    // pin a wrong answer onto a branch that plainly has one.
     try {
       return await pullRowToStatus(http, owner, repo, webUrl, found);
     } catch {
-      return null;
+      return FORGEJO_PR_STATUS_UNRESOLVED;
     }
   }
-  if (page.stoppedShort) return null; // walk unproven — the fallback could shadow an open PR
+  // walk unproven (a later page errored/hit budget/hit the page cap) — the fallback below could
+  // shadow an open PR sitting on the page never reached, so this must be UNRESOLVED, not a proven
+  // "no PR": same reasoning as the page-1 throw above, just reached through the OTHER signal
+  // `paginate` uses for "didn't finish" (see forgejo-http.ts).
+  if (page.stoppedShort) return FORGEJO_PR_STATUS_UNRESOLVED;
 
   const base = await resolveDefaultBranch(repoRoot, http, owner, repo);
-  if (!base) return null;
+  // `resolveDefaultBranch` collapses BOTH "the repo GET failed" and "resolveRepository never learned
+  // a default_branch" to `null` — there is no way to tell those apart here, but neither is a proven
+  // "no PR": the fallback simply could not be attempted, so this is UNRESOLVED too.
+  if (!base) return FORGEJO_PR_STATUS_UNRESOLVED;
   try {
     const raw = await http.getJson(`${repoPrefix}/pulls/${encodeRefSegments(base)}/${encodeRefSegments(branch)}`);
     // `await` here is load-bearing: without it, this `try` returns the pending promise itself and
     // resolves/rejects OUTSIDE this frame, so a `pullRowToStatus` rejection (a non-absolute
     // `html_url`, see the comment above) skips this `catch` entirely instead of degrading to `null`.
     return await pullRowToStatus(http, owner, repo, webUrl, forgejoPullSchema.parse(raw));
-  } catch {
-    return null;
+  } catch (err) {
+    // A 404 here is the API's own proven answer: no PR exists for this exact base/head pair — a
+    // genuine "no PR", safe to cache. Any OTHER failure (network, 5xx, a malformed body that fails
+    // `forgejoPullSchema.parse`, or `pullRowToStatus`'s own degrade path above) means this read
+    // taught us nothing, so it must stay UNRESOLVED rather than pin a "no PR" reading onto a branch
+    // that might genuinely have one.
+    if (err instanceof ForgejoHttpError && err.status === 404) return null;
+    return FORGEJO_PR_STATUS_UNRESOLVED;
   }
 }
 
@@ -623,13 +644,20 @@ async function fetchForgejoCombinedStatus(
  *  `computeReviewDecision` an empty `[]` in that case (a safe `'unknown'`/`'review-required'`
  *  answer, never a false approval), but ALSO threads `ok` through to
  *  `normalizeForgejoMergeState`'s `reviewsReadable`, which blocks the merge (`reviews-unknown`)
- *  instead of letting a failed read masquerade as "this PR genuinely has zero reviews". */
+ *  instead of letting a failed read masquerade as "this PR genuinely has zero reviews". A page 1
+ *  throw is the only case `paginate` can fail on without collecting anything (see forgejo-http.ts);
+ *  a LATER page failing instead sets `page.stoppedShort` and keeps the rows already gathered —
+ *  that partial page must ALSO be `{ok:false}`, not `{ok:true}`: a REQUEST_CHANGES review sitting on
+ *  the unread remainder would otherwise be silently absent from `reviewsRaw`, letting
+ *  `computeReviewDecision` read a partial walk as "no changes requested" (mirrors `forgejoPrDiff`'s
+ *  own `filesPage.stoppedShort` handling for the file walk). */
 async function fetchForgejoReviews(http: ForgejoHttp, owner: string, repo: string, number: number): Promise<ForgejoFetchResult<unknown[]>> {
   const repoPrefix = repoPath(owner, repo);
   try {
     const page = await http.paginate((p, l) => `${repoPrefix}/pulls/${number}/reviews?page=${p}&limit=${l}`, {
       want: FJ_MAX_LIST_LIMIT,
     });
+    if (page.stoppedShort) return { ok: false };
     return { ok: true, value: page.rows };
   } catch {
     return { ok: false };
