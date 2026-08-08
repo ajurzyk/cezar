@@ -484,27 +484,6 @@ async function pullRowToStatus(
   };
 }
 
-/**
- * Walks `repos/{o}/{r}/pulls?state=all` (NOT the `GET pulls/{base}/{head}` shortcut as the primary
- * path — that endpoint returns closed/merged PRs too and picks an arbitrary one when several share
- * a head, which on a live instance returned a merged PR for a branch with an open one). An open
- * match wins over any earlier closed/merged match with the same `head.ref`, since an open PR is
- * always the strongest possible answer.
- *
- * The `/pulls/{base}/{head}` fallback only runs once the walk is PROVEN exhaustive
- * (`page.stoppedShort === false`): a merged PR whose branch was deleted reports
- * `head.ref: "refs/pull/N/head"`, so it can never match by branch name in the walk, and the
- * fallback exists to still find it. But firing the fallback after an UNFINISHED walk would let it
- * shadow a genuinely open PR sitting on a page the walk never reached — resurrecting the exact bug
- * the state=all walk exists to avoid. Three residual gaps, all accepted as known limitations:
- * (a) a PR merged into a NON-default base with a deleted branch still returns `null` (the fallback
- * only tries the repo's `default_branch` as `base`); (b) with two terminal (closed/merged) PRs
- * sharing the same head, the fallback endpoint picks an arbitrary one, so `merged` vs `closed`
- * might describe the wrong one of the two; (c) the walk's own `found` check below runs BEFORE the
- * `stoppedShort` gate, so a terminal (closed/merged) match seen on an unfinished walk is still
- * returned and cached as proven — a genuinely open PR for the same branch sitting on a page the
- * walk never reached never gets the chance to overtake it.
- */
 /** Distinguishes "this read taught us nothing" from a genuine, proven "no PR" answer — every place
  *  `resolveForgejoPrStatus` below cannot tell "no PR exists" apart from "the read that would have
  *  proven it failed" returns this instead of `null`: a page-1 throw (nothing collected), a later
@@ -541,6 +520,27 @@ const FORGEJO_PR_STATUS_UNRESOLVED = Symbol('forgejo-pr-status-unresolved');
  *  window this trades away completeness for, it does not remove the invariant. */
 const FORGEJO_PR_STATUS_UNRESOLVED_PERSISTENT = Symbol('forgejo-pr-status-unresolved-persistent');
 
+/**
+ * Walks `repos/{o}/{r}/pulls?state=all` (NOT the `GET pulls/{base}/{head}` shortcut as the primary
+ * path — that endpoint returns closed/merged PRs too and picks an arbitrary one when several share
+ * a head, which on a live instance returned a merged PR for a branch with an open one). An open
+ * match wins over any earlier closed/merged match with the same `head.ref`, since an open PR is
+ * always the strongest possible answer.
+ *
+ * The `/pulls/{base}/{head}` fallback only runs once the walk is PROVEN exhaustive
+ * (`page.stoppedShort === false`): a merged PR whose branch was deleted reports
+ * `head.ref: "refs/pull/N/head"`, so it can never match by branch name in the walk, and the
+ * fallback exists to still find it. But firing the fallback after an UNFINISHED walk would let it
+ * shadow a genuinely open PR sitting on a page the walk never reached — resurrecting the exact bug
+ * the state=all walk exists to avoid. Three residual gaps, all accepted as known limitations:
+ * (a) a PR merged into a NON-default base with a deleted branch still returns `null` (the fallback
+ * only tries the repo's `default_branch` as `base`); (b) with two terminal (closed/merged) PRs
+ * sharing the same head, the fallback endpoint picks an arbitrary one, so `merged` vs `closed`
+ * might describe the wrong one of the two; (c) the walk's own `found` check below runs BEFORE the
+ * `stoppedShort` gate, so a terminal (closed/merged) match seen on an unfinished walk is still
+ * returned and cached as proven — a genuinely open PR for the same branch sitting on a page the
+ * walk never reached never gets the chance to overtake it.
+ */
 async function resolveForgejoPrStatus(
   repoRoot: string,
   http: ForgejoHttp,
@@ -1071,8 +1071,12 @@ async function createForgejoPr(
   return { ok: false, error: sendErrorMessage(res, 'pull request creation failed') };
 }
 
-/** Clears every cache entry that belongs to one project (`repoRoot`+`apiBase` pair) after a
- *  successful merge — a merge changes list membership (the merged PR should stop showing as open
+/** Clears every cache entry that belongs to one project (`repoRoot`+`apiBase` pair) after a write
+ *  this driver just proved landed server-side. Two callers: `mergePR` after a successful merge, and
+ *  `createPR` after a 201 (and after a 409 whose lookup proves an OPEN PR already exists) — there
+ *  the stale entry to kill is `prStatusCache`'s pre-publish "no PR", which would otherwise answer
+ *  for up to 60s after a real PR exists. The merge case is the broader one and sets the scope: a
+ *  merge changes list membership (the merged PR should stop showing as open
  *  in `listIssues`/`listPRs`), the merged PR's own merge-state (now `terminal`), every OTHER open
  *  PR's merge-state too (their `head`/`base` didn't move, but a merge can flip branch-protection-
  *  derived fields that are shared across the whole repo — same reasoning `github.ts`'s
@@ -1253,8 +1257,9 @@ async function forgejoMergePR(
 
 /** `ChangedFile` on the wire has no `patch` field at all — `forgejo-diff.ts`'s `splitUnifiedDiff`
  *  is what supplies it, parsed from a SEPARATE `GET /pulls/{n}.diff` request. Used only by the
- *  `CEZ_DRY_RUN=1` short-circuit below; `number`/`headSha` are overwritten per-call by the caller
- *  (dry-run still echoes back whatever PR number was asked for), everything else is fixed. */
+ *  `CEZ_DRY_RUN=1` short-circuit below, which wraps this file list in a result object whose
+ *  `number` echoes back whatever PR was asked for; `headSha` there is a fixed all-zero sha, and
+ *  this fixture itself (a `ForgePrChange[]`, which carries neither field) never varies. */
 const DRY_RUN_PR_DIFF_FIXTURE: ForgePrChange[] = [
   { path: 'src/example.ts', status: 'modified', additions: 3, deletions: 1, patch: '@@ -1,2 +1,2 @@\n-old\n+new\n context' },
   { path: 'src/new-name.ts', previousPath: 'src/old-name.ts', status: 'renamed', additions: 0, deletions: 0 },
