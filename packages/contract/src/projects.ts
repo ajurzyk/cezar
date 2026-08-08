@@ -33,15 +33,16 @@ export const projectListEntrySchema = z.object({
   /** Current branch when cheaply available (omitted e.g. on an unborn HEAD). */
   branch: z.string().optional(),
   /** Which forge this project's remote belongs to (#698). `'github'` when the root's remote parses
-   *  to a known forge host (the github.com table); `'github'` OR `'forgejo'` on ANY host when the
-   *  root's own `.ai/cezar/config.json` declares a `forge.kind` — the repo config WINS over the
-   *  host table rather than merely filling the gap it leaves, so a github.com remote paired with
-   *  `kind: 'forgejo'` reports `'forgejo'` here, not `'github'`. Gates the project group's GitHub
-   *  nav item. Omitted when the remote doesn't parse into `{host, owner, repo}` (even with a
-   *  `forge` key declared) or when neither source names a forge — additive, a consumer that
-   *  ignores the field sees no change. The list is deliberately literal here (the contract cannot
-   *  import from the service); `contract-parity.workspace.test.ts` catches drift against the
-   *  service's `FORGE_KINDS`. */
+   *  to a known forge host (the github.com table); `'forgejo'` when the root's own
+   *  `.ai/cezar/config.json` declares a `forge.kind` for a host the table does NOT recognize. The
+   *  repo config fills the table's gap rather than overriding it, so a github.com remote paired
+   *  with `kind: 'forgejo'` still reports `'github'` here — and a config-declared `kind: 'github'`
+   *  never reaches this field, because the GitHub driver is hardwired to github.com. Gates the
+   *  project group's GitHub nav item. Omitted when the remote doesn't parse into
+   *  `{host, owner, repo}` (even with a `forge` key declared) or when neither source names a
+   *  forge — additive, a consumer that ignores the field sees no change. The list is deliberately
+   *  literal here (the contract cannot import from the service);
+   *  `contract-parity.workspace.test.ts` catches drift against the service's `FORGE_KINDS`. */
   forge: z.enum(['github', 'forgejo']).optional(),
   /** Per-project cap on concurrently running tasks (spec 2026-07-22). Omitted = inherit the
    *  workspace `resources.maxParallel`; a number pins this project. */
