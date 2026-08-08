@@ -1,4 +1,5 @@
 import type { RepoInfo } from '../git.ts';
+import { createForgejoDriver } from './forgejo.ts';
 import { createGithubDriver } from './github.ts';
 import type { ForgeDriver, ForgeKind, ForgeSettings } from './types.ts';
 
@@ -115,10 +116,12 @@ export function resolveForge(repoInfo: RepoInfo | null, forge?: ForgeSettings): 
     return createGithubDriver(repoInfo.root, { owner: parsed.owner, repo: parsed.repo });
   }
   if (kind === 'forgejo') {
-    // Recognition only: no Forgejo driver exists yet. `forge.apiUrl`/`forge.webUrl` are exactly
-    // what a future driver would consume — deliberately unread here. No stub, no throw: a
-    // consumer sees the same `null` it would for any other forge with no driver.
-    return null;
+    // Guard is defensive, not load-bearing: `classifyForgeKind` only ever returns 'forgejo' when a
+    // repo-config `forge` was supplied (the host table has no forgejo entries), so `forge` is
+    // always defined on this branch — the `? :` just keeps the compiler's flow analysis honest.
+    return forge
+      ? createForgejoDriver({ repoRoot: repoInfo.root, owner: parsed.owner, repo: parsed.repo, settings: forge })
+      : null;
   }
   return null;
 }

@@ -129,8 +129,8 @@ describe('resolveForge', () => {
     expect(resolveForge(info('/srv/git/demo.git'))).toBeNull();
   });
 
-  it('returns null for a repo-config forgejo declaration on a self-hosted remote (driver lands separately)', () => {
-    expect(resolveForge(info('ssh://git@forge.internal:2222/acme/demo.git'), forgejoSettings)).toBeNull();
+  it('builds the Forgejo driver for a repo-config forgejo declaration on a self-hosted remote', () => {
+    expect(resolveForge(info('ssh://git@forge.internal:2222/acme/demo.git'), forgejoSettings)?.kind).toBe('forgejo');
   });
 
   it('keeps the GitHub driver on a github.com remote even when the repo config declares forgejo', () => {

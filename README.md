@@ -446,6 +446,7 @@ Useful environment variables:
 | `CEZ_HIDE_COST=1` | Hide backend-reported monetary cost throughout the browser cockpit while leaving raw input/output token counts visible. Only the exact value `1` enables it; telemetry and API payloads are unchanged, and a restart is required after changing it. |
 | `CEZ_HIDE_TOKEN_METRICS=1` | Legacy master switch that hides both token usage and cost. It takes precedence over the two independent flags; only the exact value `1` enables it, payloads are unchanged, and a restart is required. |
 | `GITHUB_TOKEN` | Fallback for GitHub reads/PRs when `gh` isn't authenticated. |
+| `CEZ_FORGEJO_TOKEN` | Auth for the Forgejo driver's own REST calls (repos declaring `forge.kind:"forgejo"`, see [Configuration](#configuration-optional)). Optional — public repos work without it. Sent only when the request's resolved target shares `forge.apiUrl`'s origin; redirects are rejected, never followed. The PR-branch push itself uses your normal git credentials, not this token. |
 | `CEZ_ENV_PASSTHROUGH=A,B` | Forward these extra host env vars to spawned agents. By default agents get a least-privilege env (safe shell/toolchain vars + the backend's own auth + `GITHUB_TOKEN` + `CEZ_*`), not your full environment — use this to add a var an agent needs. |
 | `CEZ_AGENT_ENV_FULL=1` | Escape hatch: give spawned agents the full host environment (pre-hardening behavior). Off by default; only set it if you understand that this hands every host secret to the agent process. |
 | `CEZ_REDACT_SECRETS=0` | Disable scrubbing of credential values/token shapes from the on-disk state (the NDJSON transcript and the free-text fields of `runs.json`). On by default; leave it on. Best-effort defense-in-depth, not a guarantee: it catches known token shapes and the values of your own secret-named env vars, so a credential in neither category can still get through. |
@@ -585,15 +586,25 @@ never blocks startup):
 }
 ```
 
-The `forge` key currently enables recognition only (`forge: "forgejo"` on
-`GET /api/v1/projects`); the issues/PR tab for Forgejo ships in a later release.
+Declaring `"kind": "forgejo"` now wires up a real REST driver
+(`packages/cezar/src/server/forge/forgejo.ts`, behind `resolveForge`) instead of
+recognition-only. Health and the automations tab's availability check both call
+into it today and report the repo's true reachability. The PR merge-state probe
+and merge route already dispatch through the same driver seam too, but the driver
+fills those two methods in incrementally — until it does, each answers the same
+quiet-degrade shape any undriven forge gets (`available: false` / a 502), never a
+crash. The issues/PR tab's own listing and the PR-diff view are further out still:
+their routes in `server.ts` call the GitHub-only code paths directly and don't go
+through `resolveForge` at all yet, so a Forgejo repo sees no listing there
+regardless of what the driver itself can already do. See the automations caveat
+below for the one other known gap.
 
 **The key fills a gap; it never overrides.** cezar asks its host table first
 (`github.com` → the GitHub driver) and consults `forge.kind` only for a host
 the table doesn't recognize. So declaring `kind: "forgejo"` next to a
-`github.com` remote changes nothing — the repo keeps its working GitHub driver
-rather than trading it for a forge whose driver hasn't shipped yet. Setting
-this key can never cost a repo a capability it already had.
+`github.com` remote changes nothing — the repo keeps the GitHub driver, the
+only one of the two that can actually talk to that remote. Setting this key
+can never cost a repo a capability it already had.
 
 `kind: "github"` is accepted by the schema but **inert everywhere**. On
 `github.com` the host table has already answered without it. On any other host
@@ -621,6 +632,31 @@ field means either it degraded silently — recheck `kind`, `apiUrl` and `webUrl
 for typos — or the repo has no parsable `origin` remote (a local path, or no
 `origin` at all). A `forge: "github"` there always comes from the host table,
 never from your config.
+
+Known limitation: the automations tab's own availability check honors
+`config.forge`, but the automation poller and its manual "check now" action
+still hardcode `host === 'github.com'` — a project that resolves to Forgejo
+through its config shows `available: true` there (the Forgejo driver now
+answers that probe for real), yet the poller never starts its schedule and the
+manual "check now" action fails. Closing that gap is later work; today the
+tab's availability badge is ahead of what automations can actually do for a
+Forgejo repo.
+
+Trust model for the `forge` key: `.ai/cezar/config.json` is a **code-trusted**
+surface, same as `systemPrompt` (sent to every agent run) and `skillsRepos`
+(cloned and executed as prompts, `skills-remote.ts`) — anyone who can edit a
+repo's config can already run code as you. `forge.apiUrl`/`forge.webUrl`
+therefore don't raise that file's trust level; they are just two more
+addresses it can point at. `CEZ_FORGEJO_TOKEN` itself is scoped by the driver,
+not by this file: it is attached only to the Forgejo driver's own HTTP
+requests, and only when the request's resolved target shares `apiUrl`'s
+origin (redirects are rejected, never followed) — a malicious `apiUrl` value
+can point the driver at a different host, but it cannot make the driver leak
+the token to that host. The variable is not otherwise sandboxed, though: like
+`GITHUB_TOKEN`, it is still forwarded whole to spawned agent processes
+(`agent-env.ts`) and scrubbed from the on-disk NDJSON transcript by name
+(`secret-redaction.ts`) — the origin gate protects the driver's own requests,
+not every process that ever sees the token.
 
 Put the same `"modelsLocked": true` key in `~/.cezar/config.json` to apply it
 to every registered project. When the key is absent or `false` in both config
