@@ -493,8 +493,11 @@ function combinedStatusToPrChecks(statusRaw: unknown | null, branch: ForgejoBran
  *
  * Eligibility ladder (mirrors `github.ts:1636-1667`'s structure; two deliberate divergences, each
  * cited where it happens): `terminal` (not open) → `blocked/draft` → `blocked/conflicts` →
- * `blocked/checks-failing` (`warning` counts as failing) → `blocked/reviews` (also catches an
- * unrecognized review state, via `computeReviewDecision`'s own rule 0) → `unknown/rules-unknown`
+ * `blocked/checks-failing` (`warning` counts as failing) → `unknown/checks-unknown` (ONLY when the
+ * combined-status fetch itself failed, `statusReadable:false` — never fires for a genuine "no CI
+ * configured" read) → `unknown/reviews-unknown` (same contract, for a failed
+ * `GET /pulls/{n}/reviews`) → `blocked/reviews` (also catches an unrecognized review state, via
+ * `computeReviewDecision`'s own rule 0) → `unknown/rules-unknown`
  * (ONLY when the branch GET failed — divergence 1) → `unauthorized/unauthorized` (ONLY with a token
  * present — divergence 2) → `pending/pending` → `unknown/unknown` (mergeable still unresolved, or
  * no merge method available — the ladder's own closing rung, github.ts:1660-1667) → `ready`.
@@ -502,11 +505,25 @@ function combinedStatusToPrChecks(statusRaw: unknown | null, branch: ForgejoBran
 export function normalizeForgejoMergeState(input: {
   pullRaw: unknown;
   statusRaw: unknown | null;
+  /** Optional, defaults `true` (every existing call site — real and test — omits it and keeps
+   *  today's behavior unchanged). Set to `false` ONLY when the combined-status fetch itself failed
+   *  (network/HTTP error) — distinguishes that from `statusRaw: null` on a SUCCESSFUL read, which
+   *  means "no CI configured" and stays 'ready'. Caller-supplied (`forgejo.ts`), never derived from
+   *  `statusRaw`'s own shape here — this function has no way to tell the two apart from the body
+   *  alone (a JSON `null` body vs. a `{statuses: null}` body both already collapse before they get
+   *  here; the fetch's own success/failure is the only place that distinction still exists). */
+  statusReadable?: boolean;
   branch: ForgejoBranchInfo;
   repository: ForgejoRepository | null;
   webUrl: string;
   hasToken: boolean;
   reviewsRaw: unknown;
+  /** Same contract as `statusReadable`, for `GET /pulls/{n}/reviews`: `false` ONLY when that fetch
+   *  itself failed, never derived from an empty `reviewsRaw` (a PR with genuinely zero reviews is
+   *  the routine case). Without this, a failed reviews read silently degrades to `reviewsRaw: []`
+   *  one layer up (`forgejo.ts`'s `fetchForgejoReviews`) — indistinguishable from "no reviews exist"
+   *  — which could hide an active `REQUEST_CHANGES` behind a passing `reviewDecision`. */
+  reviewsReadable?: boolean;
 }): ForgePrMergeState {
   const pull = forgejoPullSchema.parse(input.pullRaw);
 
@@ -524,6 +541,8 @@ export function normalizeForgejoMergeState(input: {
 
   const checks = combinedStatusToPrChecks(input.statusRaw, input.branch);
   const reviewDecision = computeReviewDecision(input.reviewsRaw, input.branch);
+  const statusReadable = input.statusReadable ?? true;
+  const reviewsReadable = input.reviewsReadable ?? true;
   const { methods, defaultMethod } = input.repository
     ? mergeMethodsFromRepository(input.repository)
     : { methods: [] as ForgeMergeMethod[], defaultMethod: null };
@@ -542,6 +561,21 @@ export function normalizeForgejoMergeState(input: {
   } else if (checks.some((c) => c.state === 'failing')) {
     eligibility = 'blocked';
     blockers.push({ code: 'checks-failing', message: 'One or more checks are failing.' });
+  } else if (!statusReadable) {
+    // The combined-status fetch itself failed (network/HTTP error) — NOT the same thing as
+    // `statusRaw: null` on a successful read (which means "no CI configured" and stays 'ready').
+    // `checks` above is `[]` in both cases (`combinedStatusToPrChecks` has no way to tell them
+    // apart from the body alone), so an unreadable read must block here explicitly, or it would
+    // fall through this whole ladder exactly like a repo with no CI at all — a red build read as
+    // green because the read that would have proven it red never landed.
+    eligibility = 'unknown';
+    blockers.push({ code: 'checks-unknown', message: 'Forgejo could not confirm CI status.' });
+  } else if (!reviewsReadable) {
+    // Same reasoning as `!statusReadable` above, for `GET /pulls/{n}/reviews`: a failed fetch
+    // degrades to `reviewsRaw: []` one layer up, indistinguishable from a PR with genuinely zero
+    // reviews — which `reviewDecision` below cannot tell apart from "we don't know" either.
+    eligibility = 'unknown';
+    blockers.push({ code: 'reviews-unknown', message: 'Forgejo could not confirm review status.' });
   } else if (reviewDecision === 'changes-requested' || reviewDecision === 'review-required') {
     eligibility = 'blocked';
     blockers.push({

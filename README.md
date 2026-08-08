@@ -665,7 +665,7 @@ therefore don't raise that file's trust level; they are just two more
 addresses it can point at. `CEZ_FORGEJO_TOKEN` itself is scoped by the driver,
 not by this file: it is attached only to the Forgejo driver's own HTTP
 requests, and only when the request's resolved target shares `apiOrigin` —
-the origin derived *from* `apiUrl` itself (`forgejo-http.ts:172`), not some
+the origin derived *from* `apiUrl` itself (`forgejo-http.ts:179`), not some
 independently trusted value. That means the gate does NOT protect the token
 from `apiUrl`'s own host: whatever host `apiUrl` names receives the token,
 same as pointing any other tool at an API endpoint always does — this is

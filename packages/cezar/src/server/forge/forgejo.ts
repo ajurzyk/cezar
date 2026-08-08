@@ -423,16 +423,19 @@ async function pullRowToStatus(
   pull: ForgejoPull,
 ): Promise<ForgePrStatus> {
   // Reuses `fetchForgejoCombinedStatus` rather than re-issuing the same GET+try/catch inline —
-  // both paths hit the identical `commits/{sha}/status` endpoint and degrade to `null` on failure.
-  // `combinedStatusToChecks` itself is a zod `.parse()` that `fetchForgejoCombinedStatus` does NOT
-  // cover (that function only try/catches the GET) — a malformed-but-syntactically-valid body must
-  // degrade `checks` alone to `null`, not throw past this function and blank the whole `ForgePrStatus`
-  // the caller already has (number/url/state/isDraft), so the parse is try/caught right here.
+  // both paths hit the identical `commits/{sha}/status` endpoint. `ForgePrStatus.checks` (unlike
+  // `forgejoPrMergeState`'s per-check breakdown) has no "the read itself failed" state to report —
+  // it is a list-row badge, not a merge-decision gate — so both a failed fetch and a genuine "no CI
+  // configured" read collapse to the same `null` here, same as before. `combinedStatusToChecks`
+  // itself is a zod `.parse()` that `fetchForgejoCombinedStatus` does NOT cover (that function only
+  // try/catches the GET) — a malformed-but-syntactically-valid body must degrade `checks` alone to
+  // `null`, not throw past this function and blank the whole `ForgePrStatus` the caller already has
+  // (number/url/state/isDraft), so the parse is try/caught right here.
   let checks: ForgePrStatus['checks'] = null;
   if (pull.head?.sha) {
-    const raw = await fetchForgejoCombinedStatus(http, owner, repo, pull.head.sha);
+    const status = await fetchForgejoCombinedStatus(http, owner, repo, pull.head.sha);
     try {
-      checks = raw == null ? null : combinedStatusToChecks(raw);
+      checks = status.ok ? combinedStatusToChecks(status.value) : null;
     } catch {
       checks = null;
     }
@@ -465,6 +468,16 @@ async function pullRowToStatus(
  * sharing the same head, the fallback endpoint picks an arbitrary one, so `merged` vs `closed`
  * might describe the wrong one of the two.
  */
+/** Distinguishes "the primary walk itself failed" (page 1 of `pulls?state=all` errored — no rows
+ *  collected, nothing proven) from a genuine, proven "no PR" answer. `forgejoPrStatus` below reads
+ *  this to skip `prStatusCache.set` for exactly this case — the SAME reasoning `listForgejo`'s own
+ *  `catch` already applies (that function's `catch` never touches `listCache` either): a transient
+ *  forge outage must not pin "no PR" onto a branch for the next 60s. A module-level `Symbol` (not a
+ *  discriminated union) so this one, narrow "don't cache this" signal never has to be threaded
+ *  through `resolveForgejoPrStatus`'s other, already-decided `null` returns (a proven "no PR", or a
+ *  degrade after a real match was found) — those stay ordinary `null`, exactly as before. */
+const FORGEJO_PR_STATUS_UNRESOLVED = Symbol('forgejo-pr-status-unresolved');
+
 async function resolveForgejoPrStatus(
   repoRoot: string,
   http: ForgejoHttp,
@@ -472,7 +485,7 @@ async function resolveForgejoPrStatus(
   repo: string,
   webUrl: string,
   branch: string,
-): Promise<ForgePrStatus | null> {
+): Promise<ForgePrStatus | null | typeof FORGEJO_PR_STATUS_UNRESOLVED> {
   const repoPrefix = repoPath(owner, repo);
 
   let page: ForgejoPage;
@@ -483,8 +496,10 @@ async function resolveForgejoPrStatus(
   } catch {
     // Page 1 is the only page `paginate` can fail on without having collected anything (a later
     // page's failure keeps what was gathered and marks `stoppedShort`, see forgejo-http.ts) — either
-    // way there is nothing here proving completeness, so the fallback below must not run.
-    return null;
+    // way there is nothing here proving completeness, so the fallback below must not run. Unlike
+    // every OTHER `null` this function returns, this one is UNRESOLVED, not a proven "no PR" —
+    // see `FORGEJO_PR_STATUS_UNRESOLVED`'s own doc comment.
+    return FORGEJO_PR_STATUS_UNRESOLVED;
   }
 
   let openMatch: ForgejoPull | null = null;
@@ -544,6 +559,10 @@ async function forgejoPrStatus(
   const hit = prStatusCache.get(key);
   if (hit && Date.now() - hit.at < CACHE_MS) return hit.data;
   const data = await resolveForgejoPrStatus(repoRoot, http, owner, repo, webUrl, branch);
+  // An UNRESOLVED read (the primary walk itself failed) must never poison the 60s cache with "no
+  // PR" — same reasoning `listForgejo`'s own `catch` already applies to `listCache`. Every other
+  // outcome (including a PROVEN "no PR") is cached as before.
+  if (data === FORGEJO_PR_STATUS_UNRESOLVED) return null;
   prStatusCache.set(key, { at: Date.now(), data });
   evictOldest(prStatusCache, PR_STATUS_CACHE_MAX);
   return data;
@@ -572,32 +591,48 @@ async function fetchForgejoBranchInfo(http: ForgejoHttp, owner: string, repo: st
   }
 }
 
-/** `GET /repos/{o}/{r}/commits/{sha}/status` — `null` on ANY failure (never thrown further), which
- *  `normalizeForgejoMergeState`/`combinedStatusToPrChecks` already treat identically to "no CI
- *  configured" (an empty `checks[]`, not a blocker). A CI probe that failed to answer must degrade
- *  the same way as a repo that has no CI at all — neither should ever fail the whole merge-state
- *  read the way `GET /pulls/{n}` failing does. */
-async function fetchForgejoCombinedStatus(http: ForgejoHttp, owner: string, repo: string, sha: string): Promise<unknown | null> {
+/** Discriminates "the fetch itself failed" from "the fetch succeeded and returned this body" — the
+ *  distinction `forgejoPrMergeState`'s `statusReadable`/`reviewsReadable` need (see
+ *  `normalizeForgejoMergeState`'s own doc comment for why): a body of literal `null`/`[]` is a
+ *  legitimate, common SUCCESSFUL answer ("no CI configured" / "no reviews yet"), and must never be
+ *  conflated with "we don't know because the read failed". */
+type ForgejoFetchResult<T> = { ok: true; value: T } | { ok: false };
+
+/** `GET /repos/{o}/{r}/commits/{sha}/status` — `{ok:false}` on ANY failure (never thrown further).
+ *  `pullRowToStatus` (list/prStatus rows, not a merge decision) still collapses that to `checks:
+ *  null`, same as "no CI configured" — see its own doc comment for why that stays unchanged.
+ *  `forgejoPrMergeState` does NOT collapse the two: it threads `ok` through to
+ *  `normalizeForgejoMergeState`'s `statusReadable`, which blocks the merge (`checks-unknown`)
+ *  instead of silently reading a failed CI probe as "no CI at all". */
+async function fetchForgejoCombinedStatus(
+  http: ForgejoHttp,
+  owner: string,
+  repo: string,
+  sha: string,
+): Promise<ForgejoFetchResult<unknown>> {
   try {
-    return await http.getJson(`${repoPath(owner, repo)}/commits/${encodeRefSegments(sha)}/status`);
+    return { ok: true, value: await http.getJson(`${repoPath(owner, repo)}/commits/${encodeRefSegments(sha)}/status`) };
   } catch {
-    return null;
+    return { ok: false };
   }
 }
 
 /** Walks `GET /pulls/{n}/reviews`, capped the same way every other list walk in this driver is
- *  (`FJ_MAX_LIST_LIMIT`, parity with `GH_MAX_LIMIT`). Degrades to `[]` on any failure — an unreadable
- *  review list must not fail the whole merge-state read; `computeReviewDecision([], ...)` already
- *  produces a safe `'unknown'`/`'review-required'` answer for an empty list, never a false approval. */
-async function fetchForgejoReviews(http: ForgejoHttp, owner: string, repo: string, number: number): Promise<unknown[]> {
+ *  (`FJ_MAX_LIST_LIMIT`, parity with `GH_MAX_LIMIT`). `{ok:false}` on any failure — an unreadable
+ *  review list must not fail the whole merge-state read; `forgejoPrMergeState` still feeds
+ *  `computeReviewDecision` an empty `[]` in that case (a safe `'unknown'`/`'review-required'`
+ *  answer, never a false approval), but ALSO threads `ok` through to
+ *  `normalizeForgejoMergeState`'s `reviewsReadable`, which blocks the merge (`reviews-unknown`)
+ *  instead of letting a failed read masquerade as "this PR genuinely has zero reviews". */
+async function fetchForgejoReviews(http: ForgejoHttp, owner: string, repo: string, number: number): Promise<ForgejoFetchResult<unknown[]>> {
   const repoPrefix = repoPath(owner, repo);
   try {
     const page = await http.paginate((p, l) => `${repoPrefix}/pulls/${number}/reviews?page=${p}&limit=${l}`, {
       want: FJ_MAX_LIST_LIMIT,
     });
-    return page.rows;
+    return { ok: true, value: page.rows };
   } catch {
-    return [];
+    return { ok: false };
   }
 }
 
@@ -693,8 +728,13 @@ async function forgejoPrMergeState(
       ({ raw: pullRaw, pull } = await fetchPull(http, owner, repo, number));
     }
 
-    const [statusRaw, branch, reviewsRaw, repository] = await Promise.all([
-      pull.head?.sha ? fetchForgejoCombinedStatus(http, owner, repo, pull.head.sha) : Promise.resolve(null),
+    const [statusFetch, branch, reviewsFetch, repository] = await Promise.all([
+      // No `head.sha` at all (never observed on a live instance, but the schema allows it) means
+      // there is genuinely nothing to probe — NOT a failed read, so this stays `ok:true` with a
+      // `null` value, same as "no CI configured".
+      pull.head?.sha
+        ? fetchForgejoCombinedStatus(http, owner, repo, pull.head.sha)
+        : Promise.resolve<ForgejoFetchResult<unknown>>({ ok: true, value: null }),
       pull.base?.ref ? fetchForgejoBranchInfo(http, owner, repo, pull.base.ref) : Promise.resolve<ForgejoBranchInfo>({ readable: false }),
       fetchForgejoReviews(http, owner, repo, number),
       resolveRepository(repoRoot, http, owner, repo),
@@ -702,12 +742,14 @@ async function forgejoPrMergeState(
 
     const mergeState = normalizeForgejoMergeState({
       pullRaw,
-      statusRaw,
+      statusRaw: statusFetch.ok ? statusFetch.value : null,
+      statusReadable: statusFetch.ok,
       branch,
       repository,
       webUrl,
       hasToken: http.hasToken(),
-      reviewsRaw,
+      reviewsRaw: reviewsFetch.ok ? reviewsFetch.value : [],
+      reviewsReadable: reviewsFetch.ok,
     });
     const value: ForgePrMergeStateResult = { available: true, mergeState };
     mergeStateCache.set(key, { at: Date.now(), value });
@@ -841,11 +883,15 @@ async function createForgejoPr(
   const res = await http.send('POST', `${repoPrefix}/pulls`, { head: branch, base, title, body });
 
   if (res.status === 201) {
-    // The PR was genuinely created server-side by the time we get here — a malformed response body
-    // (fails `forgejoPullSchema`) or a non-absolute `html_url` (`rebaseToWebUrl` throws a
-    // `TypeError`) must not turn a real success into an unhandled throw; it degrades to a
-    // best-effort success without a clickable link instead, same reasoning as `mergePR`'s own
-    // best-effort `mergeCommitSha` read-back.
+    // The PR was genuinely created server-side by the time we get here — evict this project's
+    // caches BEFORE the parse below, so even a malformed body (which still degrades to a
+    // best-effort success, see the try/catch below) doesn't leave a stale pre-publish
+    // `prStatusCache` entry (`null`/"no PR") answering for up to 60s after a real PR now exists.
+    // A malformed response body (fails `forgejoPullSchema`) or a non-absolute `html_url`
+    // (`rebaseToWebUrl` throws a `TypeError`) must not turn a real success into an unhandled throw;
+    // it degrades to a best-effort success without a clickable link instead, same reasoning as
+    // `mergePR`'s own best-effort `mergeCommitSha` read-back.
+    evictForgejoProjectCaches(repoRoot, http.apiBase);
     try {
       const pull = forgejoPullSchema.parse(res.json);
       return { ok: true, url: rebaseToWebUrl(pull.html_url, webUrl), dryRun: false };
@@ -865,7 +911,12 @@ async function createForgejoPr(
     try {
       const raw = await http.getJson(`${repoPrefix}/pulls/${encodeRefSegments(base)}/${encodeRefSegments(branch)}`);
       const pull = forgejoPullSchema.parse(raw);
-      if (pull.state === 'open') return { ok: true, url: rebaseToWebUrl(pull.html_url, webUrl), dryRun: false };
+      if (pull.state === 'open') {
+        // Same reasoning as the 201 branch above: a genuinely open PR was just proven to exist for
+        // this head/base — a stale pre-publish `prStatusCache` "no PR" entry must not survive it.
+        evictForgejoProjectCaches(repoRoot, http.apiBase);
+        return { ok: true, url: rebaseToWebUrl(pull.html_url, webUrl), dryRun: false };
+      }
     } catch {
       // fall through to the 409's own message below
     }
@@ -1142,11 +1193,15 @@ async function forgejoPrDiff(
     }
 
     const rowsCapped = rows.slice(0, FJ_PR_DIFF_FILE_CAP);
-    // `rows.length` (not `filesPage.stoppedShort`) mirrors `fetchGithubPrDiff` exactly: a full cap
-    // worth of rows is conservatively called partial even though the walk itself might, in
-    // principle, have landed exactly on the true total.
-    let responseTruncated = rows.length >= FJ_PR_DIFF_FILE_CAP;
-    const reasons: string[] = responseTruncated ? [`Only the first ${FJ_PR_DIFF_FILE_CAP} files are shown.`] : [];
+    // Two independent reasons the file list can be incomplete: a full cap worth of rows (`rows.length`
+    // conservatively called partial even though the walk might, in principle, have landed exactly on
+    // the true total), OR the `/files` walk itself proving nothing beyond what it collected
+    // (`filesPage.stoppedShort` — a later page errored, hit the walk budget, or hit `maxPages`). Either
+    // on its own means the response below must not be served as a complete diff.
+    let responseTruncated = rows.length >= FJ_PR_DIFF_FILE_CAP || filesPage.stoppedShort;
+    const reasons: string[] = [];
+    if (rows.length >= FJ_PR_DIFF_FILE_CAP) reasons.push(`Only the first ${FJ_PR_DIFF_FILE_CAP} files are shown.`);
+    if (filesPage.stoppedShort) reasons.push('The file list could not be fully retrieved.');
 
     const files: ForgePrChange[] = rowsCapped.map((row) => {
       const diffEntry = diffMap.get(row.filename);
