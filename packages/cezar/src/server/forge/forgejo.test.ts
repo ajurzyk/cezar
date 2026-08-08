@@ -362,6 +362,25 @@ describe('prStatus', () => {
     });
   });
 
+  it('a malformed combined-status body degrades checks alone to null, not the whole PR status', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/pulls?state=all')) return Promise.resolve(jsonResponse([pullRow()], { headers: { 'x-total-count': '1' } }));
+      // `status` must be a string per `forgejoCombinedStatusSchema` — this fails that zod parse.
+      if (s.includes('/commits/')) return Promise.resolve(jsonResponse({ statuses: [{ status: 123 }] }));
+      throw new Error(`unexpected url ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    await expect(driver.prStatus('feat/x')).resolves.toEqual({
+      number: 5,
+      url: 'https://forge.example.com/acme/demo/pulls/5',
+      state: 'open',
+      isDraft: false,
+      checks: null,
+    });
+  });
+
   it('reports state:"merged" for a merged PR, never a bare state:"closed"', async () => {
     const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
       const s = String(url);
@@ -464,6 +483,29 @@ describe('prStatus', () => {
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
 
     await expect(driver.prStatus('feat/x')).resolves.toBeNull();
+  });
+
+  it('a /pulls/{base}/{head} fallback match with a non-absolute html_url degrades to null instead of throwing', async () => {
+    const walkRow = pullRow({ number: 7, state: 'closed', merged: true, head: { ref: 'refs/pull/7/head', sha: 'c'.repeat(40) } });
+    const fallbackRow = pullRow({
+      number: 7,
+      html_url: 'not-a-url',
+      state: 'closed',
+      merged: true,
+      head: { ref: 'refs/pull/7/head', sha: 'c'.repeat(40) },
+    });
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/pulls?state=all')) {
+        return Promise.resolve(jsonResponse([walkRow], { headers: { 'x-total-count': '1' } }));
+      }
+      if (s.includes('/pulls/main/')) return Promise.resolve(jsonResponse(fallbackRow));
+      if (s.endsWith('/repos/acme/demo')) return Promise.resolve(jsonResponse({ default_branch: 'main' }));
+      throw new Error(`unexpected url ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    await expect(driver.prStatus('feat/skipped-branch')).resolves.toBeNull();
   });
 
   it('CEZ_DRY_RUN=1 short-circuits to null without calling fetch', async () => {
@@ -731,6 +773,15 @@ describe('createPR', () => {
 
     const result = await driver.createPR(input({ baseBranch: 'main' }));
     expect(result).toEqual({ ok: false, error: 'internal error' });
+  });
+
+  it('an empty error body on an other-status response falls back to this action\'s own message, not a generic one', async () => {
+    mockPush({ ok: true });
+    const fetchMock = vi.fn().mockResolvedValue(new Response('', { status: 400, headers: { 'content-type': 'text/plain' } }));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.createPR(input({ baseBranch: 'main' }));
+    expect(result).toEqual({ ok: false, error: 'pull request creation failed (HTTP 400)' });
   });
 });
 

@@ -127,20 +127,25 @@ export function firstLine(s: string): string {
 }
 
 /** Extracts a human-readable message from an already-parsed error body: the JSON `message` field
- *  wins when present and non-empty, otherwise the first non-blank line of the raw text. Exported
- *  so `forgejo.ts`'s `sendErrorMessage` doesn't grow a second copy of this exact extraction —
- *  that one works off `send()`'s already-drained `{status, json, text}` (`send` never throws, so
- *  there is no live `Response` left to drain by the time that caller runs), while `describeErrorBody`
- *  below both drains the `Response` AND adds its own status-specific 401/403 hint on top — the hint
- *  stays local to `describeErrorBody`, deliberately NOT folded in here, because `forgejo.ts`'s own
- *  create/merge callers each want their own wording for an auth failure (`mergePR`'s 403 message
- *  never mentions the token at all, for instance). */
+ *  wins when present and non-empty, otherwise the first non-blank line of the raw text, otherwise
+ *  the EMPTY string — deliberately NOT `firstLine`'s own `'request failed'` default. Both callers
+ *  (`describeErrorBody` below, `forgejo.ts`'s `sendErrorMessage`) need to tell "found a real message"
+ *  from "found nothing" so THEY can supply their own status/action-specific default (`HTTP {status}`,
+ *  or an action-specific `fallback` string); a hardcoded default here would make both of those
+ *  defaults permanently unreachable. Exported so `sendErrorMessage` doesn't grow a second copy of
+ *  this exact extraction — that one works off `send()`'s already-drained `{status, json, text}`
+ *  (`send` never throws, so there is no live `Response` left to drain by the time that caller runs),
+ *  while `describeErrorBody` below both drains the `Response` AND adds its own status-specific
+ *  401/403 hint on top — the hint stays local to `describeErrorBody`, deliberately NOT folded in
+ *  here, because `forgejo.ts`'s own create/merge callers each want their own wording for an auth
+ *  failure (`mergePR`'s 403 message never mentions the token at all, for instance). */
 export function messageFromBody(json: unknown, text: string): string {
   if (json && typeof json === 'object' && 'message' in json) {
     const m = (json as { message?: unknown }).message;
     if (typeof m === 'string' && m) return m;
   }
-  return firstLine(text);
+  const line = text.split('\n').find((l) => l.trim().length > 0);
+  return line ? line.trim() : '';
 }
 
 async function describeErrorBody(res: Response): Promise<{ text: string; message: string }> {
@@ -154,7 +159,9 @@ async function describeErrorBody(res: Response): Promise<{ text: string; message
   } catch {
     // not JSON — messageFromBody falls back to the text-derived message
   }
-  let message = messageFromBody(parsed, text);
+  // `messageFromBody` returns '' when the body carried nothing usable — this function's own default
+  // is the status code, not `firstLine`'s generic 'request failed'.
+  let message = messageFromBody(parsed, text) || `HTTP ${res.status}`;
   if (res.status === 401 || res.status === 403) {
     message = `${message} — set CEZ_FORGEJO_TOKEN to authenticate`;
   }
@@ -174,7 +181,13 @@ export function createForgejoHttp(apiUrl: string, deps: ForgejoHttpDeps = {}): F
   const now = deps.now ?? Date.now;
 
   function currentToken(): string | null {
-    return deps.token !== undefined ? deps.token : (process.env.CEZ_FORGEJO_TOKEN ?? null);
+    // An empty (or whitespace-only) string is treated the same as absent: `export CEZ_FORGEJO_TOKEN=`
+    // in a shell script sets the variable to `''`, not unset, and `doRequest` below already gates the
+    // header on `token && …` (truthy) — but `hasToken()` compared against `!== null` alone, so a blank
+    // token reported `true` while no Authorization header was ever sent, mis-flagging a public repo's
+    // anonymous request as `unauthorized` in `normalizeForgejoMergeState`'s eligibility ladder.
+    const raw = deps.token !== undefined ? deps.token : (process.env.CEZ_FORGEJO_TOKEN ?? null);
+    return raw && raw.trim() !== '' ? raw : null;
   }
 
   function hasToken(): boolean {

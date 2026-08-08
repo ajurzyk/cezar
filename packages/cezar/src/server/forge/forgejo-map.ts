@@ -21,9 +21,9 @@ export const FJ_BODY_CAP = 8_000;
  * the driver funnels through here: take only path+query+hash from `htmlUrl` and rebase it onto
  * `webUrl`, the address a human's browser can actually reach.
  *
- * Lives here rather than in `forgejo.ts` (where it was first written and is still re-exported for
- * backward compatibility with existing imports/tests) because both mappers below need it and
- * `forgejo-map.ts` must not import from `forgejo.ts` — that direction would create
+ * Lives here rather than in `forgejo.ts` (where it was first written, before this module existed)
+ * because both mappers below need it and `forgejo-map.ts` must not import from `forgejo.ts` — that
+ * direction would create
  * `forgejo.ts` -> `forgejo-map.ts` -> `forgejo.ts`, an import cycle.
  */
 export function rebaseToWebUrl(htmlUrl: string, webUrl: string): string {
@@ -405,11 +405,13 @@ const KNOWN_REVIEW_STATES = new Set(['APPROVED', 'PENDING', 'COMMENT', 'REQUEST_
  *      review supersedes their earlier one. This includes `COMMENT`: a reviewer's later `COMMENT`
  *      supersedes an earlier `APPROVED` from the SAME reviewer, dropping their approval from the
  *      count below. Intentional, not an oversight — `COMMENT` is still that reviewer's most recent
- *      standing input, and it is neither an approval nor a rejection; treating it as "supersede"
- *      rather than "ignore" means a reviewer who comments again after approving must be counted as
- *      no longer having a standing approval, the same way GitHub's own reviewer-dismissal-on-new-
- *      commit behavior works. A DIFFERENT reviewer's `COMMENT` never touches this one's approval —
- *      the collapse is per-`user.login`.
+ *      standing input, and it is neither an approval nor a rejection; treating "latest row wins"
+ *      uniformly (rather than special-casing `COMMENT` to be ignored) keeps the collapse a single
+ *      rule with no state-dependent exception. This is a conservative choice about Forgejo/Gitea's
+ *      OWN semantics, NOT verified against a live instance (no measurement exists for whether Gitea's
+ *      own approval count treats a later `COMMENT` as superseding an earlier `APPROVED` the same way);
+ *      it stands until such evidence says otherwise. A DIFFERENT reviewer's `COMMENT` never touches
+ *      this one's approval — the collapse is per-`user.login`.
  *   4. any surviving `REQUEST_CHANGES` → 'changes-requested'. This does NOT depend on branch
  *      readability — a review that plainly asked for changes blocks regardless of whether the
  *      branch-protection GET succeeded.

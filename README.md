@@ -670,7 +670,13 @@ independently trusted value. That means the gate does NOT protect the token
 from `apiUrl`'s own host: whatever host `apiUrl` names receives the token,
 same as pointing any other tool at an API endpoint always does — this is
 the same "code-trusted" reasoning as `systemPrompt` and `skillsRepos` above,
-applied to `apiUrl` specifically. What the gate DOES protect against is a
+applied to `apiUrl` specifically. The schema accepts plain `http://` for
+`apiUrl` as well as `https://` (`config.ts:131`) — nothing in the driver
+upgrades the scheme — so an `http://` value sends `CEZ_FORGEJO_TOKEN` over
+the wire in cleartext to every network hop between the cezar process and
+that host. Use `https://` unless `apiUrl` is a container-internal or
+loopback address the token never actually leaves (the docker-network
+example above is such a case). What the gate DOES protect against is a
 leak to a DIFFERENT host than the one `apiUrl` names: `redirect: 'manual'`
 means a 3xx response is treated as a failure rather than followed, so no
 hop ever carries the Authorization header to a redirect target; and the

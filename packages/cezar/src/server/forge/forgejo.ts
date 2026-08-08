@@ -167,24 +167,18 @@ interface PrDiffCacheEntry {
 const prDiffCache = new Map<string, PrDiffCacheEntry>();
 const PR_DIFF_CACHE_MAX = 50;
 
-/** Only the key-based operations — every cache below has a DIFFERENT entry value type, and
- *  `keys`/`delete`/`clear` are the only ones either function below needs, which sidesteps a
- *  value-type variance fight with the type checker that a plain `Map<string, unknown>[]` would
- *  otherwise hit. */
-interface KeyedCache {
-  keys(): IterableIterator<string>;
-  delete(key: string): boolean;
-  clear(): void;
-}
-
 /** Every cache in this module keyed `repoRoot\0apiBase\0...` — the ONE list both
  *  `evictForgejoProjectCaches` (prefix-deletes per project after a merge) and
  *  `__clearForgejoCachesForTests` (full-clears everything between tests) iterate, so a future
  *  cache addition can't be silently missed from one of the two call sites the way `prDiffCache`
  *  itself once was. `detectCache` is deliberately NOT a member — see `evictForgejoProjectCaches`'s
  *  own doc comment for why a merge must never evict it (`__clearForgejoCachesForTests` still clears
- *  it separately, alongside the `mergeInflight` `Set`, which isn't keyed the same way either). */
-const PROJECT_CACHES: KeyedCache[] = [listCache, prStatusCache, mergeStateCache, prDiffCache];
+ *  it separately, alongside the `mergeInflight` `Set`, which isn't keyed the same way either).
+ *  `Map<string, unknown>[]` (not a bespoke interface): each cache below has a different entry value
+ *  type, but `evictOldest` below already types its own parameter as `Map<string, unknown>` and every
+ *  one of this module's five caches (these four, plus `detectCache`) is assignable to it as-is —
+ *  TypeScript's structural typing has no variance fight to sidestep here. */
+const PROJECT_CACHES: Map<string, unknown>[] = [listCache, prStatusCache, mergeStateCache, prDiffCache];
 
 function cacheKey(repoRoot: string, apiBase: string): string {
   return `${repoRoot}\0${apiBase}`;
@@ -243,9 +237,10 @@ async function detectForgejo(
   let result: ForgeAvailability;
   let repository: ForgejoRepository | null = null;
   try {
-    // Dynamic segments through encodeURIComponent even though owner/repo are gate-validated by
-    // `parseRemote` upstream — defense in depth, and the same precedent this module's other path
-    // builder (`forgejoViewUrl` below) follows for every dynamic segment.
+    // Dynamic segments through encodeURIComponent — `forge/index.ts` only checks owner/repo for
+    // non-emptiness upstream, nothing rejects e.g. `..`, so encoding here is the ONLY thing standing
+    // between a crafted remote and a traversed path, not a defense-in-depth belt-and-braces layer on
+    // top of an upstream gate. Same reasoning `forgejoViewUrl` below and `repoPath` apply.
     const body = await http.getJson(repoPath(owner, repo), { timeoutMs: 5_000 });
     repository = forgejoRepositorySchema.parse(body);
     result = { available: true };
@@ -328,10 +323,11 @@ function encodeRefSegments(ref: string): string {
 
 /** `repos/{owner}/{repo}` — the API-path prefix every endpoint in this module hangs off of.
  *  Computed once per call site instead of the `encodeURIComponent(owner)`/`encodeURIComponent(repo)`
- *  pair being repeated ad hoc across the file (same defensive-encoding reasoning `detectForgejo`'s
- *  own comment gives: `owner`/`repo` are already gate-validated by `parseRemote` upstream, but this
- *  driver encodes its dynamic segments anyway). NOT the same thing as `forgejoViewUrl`'s own `base`
- *  above — that one is a full web URL for a human, this one is a relative API path for `http`. */
+ *  pair being repeated ad hoc across the file (same reasoning `detectForgejo`'s own comment gives:
+ *  `forge/index.ts` only checks `owner`/`repo` for non-emptiness, so `encodeURIComponent` here is the
+ *  ONLY thing preventing a traversed path, not a redundant extra layer). NOT the same thing as
+ *  `forgejoViewUrl`'s own `base` above — that one is a full web URL for a human, this one is a
+ *  relative API path for `http`. */
 function repoPath(owner: string, repo: string): string {
   return `repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
 }
@@ -428,10 +424,18 @@ async function pullRowToStatus(
 ): Promise<ForgePrStatus> {
   // Reuses `fetchForgejoCombinedStatus` rather than re-issuing the same GET+try/catch inline —
   // both paths hit the identical `commits/{sha}/status` endpoint and degrade to `null` on failure.
+  // `combinedStatusToChecks` itself is a zod `.parse()` that `fetchForgejoCombinedStatus` does NOT
+  // cover (that function only try/catches the GET) — a malformed-but-syntactically-valid body must
+  // degrade `checks` alone to `null`, not throw past this function and blank the whole `ForgePrStatus`
+  // the caller already has (number/url/state/isDraft), so the parse is try/caught right here.
   let checks: ForgePrStatus['checks'] = null;
   if (pull.head?.sha) {
     const raw = await fetchForgejoCombinedStatus(http, owner, repo, pull.head.sha);
-    checks = raw == null ? null : combinedStatusToChecks(raw);
+    try {
+      checks = raw == null ? null : combinedStatusToChecks(raw);
+    } catch {
+      checks = null;
+    }
   }
   return {
     number: pull.number,
@@ -503,8 +507,9 @@ async function resolveForgejoPrStatus(
   if (found) {
     // `pullRowToStatus` itself already degrades its OWN I/O (the combined-status fetch) to
     // `checks: null` on failure, but `rebaseToWebUrl` inside it can still throw a `TypeError` on a
-    // non-absolute `html_url` — a read must never throw past this function (mirrors the identical
-    // try/catch around the `/pulls/{base}/{head}` fallback just below).
+    // non-absolute `html_url` — a read must never throw past this function. The `/pulls/{base}/{head}`
+    // fallback just below needs the SAME protection for the SAME reason; both `try`s must `await`
+    // the `pullRowToStatus` call, not just wrap it, or the rejection skips the `catch` entirely.
     try {
       return await pullRowToStatus(http, owner, repo, webUrl, found);
     } catch {
@@ -517,7 +522,10 @@ async function resolveForgejoPrStatus(
   if (!base) return null;
   try {
     const raw = await http.getJson(`${repoPrefix}/pulls/${encodeRefSegments(base)}/${encodeRefSegments(branch)}`);
-    return pullRowToStatus(http, owner, repo, webUrl, forgejoPullSchema.parse(raw));
+    // `await` here is load-bearing: without it, this `try` returns the pending promise itself and
+    // resolves/rejects OUTSIDE this frame, so a `pullRowToStatus` rejection (a non-absolute
+    // `html_url`, see the comment above) skips this `catch` entirely instead of degrading to `null`.
+    return await pullRowToStatus(http, owner, repo, webUrl, forgejoPullSchema.parse(raw));
   } catch {
     return null;
   }
@@ -751,10 +759,11 @@ function tailLines(stderr: string): string {
 /** Extracts a human message from a `send()` result that didn't 2xx. `send` never throws (unlike
  *  `getJson`/`getText`), so this reads off the already-drained `{status, json, text}` shape `send`
  *  hands back, rather than a live `Response` — the extraction itself (JSON `message` field, else
- *  first non-blank line of text) is shared with `forgejo-http.ts`'s own `describeErrorBody` via
- *  `messageFromBody`; only the draining differs. `fallback` is the action-specific default for the
- *  case `messageFromBody` cannot itself hit in practice (`firstLine` always returns SOME text) —
- *  kept as a defensive belt-and-braces default, not a reachable branch today. */
+ *  first non-blank line of text, else the empty string) is shared with `forgejo-http.ts`'s own
+ *  `describeErrorBody` via `messageFromBody`; only the draining differs. `fallback` is the
+ *  action-specific default for the genuinely-reachable case of an empty error body (a live instance
+ *  answers some failures, e.g. a 502 from a proxy in front of it, with no body at all) — each of
+ *  this function's 6 call sites gets its own wording instead of one generic message. */
 function sendErrorMessage(res: { status: number; json: unknown; text: string }, fallback: string): string {
   return messageFromBody(res.json, res.text) || `${fallback} (HTTP ${res.status})`;
 }
@@ -795,7 +804,7 @@ async function createForgejoPr(
 
   // DRY-RUN: no push, no HTTP — simulate success with a fake PR URL (parity github.ts:1425-1429).
   if (process.env.CEZ_DRY_RUN === '1') {
-    return { ok: true, url: `${webUrl}/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/777`, dryRun: true };
+    return { ok: true, url: forgejoViewUrl(webUrl, owner, repo, 'pr', 777), dryRun: true };
   }
 
   const remote = await execGit(['remote', 'get-url', 'origin'], worktree);
@@ -841,7 +850,8 @@ async function createForgejoPr(
       const pull = forgejoPullSchema.parse(res.json);
       return { ok: true, url: rebaseToWebUrl(pull.html_url, webUrl), dryRun: false };
     } catch {
-      return { ok: true, url: `${webUrl}/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls`, dryRun: false };
+      // No PR number to link to a specific pull — the repo's pull list is the best-effort fallback.
+      return { ok: true, url: `${forgejoViewUrl(webUrl, owner, repo, 'repo', '')}/pulls`, dryRun: false };
     }
   }
   if (res.status === 409) {

@@ -625,6 +625,19 @@ describe('normalizeForgejoMergeState', () => {
     expect(state.checks[0]?.required).toBe(true);
   });
 
+  it('a check\'s context NOT in status_check_contexts on a readable, status-check-gated branch is required:false', () => {
+    const state = normalizeForgejoMergeState({
+      pullRaw: mergePullRow(),
+      statusRaw: { statuses: [{ status: 'success', context: 'ci/lint' }] },
+      branch: protectedBranch({ enableStatusCheck: true, statusCheckContexts: ['ci/build'] }),
+      repository: mergeStateRepo,
+      webUrl,
+      hasToken: false,
+      reviewsRaw: [],
+    });
+    expect(state.checks[0]?.required).toBe(false);
+  });
+
   it('a pending check maps to eligibility:pending when nothing else blocks', () => {
     const state = normalizeForgejoMergeState({
       pullRaw: mergePullRow(),

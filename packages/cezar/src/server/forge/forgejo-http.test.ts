@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createForgejoHttp, ForgejoHttpError, normalizeApiBase, readTotalCount } from './forgejo-http.ts';
+import { createForgejoHttp, ForgejoHttpError, messageFromBody, normalizeApiBase, readTotalCount } from './forgejo-http.ts';
 
 /**
  * `forgejo-http.ts` — the HTTP foundation every Forgejo driver method sits on. The repo has no
@@ -101,6 +101,15 @@ describe('Authorization header — decision 2 (token gated on origin)', () => {
     expect(withoutToken.hasToken()).toBe(false);
   });
 
+  it('reports hasToken() false for an empty-string token (e.g. `export CEZ_FORGEJO_TOKEN=` in a shell script)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({}));
+    const http = createForgejoHttp('http://forgejo:3000', { fetch: fetchMock, token: '' });
+    expect(http.hasToken()).toBe(false);
+    await http.getJson('repos/o/r');
+    const init = fetchMock.mock.calls[0]![1] as RequestInit;
+    expect(new Headers(init.headers).has('authorization')).toBe(false);
+  });
+
   it('omits the header, and still resolves the evil URL, when a full URL in `path` targets another origin', async () => {
     // Security gate: `path` being a full URL overrides the base (`new URL` honors it), so the
     // gate MUST compare the resolved target's origin, not just trust the base. If this test passed
@@ -179,6 +188,27 @@ describe('error normalization', () => {
       status: 401,
       message: expect.stringContaining('CEZ_FORGEJO_TOKEN'),
     });
+  });
+
+  it('an empty body (no JSON message, no text) degrades to the status code, not messageFromBody\'s own default', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(textResponse('', { status: 500 }));
+    const http = createForgejoHttp('http://forgejo:3000', { fetch: fetchMock, token: null });
+    await expect(http.getJson('repos/o/r')).rejects.toMatchObject({ status: 500, message: 'HTTP 500' });
+  });
+});
+
+describe('messageFromBody', () => {
+  it('returns the empty string, not a hardcoded default, when neither json nor text carry a message', () => {
+    // Distinct from `firstLine`'s own 'request failed' default — callers (`describeErrorBody`,
+    // `forgejo.ts`'s `sendErrorMessage`) each need their OWN status/action-specific default, and can
+    // only supply one if this function's "found nothing" signal is falsy, not itself a non-empty string.
+    expect(messageFromBody(null, '')).toBe('');
+    expect(messageFromBody({}, '   \n  ')).toBe('');
+  });
+
+  it('still prefers the JSON message field, then the first non-blank text line', () => {
+    expect(messageFromBody({ message: 'repository not found' }, 'ignored')).toBe('repository not found');
+    expect(messageFromBody(null, '\n404 page not found\n')).toBe('404 page not found');
   });
 });
 
