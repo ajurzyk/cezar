@@ -572,10 +572,34 @@ export function normalizeForgejoMergeState(input: {
   const mergeable: ForgePrMergeState['mergeable'] =
     state !== 'open' || pull.draft ? 'unknown' : pull.mergeable === true ? 'mergeable' : pull.mergeable === false ? 'conflicting' : 'unknown';
 
-  const checks = combinedStatusToPrChecks(input.statusRaw, input.branch);
-  const { decision: reviewDecision, unrecognized: reviewStateUnrecognized } = computeReviewDecision(input.reviewsRaw, input.branch);
-  const statusReadable = input.statusReadable ?? true;
-  const reviewsReadable = input.reviewsReadable ?? true;
+  // `statusReadable`/`reviewsReadable` say "the FETCH succeeded". A fetch that succeeded and
+  // returned a body this driver cannot parse teaches us exactly as little — and zod's `.default()`
+  // fires only on `undefined`, so one `null` where a boolean was expected is enough to throw. Both
+  // parses therefore collapse into the same "unreadable" signal the failed-fetch path already
+  // produces (`checks-unknown` / `reviews-unknown` below), instead of escaping to
+  // `forgejoPrMergeState`'s outer catch and blanking the entire panel — the same policy
+  // `pullRowToStatus` (forgejo.ts) already applies to this identical parse on the list path.
+  // `forgejoPullSchema.parse(input.pullRaw)` above is deliberately NOT guarded this way: without
+  // the PR body there is no `ForgePrMergeState` to build at all, so that one IS the outer catch's.
+  let checks: ForgePrCheck[];
+  let statusReadable = input.statusReadable ?? true;
+  try {
+    checks = combinedStatusToPrChecks(input.statusRaw, input.branch);
+  } catch {
+    checks = [];
+    statusReadable = false;
+  }
+
+  let reviewDecision: ReviewDecisionResult['decision'];
+  let reviewStateUnrecognized: ReviewDecisionResult['unrecognized'];
+  let reviewsReadable = input.reviewsReadable ?? true;
+  try {
+    ({ decision: reviewDecision, unrecognized: reviewStateUnrecognized } = computeReviewDecision(input.reviewsRaw, input.branch));
+  } catch {
+    reviewDecision = 'unknown';
+    reviewStateUnrecognized = false;
+    reviewsReadable = false;
+  }
   const { methods, defaultMethod } = input.repository
     ? mergeMethodsFromRepository(input.repository)
     : { methods: [] as ForgeMergeMethod[], defaultMethod: null };

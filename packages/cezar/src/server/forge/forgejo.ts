@@ -862,8 +862,11 @@ async function forgejoPrMergeState(
   } catch (err) {
     // `GET pulls/{n}` failing (404 — bad PR number, network, timeout) is the one failure this
     // method cannot degrade past: without the PR body there is no `ForgePrMergeState` to build.
-    // Every OTHER read above (status/branch/reviews/repository) already degrades to its own safe
-    // default instead of throwing, exactly so a CI hiccup can never take down the whole method.
+    // Every OTHER read above degrades instead of throwing — the status/branch/reviews/repository
+    // FETCHES to their own `ok:false`/`readable:false`, and (since a 200 can still carry a body
+    // this driver cannot parse) the status and review PARSES to the same unreadable signal, inside
+    // `normalizeForgejoMergeState`. So a CI hiccup or a malformed CI body can never take down the
+    // whole method; only the PR read itself can.
     return { available: false, reason: describeError(err) };
   }
 }

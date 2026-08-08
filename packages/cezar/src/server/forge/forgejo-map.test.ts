@@ -521,6 +521,39 @@ describe('normalizeForgejoMergeState', () => {
     expect(state.canOverride).toBe(false); // conflicts is the one blocker that closes the override door
   });
 
+  it('an unparseable reviews body blocks with reviews-unknown instead of blanking the merge state', () => {
+    // zod's .default() fires on `undefined`, never on `null`, so one `dismissed: null` row is
+    // enough to throw. A 200 whose SHAPE is wrong tells us exactly as little as a failed read —
+    // so it must land on the same blocker, never escape and take the whole panel down.
+    const state = normalizeForgejoMergeState({
+      pullRaw: mergePullRow(),
+      statusRaw: null,
+      branch: unprotectedBranch,
+      repository: mergeStateRepo,
+      webUrl,
+      hasToken: false,
+      reviewsRaw: [{ state: 'APPROVED', dismissed: null }],
+    });
+    expect(state.reviewDecision).toBe('unknown');
+    expect(state.blockers.some((b) => b.code === 'reviews-unknown')).toBe(true);
+    expect(state.canMerge).toBe(false);
+  });
+
+  it('an unparseable combined-status body blocks with checks-unknown instead of blanking the merge state', () => {
+    const state = normalizeForgejoMergeState({
+      pullRaw: mergePullRow(),
+      statusRaw: { statuses: [{ context: 'ci', status: 42 }] },
+      branch: unprotectedBranch,
+      repository: mergeStateRepo,
+      webUrl,
+      hasToken: false,
+      reviewsRaw: [],
+    });
+    expect(state.checks).toEqual([]);
+    expect(state.blockers.some((b) => b.code === 'checks-unknown')).toBe(true);
+    expect(state.canMerge).toBe(false);
+  });
+
   it('an unprotected branch reports reviewDecision:"unknown" WITHOUT a rules-unknown blocker — the rules are known: there are none', () => {
     const state = normalizeForgejoMergeState({
       pullRaw: mergePullRow(),
