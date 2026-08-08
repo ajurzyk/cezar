@@ -142,7 +142,16 @@ describe('GET /api/v1/health — forge + capabilities', () => {
     expect(body.forge).toBeNull();
   });
 
-  it('reports the GitHub forge for a self-hosted remote when the repo config declares kind:github', async () => {
+  it('reports forge:null for a self-hosted remote even when the repo config declares kind:github', async () => {
+    // A config cannot name GitHub: the driver is hardwired to github.com, so honouring this would
+    // answer `{kind:'github', available:true}` for a repo whose PRs live on another host — and the
+    // merge route would then run `gh api repos/acme/demo/…` against github.com.
+    //
+    // This is the negative half of the `config.forge` wiring. There is no POSITIVE route-level
+    // assertion available on this branch: the only kind a config can still name ('forgejo')
+    // resolves to null until the driver lands, which is indistinguishable from "config ignored".
+    // `workspace/projects.test.ts` carries the positive proof, because the project list reports a
+    // config-named forge without needing a driver.
     initRepo('ssh://git@forge.internal:2222/acme/demo.git');
     mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
     writeFileSync(
@@ -151,10 +160,13 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       'utf8',
     );
     const body = await health();
-    expect(body.forge).toEqual({ kind: 'github', available: true });
+    expect(body.forge).toBeNull();
   });
 
-  it('reports forge:null for a github.com remote when the repo config declares kind:forgejo', async () => {
+  it('keeps the GitHub forge on a github.com remote when the repo config declares kind:forgejo', async () => {
+    // The config fills the host table's gap; it does not override it. Declaring another forge
+    // next to a github.com remote must not cost the repo its working driver — which is what
+    // `forge: null` here would mean for the sidebar tab, Create PR and the merge route.
     initRepo('https://github.com/acme/demo.git');
     mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
     writeFileSync(
@@ -163,7 +175,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       'utf8',
     );
     const body = await health();
-    expect(body.forge).toBeNull();
+    expect(body.forge).toEqual({ kind: 'github', available: true });
   });
 
   it('hosted mode via CEZ_REMOTE=1: localHandoff:false', async () => {

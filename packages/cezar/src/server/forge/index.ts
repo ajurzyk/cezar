@@ -6,8 +6,9 @@ import type { ForgeDriver, ForgeKind, ForgeSettings } from './types.ts';
  * Forge resolution (cockpit-ui redesign spec §"Forge-driver seam"): map the
  * repo's origin remote to a driver — recognized either from the host table
  * (github.com → GitHub) or from a repo's own `.ai/cezar/config.json` `forge`
- * key (self-hosted forges the host table can't reveal); the config wins when
- * both apply. Anything else (GitLab, self-hosted with no config, no remote,
+ * key (self-hosted forges the host table can't reveal); the table wins where
+ * it has an answer, so the config fills its gap and never overrides it.
+ * Anything else (GitLab, self-hosted with no config, no remote,
  * not a repo) → null. The health route serializes the result as
  * `forge: {kind, available, reason?} | null`; a null forge means plain-git
  * features only (diffs, commit, push, branches).
@@ -48,18 +49,37 @@ export function parseRemote(remote: string): ParsedRemote | null {
 }
 
 /** Remote host → forge kind. The one host table both `resolveForge` and the
- *  registry probe read; GitLab lands here later as one more row. */
-const FORGE_HOSTS: Record<string, ForgeKind> = { 'github.com': 'github' };
+ *  registry probe read; GitLab lands here later as one more row. A `Map`, not an object
+ *  literal: `FORGE_HOSTS[host]` with a host of `__proto__` or `constructor` returns an
+ *  INHERITED `Object.prototype` member — truthy, non-nullish, and passed straight through
+ *  `??` as if it were a ForgeKind. A Map has no prototype chain to walk into. */
+const FORGE_HOSTS = new Map<string, ForgeKind>([['github.com', 'github']]);
 
 /**
- * The one precedence rule both `forgeKindOfRemote` and `resolveForge` must apply identically: a
- * repo-config `forge.kind`, when given, wins over the host table (it is the only way to name a
- * self-hosted forge); otherwise the host table decides; otherwise `null`. Pulled into its own
- * function rather than left as a repeated expression so the "probe and resolver must agree"
- * invariant is enforced by the compiler sharing one call site, not just asserted in a comment.
+ * The one precedence rule both `forgeKindOfRemote` and `resolveForge` must apply identically.
+ *
+ * The host table answers FIRST and the repo config only fills the gap it leaves. The config is
+ * the only way to name a forge on a host the table cannot reveal, but it must never be able to
+ * take away a driver the table would have given: `github.com` paired with `kind: 'forgejo'`
+ * keeps the working GitHub driver rather than trading it for the `null` a missing Forgejo
+ * driver returns.
+ *
+ * `kind: 'github'` from a config is inert on purpose. The GitHub driver is hardwired to
+ * github.com — it shells out to `gh` with no `--hostname`, and `viewUrl` builds a
+ * `https://github.com/` base — so honouring the declaration on a self-hosted host would aim
+ * `repos/<owner>/<repo>`, parsed from the SELF-HOSTED remote, at a same-named github.com
+ * repository, up to and including `gh api --method PUT …/merge`. On github.com the table has
+ * already answered, so the declaration has nothing to add there either. When the driver grows a
+ * host parameter, this guard is what to revisit.
+ *
+ * Pulled into its own function rather than left as a repeated expression so the "probe and
+ * resolver must agree" invariant is enforced by a shared call site, not just asserted in a comment.
  */
 function classifyForgeKind(host: string, forge?: ForgeSettings): ForgeKind | null {
-  return forge?.kind ?? FORGE_HOSTS[host] ?? null;
+  const known = FORGE_HOSTS.get(host);
+  if (known) return known;
+  if (forge?.kind === 'github') return null;
+  return forge?.kind ?? null;
 }
 
 /**
@@ -67,8 +87,9 @@ function classifyForgeKind(host: string, forge?: ForgeSettings): ForgeKind | nul
  * registry's per-project probe classifies each root from its remote alone —
  * plain string parsing, no `gh` shell-out — so the sidebar can gate each
  * project's GitHub tab on the project's own remote. `forge`, when given, is
- * the repo's own `.ai/cezar/config.json` declaration and wins over the host
- * table (it is the only way to name a self-hosted forge).
+ * the repo's own `.ai/cezar/config.json` declaration; it fills the gap the
+ * host table leaves (the only way to name a self-hosted forge) and never wins
+ * over a host the table already recognizes — see `classifyForgeKind`.
  *
  * A remote that doesn't parse to `{host, owner, repo}` stays `null` even with
  * a config present: `parseRemote` is the only source of `owner`/`repo`, so
@@ -81,19 +102,16 @@ export function forgeKindOfRemote(remote: string | undefined, forge?: ForgeSetti
   return classifyForgeKind(parsed.host, forge);
 }
 
-/** Remote host (or a repo-config `ForgeSettings` override) → driver | null. GitLab lands here
- *  later as one more host-table case. */
+/** Remote host (or, for a host the table can't reveal, a repo-config `ForgeSettings`) → driver |
+ *  null. GitLab lands here later as one more host-table case. */
 export function resolveForge(repoInfo: RepoInfo | null, forge?: ForgeSettings): ForgeDriver | null {
   if (!repoInfo?.remote) return null;
   const parsed = parseRemote(repoInfo.remote);
   if (!parsed) return null;
   const kind = classifyForgeKind(parsed.host, forge);
   if (kind === 'github') {
-    // `apiUrl`/`webUrl` are unused for `kind: 'github'` here: the GitHub driver speaks through
-    // `gh` and its `viewUrl` hardcodes the `https://github.com/` base (github.ts), so a repo
-    // config declaring `kind: 'github'` on a self-hosted host still produces github.com links.
-    // That is a driver limit, not this function's — parameterizing the driver's host is future
-    // work, not this recognition step.
+    // Reachable only from the host table — `classifyForgeKind` never answers 'github' for a repo
+    // config — so `parsed.host` is github.com here and the driver's hardwired base is correct.
     return createGithubDriver(repoInfo.root, { owner: parsed.owner, repo: parsed.repo });
   }
   if (kind === 'forgejo') {

@@ -77,10 +77,13 @@ describe('the GitHub merge API', () => {
     expect(await stale.json()).toMatchObject({ code: 'stale-head', current: { number: 128 } });
   });
 
-  it('resolves the driver from repo config when the remote is not a github.com host', async () => {
-    // #698: `resolveForge(repoInfo, config.forge)` — a repo config declaring `kind: 'github'`
-    // must make the PR merge routes work on a self-hosted remote, exactly like the github.com
-    // fixture above.
+  it('refuses to build a driver for a repo config declaring kind:github on a self-hosted remote', async () => {
+    // The hazard this guards: the driver would have been built with `{owner:'acme', repo:'demo'}`
+    // parsed from the SELF-HOSTED remote, and the merge route runs
+    // `gh api --method PUT repos/acme/demo/pulls/128/merge` with no `--hostname` — i.e. against
+    // github.com/acme/demo, a repository the self-hosted forge has nothing to do with. The
+    // earlier version of this test asserted `merged: true` here and only avoided that call
+    // because `CEZ_DRY_RUN=1` short-circuits before `gh api` runs.
     const selfHostedRoot = mkdtempSync(join(tmpdir(), 'cez-ghmerge-selfhosted-'));
     mkdirSync(join(selfHostedRoot, '.ai/cezar'), { recursive: true });
     execFileSync('git', ['init', '-b', 'main'], { cwd: selfHostedRoot });
@@ -103,19 +106,15 @@ describe('the GitHub merge API', () => {
     try {
       const stateResponse = await apiRequest(selfHostedApp, '/api/v1/github/prs/128/merge-state?refresh=1');
       expect(stateResponse.status).toBe(200);
-      const state = (await stateResponse.json()) as {
-        available: true;
-        mergeState: { headSha: string };
-      };
-      expect(state.available).toBe(true);
+      expect(await stateResponse.json()).toMatchObject({ available: false });
 
       const mergeResponse = await apiRequest(selfHostedApp, '/api/v1/github/prs/128/merge', {
         method: 'POST',
         headers: { 'content-type': 'application/json', origin: 'http://127.0.0.1:4321' },
-        body: JSON.stringify({ method: 'squash', expectedHeadSha: state.mergeState.headSha }),
+        body: JSON.stringify({ method: 'squash', expectedHeadSha: 'a'.repeat(40) }),
       });
-      expect(mergeResponse.status).toBe(200);
-      expect(await mergeResponse.json()).toMatchObject({ merged: true, number: 128, method: 'squash' });
+      expect(mergeResponse.status).toBe(409);
+      expect(await mergeResponse.json()).toMatchObject({ error: 'GitHub merge is unavailable' });
     } finally {
       selfHostedStore.flush();
       rmSync(selfHostedRoot, { recursive: true, force: true });

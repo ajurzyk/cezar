@@ -7,8 +7,8 @@ import type { ForgeSettings } from './types.ts';
 
 const info = (remote?: string): RepoInfo => ({ root: '/repo', branch: 'main', remote });
 
-/** A repo-config-declared self-hosted forge (repo-config-driven recognition) — wins over the host
- *  table when present. */
+/** A repo-config-declared self-hosted forge (repo-config-driven recognition) — fills the gap the
+ *  host table leaves, and only there. */
 const forgejoSettings: ForgeSettings = {
   kind: 'forgejo',
   apiUrl: 'http://forgejo:3000',
@@ -60,21 +60,36 @@ describe('forgeKindOfRemote', () => {
     expect(forgeKindOfRemote(remote)).toBe(expected);
   });
 
-  it('a repo-config forge wins over the host table for a self-hosted remote', () => {
+  it('a repo-config forge names the forge for a host the table cannot reveal', () => {
     expect(forgeKindOfRemote('ssh://git@forge.internal:2222/acme/demo.git', forgejoSettings)).toBe('forgejo');
   });
 
-  it('a repo-config forge wins over the host table even on a github.com remote', () => {
-    expect(forgeKindOfRemote('https://github.com/acme/demo.git', forgejoSettings)).toBe('forgejo');
+  it('the host table wins over a repo-config forge on a github.com remote — the config fills a gap, it does not override', () => {
+    // Declaring `forgejo` next to a github.com remote used to classify as 'forgejo' and hand the
+    // repo a null driver: a config key that silently takes a working forge away.
+    expect(forgeKindOfRemote('https://github.com/acme/demo.git', forgejoSettings)).toBe('github');
   });
 
   it('a github-kind repo config on a github.com remote still classifies as github', () => {
     expect(forgeKindOfRemote('https://github.com/acme/demo.git', githubSettings)).toBe('github');
   });
 
-  it('a github-kind repo config on a self-hosted remote still wins (config beats host)', () => {
-    expect(forgeKindOfRemote('ssh://git@forge.internal:2222/acme/demo.git', githubSettings)).toBe('github');
+  it('ignores a repo-config kind:github on a self-hosted remote', () => {
+    // The GitHub driver is hardwired to github.com (`gh` without `--hostname`, `viewUrl` on
+    // github.com), so honouring this would point `repos/acme/demo` at a same-named github.com
+    // repository. Nothing left to classify → null.
+    expect(forgeKindOfRemote('ssh://git@forge.internal:2222/acme/demo.git', githubSettings)).toBeNull();
   });
+
+  it.each([['git@__proto__:acme/demo.git'], ['git@constructor:acme/demo.git']])(
+    'classifies %s — a host colliding with an Object.prototype key — as no forge',
+    (remote) => {
+      // The host table used to be an object literal, so `FORGE_HOSTS['__proto__']` returned
+      // Object.prototype: truthy, non-nullish, and passed straight through `??` into the project
+      // list as a value the contract's `z.enum(['github','forgejo'])` rejects.
+      expect(forgeKindOfRemote(remote)).toBeNull();
+    },
+  );
 
   it('an undefined remote stays null even with a repo config (nothing to parse owner/repo from)', () => {
     expect(forgeKindOfRemote(undefined, forgejoSettings)).toBeNull();
@@ -118,14 +133,15 @@ describe('resolveForge', () => {
     expect(resolveForge(info('ssh://git@forge.internal:2222/acme/demo.git'), forgejoSettings)).toBeNull();
   });
 
-  it('a repo-config forgejo declaration also wins on a github.com remote, deliberately dropping the GitHub driver', () => {
-    expect(resolveForge(info('https://github.com/acme/demo.git'), forgejoSettings)).toBeNull();
+  it('keeps the GitHub driver on a github.com remote even when the repo config declares forgejo', () => {
+    expect(resolveForge(info('https://github.com/acme/demo.git'), forgejoSettings)?.kind).toBe('github');
   });
 
-  it('a repo-config github declaration builds the GitHub driver from a self-hosted remote', () => {
-    // owner/repo still come from parseRemote — viewUrl still hardcodes github.com (known limit,
-    // see the comment on the 'github' branch in resolveForge), so it is NOT asserted here.
-    expect(resolveForge(info('ssh://git@forge.internal:2222/acme/demo.git'), githubSettings)?.kind).toBe('github');
+  it('builds no driver for a repo-config kind:github on a self-hosted remote', () => {
+    // Regression guard for the cross-repo hazard: the driver would have been built with
+    // `{owner:'acme', repo:'demo'}` parsed from the SELF-HOSTED remote, and `gh api --method PUT
+    // repos/acme/demo/pulls/<n>/merge` runs without `--hostname` — i.e. against github.com.
+    expect(resolveForge(info('ssh://git@forge.internal:2222/acme/demo.git'), githubSettings)).toBeNull();
   });
 
   it('a repo-config github declaration stays null without a parseable remote', () => {
