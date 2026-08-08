@@ -422,7 +422,17 @@ async function listForgejo(
     const page = await http.paginate((p, l) => `${repoPrefix}/${segment}?${query}&page=${p}&limit=${l}`, { want: limit });
     const items: ForgeItem[] = [];
     for (const row of page.rows) {
-      const item = mapRow(row, webUrl);
+      // Per-row, not per-walk: one row that fails `forgejoIssueSchema`/`forgejoPullSchema` (or
+      // whose `html_url` is not absolute, which makes `rebaseToWebUrl` throw a `TypeError`) must
+      // cost that ONE row, not the whole list — "29 of 30 issues" is a dropped row the user can
+      // still work from, whereas `[]` is a false "there is nothing here". Same policy
+      // `resolveForgejoPrStatus` and `forgejoPrDiff` already apply to their own walks.
+      let item: ForgeItem | null;
+      try {
+        item = mapRow(row, webUrl);
+      } catch {
+        continue;
+      }
       if (item) items.push(item);
       if (items.length >= limit) break;
     }
@@ -430,8 +440,9 @@ async function listForgejo(
     evictOldest(listCache, LIST_CACHE_MAX);
     return items;
   } catch {
-    // Never throw from a read — HTTP failure, timeout, or a malformed row that fails
-    // `forgejoIssueSchema`/`forgejoPullSchema` all degrade to an empty list here.
+    // Never throw from a read — an HTTP failure or a timeout degrades to an empty list here.
+    // (A malformed individual ROW no longer reaches this catch: it is skipped in the loop above.)
+    // Deliberately NOT cached: a transient forge outage must not pin an empty list for the TTL.
     return [];
   }
 }

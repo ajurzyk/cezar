@@ -295,6 +295,18 @@ describe('listIssues', () => {
     await expect(driver.listIssues()).resolves.toEqual([]);
   });
 
+  it('skips a malformed row and keeps the rest, instead of wiping the whole list', async () => {
+    // Same policy `forgejoPrDiff` and `resolveForgejoPrStatus` already document for their own
+    // walks. Losing 1 of 2 rows is a dropped row; losing both is a false "there is nothing here".
+    const rows = [{ number: 'not-a-number' }, issueRow(7)];
+    const fetchMock = vi.fn().mockImplementation(pageOf(rows, rows.length));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const items = await driver.listIssues({ refresh: true });
+
+    expect(items).toEqual([expect.objectContaining({ kind: 'issue', number: 7 })]);
+  });
+
   it('CEZ_DRY_RUN=1 short-circuits to [] without calling fetch', async () => {
     process.env.CEZ_DRY_RUN = '1';
     const fetchMock = vi.fn();
