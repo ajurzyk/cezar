@@ -1,3 +1,5 @@
+import { execFile } from 'node:child_process';
+import { autosaveCommit } from '../../git-worktree.ts';
 import {
   createForgejoHttp,
   firstLine,
@@ -18,6 +20,10 @@ import {
   type ForgejoPull,
   type ForgejoRepository,
 } from './forgejo-map.ts';
+// `buildPrBody` is the one function this driver reuses FROM `github.ts` (explicitly sanctioned —
+// see the module doc below): the PR body format (goal + progress skim + footer) has no
+// forge-specific content, so re-deriving it here would just be a second copy to keep in sync.
+import { buildPrBody } from './github.ts';
 import type {
   DraftPrInput,
   DraftPrOutcome,
@@ -39,10 +45,14 @@ import type {
  * `github.ts`, but speaks REST directly through `forgejo-http.ts` instead of shelling out to a
  * CLI. `kind`, `detect`/`detectCached` (the two call sites that already exist, `server.ts:1511`
  * health and `:3214` automations-availability), `viewUrl`, `rebaseToWebUrl`, `listIssues`,
- * `listPRs` and `prStatus` are real; `createPR`, `prMergeState`, `mergePR` and `prDiff` remain
+ * `listPRs`, `prStatus` and `createPR` are real; `prMergeState`, `mergePR` and `prDiff` remain
  * degraded stubs whose real bodies land as follow-up changes, each with its own tests. A stub with
  * no caller yet is expected shape here, not a defect: `github.ts` itself implements every optional
  * method even though several of its own call sites were wired up separately, over time.
+ * `createPR` deliberately reuses two things straight from `github.ts` rather than re-deriving them:
+ * `buildPrBody` (the PR body format has no forge-specific content) and, transitively through
+ * `git-worktree.ts`, `autosaveCommit` (the pre-publish flush is identical git plumbing regardless
+ * of which forge the branch is headed to). Neither import touches `github.ts`'s own driver logic.
  */
 
 export interface ForgejoDriverCtx {
@@ -418,6 +428,154 @@ async function forgejoPrStatus(
   return data;
 }
 
+const PR_PUSH_TIMEOUT_MS = 60_000;
+
+/** Same guard as `github.ts`'s own base-branch handling (github.ts:1447): a raw sha (a
+ *  detached-HEAD fork point) can never be a valid PR base. `gh pr create` silently falls back to
+ *  the repo default in that case; Forgejo's API has no such fallback (base is a required field), so
+ *  `createForgejoPr` below must reject it itself and fall through to `Repository.default_branch`. */
+const BASE_LOOKS_LIKE_SHA_RE = /^[0-9a-f]{7,40}$/i;
+
+interface ForgejoExecResult {
+  ok: boolean;
+  stdout: string;
+  stderr: string;
+}
+
+/** Own local git runner for `createPR`'s push step. Deliberately NOT a shared import from
+ *  `github.ts`'s `execTool` (that function is module-private there — importing it would also
+ *  couple this driver to `github.ts` internals the plan explicitly keeps out of scope). Mirrors its
+ *  shape (github.ts:1510-1525) for parity, not by reference. */
+function execGit(args: string[], cwd: string, timeoutMs = 30_000): Promise<ForgejoExecResult> {
+  return new Promise((resolveResult) => {
+    execFile(
+      'git',
+      args,
+      { cwd, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024, encoding: 'utf8' },
+      (err, stdout, stderr) => resolveResult({ ok: !err, stdout: stdout ?? '', stderr: stderr ?? '' }),
+    );
+  });
+}
+
+/** Last 3 stderr lines, pipe-joined — toast-sized error context (mirrors github.ts's own `tail`). */
+function tailLines(stderr: string): string {
+  return stderr.trim().split('\n').slice(-3).join(' | ').slice(0, 300);
+}
+
+/** Extracts a human message from a `send()` result that didn't 2xx. `send` never throws (unlike
+ *  `getJson`/`getText`), so this is the createPR-local equivalent of `forgejo-http.ts`'s internal
+ *  error-body reader — that one works off a raw `Response`, this one off the already-drained
+ *  `{status, json, text}` shape `send` hands back, hence the small, deliberate duplication instead
+ *  of a shared helper across the module boundary. */
+function sendErrorMessage(res: { status: number; json: unknown; text: string }): string {
+  if (res.json && typeof res.json === 'object' && 'message' in res.json) {
+    const m = (res.json as { message?: unknown }).message;
+    if (typeof m === 'string' && m) return m;
+  }
+  return firstLine(res.text) || `pull request creation failed (HTTP ${res.status})`;
+}
+
+/**
+ * Publishes the run's branch as a draft PR: `autosaveCommit` (final flush) → `git push` (over the
+ * worktree's own SSH key / credential helper — the remote is `ssh://git@<host>:<port>/…`, a
+ * DIFFERENT host AND port than `apiUrl`, measured — so `CEZ_FORGEJO_TOKEN` plays no role in the
+ * push, and a failed push must say so, not point at the token) → `POST repos/{o}/{r}/pulls`.
+ * Mirrors `createDraftPr` (github.ts:1401-1468) structurally; the two diverge only where Forgejo's
+ * API differs from `gh pr create` — see the comments at each divergence below.
+ */
+async function createForgejoPr(
+  repoRoot: string,
+  http: ForgejoHttp,
+  owner: string,
+  repo: string,
+  webUrl: string,
+  input: DraftPrInput,
+): Promise<DraftPrOutcome> {
+  const { run } = input;
+  const worktree = run.worktreePath;
+  const branch = run.branch;
+  if (!worktree || !branch) {
+    return { ok: false, error: 'this task has no worktree/branch to publish' };
+  }
+
+  // Final autosave: the branch must hold everything before it leaves the box — this is the LAST
+  // flush, so a refusal (conflicted tree) or a failed commit has to stop the publish instead of
+  // silently opening a PR from a branch missing the run's final state (parity github.ts:1409-1423).
+  const saved = await autosaveCommit(worktree, 'pre-PR');
+  if (saved === 'refused') {
+    return { ok: false, error: 'worktree has unresolved merge conflicts — resolve them, then publish again' };
+  }
+  if (saved === 'failed') {
+    return { ok: false, error: 'could not commit the final changes — check git status in the worktree' };
+  }
+
+  // DRY-RUN: no push, no HTTP — simulate success with a fake PR URL (parity github.ts:1425-1429).
+  if (process.env.CEZ_DRY_RUN === '1') {
+    return { ok: true, url: `${webUrl}/${owner}/${repo}/pulls/777`, dryRun: true };
+  }
+
+  const remote = await execGit(['remote', 'get-url', 'origin'], worktree);
+  if (!remote.ok || !remote.stdout.trim()) {
+    return { ok: false, error: 'no git remote — add one (git remote add origin <url>) or merge the branch locally' };
+  }
+
+  const push = await execGit(['push', '-u', 'origin', branch], worktree, PR_PUSH_TIMEOUT_MS);
+  if (!push.ok) {
+    // Deliberately no mention of CEZ_FORGEJO_TOKEN anywhere in this message — the push runs on the
+    // worktree's own SSH key / credential helper (see the docstring above for why), and a message
+    // that named the token here would send the user chasing the wrong fix.
+    return { ok: false, error: `git push failed — ${tailLines(push.stderr) || 'unknown error'}` };
+  }
+
+  const encOwner = encodeURIComponent(owner);
+  const encRepo = encodeURIComponent(repo);
+
+  // Forgejo requires `base` — unlike `gh pr create`, there is no repo-default fallback on its own
+  // side. `origin/x` normalizes to `x`; a raw sha can't be a base either — both cases fall through
+  // to `Repository.default_branch` (from the warm `detectCache`, or one fresh GET when cold).
+  const rawBase = run.baseBranch?.replace(/^origin\//, '');
+  const base = rawBase && !BASE_LOOKS_LIKE_SHA_RE.test(rawBase) ? rawBase : await resolveDefaultBranch(repoRoot, http, owner, repo);
+  if (!base) {
+    return { ok: false, error: 'could not determine a base branch — set baseBranch or check the repository default' };
+  }
+
+  const body = buildPrBody(input.handoffText, run.task);
+  // `CreatePullRequestOption` has no `draft` field — Forgejo derives draft state from a "WIP:"/
+  // "[WIP]" title prefix instead (measured on a live instance: `title:"WIP: …", draft:true`
+  // together), so createPR must add the prefix itself; `stripWipTitle` strips it back off for
+  // display in `mapForgejoPull`.
+  const title = `WIP: ${run.title}`;
+
+  const res = await http.send('POST', `repos/${encOwner}/${encRepo}/pulls`, { head: branch, base, title, body });
+
+  if (res.status === 201) {
+    const pull = forgejoPullSchema.parse(res.json);
+    return { ok: true, url: rebaseToWebUrl(pull.html_url, webUrl), dryRun: false };
+  }
+  if (res.status === 409) {
+    // "a PR from this head to this base already exists" — treat re-publishing as idempotent:
+    // fetch the existing PR and hand its URL back instead of surfacing a conflict. Safe here
+    // (unlike `prStatus`'s `/pulls/{base}/{head}` shortcut — pułapka 13) because this 409 came from
+    // the exact head/base pair just POSTed, so there is no ambiguity about which PR it names.
+    try {
+      const raw = await http.getJson(`repos/${encOwner}/${encRepo}/pulls/${encodeRefSegments(base)}/${encodeRefSegments(branch)}`);
+      const pull = forgejoPullSchema.parse(raw);
+      return { ok: true, url: rebaseToWebUrl(pull.html_url, webUrl), dryRun: false };
+    } catch (err) {
+      return { ok: false, error: describeError(err) };
+    }
+  }
+  if (res.status === 404) {
+    // A repo with `has_pull_requests:false` answers 404 here, not a permissions error — a plain
+    // "not found" would mislead a user staring at a repository that plainly exists.
+    return { ok: false, error: 'pull requests are disabled for this repository' };
+  }
+  if (res.status === 423) {
+    return { ok: false, error: 'this repository is archived and cannot receive pull requests' };
+  }
+  return { ok: false, error: sendErrorMessage(res) };
+}
+
 export function createForgejoDriver(ctx: ForgejoDriverCtx, deps?: ForgejoHttpDeps): ForgeDriver {
   const { repoRoot, owner, repo, settings } = ctx;
   const http = createForgejoHttp(settings.apiUrl, deps);
@@ -433,14 +591,11 @@ export function createForgejoDriver(ctx: ForgejoDriverCtx, deps?: ForgejoHttpDep
     listPRs: (opts?: ForgeListOptions) => listForgejo('prs', repoRoot, http, owner, repo, webUrl, opts),
     prStatus: (branch: string) => forgejoPrStatus(repoRoot, http, owner, repo, webUrl, branch),
 
-    // Every method below is a degraded stub — real bodies land as follow-up changes, each with
-    // its own tests. None of them call `http`, which is exactly what `forgejo.test.ts` pins down
-    // (fetch is never invoked by any stub).
-    createPR: async (_input: DraftPrInput): Promise<DraftPrOutcome> => ({
-      ok: false,
-      error: 'Forgejo pull-request creation is not implemented yet.',
-    }),
+    createPR: (input: DraftPrInput) => createForgejoPr(repoRoot, http, owner, repo, webUrl, input),
 
+    // Every method below is still a degraded stub — real bodies land as follow-up changes, each
+    // with its own tests. None of them call `http`, which is exactly what `forgejo.test.ts` pins
+    // down (fetch is never invoked by any stub).
     prMergeState: async (_number: number, _opts?: { refresh?: boolean }): Promise<ForgePrMergeStateResult> => ({
       available: false,
       reason: 'Forgejo merge-state reporting is not implemented yet.',

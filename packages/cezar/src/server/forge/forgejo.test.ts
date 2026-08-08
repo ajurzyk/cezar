@@ -1,6 +1,49 @@
+import { execFile } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { RunRecord } from '../../runs/store.ts';
 import type { ForgeSettings } from './types.ts';
 import { __clearForgejoCachesForTests, createForgejoDriver, rebaseToWebUrl, type ForgejoDriverCtx } from './forgejo.ts';
+
+// `vi.hoisted` so `execFileMock` exists before the (hoisted) vi.mock factory runs — same pattern
+// as `github.test.ts`. Default behavior delegates every call to the REAL `execFile`: `createPR`'s
+// autosave and `remote get-url` steps run against a real temp git repo (fast, local, no network —
+// same approach `draft-pr-autosave.test.ts` uses for `createDraftPr`). Only `git push` ever gets
+// overridden (via `mockPush` below, per test that needs it) — that is the one git subcommand this
+// suite must never let touch the network. `realExecFileRef` captures the actual implementation so
+// `mockPush` can still delegate every non-push call to it after overriding.
+const execFileMock = vi.hoisted(() => vi.fn());
+const realExecFileRef: { current?: typeof import('node:child_process').execFile } = vi.hoisted(() => ({}));
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  realExecFileRef.current = actual.execFile;
+  execFileMock.mockImplementation((...args: unknown[]) => (actual.execFile as (...a: unknown[]) => unknown)(...args));
+  return { ...actual, execFile: (...args: unknown[]) => execFileMock(...args) };
+});
+
+// Test-setup helper (git init/commit for temp repos below) — resolves through the mock's default
+// passthrough, exactly like importing `execFile` directly in `draft-pr-autosave.test.ts` does.
+const runGit = promisify(execFile);
+
+/** Intercepts only `git push …` (argv[0] === 'push'); every other git invocation — status, add,
+ *  commit, remote get-url — still runs for real against the temp repo each test sets up. Always
+ *  installs a FRESH implementation (never chains onto a previous test's override), so test order
+ *  can never leak one test's push behavior into the next. */
+function mockPush(result: { ok: boolean; stderr?: string }): void {
+  execFileMock.mockImplementation((...args: unknown[]) => {
+    const argv = args[1] as string[];
+    const cb = args[args.length - 1] as (err: unknown, stdout: string, stderr: string) => void;
+    if (argv[0] === 'push') {
+      if (result.ok) cb(null, '', '');
+      else cb(new Error('git push failed'), '', result.stderr ?? 'permission denied (publickey)');
+      return undefined;
+    }
+    return (realExecFileRef.current as (...a: unknown[]) => unknown)(...args);
+  });
+}
 
 /**
  * The Forgejo driver: `kind`, `detect`/`detectCached` (the two call sites that already exist,
@@ -425,16 +468,225 @@ describe('prStatus', () => {
   });
 });
 
-describe('stubbed methods (real bodies land as follow-up changes) never touch the network', () => {
-  const repoRoot = '/repo/stubs';
+const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
 
-  it('createPR degrades to {ok:false, error}', async () => {
+describe('createPR', () => {
+  const repoRoot = '/repo/create-pr'; // detectCache/prStatusCache key namespace — unrelated to the git temp dir below
+  let repo: string;
+
+  const input = (overrides: { baseBranch?: string; worktreePath?: string; branch?: string } = {}) => ({
+    repoRoot,
+    handoffText: '# Goal\n\nship it\n',
+    run: {
+      // `in` (not `!== undefined`) so a test can explicitly pass `worktreePath: undefined` to
+      // exercise the "no worktree" guard — a `!==` check would treat that as "not overridden" and
+      // silently fall back to the real temp repo, which is exactly the case that guard test needs
+      // to NOT happen.
+      worktreePath: 'worktreePath' in overrides ? overrides.worktreePath : repo,
+      branch: 'branch' in overrides ? overrides.branch : 'feat/x',
+      baseBranch: overrides.baseBranch,
+      title: 'ship it',
+      task: 'do the thing',
+    } as RunRecord,
+  });
+
+  beforeEach(async () => {
+    repo = mkdtempSync(join(tmpdir(), 'cez-forgejo-pr-'));
+    await runGit('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+    await runGit('git', ['remote', 'add', 'origin', 'ssh://git@q7010-dev.local:2222/acme/demo.git'], { cwd: repo });
+    writeFileSync(join(repo, 'a.txt'), 'base\n');
+    await runGit('git', ['add', '-A'], { cwd: repo });
+    await runGit('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repo });
+  });
+
+  afterEach(() => {
+    execFileMock.mockReset();
+    execFileMock.mockImplementation((...args: unknown[]) => (realExecFileRef.current as (...a: unknown[]) => unknown)(...args));
+    delete process.env.CEZ_DRY_RUN;
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  it('with no worktree/branch to publish, degrades to {ok:false, error} without touching git or fetch', async () => {
     const fetchMock = vi.fn();
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
-    const result = await driver.createPR({ repoRoot, run: {} as never, handoffText: '' });
-    expect(result).toEqual({ ok: false, error: expect.any(String) });
+    const result = await driver.createPR(input({ worktreePath: undefined, branch: undefined }));
+    // Exact message, parity with `createDraftPr` (github.ts:1405-1407) — `expect.any(String)` here
+    // would also pass against the old degraded-stub message, defeating the point of this guard test.
+    expect(result).toEqual({ ok: false, error: 'this task has no worktree/branch to publish' });
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it('refuses to publish a worktree holding conflict markers (reuses autosaveCommit\'s guard)', async () => {
+    writeFileSync(
+      join(repo, 'a.txt'),
+      ['<<<<<<< HEAD', 'ours', '=======', 'theirs', '>>>>>>> other', ''].join('\n'),
+    );
+    const fetchMock = vi.fn();
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+    const result = await driver.createPR(input());
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toContain('unresolved merge conflicts');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('CEZ_DRY_RUN=1 returns a fake PR URL after the autosave, without pushing or calling fetch', async () => {
+    process.env.CEZ_DRY_RUN = '1';
+    writeFileSync(join(repo, 'a.txt'), 'finished work\n');
+    const fetchMock = vi.fn();
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+    const result = await driver.createPR(input());
+    expect(result).toEqual({ ok: true, url: 'https://forge.example.com/acme/demo/pulls/777', dryRun: true });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(execFileMock.mock.calls.some((c) => (c[1] as string[])[0] === 'push')).toBe(false);
+  });
+
+  it('with no git remote configured, degrades to {ok:false, error} without pushing or calling fetch', async () => {
+    await runGit('git', ['remote', 'remove', 'origin'], { cwd: repo });
+    const fetchMock = vi.fn();
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+    const result = await driver.createPR(input());
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toContain('no git remote');
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(execFileMock.mock.calls.some((c) => (c[1] as string[])[0] === 'push')).toBe(false);
+  });
+
+  it('when the base branch cannot be resolved (no baseBranch, and the default-branch lookup fails), degrades to {ok:false, error}', async () => {
+    mockPush({ ok: true });
+    const fetchMock = vi.fn().mockRejectedValue(new Error('network down'));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+    const result = await driver.createPR(input());
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toContain('base branch');
+  });
+
+  it('a failed push reports a git/SSH error, never mentions the token', async () => {
+    mockPush({ ok: false, stderr: 'Permission denied (publickey).\nfatal: Could not read from remote repository.' });
+    const fetchMock = vi.fn();
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+    const result = await driver.createPR(input());
+    expect(result.ok).toBe(false);
+    const message = result.ok === false ? result.error : '';
+    expect(message).toContain('git push failed');
+    expect(message.toLowerCase()).not.toContain('cez_forgejo_token');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('posts head/base/draft-prefixed title/body and returns the webUrl-rebased link on 201', async () => {
+    mockPush({ ok: true });
+    const fetchMock = vi.fn().mockImplementation((url: URL | string, init?: RequestInit) => {
+      const s = String(url);
+      if (s.endsWith('/repos/acme/demo/pulls') && init?.method === 'POST') {
+        return Promise.resolve(
+          jsonResponse(pullRow({ number: 42, html_url: 'http://forgejo:3000/acme/demo/pulls/42' }), { status: 201 }),
+        );
+      }
+      throw new Error(`unexpected fetch ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.createPR(input({ baseBranch: 'origin/main' }));
+
+    expect(result).toEqual({ ok: true, url: 'https://forge.example.com/acme/demo/pulls/42', dryRun: false });
+    const [, init] = fetchMock.mock.calls[0] as [unknown, RequestInit];
+    const sentBody = JSON.parse(init.body as string) as Record<string, unknown>;
+    expect(sentBody.head).toBe('feat/x'); // bare branch name, "origin/" never leaks in
+    expect(sentBody.base).toBe('main'); // "origin/" prefix stripped
+    expect(sentBody.title).toBe('WIP: ship it'); // draft expressed as a title prefix
+    expect(typeof sentBody.body).toBe('string');
+    expect(sentBody.labels).toBeUndefined(); // label IDs, not names — omitted entirely
+  });
+
+  it('a base that looks like a sha is rejected and falls back to Repository.default_branch', async () => {
+    mockPush({ ok: true });
+    const fetchMock = vi.fn().mockImplementation((url: URL | string, init?: RequestInit) => {
+      const s = String(url);
+      if (s.endsWith('/repos/acme/demo') && init?.method === 'GET') return Promise.resolve(jsonResponse({ default_branch: 'develop' }));
+      if (s.endsWith('/repos/acme/demo/pulls') && init?.method === 'POST') {
+        const sent = JSON.parse(init.body as string) as Record<string, unknown>;
+        expect(sent.base).toBe('develop');
+        return Promise.resolve(
+          jsonResponse(pullRow({ number: 9, html_url: 'http://forgejo:3000/acme/demo/pulls/9' }), { status: 201 }),
+        );
+      }
+      throw new Error(`unexpected fetch ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.createPR(input({ baseBranch: 'a'.repeat(40) }));
+    expect(result.ok).toBe(true);
+  });
+
+  it('with no baseBranch at all, falls back to Repository.default_branch the same way', async () => {
+    mockPush({ ok: true });
+    const fetchMock = vi.fn().mockImplementation((url: URL | string, init?: RequestInit) => {
+      const s = String(url);
+      if (s.endsWith('/repos/acme/demo') && init?.method === 'GET') return Promise.resolve(jsonResponse({ default_branch: 'develop' }));
+      if (s.endsWith('/repos/acme/demo/pulls') && init?.method === 'POST') {
+        const sent = JSON.parse(init.body as string) as Record<string, unknown>;
+        expect(sent.base).toBe('develop');
+        return Promise.resolve(
+          jsonResponse(pullRow({ number: 9, html_url: 'http://forgejo:3000/acme/demo/pulls/9' }), { status: 201 }),
+        );
+      }
+      throw new Error(`unexpected fetch ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.createPR(input());
+    expect(result.ok).toBe(true);
+  });
+
+  it('409 (PR already exists) idempotently returns the existing PR\'s URL via GET pulls/{base}/{head}', async () => {
+    mockPush({ ok: true });
+    const fetchMock = vi.fn().mockImplementation((url: URL | string, init?: RequestInit) => {
+      const s = String(url);
+      if (s.endsWith('/repos/acme/demo/pulls') && init?.method === 'POST') {
+        return Promise.resolve(jsonResponse({ message: 'PR already exists' }, { status: 409 }));
+      }
+      if (s.includes('/pulls/main/feat/x')) {
+        return Promise.resolve(jsonResponse(pullRow({ number: 11, html_url: 'http://forgejo:3000/acme/demo/pulls/11' })));
+      }
+      throw new Error(`unexpected fetch ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.createPR(input({ baseBranch: 'main' }));
+    expect(result).toEqual({ ok: true, url: 'https://forge.example.com/acme/demo/pulls/11', dryRun: false });
+  });
+
+  it('404 (pull requests disabled) gets its own message, not a generic "not found"', async () => {
+    mockPush({ ok: true });
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ message: 'not found' }, { status: 404 }));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.createPR(input({ baseBranch: 'main' }));
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toContain('disabled');
+  });
+
+  it('423 (archived repository) gets its own message', async () => {
+    mockPush({ ok: true });
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ message: 'repo is archived' }, { status: 423 }));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.createPR(input({ baseBranch: 'main' }));
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toContain('archived');
+  });
+
+  it('any other error status surfaces the response message, never throws', async () => {
+    mockPush({ ok: true });
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ message: 'internal error' }, { status: 500 }));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.createPR(input({ baseBranch: 'main' }));
+    expect(result).toEqual({ ok: false, error: 'internal error' });
+  });
+});
+
+describe('stubbed methods (real bodies land as follow-up changes) never touch the network', () => {
+  const repoRoot = '/repo/stubs';
 
   it('prMergeState degrades to {available:false, reason}', async () => {
     const fetchMock = vi.fn();
