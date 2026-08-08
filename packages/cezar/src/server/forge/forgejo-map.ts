@@ -284,8 +284,8 @@ export type ForgejoRepository = z.infer<typeof forgejoRepositorySchema>;
 
 /**
  * Flattens a `ForgejoRepository`'s four independent merge-method flags into the ordered list the
- * merge-state UI renders, plus a `doFor` lookup a future `mergePR` implementation uses to pick the
- * Forgejo API merge-style string for a chosen `ForgeMergeMethod`. `allow_fast_forward_only_merge`
+ * merge-state UI renders, plus a `doFor` lookup `mergePR` (forgejo.ts) uses to pick the Forgejo
+ * API merge-style string for a chosen `ForgeMergeMethod`. `allow_fast_forward_only_merge`
  * never adds a method — not because fast-forward-only isn't a real Forgejo merge style (its merge
  * API accepts `fast-forward-only` as a `Do` value exactly like `merge`/`squash`/`rebase` are), but
  * because cezar's own `ForgeMergeMethod` type has no value representing it, so there is nothing for

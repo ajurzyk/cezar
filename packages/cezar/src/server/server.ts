@@ -1489,9 +1489,10 @@ export function createApp(deps: ServerDeps) {
     // Additive fields only below — the pre-forge shape is the most
     // externally-depended-on JSON in the app (BACKWARD_COMPATIBILITY.md §2).
     // `config.forge`, when the repo declares one, fills the gap the host table leaves — it never
-    // overrides a host the table recognizes. For `kind: 'forgejo'` `resolveForge` still returns
-    // null (no driver yet), so this route keeps sending `forge: null` unchanged until a driver
-    // exists. `config` is already loaded above for other fields, so no extra read here.
+    // overrides a host the table recognizes. Since the Forgejo driver shipped, a `kind: 'forgejo'`
+    // declared for a host the table can't reveal resolves to a real driver, so this route reports
+    // `{kind:'forgejo', available:…}` for those repos rather than the `forge: null` it used to send.
+    // `config` is already loaded above for other fields, so no extra read here.
     const forge = resolveForge(repo, config.forge);
     const caps = capabilities();
     return {
