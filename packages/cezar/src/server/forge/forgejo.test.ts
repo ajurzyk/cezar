@@ -3,10 +3,11 @@ import type { ForgeSettings } from './types.ts';
 import { __clearForgejoCachesForTests, createForgejoDriver, rebaseToWebUrl, type ForgejoDriverCtx } from './forgejo.ts';
 
 /**
- * The Forgejo driver skeleton: `kind`, `detect`/`detectCached` (the two call sites that already
- * exist, `server.ts:1511`/`:3214`), `viewUrl`, `rebaseToWebUrl`, and the degraded stub for every
- * other `ForgeDriver` method (their real bodies land as follow-up changes). `fetch` is injected via
- * `deps.fetch`; nothing here touches the network.
+ * The Forgejo driver: `kind`, `detect`/`detectCached` (the two call sites that already exist,
+ * `server.ts:1511`/`:3214`), `viewUrl`, `rebaseToWebUrl`, `listIssues`, `listPRs` and `prStatus`
+ * are real; `createPR`/`prMergeState`/`mergePR`/`prDiff` remain degraded stubs whose real bodies
+ * land as follow-up changes. `fetch` is injected via `deps.fetch`; nothing here touches the
+ * network.
  */
 
 function jsonResponse(body: unknown, init: { status?: number; headers?: Record<string, string> } = {}): Response {
@@ -164,23 +165,268 @@ describe('detectCached', () => {
   });
 });
 
-describe('stubbed methods (real bodies land as follow-up changes) never touch the network', () => {
-  const repoRoot = '/repo/stubs';
+function issueRow(number: number, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    number,
+    title: `Issue ${number}`,
+    html_url: `http://forgejo:3000/acme/demo/issues/${number}`,
+    user: { login: 'ajr' },
+    created_at: '2026-08-07T10:00:00Z',
+    labels: [],
+    body: 'body',
+    comments: 0,
+    pull_request: null,
+    ...overrides,
+  };
+}
 
-  it('listIssues/listPRs degrade to []', async () => {
+function pullRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    number: 5,
+    title: 'add x',
+    html_url: 'http://forgejo:3000/acme/demo/pulls/5',
+    user: { login: 'ajr' },
+    created_at: '2026-08-07T10:00:00Z',
+    labels: [],
+    body: '',
+    comments: 0,
+    draft: false,
+    additions: 1,
+    deletions: 1,
+    state: 'open',
+    merged: false,
+    head: { ref: 'feat/x', sha: 'a'.repeat(40) },
+    ...overrides,
+  };
+}
+
+/** A fresh `Response` per call — a shared mock `Response`'s body stream can only be read once
+ *  (mirrors the same comment/pattern in `forgejo-http.test.ts`'s `maxPages` test). Every list/walk
+ *  fixture below uses this instead of `mockResolvedValue` so a second (or cache-miss re-)page
+ *  never silently reads an already-consumed body. */
+function pageOf(rows: unknown[], total?: number): () => Promise<Response> {
+  return () => Promise.resolve(jsonResponse(rows, total === undefined ? {} : { headers: { 'x-total-count': String(total) } }));
+}
+
+describe('listIssues', () => {
+  const repoRoot = '/repo/list-issues';
+
+  afterEach(() => {
+    delete process.env.CEZ_DRY_RUN;
+  });
+
+  it('requests state=open&type=issues, drops PR rows, and rebases urls onto webUrl', async () => {
+    const rows = [issueRow(1), issueRow(2, { pull_request: { merged: false, merged_at: null } })];
+    const fetchMock = vi.fn().mockImplementation(pageOf(rows, rows.length));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const items = await driver.listIssues();
+
+    expect(items).toEqual([
+      expect.objectContaining({ kind: 'issue', number: 1, url: 'https://forge.example.com/acme/demo/issues/1' }),
+    ]);
+    const requestedUrl = String(fetchMock.mock.calls[0]![0]);
+    expect(requestedUrl).toContain('state=open');
+    expect(requestedUrl).toContain('type=issues');
+  });
+
+  it('caches for 60s; refresh:true bypasses the cache', async () => {
+    const fetchMock = vi.fn().mockImplementation(pageOf([issueRow(1)], 1));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+    await driver.listIssues();
+    await driver.listIssues();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await driver.listIssues({ refresh: true });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('respects a smaller limit than the server page size', async () => {
+    // No x-total-count here on purpose: a full first page (50 == pageLimit) already satisfies
+    // `want=10` on its own ("want reached" branch), independent of whether the walk is provably
+    // exhausted — proving the driver-level `limit` re-slice runs, not `paginate`'s own stop logic.
+    const fetchMock = vi.fn().mockImplementation(pageOf(Array.from({ length: 50 }, (_, i) => issueRow(i + 1))));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+    const items = await driver.listIssues({ limit: 10 });
+    expect(items).toHaveLength(10);
+    expect(fetchMock).toHaveBeenCalledTimes(1); // one full page already satisfies want=10
+  });
+
+  it('degrades to [] on an HTTP error, never throws', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ message: 'nope' }, { status: 500 }));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+    await expect(driver.listIssues()).resolves.toEqual([]);
+  });
+
+  it('CEZ_DRY_RUN=1 short-circuits to [] without calling fetch', async () => {
+    process.env.CEZ_DRY_RUN = '1';
     const fetchMock = vi.fn();
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
     await expect(driver.listIssues()).resolves.toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('listPRs', () => {
+  const repoRoot = '/repo/list-prs';
+
+  afterEach(() => {
+    delete process.env.CEZ_DRY_RUN;
+  });
+
+  it('requests state=open (no type filter) and maps drafts with a stripped title + draft label', async () => {
+    const rows = [pullRow({ number: 9, title: 'WIP: add y', draft: true })];
+    const fetchMock = vi.fn().mockImplementation(pageOf(rows, rows.length));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const items = await driver.listPRs();
+
+    expect(items).toEqual([
+      expect.objectContaining({ kind: 'pr', number: 9, title: 'add y', isDraft: true, labels: ['draft'], checks: null }),
+    ]);
+    const requestedUrl = String(fetchMock.mock.calls[0]![0]);
+    expect(requestedUrl).toContain('state=open');
+    expect(requestedUrl).not.toContain('type=issues');
+  });
+
+  it('CEZ_DRY_RUN=1 short-circuits to [] without calling fetch', async () => {
+    process.env.CEZ_DRY_RUN = '1';
+    const fetchMock = vi.fn();
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
     await expect(driver.listPRs()).resolves.toEqual([]);
     expect(fetchMock).not.toHaveBeenCalled();
   });
+});
 
-  it('prStatus degrades to null', async () => {
+describe('prStatus', () => {
+  const repoRoot = '/repo/pr-status';
+
+  afterEach(() => {
+    delete process.env.CEZ_DRY_RUN;
+  });
+
+  it('walks pulls?state=all, finds the branch, and reports checks from head.sha (never the branch name)', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/pulls?state=all')) return Promise.resolve(jsonResponse([pullRow()], { headers: { 'x-total-count': '1' } }));
+      if (s.includes('/commits/')) {
+        expect(s).toContain(`/commits/${'a'.repeat(40)}/status`); // head.sha, never "feat/x"
+        return Promise.resolve(jsonResponse({ statuses: [{ status: 'success' }] }));
+      }
+      throw new Error(`unexpected url ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    await expect(driver.prStatus('feat/x')).resolves.toEqual({
+      number: 5,
+      url: 'https://forge.example.com/acme/demo/pulls/5',
+      state: 'open',
+      isDraft: false,
+      checks: 'passing',
+    });
+  });
+
+  it('reports state:"merged" for a merged PR, never a bare state:"closed"', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/pulls?state=all')) {
+        return Promise.resolve(jsonResponse([pullRow({ state: 'closed', merged: true })], { headers: { 'x-total-count': '1' } }));
+      }
+      return Promise.resolve(jsonResponse({ statuses: null }));
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+    const status = await driver.prStatus('feat/x');
+    expect(status?.state).toBe('merged');
+  });
+
+  it('prefers an open match over an earlier closed match with the same head.ref', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/pulls?state=all')) {
+        return Promise.resolve(
+          jsonResponse([pullRow({ number: 3, state: 'closed', merged: false }), pullRow({ number: 5, state: 'open' })], {
+            headers: { 'x-total-count': '2' },
+          }),
+        );
+      }
+      return Promise.resolve(jsonResponse({ statuses: null }));
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+    const status = await driver.prStatus('feat/x');
+    expect(status?.number).toBe(5);
+    expect(status?.state).toBe('open');
+  });
+
+  it('an exhausted walk (stoppedShort:false) with no match falls back to /pulls/{base}/{head}', async () => {
+    // A merged PR with a deleted branch reports head.ref as "refs/pull/7/head" — the walk can
+    // never match it against the real branch name, so a match-by-head.ref alone would report
+    // "no PR" for a PR that plainly exists. `page.stoppedShort:false` (short page + a matching
+    // X-Total-Count) proves the walk was exhaustive, which is what makes the fallback lookup safe.
+    const walkRow = pullRow({ number: 7, state: 'closed', merged: true, head: { ref: 'refs/pull/7/head', sha: 'c'.repeat(40) } });
+    const fallbackRow = pullRow({
+      number: 7,
+      html_url: 'http://forgejo:3000/acme/demo/pulls/7',
+      state: 'closed',
+      merged: true,
+      head: { ref: 'refs/pull/7/head', sha: 'c'.repeat(40) },
+    });
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/pulls?state=all')) {
+        return Promise.resolve(jsonResponse([walkRow], { headers: { 'x-total-count': '1' } }));
+      }
+      if (s.includes('/pulls/main/')) return Promise.resolve(jsonResponse(fallbackRow));
+      if (s.endsWith('/repos/acme/demo')) return Promise.resolve(jsonResponse({ default_branch: 'main' }));
+      if (s.includes('/status')) return Promise.resolve(jsonResponse({ statuses: null }));
+      throw new Error(`unexpected url ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    await expect(driver.prStatus('feat/skipped-branch')).resolves.toEqual({
+      number: 7,
+      url: 'https://forge.example.com/acme/demo/pulls/7',
+      state: 'merged',
+      isDraft: false,
+      checks: null,
+    });
+  });
+
+  it('an unfinished walk (stoppedShort:true) returns null WITHOUT ever calling the base/head fallback', async () => {
+    let now = 0;
+    const fetchMock = vi.fn().mockImplementation((_url: URL | string) => {
+      now += 14_000; // leaves < minPageMs (2s) of the default 15s budget after one page
+      return Promise.resolve(jsonResponse([pullRow({ head: { ref: 'refs/pull/9/head', sha: 'b'.repeat(40) } })]));
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, now: () => now, token: null });
+
+    await expect(driver.prStatus('feat/x')).resolves.toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]![0])).toContain('/pulls?state=all');
+  });
+
+  it('caches for 60s', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/pulls?state=all')) return Promise.resolve(jsonResponse([pullRow()], { headers: { 'x-total-count': '1' } }));
+      return Promise.resolve(jsonResponse({ statuses: null }));
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+    await driver.prStatus('feat/x');
+    const callsAfterFirst = fetchMock.mock.calls.length;
+    await driver.prStatus('feat/x');
+    expect(fetchMock.mock.calls.length).toBe(callsAfterFirst);
+  });
+
+  it('CEZ_DRY_RUN=1 short-circuits to null without calling fetch', async () => {
+    process.env.CEZ_DRY_RUN = '1';
     const fetchMock = vi.fn();
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
     await expect(driver.prStatus('feat/x')).resolves.toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();
   });
+});
+
+describe('stubbed methods (real bodies land as follow-up changes) never touch the network', () => {
+  const repoRoot = '/repo/stubs';
 
   it('createPR degrades to {ok:false, error}', async () => {
     const fetchMock = vi.fn();
