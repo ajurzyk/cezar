@@ -696,8 +696,8 @@ therefore don't raise that file's trust level; they are just two more
 addresses it can point at. `CEZ_FORGEJO_TOKEN` itself is scoped by the driver,
 not by this file: it is attached only to the Forgejo driver's own HTTP
 requests, and only when the request's resolved target shares `apiOrigin` —
-the origin derived *from* `apiUrl` itself (`forgejo-http.ts:179`), not some
-independently trusted value. That means the gate does NOT protect the token
+the origin derived *from* `apiUrl` itself (`forgejo-http.ts:192`, gated at
+`:221`), not some independently trusted value. That means the gate does NOT protect the token
 from `apiUrl`'s own host: whatever host `apiUrl` names receives the token,
 same as pointing any other tool at an API endpoint always does — this is
 the same "code-trusted" reasoning as `systemPrompt` and `skillsRepos` above,
@@ -713,12 +713,14 @@ means a 3xx response is treated as a failure rather than followed, so no
 hop ever carries the Authorization header to a redirect target; and the
 same-origin check keeps a cross-origin URL that shows up elsewhere in a
 Forgejo response (a third-party CI `target_url`, for instance) from ever
-being mistaken for an API target and sent the token. The variable is not
-otherwise sandboxed, though: like `GITHUB_TOKEN`, it is still forwarded
-whole to spawned agent processes (`agent-env.ts`) and scrubbed from the
-on-disk NDJSON transcript by name (`secret-redaction.ts`) — the origin gate
-protects the driver's own requests, not every process that ever sees the
-token.
+being mistaken for an API target and sent the token. The variable is also
+**not** forwarded to spawned agent processes: `buildChildEnv` forwards
+cezar's `CEZ_*` namespace as configuration, but denies the credential-shaped
+names in it (`agent-env.ts`), and no agent tool speaks the Forgejo REST API
+anyway. `GITHUB_TOKEN` is the deliberate contrast — it IS forwarded, through
+a curated allowlist, because the agent's own `gh` cannot work without it.
+Either way the value is scrubbed from the on-disk NDJSON transcript by name
+(`secret-redaction.ts`).
 
 Put the same `"modelsLocked": true` key in `~/.cezar/config.json` to apply it
 to every registered project. When the key is absent or `false` in both config

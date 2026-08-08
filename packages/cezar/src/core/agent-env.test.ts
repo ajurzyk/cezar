@@ -69,6 +69,19 @@ describe('buildChildEnv — least-privilege child env (#427)', () => {
     expect(env.CEZ_MOCK_ARGS_FILE).toBe('/tmp/args');
   });
 
+  it('does not forward a credential-shaped CEZ_ name to the agent', () => {
+    // The CEZ_ family is cezar's own CONFIG namespace, which is why it has no looksSecret guard.
+    // CEZ_FORGEJO_TOKEN is a credential: the service's Forgejo REST driver uses it, no agent tool
+    // does (unlike GITHUB_TOKEN, which the agent's own `gh` needs and which is forwarded through a
+    // curated allowlist for exactly that reason). #427's least-privilege posture must hold here.
+    const env = buildChildEnv({
+      backend: 'claude',
+      source: { ...HOST, CEZ_FORGEJO_TOKEN: 'fj_tokenshouldnotleak', CEZ_DRY_RUN: '1' },
+    });
+    expect(env.CEZ_FORGEJO_TOKEN).toBeUndefined();
+    expect(env.CEZ_DRY_RUN).toBe('1'); // the rest of the namespace is untouched
+  });
+
   it('applies extraEnv (spec.env) last so per-run vars always win', () => {
     const env = buildChildEnv({
       backend: 'claude',

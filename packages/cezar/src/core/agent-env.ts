@@ -338,8 +338,17 @@ export function buildChildEnv(opts: BuildChildEnvOptions): NodeJS.ProcessEnv {
   /** `name` is matched normalized; the caller keeps the original spelling. */
   function allow(name: string): boolean {
     const key = name.toUpperCase();
-    // cezar's own namespace (CEZ_DRY_RUN plumbing, mock hooks, run wiring).
-    if (key.startsWith('CEZ_')) return true;
+    // cezar's own namespace (CEZ_DRY_RUN plumbing, mock hooks, run wiring) — CONFIG, not
+    // credentials, which is why the whole family is forwarded. A credential-shaped member is
+    // therefore denied by the same rule `BASE_ALLOW_PREFIXES` applies below: the service may hold
+    // a forge token (CEZ_FORGEJO_TOKEN — the Forgejo REST driver uses it), but no agent tool does,
+    // so forwarding it would hand every spawned agent a credential it has no use for and reopen
+    // the exfiltration path #427 closed. GITHUB_TOKEN is the deliberate contrast: it IS forwarded,
+    // via the curated GH_ALLOW_NAMES above, precisely because the agent's own `gh` cannot work
+    // without it. The two CEZ_HIDE_TOKEN_* display flags also match `looksSecret`, but they are
+    // read server-side only (server/capabilities.ts), never by a child, so denying them costs
+    // nothing.
+    if (key.startsWith('CEZ_')) return !looksSecret(key);
     // Backend auth + gh handoff + the cloud creds an active Bedrock/Vertex
     // toggle needs: forwarded even though they are secrets — the backend cannot
     // authenticate without them. They are still redacted before anything
