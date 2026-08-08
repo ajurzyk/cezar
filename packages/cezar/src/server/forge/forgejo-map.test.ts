@@ -94,8 +94,9 @@ describe('combinedStatusToChecks', () => {
     expect(combinedStatusToChecks({ statuses: [{ status: 'success' }, { status: 'success' }] })).toBe('passing');
   });
 
-  it('ignores an empty-string status entry (never seen alone, but must not count as failing/pending)', () => {
-    expect(combinedStatusToChecks({ statuses: [{ status: 'success' }, { status: '' }] })).toBe('passing');
+  it('rolls an empty-string or otherwise unrecognized status entry into "pending", never "passing" — parity with github.ts rollupToChecks mapping its own "" to pending', () => {
+    expect(combinedStatusToChecks({ statuses: [{ status: 'success' }, { status: '' }] })).toBe('pending');
+    expect(combinedStatusToChecks({ statuses: [{ status: 'success' }, { status: 'some-future-state' }] })).toBe('pending');
   });
 });
 
@@ -316,27 +317,33 @@ describe('computeReviewDecision', () => {
   // including the protected:false shortcut to 'unknown' — 'unknown' is not a blocking eligibility
   // state, so silently dropping a review we can't interpret would let a
   // request-changes-shaped-but-misspelled review through to 'ready'.
-  it('an unrecognized non-empty state forces review-required, even alongside an APPROVED and even at protected:false', () => {
+  it('an unrecognized non-empty state forces review-required (and flags unrecognized:true), even alongside an APPROVED and even at protected:false', () => {
     const reviews = [reviewRow({ state: 'APPROVED' }), reviewRow({ state: 'FUTURE_STATE', user: { login: 'reviewer2' } })];
-    expect(computeReviewDecision(reviews, unprotectedBranch)).toBe('review-required');
+    const result = computeReviewDecision(reviews, unprotectedBranch);
+    expect(result.decision).toBe('review-required');
+    expect(result.unrecognized).toBe(true);
   });
 
   it('an unrecognized state still wins when the branch is unreadable', () => {
-    expect(computeReviewDecision([reviewRow({ state: 'SOMETHING_NEW' })], unreadableBranch)).toBe('review-required');
+    const result = computeReviewDecision([reviewRow({ state: 'SOMETHING_NEW' })], unreadableBranch);
+    expect(result.decision).toBe('review-required');
+    expect(result.unrecognized).toBe(true);
   });
 
   it('the empty string state is a known "no signal" value, not an unrecognized one', () => {
-    expect(computeReviewDecision([reviewRow({ state: '' })], unprotectedBranch)).toBe('unknown');
+    const result = computeReviewDecision([reviewRow({ state: '' })], unprotectedBranch);
+    expect(result.decision).toBe('unknown');
+    expect(result.unrecognized).toBe(false);
   });
 
   it('drops a dismissed review entirely', () => {
     const reviews = [reviewRow({ state: 'REQUEST_CHANGES', dismissed: true })];
-    expect(computeReviewDecision(reviews, protectedBranch())).toBe('review-required'); // no active review at all
+    expect(computeReviewDecision(reviews, protectedBranch()).decision).toBe('review-required'); // no active review at all
   });
 
   it('drops PENDING and REQUEST_REVIEW rows (not yet a real verdict)', () => {
     const reviews = [reviewRow({ state: 'PENDING' }), reviewRow({ state: 'REQUEST_REVIEW', user: { login: 'r2' } })];
-    expect(computeReviewDecision(reviews, protectedBranch())).toBe('review-required');
+    expect(computeReviewDecision(reviews, protectedBranch()).decision).toBe('review-required');
   });
 
   it('keeps only official reviews once at least one official row exists', () => {
@@ -344,7 +351,7 @@ describe('computeReviewDecision', () => {
       reviewRow({ state: 'REQUEST_CHANGES', official: false, user: { login: 'drive-by' } }),
       reviewRow({ state: 'APPROVED', official: true }),
     ];
-    expect(computeReviewDecision(reviews, protectedBranch())).toBe('approved');
+    expect(computeReviewDecision(reviews, protectedBranch()).decision).toBe('approved');
   });
 
   it('collapses to the latest row per reviewer by submitted_at — a later APPROVED supersedes an earlier REQUEST_CHANGES', () => {
@@ -352,42 +359,42 @@ describe('computeReviewDecision', () => {
       reviewRow({ state: 'REQUEST_CHANGES', submitted_at: '2026-08-01T00:00:00Z' }),
       reviewRow({ state: 'APPROVED', submitted_at: '2026-08-02T00:00:00Z' }),
     ];
-    expect(computeReviewDecision(reviews, protectedBranch())).toBe('approved');
+    expect(computeReviewDecision(reviews, protectedBranch()).decision).toBe('approved');
   });
 
   it('any REQUEST_CHANGES after collapsing blocks with changes-requested', () => {
     const reviews = [reviewRow({ state: 'APPROVED', user: { login: 'r1' } }), reviewRow({ state: 'REQUEST_CHANGES', user: { login: 'r2' } })];
-    expect(computeReviewDecision(reviews, protectedBranch())).toBe('changes-requested');
+    expect(computeReviewDecision(reviews, protectedBranch()).decision).toBe('changes-requested');
   });
 
   it('REQUEST_CHANGES blocks even when the branch is unreadable — it needs no branch-protection info', () => {
-    expect(computeReviewDecision([reviewRow({ state: 'REQUEST_CHANGES' })], unreadableBranch)).toBe('changes-requested');
+    expect(computeReviewDecision([reviewRow({ state: 'REQUEST_CHANGES' })], unreadableBranch).decision).toBe('changes-requested');
   });
 
   it('an unprotected branch is "no requirements" — always unknown, never approved, regardless of approvals', () => {
-    expect(computeReviewDecision([reviewRow({ state: 'APPROVED' })], unprotectedBranch)).toBe('unknown');
+    expect(computeReviewDecision([reviewRow({ state: 'APPROVED' })], unprotectedBranch).decision).toBe('unknown');
   });
 
   it('a protected branch requiring 0 approvals is also "no requirements" — unknown, not approved', () => {
-    expect(computeReviewDecision([reviewRow({ state: 'APPROVED' })], protectedBranch({ requiredApprovals: 0 }))).toBe('unknown');
+    expect(computeReviewDecision([reviewRow({ state: 'APPROVED' })], protectedBranch({ requiredApprovals: 0 })).decision).toBe('unknown');
   });
 
   it('an unreadable branch (no requirements info at all) is unknown', () => {
-    expect(computeReviewDecision([reviewRow({ state: 'APPROVED' })], unreadableBranch)).toBe('unknown');
+    expect(computeReviewDecision([reviewRow({ state: 'APPROVED' })], unreadableBranch).decision).toBe('unknown');
   });
 
   it('enough non-stale approvals on a protected branch requiring them satisfies review-required into approved', () => {
     const reviews = [reviewRow({ state: 'APPROVED', user: { login: 'r1' } }), reviewRow({ state: 'APPROVED', user: { login: 'r2' } })];
-    expect(computeReviewDecision(reviews, protectedBranch({ requiredApprovals: 2 }))).toBe('approved');
+    expect(computeReviewDecision(reviews, protectedBranch({ requiredApprovals: 2 })).decision).toBe('approved');
   });
 
   it('a stale approval does not count toward the required_approvals threshold', () => {
     const reviews = [reviewRow({ state: 'APPROVED', stale: true })];
-    expect(computeReviewDecision(reviews, protectedBranch({ requiredApprovals: 1 }))).toBe('review-required');
+    expect(computeReviewDecision(reviews, protectedBranch({ requiredApprovals: 1 })).decision).toBe('review-required');
   });
 
   it('not enough approvals on a protected branch with a real requirement is review-required', () => {
-    expect(computeReviewDecision([], protectedBranch({ requiredApprovals: 1 }))).toBe('review-required');
+    expect(computeReviewDecision([], protectedBranch({ requiredApprovals: 1 })).decision).toBe('review-required');
   });
 
   it('a later COMMENT from the same reviewer supersedes (drops) their earlier APPROVED — pinned, intentional behavior, see the doc comment above', () => {
@@ -398,7 +405,7 @@ describe('computeReviewDecision', () => {
     // Only one reviewer, and their standing review is now COMMENT — not enough to satisfy a
     // required approval, but also not a REQUEST_CHANGES, so this is 'review-required', not
     // 'changes-requested'.
-    expect(computeReviewDecision(reviews, protectedBranch({ requiredApprovals: 1 }))).toBe('review-required');
+    expect(computeReviewDecision(reviews, protectedBranch({ requiredApprovals: 1 })).decision).toBe('review-required');
   });
 
   it('a DIFFERENT reviewer\'s COMMENT never touches another reviewer\'s standing APPROVED', () => {
@@ -406,7 +413,7 @@ describe('computeReviewDecision', () => {
       reviewRow({ state: 'APPROVED', user: { login: 'r1' } }),
       reviewRow({ state: 'COMMENT', user: { login: 'r2' } }),
     ];
-    expect(computeReviewDecision(reviews, protectedBranch({ requiredApprovals: 1 }))).toBe('approved');
+    expect(computeReviewDecision(reviews, protectedBranch({ requiredApprovals: 1 })).decision).toBe('approved');
   });
 
   it('collapses by NORMALIZED submitted_at, not the raw offset string — a later UTC instant with a smaller numeric offset still wins', () => {
@@ -419,7 +426,7 @@ describe('computeReviewDecision', () => {
       reviewRow({ state: 'REQUEST_CHANGES', submitted_at: '2026-10-25T02:10:00+01:00' }),
       reviewRow({ state: 'APPROVED', submitted_at: '2026-10-25T02:30:00+02:00' }),
     ];
-    expect(computeReviewDecision(reviews, protectedBranch())).toBe('changes-requested');
+    expect(computeReviewDecision(reviews, protectedBranch()).decision).toBe('changes-requested');
   });
 });
 
@@ -530,7 +537,7 @@ describe('normalizeForgejoMergeState', () => {
     expect(state.blockers).toEqual([{ code: 'rules-unknown', message: expect.any(String) }]);
   });
 
-  it('an unrecognized review state blocks with reviews/review-required even on an unprotected branch', () => {
+  it('an unrecognized review state blocks with its own reviews-unrecognized code, never the generic "review missing" reviews code, even on an unprotected branch', () => {
     const state = normalizeForgejoMergeState({
       pullRaw: mergePullRow(),
       statusRaw: null,
@@ -542,7 +549,10 @@ describe('normalizeForgejoMergeState', () => {
     });
     expect(state.reviewDecision).toBe('review-required');
     expect(state.eligibility).toBe('blocked');
-    expect(state.blockers[0]?.code).toBe('reviews');
+    expect(state.blockers).toEqual([{ code: 'reviews-unrecognized', message: expect.any(String) }]);
+    // A review WAS submitted — cezar just can't read its state — so the "required review is
+    // missing" wording (the `reviews` code's own message) would misdescribe what happened.
+    expect(state.blockers[0]?.message).not.toBe('A required review is missing.');
   });
 
   it('statuses:null (no CI configured) maps to an empty checks array, not a failing/pending one', () => {
@@ -651,6 +661,21 @@ describe('normalizeForgejoMergeState', () => {
     expect(state.eligibility).toBe('pending');
   });
 
+  it('an unrecognized per-check status surfaces as its own "unknown" check state but does NOT gate eligibility — the merge ladder is unaffected by combinedStatusToChecks\' unrelated "unknown"->"pending" rollup fix (that rollup only feeds the list-row badge, ForgePrStatus.checks, never this ladder)', () => {
+    const state = normalizeForgejoMergeState({
+      pullRaw: mergePullRow(),
+      statusRaw: { statuses: [{ status: 'some-future-state', context: 'ci/build' }] },
+      branch: unprotectedBranch,
+      repository: mergeStateRepo,
+      webUrl,
+      hasToken: false,
+      reviewsRaw: [],
+    });
+    expect(state.checks).toEqual([{ name: 'ci/build', state: 'unknown', required: false }]);
+    expect(state.eligibility).toBe('ready');
+    expect(state.canMerge).toBe(true);
+  });
+
   it('a merged PR reports state:"merged" and eligibility:terminal, never a bare "closed"', () => {
     const state = normalizeForgejoMergeState({
       pullRaw: mergePullRow({ state: 'closed', merged: true }),
@@ -754,7 +779,7 @@ describe('normalizeForgejoMergeState', () => {
     expect(state.defaultMethod).toBeNull();
   });
 
-  it('methods:[] (a repository with every merge-method flag off) closes the ladder at unknown, not a false ready', () => {
+  it('methods:[] on a READABLE repository closes the ladder at unknown with its own no-merge-method code (a confirmed answer, not a vague "could not confirm")', () => {
     const noMethodsRepo: ForgejoRepository = forgejoRepositorySchema.parse({ default_branch: 'main' });
     const state = normalizeForgejoMergeState({
       pullRaw: mergePullRow(),
@@ -767,7 +792,7 @@ describe('normalizeForgejoMergeState', () => {
     });
     expect(state.methods).toEqual([]);
     expect(state.eligibility).toBe('unknown');
-    expect(state.blockers).toEqual([{ code: 'unknown', message: expect.any(String) }]);
+    expect(state.blockers).toEqual([{ code: 'no-merge-method', message: expect.any(String) }]);
     // The one blocker that closes the override door is a conflict — methods:[] is not that, but
     // canOverride still requires methods.length > 0, so there is nothing to override onto either.
     expect(state.canOverride).toBe(false);

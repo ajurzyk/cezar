@@ -147,10 +147,12 @@ export const forgejoCombinedStatusSchema = z.object({
  *  rollup, below) and `combinedStatusToPrChecks` (the per-check breakdown, further down) both build
  *  on, replacing what used to be two independently hand-written copies of this same mapping.
  *  `warning` counts as failing (a build that produced a warning-level status is not clean); `""`
- *  and any other unrecognized value classify as `'unknown'` — `combinedStatusToChecks` then treats
- *  `'unknown'` as neither failing nor pending (see its own doc comment for why a single
- *  stray/unrecognized entry must never flip an otherwise-green build), while
- *  `combinedStatusToPrChecks` surfaces `'unknown'` to the UI as-is. */
+ *  and any other unrecognized value classify as `'unknown'` — `combinedStatusToChecks` folds
+ *  `'unknown'` into its `'pending'` rollup bucket (parity with `github.ts`'s `rollupToChecks`,
+ *  which maps its own equivalent `''` to `'pending'` too — see that function's own doc comment for
+ *  why a status this driver cannot classify must never render as a green badge), while
+ *  `combinedStatusToPrChecks` surfaces `'unknown'` to the UI as its own distinct per-check state
+ *  instead of folding it into anything. */
 function classifyCommitStatus(status: string): 'passing' | 'failing' | 'pending' | 'unknown' {
   if (status === 'success') return 'passing';
   if (status === 'failure' || status === 'error' || status === 'warning') return 'failing';
@@ -160,14 +162,19 @@ function classifyCommitStatus(status: string): 'passing' | 'failing' | 'pending'
 
 /**
  * `null`/empty `statuses` (no CI configured) maps to `null`, never `'pending'` — `'pending'` would
- * spin the UI's CI indicator forever for a repository that has no CI at all.
+ * spin the UI's CI indicator forever for a repository that has no CI at all. A non-empty `statuses`
+ * array containing an unrecognized/empty entry rolls up to `'pending'`, not `'passing'` — this is
+ * the list-row badge (`ForgePrStatus.checks`, `pullRowToStatus` in `forgejo.ts`), so a status this
+ * driver could not read must never render as a green checkmark for a build that might genuinely be
+ * red; parity with `github.ts`'s `rollupToChecks`, which maps its own `''` state to `'pending'` for
+ * the identical reason.
  */
 export function combinedStatusToChecks(raw: unknown): 'passing' | 'failing' | 'pending' | null {
   const { statuses } = forgejoCombinedStatusSchema.parse(raw);
   if (!statuses || statuses.length === 0) return null;
   const classified = statuses.map((s) => classifyCommitStatus(s.status));
   if (classified.includes('failing')) return 'failing';
-  if (classified.includes('pending')) return 'pending';
+  if (classified.includes('pending') || classified.includes('unknown')) return 'pending';
   return 'passing';
 }
 
@@ -386,6 +393,18 @@ type ForgejoReview = z.infer<typeof forgejoReviewSchema>;
  *  surprise rule 0 below exists to catch. */
 const KNOWN_REVIEW_STATES = new Set(['APPROVED', 'PENDING', 'COMMENT', 'REQUEST_CHANGES', 'REQUEST_REVIEW', '']);
 
+/** Return shape of `computeReviewDecision` — `decision` alone collapses two DIFFERENT reasons for
+ *  landing on `'review-required'` into one indistinguishable value: "nobody has approved yet" and
+ *  "a review row's `state` is something this driver cannot interpret" (rule 0, below). Both must
+ *  block the merge identically, but they must NOT share a user-facing message — "a required review
+ *  is missing" is false when a review plainly exists and simply couldn't be read.
+ *  `normalizeForgejoMergeState` reads `unrecognized` to pick between the two blockers
+ *  (`reviews-unrecognized` vs `reviews`); `unrecognized` is `false` for every other `decision`. */
+export interface ReviewDecisionResult {
+  decision: ForgePrMergeState['reviewDecision'];
+  unrecognized: boolean;
+}
+
 /**
  * Forgejo has no `reviewDecision` field — this reconstructs GitHub's equivalent from
  * `GET /pulls/{n}/reviews` + the branch's protection settings:
@@ -397,7 +416,9 @@ const KNOWN_REVIEW_STATES = new Set(['APPROVED', 'PENDING', 'COMMENT', 'REQUEST_
  *      `rules-unknown`, gated on the branch fetch itself failing, is) — returning 'unknown' here
  *      would let a review this driver cannot interpret sail through to 'ready'. 'review-required'
  *      blocks the merge AND leaves `canOverride` open, so a human still has an escape hatch; it can
- *      never be mistaken for an approval.
+ *      never be mistaken for an approval. `unrecognized: true` on the return value is what lets
+ *      `normalizeForgejoMergeState` say so honestly (`reviews-unrecognized`) instead of claiming a
+ *      review is simply missing.
  *   1. drop `dismissed`, `PENDING`, `REQUEST_REVIEW` rows — none of them is a standing verdict.
  *   2. once any row is `official`, keep only official rows (Forgejo's own "counts toward the
  *      requirement" flag).
@@ -422,10 +443,10 @@ const KNOWN_REVIEW_STATES = new Set(['APPROVED', 'PENDING', 'COMMENT', 'REQUEST_
  *      `github.ts`'s `normalizeMergeState`) — counting approvals against a threshold that doesn't
  *      exist would report certainty this driver does not have.
  */
-export function computeReviewDecision(reviewsRaw: unknown, branch: ForgejoBranchInfo): ForgePrMergeState['reviewDecision'] {
+export function computeReviewDecision(reviewsRaw: unknown, branch: ForgejoBranchInfo): ReviewDecisionResult {
   const rows = z.array(forgejoReviewSchema).parse(reviewsRaw);
 
-  if (rows.some((r) => r.state !== '' && !KNOWN_REVIEW_STATES.has(r.state))) return 'review-required';
+  if (rows.some((r) => r.state !== '' && !KNOWN_REVIEW_STATES.has(r.state))) return { decision: 'review-required', unrecognized: true };
 
   const active = rows.filter((r) => !r.dismissed && r.state !== 'PENDING' && r.state !== 'REQUEST_REVIEW');
   const officialRows = active.filter((r) => r.official);
@@ -447,13 +468,13 @@ export function computeReviewDecision(reviewsRaw: unknown, branch: ForgejoBranch
   }
   const collapsed = [...latestByUser.values()];
 
-  if (collapsed.some((r) => r.state === 'REQUEST_CHANGES')) return 'changes-requested';
+  if (collapsed.some((r) => r.state === 'REQUEST_CHANGES')) return { decision: 'changes-requested', unrecognized: false };
 
-  if (!branch.readable || !branch.protected || branch.requiredApprovals <= 0) return 'unknown';
+  if (!branch.readable || !branch.protected || branch.requiredApprovals <= 0) return { decision: 'unknown', unrecognized: false };
 
   const required = Math.max(1, branch.requiredApprovals);
   const approvals = collapsed.filter((r) => r.state === 'APPROVED' && !r.stale).length;
-  return approvals >= required ? 'approved' : 'review-required';
+  return { decision: approvals >= required ? 'approved' : 'review-required', unrecognized: false };
 }
 
 /** `target_url` names a third-party CI system (a different host than both `apiUrl` and `webUrl` —
@@ -496,8 +517,10 @@ function combinedStatusToPrChecks(statusRaw: unknown | null, branch: ForgejoBran
  * `blocked/checks-failing` (`warning` counts as failing) → `unknown/checks-unknown` (ONLY when the
  * combined-status fetch itself failed, `statusReadable:false` — never fires for a genuine "no CI
  * configured" read) → `unknown/reviews-unknown` (same contract, for a failed
- * `GET /pulls/{n}/reviews`) → `blocked/reviews` (also catches an unrecognized review state, via
- * `computeReviewDecision`'s own rule 0) → `unknown/rules-unknown`
+ * `GET /pulls/{n}/reviews`) → `blocked/reviews-unrecognized` (a review row's `state` is something
+ * this driver cannot interpret, via `computeReviewDecision`'s own rule 0 — NEVER worded as "review
+ * missing", a review plainly exists) → `blocked/reviews` (a genuine "changes requested" or "not
+ * enough approvals yet") → `unknown/rules-unknown`
  * (ONLY when the branch GET failed — divergence 1) → `unauthorized/unauthorized` (ONLY with a token
  * present — divergence 2) → `pending/pending` → `unknown/unknown` (mergeable still unresolved, or
  * no merge method available — the ladder's own closing rung, github.ts:1660-1667) → `ready`.
@@ -540,7 +563,7 @@ export function normalizeForgejoMergeState(input: {
     state !== 'open' || pull.draft ? 'unknown' : pull.mergeable === true ? 'mergeable' : pull.mergeable === false ? 'conflicting' : 'unknown';
 
   const checks = combinedStatusToPrChecks(input.statusRaw, input.branch);
-  const reviewDecision = computeReviewDecision(input.reviewsRaw, input.branch);
+  const { decision: reviewDecision, unrecognized: reviewStateUnrecognized } = computeReviewDecision(input.reviewsRaw, input.branch);
   const statusReadable = input.statusReadable ?? true;
   const reviewsReadable = input.reviewsReadable ?? true;
   const { methods, defaultMethod } = input.repository
@@ -576,6 +599,14 @@ export function normalizeForgejoMergeState(input: {
     // reviews — which `reviewDecision` below cannot tell apart from "we don't know" either.
     eligibility = 'unknown';
     blockers.push({ code: 'reviews-unknown', message: 'Forgejo could not confirm review status.' });
+  } else if (reviewStateUnrecognized) {
+    // A review WAS read successfully (`reviewsReadable` above is true) but at least one row's
+    // `state` is a value `computeReviewDecision`'s rule 0 does not recognize — this is NOT "no
+    // review exists"; a `reviews`-coded "required review is missing" message would misdescribe it.
+    // `eligibility` still blocks (never 'unknown' — see rule 0's own doc comment for why), it just
+    // gets its own honest code/message instead of borrowing the "missing" one.
+    eligibility = 'blocked';
+    blockers.push({ code: 'reviews-unrecognized', message: 'Forgejo returned a review state cezar cannot interpret.' });
   } else if (reviewDecision === 'changes-requested' || reviewDecision === 'review-required') {
     eligibility = 'blocked';
     blockers.push({
@@ -603,14 +634,28 @@ export function normalizeForgejoMergeState(input: {
   } else if (checks.some((c) => c.state === 'pending')) {
     eligibility = 'pending';
     blockers.push({ code: 'pending', message: 'Checks are still pending.' });
-  } else if (mergeable !== 'mergeable' || methods.length === 0) {
+  } else if (mergeable !== 'mergeable') {
     // Closing rung of the ladder, mirroring github.ts:1660-1667: everything above only rules OUT
     // known blockers — it never confirms merge is actually possible. Without this rung, a PR whose
-    // `mergeable` reading is still 'unknown' (Gitea hasn't finished computing it) or whose repo
-    // exposes zero merge methods would fall through to the default `eligibility = 'ready'` above,
-    // reporting a green, mergeable-looking PR that `mergePR` would then reject.
+    // `mergeable` reading is still 'unknown' (Gitea hasn't finished computing it) would fall through
+    // to the default `eligibility = 'ready'` above, reporting a green, mergeable-looking PR that
+    // `mergePR` would then reject.
     eligibility = 'unknown';
     blockers.push({ code: 'unknown', message: 'Forgejo could not confirm every merge requirement.' });
+  } else if (methods.length === 0) {
+    // Same closing rung, split from the `mergeable !== 'mergeable'` branch above so a READABLE
+    // repository confirmed to expose zero usable merge methods (e.g. one flagging only
+    // `allow_fast_forward_only_merge` — a merge CONSTRAINT, never a selectable method, see
+    // `mergeMethodsFromRepository`'s own doc comment) gets an honest, specific message instead of
+    // the vague "could not confirm" one. `input.repository` is `null` only when the repository body
+    // itself could not be fetched/parsed — that case keeps the original vague wording, since THAT
+    // one genuinely is an unread state, not a confirmed one.
+    eligibility = 'unknown';
+    blockers.push(
+      input.repository
+        ? { code: 'no-merge-method', message: 'This repository has no merge method enabled that cezar supports.' }
+        : { code: 'unknown', message: 'Forgejo could not confirm every merge requirement.' },
+    );
   }
 
   const canMerge = eligibility === 'ready';

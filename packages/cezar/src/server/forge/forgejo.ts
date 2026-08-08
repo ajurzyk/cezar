@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { z } from 'zod';
 import { autosaveCommit } from '../../git-worktree.ts';
 import { splitUnifiedDiff, type ForgejoDiffEntry } from './forgejo-diff.ts';
 import {
@@ -126,12 +127,25 @@ const LIST_CACHE_MAX = 50;
 interface PrStatusCacheEntry {
   at: number;
   data: ForgePrStatus | null;
+  /** This entry's own TTL — `CACHE_MS` (60s) for a resolved answer (a found PR, or a PROVEN "no
+   *  PR"), `PR_STATUS_UNRESOLVED_CACHE_MS` (much shorter) for a `FORGEJO_PR_STATUS_UNRESOLVED_PERSISTENT`
+   *  read (`data` is `null`, but it means "don't know", not "proven no PR" — see that symbol's own
+   *  doc comment). Per-entry rather than a single module constant so the two flavors can share one
+   *  cache/read path without a second lookup table. */
+  ttlMs: number;
 }
 
 /** Keyed `repoRoot\0apiBase\0branch` — one entry per branch probed, so one worktree's PR status
  *  can never answer for a different branch in the same project. */
 const prStatusCache = new Map<string, PrStatusCacheEntry>();
 const PR_STATUS_CACHE_MAX = 50;
+/** TTL for a `FORGEJO_PR_STATUS_UNRESOLVED_PERSISTENT` read — short enough that a repo whose walk
+ *  hits its own page/row ceiling self-heals quickly if the underlying data ever changes (a PR
+ *  closes, history shrinks), long enough to absorb rapid repeat calls for the same branch (multiple
+ *  UI panels, a user refreshing) without repeating the full, expensive walk every time. Deliberately
+ *  much shorter than `CACHE_MS` (60s) — that TTL is reserved for answers this driver has actually
+ *  proven, never for "I don't know". */
+const PR_STATUS_UNRESOLVED_CACHE_MS = 5_000;
 
 interface MergeStateCacheEntry {
   at: number;
@@ -219,6 +233,15 @@ export function __clearForgejoCachesForTests(): void {
 
 function describeError(err: unknown): string {
   if (err instanceof ForgejoHttpError) return err.message;
+  // zod v4's `ZodError#message` is a pretty-printed JSON array (one issue object per line) — piping
+  // it through `firstLine` below hands back a bare `"["`, which is worse than useless as a
+  // human-facing reason (measured: `new Error()`'s subclass check here is load-bearing, `ZodError`
+  // IS an `Error`, so without this branch it would silently fall through to the generic path below).
+  // Every call site this function feeds (`detectForgejo`, `forgejoPrMergeState`, `forgejoMergePR`,
+  // `forgejoPrDiff`) can only reach a `ZodError` from a response body this driver's own schemas
+  // rejected — "the shape Forgejo sent back doesn't match what we expected" is the one honest,
+  // readable summary for all of them, regardless of which field actually failed.
+  if (err instanceof z.ZodError) return 'unexpected response from Forgejo';
   const message = err instanceof Error ? err.message : String(err);
   return firstLine(message);
 }
@@ -483,6 +506,27 @@ async function pullRowToStatus(
  *  the API's own proven "no PR for this base/head pair" answer. */
 const FORGEJO_PR_STATUS_UNRESOLVED = Symbol('forgejo-pr-status-unresolved');
 
+/** Same "don't know" contract as `FORGEJO_PR_STATUS_UNRESOLVED` above — `forgejoPrStatus` below
+ *  still returns `null` to its own caller either way — but distinguishes ONE specific route to
+ *  UNRESOLVED that is a PERSISTENT trait of the repo/branch rather than a one-off hiccup: the
+ *  primary `pulls?state=all` walk hitting its own fixed ceiling (`ForgejoPage.stopReason:'limit'`
+ *  — ran out of pages/rows before it could prove "no match", not because a request failed or the
+ *  time budget ran out). A repo whose open+closed PR history is larger than that walk's own
+ *  ceiling hits this on EVERY call, forever, so `forgejoPrStatus` caches this flavor under a short
+ *  negative TTL (`PR_STATUS_UNRESOLVED_CACHE_MS`) instead of repeating the full, expensive walk on
+ *  every single call — a real, measured cost against an already-loaded instance.
+ *
+ *  This must NEVER be returned for a `stoppedShort` caused by `'budget'` or `'error'` (both are
+ *  one-off, plausibly transient, and must keep retrying on every call, uncached, exactly like
+ *  `FORGEJO_PR_STATUS_UNRESOLVED`), nor for ANY of the other UNRESOLVED routes below (a page-1
+ *  throw, an unparseable row, a failed default-branch lookup, a non-404 fallback failure, a matched
+ *  row that failed to render) — none of those are a stable trait of the repo, and caching them even
+ *  briefly would risk exactly the false "no PR" the negative-TTL cache must never produce. Caching
+ *  the ANSWER "I don't know" briefly is safe; caching "there is no PR" ever, from an unproven read,
+ *  is the defect this whole UNRESOLVED mechanism exists to prevent — the short TTL narrows the
+ *  window this trades away completeness for, it does not remove the invariant. */
+const FORGEJO_PR_STATUS_UNRESOLVED_PERSISTENT = Symbol('forgejo-pr-status-unresolved-persistent');
+
 async function resolveForgejoPrStatus(
   repoRoot: string,
   http: ForgejoHttp,
@@ -490,7 +534,7 @@ async function resolveForgejoPrStatus(
   repo: string,
   webUrl: string,
   branch: string,
-): Promise<ForgePrStatus | null | typeof FORGEJO_PR_STATUS_UNRESOLVED> {
+): Promise<ForgePrStatus | null | typeof FORGEJO_PR_STATUS_UNRESOLVED | typeof FORGEJO_PR_STATUS_UNRESOLVED_PERSISTENT> {
   const repoPrefix = repoPath(owner, repo);
 
   let page: ForgejoPage;
@@ -509,12 +553,19 @@ async function resolveForgejoPrStatus(
 
   let openMatch: ForgejoPull | null = null;
   let anyMatch: ForgejoPull | null = null;
+  // A row that fails `forgejoPullSchema.parse` can never be checked against `branch` — this driver
+  // has no way to know whether the row it just skipped WAS the match. Tracked separately from
+  // `page.stoppedShort` (a property of the HTTP walk itself) because this is a DIFFERENT reason the
+  // walk cannot be trusted: the walk can complete perfectly (short page, matching X-Total-Count) and
+  // still contain a row this schema cannot read.
+  let unparseableRowSeen = false;
   for (const row of page.rows) {
     let parsed: ForgejoPull;
     try {
       parsed = forgejoPullSchema.parse(row);
     } catch {
-      continue; // a malformed row must not abort the whole walk
+      unparseableRowSeen = true; // a malformed row must not abort the whole walk, but it also can't be ruled out as the match
+      continue;
     }
     if (parsed.head?.ref !== branch) continue;
     anyMatch ??= parsed;
@@ -543,7 +594,19 @@ async function resolveForgejoPrStatus(
   // shadow an open PR sitting on the page never reached, so this must be UNRESOLVED, not a proven
   // "no PR": same reasoning as the page-1 throw above, just reached through the OTHER signal
   // `paginate` uses for "didn't finish" (see forgejo-http.ts).
-  if (page.stoppedShort) return FORGEJO_PR_STATUS_UNRESOLVED;
+  if (page.stoppedShort) {
+    // A deterministic ceiling hit (`stopReason:'limit'` — the walk always needs more pages/rows
+    // than its own fixed budget allows) is a PERSISTENT trait of this repo/branch, unlike a one-off
+    // 'budget'/'error' stop — see `FORGEJO_PR_STATUS_UNRESOLVED_PERSISTENT`'s own doc comment for
+    // why only that one flavor is worth a short negative cache.
+    return page.stopReason === 'limit' ? FORGEJO_PR_STATUS_UNRESOLVED_PERSISTENT : FORGEJO_PR_STATUS_UNRESOLVED;
+  }
+  // A row this schema could not parse can never be checked against `branch` — the walk otherwise
+  // LOOKS complete (short page, matching X-Total-Count), but this driver cannot rule out that the
+  // skipped row was the match, so this must stay UNRESOLVED too, never a proven "no PR". A one-off
+  // malformed row (not a repo-wide trait), so this always uses the transient symbol, never the
+  // persistent one.
+  if (unparseableRowSeen) return FORGEJO_PR_STATUS_UNRESOLVED;
 
   const base = await resolveDefaultBranch(repoRoot, http, owner, repo);
   // `resolveDefaultBranch` collapses BOTH "the repo GET failed" and "resolveRepository never learned
@@ -578,13 +641,23 @@ async function forgejoPrStatus(
   if (process.env.CEZ_DRY_RUN === '1') return null;
   const key = prStatusCacheKey(repoRoot, http.apiBase, branch);
   const hit = prStatusCache.get(key);
-  if (hit && Date.now() - hit.at < CACHE_MS) return hit.data;
+  if (hit && Date.now() - hit.at < hit.ttlMs) return hit.data;
   const data = await resolveForgejoPrStatus(repoRoot, http, owner, repo, webUrl, branch);
-  // An UNRESOLVED read (the primary walk itself failed) must never poison the 60s cache with "no
-  // PR" — same reasoning `listForgejo`'s own `catch` already applies to `listCache`. Every other
-  // outcome (including a PROVEN "no PR") is cached as before.
+  // A transient UNRESOLVED read (the primary walk itself failed for a one-off reason) must never
+  // poison the cache with "no PR" — same reasoning `listForgejo`'s own `catch` already applies to
+  // `listCache`. Not cached at all: the next call retries from scratch.
   if (data === FORGEJO_PR_STATUS_UNRESOLVED) return null;
-  prStatusCache.set(key, { at: Date.now(), data });
+  // A PERSISTENT UNRESOLVED read (the walk hit its own fixed ceiling, a repo/branch trait — see
+  // `FORGEJO_PR_STATUS_UNRESOLVED_PERSISTENT`'s own doc comment) still answers `null` to THIS
+  // caller, but is worth a SHORT negative cache so rapid repeat calls don't each re-pay the full,
+  // expensive walk. Never the 60s `CACHE_MS` used for proven answers below — this is "don't know",
+  // not "no PR", and must self-heal quickly.
+  if (data === FORGEJO_PR_STATUS_UNRESOLVED_PERSISTENT) {
+    prStatusCache.set(key, { at: Date.now(), data: null, ttlMs: PR_STATUS_UNRESOLVED_CACHE_MS });
+    evictOldest(prStatusCache, PR_STATUS_CACHE_MAX);
+    return null;
+  }
+  prStatusCache.set(key, { at: Date.now(), data, ttlMs: CACHE_MS });
   evictOldest(prStatusCache, PR_STATUS_CACHE_MAX);
   return data;
 }
@@ -905,7 +978,17 @@ async function createForgejoPr(
   // `CreatePullRequestOption` has no `draft` field — Forgejo derives draft state from a "WIP:"/
   // "[WIP]" title prefix instead (measured on a live instance: `title:"WIP: …", draft:true`
   // together), so createPR must add the prefix itself; `stripWipTitle` strips it back off for
-  // display in `mapForgejoPull`.
+  // display in `mapForgejoPull`. That prefix recognition is itself governed by the target
+  // instance's OWN `WORK_IN_PROGRESS_PREFIXES` config (a Gitea/Forgejo `app.ini` setting, not
+  // something this driver can read or override) — the "WIP:" spelling sent here matches Forgejo's
+  // documented default list, but an instance that has customized that setting to exclude it would
+  // silently create a non-draft, immediately-mergeable-looking PR instead. This function does NOT
+  // check `pull.draft` on the 201 response below to detect that mismatch: the field IS present
+  // there (same schema, same measurement cited above) and reading it is cheap, but `DraftPrOutcome`
+  // (this function's own return type) has no field to carry a "created, but not actually a draft"
+  // warning to a caller — the route/UI wiring that would need to display one is out of scope for
+  // this driver (README's own "Closing these routing gaps is later work"). Documented here rather
+  // than silently assumed.
   const title = `WIP: ${run.title}`;
 
   const res = await http.send('POST', `${repoPrefix}/pulls`, { head: branch, base, title, body });

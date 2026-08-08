@@ -657,6 +657,35 @@ manual "check now" action fails. Closing that gap is later work; today the
 tab's availability badge is ahead of what automations can actually do for a
 Forgejo repo.
 
+Known limitations of the Forgejo merge-state driver
+(`packages/cezar/src/server/forge/forgejo-map.ts`/`forgejo.ts`), each a
+deliberate, accepted trade-off rather than a bug:
+- A repository whose ONLY enabled merge policy is fast-forward-only
+  (`allow_fast_forward_only_merge`, with every other `allow_*_merge` flag off)
+  reports zero usable merge methods — fast-forward-only is a *constraint* Gitea
+  applies to how a merge behaves, not a selectable method the way merge/squash/
+  rebase are, so there is nothing in `ForgeMergeMethod` for it to map onto. The
+  merge box shows this as "no merge method enabled that cezar supports", not a
+  generic "could not confirm" — that specific repository configuration is the
+  most common reason a Forgejo repo would ever land there.
+- Draft-PR creation ("WIP:" title prefix on `POST .../pulls`) relies on the
+  target instance's own `WORK_IN_PROGRESS_PREFIXES` `app.ini` setting
+  recognizing that exact prefix. cezar cannot read or override that
+  server-side config, and does not verify the created PR's own `draft` field
+  in the response to catch a mismatch — an instance that has customized this
+  setting away from its documented default could silently publish a
+  ready-for-review-looking PR instead of a draft one.
+- cezar reconstructs GitHub's `reviewDecision` from Forgejo's raw
+  `GET /pulls/{n}/reviews` rows: per reviewer, the LATEST review row (by
+  `submitted_at`) is treated as that reviewer's standing verdict, including a
+  plain `COMMENT` — so a reviewer who `APPROVED` and later left an unrelated
+  `COMMENT` has their approval dropped from cezar's count, and the merge box
+  can show "a required review is missing" for a PR Forgejo's own UI still
+  counts as approved. This is intentional (fail closed rather than risk a
+  false "approved"), not verified against a live instance's own counting
+  rules, and applies only to the SAME reviewer's own later comment — a
+  different reviewer's `COMMENT` never touches anyone else's approval.
+
 Trust model for the `forge` key: `.ai/cezar/config.json` is a **code-trusted**
 surface, same as `systemPrompt` (sent to every agent run) and `skillsRepos`
 (cloned and executed as prompts, `skills-remote.ts`) — anyone who can edit a

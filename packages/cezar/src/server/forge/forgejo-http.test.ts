@@ -271,6 +271,7 @@ describe('paginate', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(page.rows).toHaveLength(100);
     expect(page.stoppedShort).toBe(false);
+    expect(page.stopReason).toBeUndefined();
   });
 
   it('a server that silently caps the page size below the requested limit loses no rows', async () => {
@@ -301,7 +302,7 @@ describe('paginate', () => {
     expect(page.stoppedShort).toBe(false);
   });
 
-  it('gives up at maxPages and marks the result stoppedShort', async () => {
+  it('gives up at maxPages and marks the result stoppedShort with stopReason:"limit" — a deterministic ceiling, not a one-off failure', async () => {
     // A fresh Response per call — a shared mock Response's body stream can only be read once.
     const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse(rowsOfLength(50))));
     const http = createForgejoHttp('http://forgejo:3000', { fetch: fetchMock, token: null });
@@ -309,9 +310,10 @@ describe('paginate', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(page.rows).toHaveLength(100);
     expect(page.stoppedShort).toBe(true);
+    expect(page.stopReason).toBe('limit');
   });
 
-  it('gives up when the shared time budget runs out before the next page could finish', async () => {
+  it('gives up when the shared time budget runs out before the next page could finish, stopReason:"budget"', async () => {
     let now = 0;
     const fetchMock = vi.fn(() => {
       now += 4_000; // simulate each page costing 4s
@@ -321,15 +323,17 @@ describe('paginate', () => {
     const page = await http.paginate(pageUrl, { want: 1000, pageLimit: 50, budgetMs: 5_000, minPageMs: 2_000 });
     expect(fetchMock).toHaveBeenCalledTimes(1); // 5000 - 4000 = 1000 remaining < minPageMs(2000)
     expect(page.stoppedShort).toBe(true);
+    expect(page.stopReason).toBe('budget');
   });
 
-  it('stops as soon as "want" rows are collected before the natural end', async () => {
+  it('stops as soon as "want" rows are collected before the natural end, stopReason:"limit" (the same deterministic-ceiling category as maxPages)', async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(rowsOfLength(50))); // full pages, no header — could go forever
     const http = createForgejoHttp('http://forgejo:3000', { fetch: fetchMock, token: null });
     const page = await http.paginate(pageUrl, { want: 30, pageLimit: 50, maxPages: 20 });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(page.rows).toHaveLength(50);
     expect(page.stoppedShort).toBe(true);
+    expect(page.stopReason).toBe('limit');
   });
 
   it('"want" reached exactly at the natural end (short page) is NOT stoppedShort', async () => {
@@ -349,7 +353,7 @@ describe('paginate', () => {
     await expect(http.paginate(pageUrl, { want: 10, pageLimit: 50 })).rejects.toThrow('network down');
   });
 
-  it('a request failure on a later page keeps the rows already collected and marks stoppedShort', async () => {
+  it('a request failure on a later page keeps the rows already collected and marks stoppedShort with stopReason:"error" — a one-off, not a deterministic ceiling', async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse(rowsOfLength(50)))
@@ -358,6 +362,7 @@ describe('paginate', () => {
     const page = await http.paginate(pageUrl, { want: 1000, pageLimit: 50 });
     expect(page.rows).toHaveLength(50);
     expect(page.stoppedShort).toBe(true);
+    expect(page.stopReason).toBe('error');
   });
 
   it('an empty first page (no rows, no X-Total-Count) is the natural end — never walks the remaining pages', async () => {

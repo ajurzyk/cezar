@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RunRecord } from '../../runs/store.ts';
+import { FJ_LIST_MAX_PAGES } from './forgejo-http.ts';
 import type { ForgeSettings } from './types.ts';
 import {
   __clearForgejoCachesForTests,
@@ -459,6 +460,61 @@ describe('prStatus', () => {
     expect(String(fetchMock.mock.calls[0]![0])).toContain('/pulls?state=all');
   });
 
+  it('a primary walk that deterministically exhausts its own page/row ceiling (never an error, never a budget timeout) is cached briefly, not re-walked in full on every call', async () => {
+    // Every page is a full 50-row page (never short) with a huge x-total-count (5000) that the walk
+    // never gets close to — the walk stops ONLY because it ran out of its own fixed budget
+    // (FJ_LIST_MAX_PAGES pages / FJ_MAX_LIST_LIMIT rows), the exact "persistent ceiling" trait a
+    // repo with more PR history than this walk's own budget allows will hit on EVERY call, forever.
+    let walkCalls = 0;
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/pulls?state=all')) {
+        walkCalls += 1;
+        const page = Number(new URL(s).searchParams.get('page'));
+        const rows = Array.from({ length: 50 }, (_, i) => pullRow({ number: page * 1000 + i, head: { ref: `other/${page}-${i}`, sha: 'a'.repeat(40) } }));
+        return Promise.resolve(jsonResponse(rows, { headers: { 'x-total-count': '5000' } }));
+      }
+      throw new Error(`unexpected url ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    await expect(driver.prStatus('feat/x')).resolves.toBeNull();
+    expect(walkCalls).toBe(FJ_LIST_MAX_PAGES); // hit the walk's own ceiling, not an error or a timeout
+    const callsAfterFirst = walkCalls;
+
+    await expect(driver.prStatus('feat/x')).resolves.toBeNull();
+    // A repo this large hits the SAME ceiling on every call — unlike a one-off network/HTTP failure,
+    // this is worth a short negative-TTL cache instead of repeating the full, expensive walk.
+    expect(walkCalls).toBe(callsAfterFirst);
+  });
+
+  it('the deterministic-ceiling cache entry self-heals well before the 60s TTL a proven answer would get — it never sits on a "don\'t know" answer that long', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    try {
+      let walkCalls = 0;
+      const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+        const s = String(url);
+        if (s.includes('/pulls?state=all')) {
+          walkCalls += 1;
+          const page = Number(new URL(s).searchParams.get('page'));
+          const rows = Array.from({ length: 50 }, (_, i) => pullRow({ number: page * 1000 + i, head: { ref: `other/${page}-${i}`, sha: 'a'.repeat(40) } }));
+          return Promise.resolve(jsonResponse(rows, { headers: { 'x-total-count': '5000' } }));
+        }
+        throw new Error(`unexpected url ${s}`);
+      });
+      const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+      await driver.prStatus('feat/x');
+      const callsAfterFirst = walkCalls;
+      vi.setSystemTime(10_000); // past a short negative TTL, nowhere near a proven answer's 60s
+      await driver.prStatus('feat/x');
+      expect(walkCalls).toBeGreaterThan(callsAfterFirst); // must re-walk, not still be serving the 60s-cache path
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('caches for 60s', async () => {
     const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
       const s = String(url);
@@ -516,6 +572,36 @@ describe('prStatus', () => {
     expect(walkCalls).toBe(1);
     await expect(driver.prStatus('feat/x')).resolves.toBeNull();
     expect(walkCalls).toBe(2); // a stopped-short walk must not poison the 60s cache with "no PR"
+  });
+
+  it('a row this schema cannot parse cannot be ruled out as the match — the walk must not settle on a proven "no match" and a later fallback 404 must not be cached as "no PR"', async () => {
+    // The walk itself looks COMPLETE (short page, matching x-total-count) — `page.stoppedShort` is
+    // false here, isolating this from the `stoppedShort:true` case above. The one row this page
+    // returns fails `forgejoPullSchema.parse` (missing every required field), so this driver never
+    // even learns whether its `head.ref` was `feat/x` — it must not conclude "no match" from that.
+    let walkCalls = 0;
+    let fallbackCalls = 0;
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/pulls?state=all')) {
+        walkCalls += 1;
+        return Promise.resolve(jsonResponse([{ not: 'a pull request' }], { headers: { 'x-total-count': '1' } }));
+      }
+      if (s.endsWith('/repos/acme/demo')) return Promise.resolve(jsonResponse({ default_branch: 'main' }));
+      if (s.includes('/pulls/main/')) {
+        fallbackCalls += 1;
+        return Promise.resolve(jsonResponse({ message: 'not found' }, { status: 404 }));
+      }
+      throw new Error(`unexpected url ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    await expect(driver.prStatus('feat/x')).resolves.toBeNull();
+    expect(walkCalls).toBe(1);
+    expect(fallbackCalls).toBe(0); // an unparseable row must short-circuit straight to UNRESOLVED, never reach the fallback
+    await expect(driver.prStatus('feat/x')).resolves.toBeNull();
+    expect(walkCalls).toBe(2); // must not poison the 60s cache with "no PR" off an unproven read
+    expect(fallbackCalls).toBe(0);
   });
 
   it('a failed default-branch lookup (the /pulls/{base}/{head} fallback cannot even be attempted) is NOT cached', async () => {
@@ -1169,6 +1255,23 @@ describe('prMergeState', () => {
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
 
     await expect(driver.prMergeState?.(9)).resolves.toEqual({ available: false, reason: expect.any(String) });
+  });
+
+  it('a malformed GET /pulls/{n} body (fails forgejoPullSchema) degrades to a readable reason, never zod\'s own raw JSON error blob', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      // Missing every required field (`number`, `title`, `html_url`, `created_at`) — fails
+      // `forgejoPullSchema.parse` inside `fetchPull`, throwing a real `ZodError`.
+      if (s.endsWith('/pulls/9')) return Promise.resolve(jsonResponse({ not: 'a pull request' }));
+      return router()(url);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.prMergeState?.(9);
+    expect(result?.available).toBe(false);
+    const reason = result?.available === false ? result.reason : undefined;
+    expect(reason).toBe('unexpected response from Forgejo');
+    expect(reason?.startsWith('[')).toBe(false); // zod v4's own ZodError#message is a pretty-printed JSON array
   });
 
   it('without a token, user_can_merge:false is unknown/ready, never unauthorized (anonymous reads read it as false too)', async () => {

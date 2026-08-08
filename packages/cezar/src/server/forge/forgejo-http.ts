@@ -74,6 +74,19 @@ export interface ForgejoPage {
    *  this branch?") must gate that decision on this field staying honest — never assume completion
    *  from row count alone. */
   stoppedShort: boolean;
+  /** WHY `stoppedShort` is true — `undefined` when `stoppedShort` is false (a natural end has no
+   *  reason to record). `'limit'` covers BOTH ways the walk can hit its own fixed, deterministic
+   *  ceiling — `rows.length >= want` inside the loop, or falling out at `page > maxPages` — which a
+   *  caller can treat as a PERSISTENT trait of the repo/branch being walked (the same ceiling will
+   *  be hit again on the next call, until the underlying data actually shrinks). `'budget'`
+   *  (the `minPageMs`/`budgetMs` time cutoff) and `'error'` (a later page's request itself failing)
+   *  are both one-off, more likely transient conditions instead — a caller must NOT treat either as
+   *  a stable answer worth remembering past the current call. Exists so a caller like
+   *  `resolveForgejoPrStatus` can distinguish "this repo always has more history than this walk's
+   *  own budget allows" (worth a short negative cache, see `forgejo.ts`'s
+   *  `FORGEJO_PR_STATUS_UNRESOLVED_PERSISTENT`) from "the server hiccuped this one time" (must
+   *  never be cached, not even briefly). */
+  stopReason?: 'budget' | 'error' | 'limit';
 }
 
 export interface ForgejoHttp {
@@ -284,6 +297,7 @@ export function createForgejoHttp(apiUrl: string, deps: ForgejoHttpDeps = {}): F
     const deadline = now() + budgetMs;
     const rows: unknown[] = [];
     let stoppedShort = false;
+    let stopReason: ForgejoPage['stopReason'];
     let pageSize: number | null = null;
     let page = 1;
 
@@ -294,6 +308,7 @@ export function createForgejoHttp(apiUrl: string, deps: ForgejoHttpDeps = {}): F
       // cannot complete and looks indistinguishable from a real endpoint failure.
       if (remaining < minPageMs) {
         stoppedShort = true;
+        stopReason = 'budget';
         break;
       }
 
@@ -309,6 +324,7 @@ export function createForgejoHttp(apiUrl: string, deps: ForgejoHttpDeps = {}): F
         // instead (documented choice — mirrors fetchTimelinePages' page===1 split, github.ts:874-915).
         if (page === 1) throw err;
         stoppedShort = true;
+        stopReason = 'error';
         break;
       }
 
@@ -323,16 +339,21 @@ export function createForgejoHttp(apiUrl: string, deps: ForgejoHttpDeps = {}): F
       const atNaturalEnd = pageRows.length === 0 || pageRows.length < pageSize || (total !== null && page * pageSize >= total);
       if (atNaturalEnd) {
         stoppedShort = false;
+        stopReason = undefined;
         break;
       }
       if (rows.length >= want) {
         stoppedShort = true;
+        stopReason = 'limit';
         break;
       }
     }
-    if (page > maxPages) stoppedShort = true; // fell out on the page cap
+    if (page > maxPages) {
+      stoppedShort = true; // fell out on the page cap
+      stopReason = 'limit'; // same deterministic-ceiling category as the in-loop `want` cutoff above
+    }
 
-    return { rows, stoppedShort };
+    return { rows, stoppedShort, ...(stopReason ? { stopReason } : {}) };
   }
 
   return { apiBase, hasToken, getJson, getText, send, paginate };
