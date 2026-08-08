@@ -2,7 +2,13 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { DEFAULT_SKILLS_REPOS, gatedSkillsRepos, loadConfig, resolveWorktreeRetention } from './config.ts';
+import {
+  DEFAULT_SKILLS_REPOS,
+  gatedSkillsRepos,
+  loadConfig,
+  readForgeSettings,
+  resolveWorktreeRetention,
+} from './config.ts';
 
 /**
  * `config.json` schema roundtrips (R2 2.3: `systemPrompt?`). The invariants
@@ -176,6 +182,41 @@ describe('loadConfig systemPrompt', () => {
         expect(config.maxParallel).toBe(5);
       },
     );
+  });
+
+  /** `readForgeSettings` is the narrow reader for callers that need ONLY `forge` — the project
+   *  probe runs once per registered project, and `loadConfig` would pull in the machine-wide
+   *  `~/.cezar/config.json` on every one of them (a second file read each, plus one corruption
+   *  warning each). Same zod boundary as `loadConfig`, one file. */
+  describe('readForgeSettings', () => {
+    it('returns undefined when the repo has no config file', async () => {
+      rmSync(join(repoRoot, '.ai/cezar', 'config.json'), { force: true });
+      expect(await readForgeSettings(repoRoot)).toBeUndefined();
+    });
+
+    it('returns undefined when the config declares no forge', async () => {
+      write({ maxParallel: 4 });
+      expect(await readForgeSettings(repoRoot)).toBeUndefined();
+    });
+
+    it('returns a valid forgejo declaration', async () => {
+      write({ forge: { kind: 'forgejo', apiUrl: 'http://forgejo:3000', webUrl: 'http://forge.internal:8929' } });
+      expect(await readForgeSettings(repoRoot)).toEqual({
+        kind: 'forgejo',
+        apiUrl: 'http://forgejo:3000',
+        webUrl: 'http://forge.internal:8929',
+      });
+    });
+
+    it('degrades a malformed forge value to undefined, exactly like loadConfig', async () => {
+      write({ forge: { kind: 'forgejo', apiUrl: 'not a url', webUrl: 'http://forge.internal:8929' } });
+      expect(await readForgeSettings(repoRoot)).toBeUndefined();
+    });
+
+    it('degrades malformed JSON to undefined', async () => {
+      writeFileSync(join(repoRoot, '.ai/cezar', 'config.json'), '{ not json', 'utf8');
+      expect(await readForgeSettings(repoRoot)).toBeUndefined();
+    });
   });
 
   describe('modelsLocked', () => {

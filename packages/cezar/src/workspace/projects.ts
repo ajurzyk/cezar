@@ -1,7 +1,7 @@
 import { realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, join, resolve, sep } from 'node:path';
-import { loadConfig } from '../config.ts';
+import { readForgeSettings } from '../config.ts';
 import { forgeKindOfRemote, type ForgeKind } from '../server/forge/index.ts';
 import { getRepoInfo } from '../server/git.ts';
 import {
@@ -203,13 +203,13 @@ async function computeProbe(root: string): Promise<RootProbe> {
   // on e.g. an unborn HEAD), and a repo without either is still status ok.
   // The repo's own config is read too — a self-hosted forge (e.g. Forgejo) is
   // recognizable ONLY from an explicit repo declaration, never from the
-  // remote URL alone. `loadConfig` (not a raw key read) so a malformed value
-  // degrades per-key through the same zod boundary every other config read
-  // uses, at the cost of two extra small JSON reads per probe (the repo config
-  // and `loadWorkspaceConfig`'s agent defaults it folds in) — coalesced by
-  // the TTL cache below like everything else `computeProbe` does.
-  const [info, config] = await Promise.all([getRepoInfo(root), loadConfig(root)]);
-  const forge = forgeKindOfRemote(info?.remote, config.forge);
+  // remote URL alone. `readForgeSettings`, not `loadConfig`: this runs once
+  // per registered project on every list refresh, and `loadConfig` would add
+  // the machine-wide `~/.cezar/config.json` read (plus its corruption warning)
+  // to each one, for a key that config never contributes to. Same zod
+  // boundary, so a malformed value still degrades to unset.
+  const [info, forgeSettings] = await Promise.all([getRepoInfo(root), readForgeSettings(root)]);
+  const forge = forgeKindOfRemote(info?.remote, forgeSettings);
   return {
     status: 'ok',
     ...(info?.branch ? { branch: info.branch } : {}),

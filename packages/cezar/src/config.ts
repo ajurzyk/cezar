@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { forgeSettingsSchema } from './server/forge/types.ts';
+import { forgeSettingsSchema, type ForgeSettings } from './server/forge/types.ts';
 import { loadWorkspaceConfig, type WorkspaceConfig } from './workspace/config.ts';
 
 /**
@@ -174,6 +174,34 @@ export async function loadConfig(repoRoot: string): Promise<CezConfig> {
     // fall through — malformed JSON degrades to the default
   }
   return configSchema.parse(withMachineDefaults({}, machine));
+}
+
+/**
+ * The repo's OWN `forge` declaration — one file read, no machine-wide config.
+ *
+ * `loadConfig` answers this too, but it also reads `~/.cezar/config.json` through
+ * `loadWorkspaceConfig` on every call, and that read warns once per call when the file is
+ * corrupt. The project probe runs per registered project on every sidebar refresh, so going
+ * through `loadConfig` there costs N extra reads and prints N identical warnings — for a key the
+ * workspace config does not contribute to at all (`withMachineDefaults` folds in
+ * `defaultRunner`/`defaultModels`, never `forge`). Same zod boundary as `loadConfig`, so a
+ * malformed value still degrades to unset rather than throwing.
+ */
+export async function readForgeSettings(repoRoot: string): Promise<ForgeSettings | undefined> {
+  let raw: string;
+  try {
+    raw = await readFile(join(repoRoot, '.ai/cezar', 'config.json'), 'utf8');
+  } catch {
+    return undefined; // no file — nothing declared
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return undefined;
+    const field = forgeSettingsSchema.safeParse((parsed as Record<string, unknown>).forge);
+    return field.success ? field.data : undefined;
+  } catch {
+    return undefined; // malformed JSON degrades to unset, exactly like `loadConfig`
+  }
 }
 
 /**
