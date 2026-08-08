@@ -10,8 +10,8 @@ import {
   __clearForgejoCachesForTests,
   createForgejoDriver,
   FJ_PR_DIFF_FILE_CAP,
+  FJ_PR_DIFF_JSON_CAP,
   FJ_PR_PATCH_CAP,
-  rebaseToWebUrl,
   type ForgejoDriverCtx,
 } from './forgejo.ts';
 
@@ -54,9 +54,11 @@ function mockPush(result: { ok: boolean; stderr?: string }): void {
 
 /**
  * The Forgejo driver: `kind`, `detect`/`detectCached` (the two call sites that already exist,
- * `server.ts:1511`/`:3214`), `viewUrl`, `rebaseToWebUrl`, `listIssues`, `listPRs`, `prStatus`,
+ * `server.ts:1511`/`:3214`), `viewUrl`, `listIssues`, `listPRs`, `prStatus`,
  * `createPR`, `prMergeState`, `mergePR` and `prDiff` are all real. `fetch` is injected via
- * `deps.fetch`; nothing here touches the network.
+ * `deps.fetch`; nothing here touches the network. `rebaseToWebUrl` itself is `forgejo-map.ts`'s
+ * (imported there from `./forgejo-map.ts`, not re-exported here) — its own tests live in
+ * `forgejo-map.test.ts`.
  */
 
 function jsonResponse(body: unknown, init: { status?: number; headers?: Record<string, string> } = {}): Response {
@@ -98,20 +100,6 @@ describe('viewUrl', () => {
     ['commit', 'abc1234', 'https://forge.example.com/acme/demo/commit/abc1234'],
   ] as const)('%s → %s', (kind, ref, expected) => {
     expect(driver.viewUrl(kind, ref)).toBe(expected);
-  });
-});
-
-describe('rebaseToWebUrl', () => {
-  it('rebases host+path+query+hash from html_url onto the webUrl origin', () => {
-    expect(
-      rebaseToWebUrl('http://q7010-dev.local:8929/ajr/x/pulls/1?tab=files', 'http://q7010-dev:8929'),
-    ).toBe('http://q7010-dev:8929/ajr/x/pulls/1?tab=files');
-  });
-
-  it('preserves a hash fragment too', () => {
-    expect(rebaseToWebUrl('http://a.local/o/r/pulls/1#comment-9', 'http://b.local:8929')).toBe(
-      'http://b.local:8929/o/r/pulls/1#comment-9',
-    );
   });
 });
 
@@ -465,6 +453,19 @@ describe('prStatus', () => {
     expect(fetchMock.mock.calls.length).toBe(callsAfterFirst);
   });
 
+  it('a matched row with a non-absolute html_url degrades to null instead of throwing (rebaseToWebUrl cannot parse it)', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/pulls?state=all')) {
+        return Promise.resolve(jsonResponse([pullRow({ html_url: 'not-a-url' })], { headers: { 'x-total-count': '1' } }));
+      }
+      return Promise.resolve(jsonResponse({ statuses: null }));
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    await expect(driver.prStatus('feat/x')).resolves.toBeNull();
+  });
+
   it('CEZ_DRY_RUN=1 short-circuits to null without calling fetch', async () => {
     process.env.CEZ_DRY_RUN = '1';
     const fetchMock = vi.fn();
@@ -661,6 +662,48 @@ describe('createPR', () => {
     expect(result).toEqual({ ok: true, url: 'https://forge.example.com/acme/demo/pulls/11', dryRun: false });
   });
 
+  it('a 201 response with a non-absolute html_url degrades to a best-effort success (repo pulls link), never throws', async () => {
+    // `rebaseToWebUrl` calls `new URL(html_url)`, which throws a `TypeError` on a non-absolute
+    // string — the PR was genuinely created server-side by this point, so that must degrade to a
+    // best-effort URL instead of turning a real success into an unhandled rejection.
+    mockPush({ ok: true });
+    const fetchMock = vi.fn().mockImplementation((url: URL | string, init?: RequestInit) => {
+      const s = String(url);
+      if (s.endsWith('/repos/acme/demo/pulls') && init?.method === 'POST') {
+        return Promise.resolve(jsonResponse(pullRow({ html_url: 'not-a-url' }), { status: 201 }));
+      }
+      throw new Error(`unexpected fetch ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.createPR(input({ baseBranch: 'main' }));
+    expect(result).toEqual({ ok: true, url: 'https://forge.example.com/acme/demo/pulls', dryRun: false });
+  });
+
+  it('409 fallback that resolves to a MERGED pull request is not treated as success — surfaces the 409 message instead', async () => {
+    // GET pulls/{base}/{head} has no "give me the open one" semantics — it can hand back a
+    // terminal PR sharing this exact head/base pair. Reporting {ok:true} with that PR's URL would
+    // silently point the caller at a defunct pull request instead of the conflict Forgejo reported.
+    mockPush({ ok: true });
+    const fetchMock = vi.fn().mockImplementation((url: URL | string, init?: RequestInit) => {
+      const s = String(url);
+      if (s.endsWith('/repos/acme/demo/pulls') && init?.method === 'POST') {
+        return Promise.resolve(jsonResponse({ message: 'PR already exists' }, { status: 409 }));
+      }
+      if (s.includes('/pulls/main/feat/x')) {
+        return Promise.resolve(
+          jsonResponse(pullRow({ number: 11, html_url: 'http://forgejo:3000/acme/demo/pulls/11', state: 'closed', merged: true })),
+        );
+      }
+      throw new Error(`unexpected fetch ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.createPR(input({ baseBranch: 'main' }));
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toBe('PR already exists');
+  });
+
   it('404 (pull requests disabled) gets its own message, not a generic "not found"', async () => {
     mockPush({ ok: true });
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ message: 'not found' }, { status: 404 }));
@@ -785,7 +828,7 @@ describe('prMergeState', () => {
     });
 
     const result = await driver.prMergeState?.(9, { refresh: true });
-    expect(pullCalls).toBe(2); // one probe, one retry — pułapka 5: a wrong first read closes canOverride
+    expect(pullCalls).toBe(2); // one probe, one retry — a wrong first "Checking" read would otherwise close canOverride
     expect(slept).toBeGreaterThan(0);
     expect(result?.available && result.mergeState.mergeable).toBe('conflicting');
   });
@@ -826,7 +869,7 @@ describe('prMergeState', () => {
     await expect(driver.prMergeState?.(9)).resolves.toEqual({ available: false, reason: expect.any(String) });
   });
 
-  it('without a token, user_can_merge:false is unknown/ready, never unauthorized (pułapka 12)', async () => {
+  it('without a token, user_can_merge:false is unknown/ready, never unauthorized (anonymous reads read it as false too)', async () => {
     const fetchMock = router({ branch: branchRow({ user_can_merge: false }) });
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
 
@@ -1244,6 +1287,35 @@ describe('prDiff', () => {
     expect(result.files).toHaveLength(FJ_PR_DIFF_FILE_CAP);
     expect(result.truncated).toBe(true);
     expect(result.reason).toContain(String(FJ_PR_DIFF_FILE_CAP));
+  });
+
+  it('the WHOLE response over FJ_PR_DIFF_JSON_CAP drops files from the tail and marks the reason, even when no single patch is over FJ_PR_PATCH_CAP', async () => {
+    // 10 files at ~460KB of patch each: none individually crosses FJ_PR_PATCH_CAP (512KB), so this
+    // isolates the OTHER cap — the whole-response JSON size — from the per-file one already covered
+    // above. `Math.ceil(FJ_PR_DIFF_JSON_CAP / 460_000) + 1` files guarantees the total crosses
+    // FJ_PR_DIFF_JSON_CAP regardless of the cap's exact value.
+    const perPatchBytes = 460_000;
+    const fileCount = Math.ceil(FJ_PR_DIFF_JSON_CAP / perPatchBytes) + 1;
+    const filesRows = Array.from({ length: fileCount }, (_, i) => ({
+      filename: `src/f${i}.ts`,
+      status: 'changed',
+      additions: 1,
+      deletions: 0,
+    }));
+    const diffText = filesRows
+      .map(
+        (row) =>
+          `diff --git a/${row.filename} b/${row.filename}\n--- a/${row.filename}\n+++ b/${row.filename}\n@@ -1 +1 @@\n+${'x'.repeat(perPatchBytes)}`,
+      )
+      .join('\n');
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: router({ filesRows, diffText }), token: null });
+
+    const result = await driver.prDiff?.(9);
+    if (!result?.available) throw new Error('expected available:true');
+    expect(result.files.length).toBeLessThan(fileCount); // some files dropped from the tail
+    expect(result.files.every((f) => f.patchUnavailableReason !== 'too-large')).toBe(true); // not the per-file cap
+    expect(result.truncated).toBe(true);
+    expect(result.reason).toContain('response size limit');
   });
 
   it('a failed .diff request degrades to a files-only list, still available:true, every file not-provided', async () => {

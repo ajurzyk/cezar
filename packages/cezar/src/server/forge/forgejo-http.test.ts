@@ -329,4 +329,16 @@ describe('paginate', () => {
     expect(page.rows).toHaveLength(50);
     expect(page.stoppedShort).toBe(true);
   });
+
+  it('an empty first page (no rows, no X-Total-Count) is the natural end — never walks the remaining pages', async () => {
+    // Without the explicit `pageRows.length === 0` check, `pageSize` is set to 0 from this same
+    // empty page, so `pageRows.length < pageSize` reads `0 < 0` (false) forever — the walk would
+    // burn every one of `maxPages` requests and report a false `stoppedShort:true`.
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(rowsOfLength(0)));
+    const http = createForgejoHttp('http://forgejo:3000', { fetch: fetchMock, token: null });
+    const page = await http.paginate(pageUrl, { want: 1000, pageLimit: 50, maxPages: 20 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(page.rows).toHaveLength(0);
+    expect(page.stoppedShort).toBe(false);
+  });
 });

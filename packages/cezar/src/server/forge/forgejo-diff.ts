@@ -27,6 +27,10 @@ export interface ForgejoDiffEntry {
  * one, so decoding byte-by-byte via `String.fromCharCode` would mangle anything outside Latin-1.
  * A string that isn't quoted at all (the common case — most paths need no escaping) passes
  * through unchanged.
+ *
+ * Sibling implementation: `git-changes.ts`'s own `unquoteGitPath` (git-changes.ts:169-187) does
+ * the same job for `git diff --patch` output rather than the Forgejo REST diff text this module
+ * parses — a candidate for future consolidation, not attempted here (out of this fix's scope).
  */
 export function unquoteGitPath(raw: string): string {
   const trimmed = raw.trim();
@@ -45,6 +49,12 @@ export function unquoteGitPath(raw: string): string {
       i++;
     } else if (next === 'n') {
       bytes.push(10);
+      i++;
+    } else if (next === 'r') {
+      bytes.push(13);
+      i++;
+    } else if (next === 'f') {
+      bytes.push(12);
       i++;
     } else if (next === '"') {
       bytes.push(34);
@@ -107,9 +117,17 @@ function parseDiffBlock(block: string): ForgejoDiffEntry | null {
   let binary = false;
   let hunkStart = -1;
 
+  // Header lines (`+++`/`---`/`rename from`/`rename to`/binary markers) only ever appear BEFORE
+  // the first hunk — never after. A hunk's own content can legitimately contain lines that start
+  // with the same prefixes (a removed SQL comment `-- foo` reads as `--- foo`; an added `++ i;`
+  // reads as `+++ i;`), so scanning must stop the instant the first `@@` is seen, or those content
+  // lines silently clobber plusPath/minusPath/etc. with garbage.
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
-    if (line.startsWith('+++ ')) plusPath = stripAbPrefix(line.slice(4));
+    if (line.startsWith('@@')) {
+      hunkStart = i;
+      break;
+    } else if (line.startsWith('+++ ')) plusPath = stripAbPrefix(line.slice(4));
     else if (line.startsWith('--- ')) minusPath = stripAbPrefix(line.slice(4));
     else if (line.startsWith('rename from ')) renameFrom = unquoteGitPath(line.slice('rename from '.length).trim());
     else if (line.startsWith('rename to ')) renameTo = unquoteGitPath(line.slice('rename to '.length).trim());
@@ -122,8 +140,6 @@ function parseDiffBlock(block: string): ForgejoDiffEntry | null {
       }
     } else if (line.startsWith('GIT binary patch')) {
       binary = true;
-    } else if (hunkStart === -1 && line.startsWith('@@')) {
-      hunkStart = i;
     }
   }
 

@@ -8,6 +8,7 @@ import {
   FJ_LIST_MAX_PAGES,
   FJ_PAGE_LIMIT,
   ForgejoHttpError,
+  messageFromBody,
   type ForgejoHttp,
   type ForgejoHttpDeps,
   type ForgejoPage,
@@ -57,7 +58,7 @@ import type {
  * `github.ts`, but speaks REST directly through `forgejo-http.ts` instead of shelling out to a
  * CLI. Every method of `ForgeDriver` (`kind`, `detect`/`detectCached` — the two call sites that
  * already exist, `server.ts:1511` health and `:3214` automations-availability — `viewUrl`,
- * `rebaseToWebUrl`, `listIssues`, `listPRs`, `prStatus`, `createPR`, `prMergeState`, `mergePR`,
+ * `listIssues`, `listPRs`, `prStatus`, `createPR`, `prMergeState`, `mergePR`,
  * `prDiff`) is real. Several of these have no production call site yet (`server.ts`'s list/diff
  * routes still call `fetchGithub*` directly, bypassing `resolveForge` — that seam lands in a
  * later stage): a fully-implemented method with no caller yet is expected shape here, not a
@@ -166,6 +167,25 @@ interface PrDiffCacheEntry {
 const prDiffCache = new Map<string, PrDiffCacheEntry>();
 const PR_DIFF_CACHE_MAX = 50;
 
+/** Only the key-based operations — every cache below has a DIFFERENT entry value type, and
+ *  `keys`/`delete`/`clear` are the only ones either function below needs, which sidesteps a
+ *  value-type variance fight with the type checker that a plain `Map<string, unknown>[]` would
+ *  otherwise hit. */
+interface KeyedCache {
+  keys(): IterableIterator<string>;
+  delete(key: string): boolean;
+  clear(): void;
+}
+
+/** Every cache in this module keyed `repoRoot\0apiBase\0...` — the ONE list both
+ *  `evictForgejoProjectCaches` (prefix-deletes per project after a merge) and
+ *  `__clearForgejoCachesForTests` (full-clears everything between tests) iterate, so a future
+ *  cache addition can't be silently missed from one of the two call sites the way `prDiffCache`
+ *  itself once was. `detectCache` is deliberately NOT a member — see `evictForgejoProjectCaches`'s
+ *  own doc comment for why a merge must never evict it (`__clearForgejoCachesForTests` still clears
+ *  it separately, alongside the `mergeInflight` `Set`, which isn't keyed the same way either). */
+const PROJECT_CACHES: KeyedCache[] = [listCache, prStatusCache, mergeStateCache, prDiffCache];
+
 function cacheKey(repoRoot: string, apiBase: string): string {
   return `${repoRoot}\0${apiBase}`;
 }
@@ -199,11 +219,8 @@ function evictOldest(cache: Map<string, unknown>, max: number): void {
  *  never leak into the next. */
 export function __clearForgejoCachesForTests(): void {
   detectCache.clear();
-  listCache.clear();
-  prStatusCache.clear();
-  mergeStateCache.clear();
   mergeInflight.clear();
-  prDiffCache.clear();
+  for (const cache of PROJECT_CACHES) cache.clear();
 }
 
 function describeError(err: unknown): string {
@@ -229,9 +246,7 @@ async function detectForgejo(
     // Dynamic segments through encodeURIComponent even though owner/repo are gate-validated by
     // `parseRemote` upstream — defense in depth, and the same precedent this module's other path
     // builder (`forgejoViewUrl` below) follows for every dynamic segment.
-    const body = await http.getJson(`repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, {
-      timeoutMs: 5_000,
-    });
+    const body = await http.getJson(repoPath(owner, repo), { timeoutMs: 5_000 });
     repository = forgejoRepositorySchema.parse(body);
     result = { available: true };
   } catch (err) {
@@ -256,7 +271,7 @@ async function resolveRepository(
   const hit = detectCache.get(cacheKey(repoRoot, http.apiBase));
   if (hit?.repository) return hit.repository;
   try {
-    const raw = await http.getJson(`repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`);
+    const raw = await http.getJson(repoPath(owner, repo));
     return forgejoRepositorySchema.parse(raw);
   } catch {
     return null;
@@ -298,12 +313,6 @@ function detectForgejoCached(
   return hit ? hit.result : null;
 }
 
-/** Re-exported: `forgejo-map.ts` now owns the implementation (both its mappers call it directly,
- *  and `forgejo-map.ts` must stay a leaf module — importing it FROM `forgejo.ts`, rather than the
- *  reverse, avoids a `forgejo.ts` <-> `forgejo-map.ts` import cycle). Kept as a re-export, not just
- *  an internal import, because existing callers/tests import it from this module. */
-export { rebaseToWebUrl };
-
 /** Dynamic path segments that may legitimately contain '/' (a git branch name like
  *  `feat/cockpit-ui`) are encoded per-segment, never as one blob — `encodeURIComponent` on the
  *  whole string would turn the separating '/' into a literal `%2F`, breaking the multi-segment
@@ -315,6 +324,27 @@ export { rebaseToWebUrl };
  *  forbidden by git's own refname rules, so path traversal is not a concern here). */
 function encodeRefSegments(ref: string): string {
   return ref.split('/').map(encodeURIComponent).join('/');
+}
+
+/** `repos/{owner}/{repo}` — the API-path prefix every endpoint in this module hangs off of.
+ *  Computed once per call site instead of the `encodeURIComponent(owner)`/`encodeURIComponent(repo)`
+ *  pair being repeated ad hoc across the file (same defensive-encoding reasoning `detectForgejo`'s
+ *  own comment gives: `owner`/`repo` are already gate-validated by `parseRemote` upstream, but this
+ *  driver encodes its dynamic segments anyway). NOT the same thing as `forgejoViewUrl`'s own `base`
+ *  above — that one is a full web URL for a human, this one is a relative API path for `http`. */
+function repoPath(owner: string, repo: string): string {
+  return `repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+}
+
+/** `GET repos/{o}/{r}/pulls/{n}`, parsed — the one request repeated across `forgejoPrMergeState`
+ *  (the initial read and its own mergeable:false retry), `forgejoMergePR` (the post-merge
+ *  commit-sha read-back) and `forgejoPrDiff` (for `headSha`). Returns both the parsed `pull` AND
+ *  the raw JSON — `normalizeForgejoMergeState` takes the raw body itself (it re-parses internally),
+ *  so callers that feed it (`forgejoPrMergeState`) need `raw`; callers that only read typed fields
+ *  (`forgejoMergePR`, `forgejoPrDiff`) just use `pull` and ignore `raw`. */
+async function fetchPull(http: ForgejoHttp, owner: string, repo: string, number: number): Promise<{ raw: unknown; pull: ForgejoPull }> {
+  const raw = await http.getJson(`${repoPath(owner, repo)}/pulls/${number}`);
+  return { raw, pull: forgejoPullSchema.parse(raw) };
 }
 
 function forgejoViewUrl(webUrl: string, owner: string, repo: string, kind: ForgeRefKind, ref: string | number): string {
@@ -361,8 +391,7 @@ async function listForgejo(
     if (hit && Date.now() - hit.at < CACHE_MS && hit.limit >= limit) return hit.data.slice(0, limit);
   }
 
-  const encOwner = encodeURIComponent(owner);
-  const encRepo = encodeURIComponent(repo);
+  const repoPrefix = repoPath(owner, repo);
   // `/issues` on a live instance also returns PR rows (measured: 3/3 rows returned were PRs) —
   // `type=issues` filters most of them server-side; `mapForgejoIssue`'s own `pull_request` check
   // is the second, belt-and-braces layer for whatever slips through.
@@ -371,10 +400,7 @@ async function listForgejo(
   const mapRow: (raw: unknown, webUrl: string) => ForgeItem | null = listKind === 'issues' ? mapForgejoIssue : mapForgejoPull;
 
   try {
-    const page = await http.paginate(
-      (p, l) => `repos/${encOwner}/${encRepo}/${segment}?${query}&page=${p}&limit=${l}`,
-      { want: limit },
-    );
+    const page = await http.paginate((p, l) => `${repoPrefix}/${segment}?${query}&page=${p}&limit=${l}`, { want: limit });
     const items: ForgeItem[] = [];
     for (const row of page.rows) {
       const item = mapRow(row, webUrl);
@@ -400,16 +426,12 @@ async function pullRowToStatus(
   webUrl: string,
   pull: ForgejoPull,
 ): Promise<ForgePrStatus> {
+  // Reuses `fetchForgejoCombinedStatus` rather than re-issuing the same GET+try/catch inline —
+  // both paths hit the identical `commits/{sha}/status` endpoint and degrade to `null` on failure.
   let checks: ForgePrStatus['checks'] = null;
   if (pull.head?.sha) {
-    try {
-      const raw = await http.getJson(
-        `repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeRefSegments(pull.head.sha)}/status`,
-      );
-      checks = combinedStatusToChecks(raw);
-    } catch {
-      checks = null;
-    }
+    const raw = await fetchForgejoCombinedStatus(http, owner, repo, pull.head.sha);
+    checks = raw == null ? null : combinedStatusToChecks(raw);
   }
   return {
     number: pull.number,
@@ -447,12 +469,11 @@ async function resolveForgejoPrStatus(
   webUrl: string,
   branch: string,
 ): Promise<ForgePrStatus | null> {
-  const encOwner = encodeURIComponent(owner);
-  const encRepo = encodeURIComponent(repo);
+  const repoPrefix = repoPath(owner, repo);
 
   let page: ForgejoPage;
   try {
-    page = await http.paginate((p, l) => `repos/${encOwner}/${encRepo}/pulls?state=all&page=${p}&limit=${l}`, {
+    page = await http.paginate((p, l) => `${repoPrefix}/pulls?state=all&page=${p}&limit=${l}`, {
       want: FJ_MAX_LIST_LIMIT,
     });
   } catch {
@@ -479,13 +500,23 @@ async function resolveForgejoPrStatus(
     }
   }
   const found = openMatch ?? anyMatch;
-  if (found) return pullRowToStatus(http, owner, repo, webUrl, found);
+  if (found) {
+    // `pullRowToStatus` itself already degrades its OWN I/O (the combined-status fetch) to
+    // `checks: null` on failure, but `rebaseToWebUrl` inside it can still throw a `TypeError` on a
+    // non-absolute `html_url` — a read must never throw past this function (mirrors the identical
+    // try/catch around the `/pulls/{base}/{head}` fallback just below).
+    try {
+      return await pullRowToStatus(http, owner, repo, webUrl, found);
+    } catch {
+      return null;
+    }
+  }
   if (page.stoppedShort) return null; // walk unproven — the fallback could shadow an open PR
 
   const base = await resolveDefaultBranch(repoRoot, http, owner, repo);
   if (!base) return null;
   try {
-    const raw = await http.getJson(`repos/${encOwner}/${encRepo}/pulls/${encodeRefSegments(base)}/${encodeRefSegments(branch)}`);
+    const raw = await http.getJson(`${repoPrefix}/pulls/${encodeRefSegments(base)}/${encodeRefSegments(branch)}`);
     return pullRowToStatus(http, owner, repo, webUrl, forgejoPullSchema.parse(raw));
   } catch {
     return null;
@@ -518,7 +549,7 @@ async function forgejoPrStatus(
  * fields are all individually optional. */
 async function fetchForgejoBranchInfo(http: ForgejoHttp, owner: string, repo: string, ref: string): Promise<ForgejoBranchInfo> {
   try {
-    const raw = await http.getJson(`repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/branches/${encodeRefSegments(ref)}`);
+    const raw = await http.getJson(`${repoPath(owner, repo)}/branches/${encodeRefSegments(ref)}`);
     const b = forgejoBranchSchema.parse(raw);
     return {
       readable: true,
@@ -540,7 +571,7 @@ async function fetchForgejoBranchInfo(http: ForgejoHttp, owner: string, repo: st
  *  read the way `GET /pulls/{n}` failing does. */
 async function fetchForgejoCombinedStatus(http: ForgejoHttp, owner: string, repo: string, sha: string): Promise<unknown | null> {
   try {
-    return await http.getJson(`repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeRefSegments(sha)}/status`);
+    return await http.getJson(`${repoPath(owner, repo)}/commits/${encodeRefSegments(sha)}/status`);
   } catch {
     return null;
   }
@@ -551,10 +582,9 @@ async function fetchForgejoCombinedStatus(http: ForgejoHttp, owner: string, repo
  *  review list must not fail the whole merge-state read; `computeReviewDecision([], ...)` already
  *  produces a safe `'unknown'`/`'review-required'` answer for an empty list, never a false approval. */
 async function fetchForgejoReviews(http: ForgejoHttp, owner: string, repo: string, number: number): Promise<unknown[]> {
-  const encOwner = encodeURIComponent(owner);
-  const encRepo = encodeURIComponent(repo);
+  const repoPrefix = repoPath(owner, repo);
   try {
-    const page = await http.paginate((p, l) => `repos/${encOwner}/${encRepo}/pulls/${number}/reviews?page=${p}&limit=${l}`, {
+    const page = await http.paginate((p, l) => `${repoPrefix}/pulls/${number}/reviews?page=${p}&limit=${l}`, {
       want: FJ_MAX_LIST_LIMIT,
     });
     return page.rows;
@@ -563,8 +593,8 @@ async function fetchForgejoReviews(http: ForgejoHttp, owner: string, repo: strin
   }
 }
 
-/** ~1.5s, matching the brief's measured window (pułapka 5: `mergeable:false` on Gitea can mean the
- *  async mergeability check is still "Checking", not a real conflict). Only worth paying on the
+/** ~1.5s, matching the measured window for Gitea's async mergeability check to settle
+ *  (`mergeable:false` can mean the check is still "Checking", not a real conflict). Only worth paying on the
  *  `refresh:true` path — `mergePR`'s own preflight always calls with `refresh:true`, which is
  *  exactly the one call site where a false "conflicting" reading has a real cost (it flips
  *  `canOverride` to `false`, closing the user's only escape hatch). */
@@ -617,7 +647,8 @@ const DRY_RUN_MERGE_STATE_FIXTURE = {
  * (github.ts:1698-1748) structurally; all forge-specific mapping lives in
  * `normalizeForgejoMergeState`/`computeReviewDecision` (`forgejo-map.ts`), this function is I/O
  * only. `sleep` defaults to a real timer (`defaultSleep`) but is threaded through from `deps` so
- * the pułapka-5 retry below is testable with zero real wall-clock wait.
+ * the `mergeable:false` retry below (see `MERGE_STATE_RETRY_DELAY_MS`'s doc comment) is testable
+ * with zero real wall-clock wait.
  */
 async function forgejoPrMergeState(
   repoRoot: string,
@@ -642,20 +673,16 @@ async function forgejoPrMergeState(
     if (hit && Date.now() - hit.at < MERGE_STATE_CACHE_MS) return hit.value;
   }
 
-  const encOwner = encodeURIComponent(owner);
-  const encRepo = encodeURIComponent(repo);
   try {
-    let pullRaw = await http.getJson(`repos/${encOwner}/${encRepo}/pulls/${number}`);
-    let pull = forgejoPullSchema.parse(pullRaw);
+    let { raw: pullRaw, pull } = await fetchPull(http, owner, repo, number);
 
-    // Pułapka 5, the retry half: only on the refresh path (mergePR's preflight always refreshes),
+    // The mergeable:false retry: only on the refresh path (mergePR's preflight always refreshes),
     // and only when the FIRST read looks like a genuine "Checking -> false" ambiguity — a terminal
     // or draft PR's `mergeable:false` is already known-meaningless (normalizeForgejoMergeState maps
     // it to 'unknown' regardless), so retrying there would just burn a request for nothing.
     if (opts?.refresh && pull.state === 'open' && !pull.draft && pull.mergeable === false) {
       await sleep(MERGE_STATE_RETRY_DELAY_MS);
-      pullRaw = await http.getJson(`repos/${encOwner}/${encRepo}/pulls/${number}`);
-      pull = forgejoPullSchema.parse(pullRaw);
+      ({ raw: pullRaw, pull } = await fetchPull(http, owner, repo, number));
     }
 
     const [statusRaw, branch, reviewsRaw, repository] = await Promise.all([
@@ -722,19 +749,14 @@ function tailLines(stderr: string): string {
 }
 
 /** Extracts a human message from a `send()` result that didn't 2xx. `send` never throws (unlike
- *  `getJson`/`getText`), so this is the createPR/mergePR-local equivalent of `forgejo-http.ts`'s
- *  internal error-body reader — that one works off a raw `Response`, this one off the
- *  already-drained `{status, json, text}` shape `send` hands back, hence the small, deliberate
- *  duplication instead of a shared helper across the module boundary. `fallback` is the action-
- *  specific default when neither the JSON `message` field nor the raw text yields anything usable
- *  (an empty body on an otherwise-unhandled status, say) — `createPR` and `mergePR` each want their
- *  own wording here, not a generic one. */
+ *  `getJson`/`getText`), so this reads off the already-drained `{status, json, text}` shape `send`
+ *  hands back, rather than a live `Response` — the extraction itself (JSON `message` field, else
+ *  first non-blank line of text) is shared with `forgejo-http.ts`'s own `describeErrorBody` via
+ *  `messageFromBody`; only the draining differs. `fallback` is the action-specific default for the
+ *  case `messageFromBody` cannot itself hit in practice (`firstLine` always returns SOME text) —
+ *  kept as a defensive belt-and-braces default, not a reachable branch today. */
 function sendErrorMessage(res: { status: number; json: unknown; text: string }, fallback: string): string {
-  if (res.json && typeof res.json === 'object' && 'message' in res.json) {
-    const m = (res.json as { message?: unknown }).message;
-    if (typeof m === 'string' && m) return m;
-  }
-  return firstLine(res.text) || `${fallback} (HTTP ${res.status})`;
+  return messageFromBody(res.json, res.text) || `${fallback} (HTTP ${res.status})`;
 }
 
 /**
@@ -773,7 +795,7 @@ async function createForgejoPr(
 
   // DRY-RUN: no push, no HTTP — simulate success with a fake PR URL (parity github.ts:1425-1429).
   if (process.env.CEZ_DRY_RUN === '1') {
-    return { ok: true, url: `${webUrl}/${owner}/${repo}/pulls/777`, dryRun: true };
+    return { ok: true, url: `${webUrl}/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/777`, dryRun: true };
   }
 
   const remote = await execGit(['remote', 'get-url', 'origin'], worktree);
@@ -789,8 +811,7 @@ async function createForgejoPr(
     return { ok: false, error: `git push failed — ${tailLines(push.stderr) || 'unknown error'}` };
   }
 
-  const encOwner = encodeURIComponent(owner);
-  const encRepo = encodeURIComponent(repo);
+  const repoPrefix = repoPath(owner, repo);
 
   // Forgejo requires `base` — unlike `gh pr create`, there is no repo-default fallback on its own
   // side. `origin/x` normalizes to `x`; a raw sha can't be a base either — both cases fall through
@@ -808,23 +829,35 @@ async function createForgejoPr(
   // display in `mapForgejoPull`.
   const title = `WIP: ${run.title}`;
 
-  const res = await http.send('POST', `repos/${encOwner}/${encRepo}/pulls`, { head: branch, base, title, body });
+  const res = await http.send('POST', `${repoPrefix}/pulls`, { head: branch, base, title, body });
 
   if (res.status === 201) {
-    const pull = forgejoPullSchema.parse(res.json);
-    return { ok: true, url: rebaseToWebUrl(pull.html_url, webUrl), dryRun: false };
+    // The PR was genuinely created server-side by the time we get here — a malformed response body
+    // (fails `forgejoPullSchema`) or a non-absolute `html_url` (`rebaseToWebUrl` throws a
+    // `TypeError`) must not turn a real success into an unhandled throw; it degrades to a
+    // best-effort success without a clickable link instead, same reasoning as `mergePR`'s own
+    // best-effort `mergeCommitSha` read-back.
+    try {
+      const pull = forgejoPullSchema.parse(res.json);
+      return { ok: true, url: rebaseToWebUrl(pull.html_url, webUrl), dryRun: false };
+    } catch {
+      return { ok: true, url: `${webUrl}/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls`, dryRun: false };
+    }
   }
   if (res.status === 409) {
-    // "a PR from this head to this base already exists" — treat re-publishing as idempotent:
-    // fetch the existing PR and hand its URL back instead of surfacing a conflict. Safe here
-    // (unlike `prStatus`'s `/pulls/{base}/{head}` shortcut — pułapka 13) because this 409 came from
-    // the exact head/base pair just POSTed, so there is no ambiguity about which PR it names.
+    // "a PR from this head to this base already exists" — treat re-publishing as idempotent: fetch
+    // the existing PR and hand its URL back instead of surfacing a conflict. But `GET
+    // pulls/{base}/{head}` has no "give me the open one" semantics — it can return a MERGED/closed
+    // PR sharing this exact head/base pair too (same caveat `resolveForgejoPrStatus`'s own fallback
+    // documents), so only an OPEN match actually proves "a PR already exists to re-publish onto";
+    // anything else falls through to the original 409's own error message instead of quietly
+    // handing back a defunct PR's URL as if it were a success.
     try {
-      const raw = await http.getJson(`repos/${encOwner}/${encRepo}/pulls/${encodeRefSegments(base)}/${encodeRefSegments(branch)}`);
+      const raw = await http.getJson(`${repoPrefix}/pulls/${encodeRefSegments(base)}/${encodeRefSegments(branch)}`);
       const pull = forgejoPullSchema.parse(raw);
-      return { ok: true, url: rebaseToWebUrl(pull.html_url, webUrl), dryRun: false };
-    } catch (err) {
-      return { ok: false, error: describeError(err) };
+      if (pull.state === 'open') return { ok: true, url: rebaseToWebUrl(pull.html_url, webUrl), dryRun: false };
+    } catch {
+      // fall through to the 409's own message below
     }
   }
   if (res.status === 404) {
@@ -852,18 +885,11 @@ async function createForgejoPr(
  *  merge-method flags or default branch, which is all that cache holds. */
 function evictForgejoProjectCaches(repoRoot: string, apiBase: string): void {
   const prefix = `${repoRoot}\0${apiBase}\0`;
-  listCache.forEach((_value, key) => {
-    if (key.startsWith(prefix)) listCache.delete(key);
-  });
-  prStatusCache.forEach((_value, key) => {
-    if (key.startsWith(prefix)) prStatusCache.delete(key);
-  });
-  mergeStateCache.forEach((_value, key) => {
-    if (key.startsWith(prefix)) mergeStateCache.delete(key);
-  });
-  prDiffCache.forEach((_value, key) => {
-    if (key.startsWith(prefix)) prDiffCache.delete(key);
-  });
+  for (const cache of PROJECT_CACHES) {
+    for (const key of cache.keys()) {
+      if (key.startsWith(prefix)) cache.delete(key);
+    }
+  }
 }
 
 /** Fixed, obviously-fake sha for the `CEZ_DRY_RUN=1` merge success path — mirrors `github.ts`'s own
@@ -948,23 +974,22 @@ async function forgejoMergePR(
       return { merged: false, status: 409, error: 'That merge method is no longer enabled.', code: 'disabled-method', current };
     }
 
-    const encOwner = encodeURIComponent(owner);
-    const encRepo = encodeURIComponent(repo);
+    const repoPrefix = repoPath(owner, repo);
     let res: { status: number; json: unknown; text: string };
     try {
-      res = await http.send('POST', `repos/${encOwner}/${encRepo}/pulls/${number}/merge`, {
+      res = await http.send('POST', `${repoPrefix}/pulls/${number}/merge`, {
         Do: doValue,
         // Native optimistic-concurrency check on Forgejo's own side — ALWAYS sent, never made
         // conditional on the preflight compare above. See this function's own doc comment for why
         // the two are independent layers, not a redundant pair.
         head_commit_id: input.expectedHeadSha,
         force_merge: input.overrideRules === true,
-        // JAWNIE false — omitting this (or sending `true`) makes Forgejo SCHEDULE the merge for
+        // Explicitly false — omitting this (or sending `true`) makes Forgejo SCHEDULE the merge for
         // once checks pass instead of merging now, and this function would still return
         // `merged:true` for a merge that has not actually happened yet. Do not drop this field to
         // "simplify"; it is not a default worth inheriting.
         merge_when_checks_succeed: false,
-        // JAWNIE false — do NOT inherit `Repository.default_delete_branch_after_merge`. Deleting
+        // Explicitly false — do NOT inherit `Repository.default_delete_branch_after_merge`. Deleting
         // the run's own branch out from under it, from the merge button, is destructive, and
         // `github.ts`'s `mergePullRequest` does not do this either. Do not drop this field either.
         delete_branch_after_merge: false,
@@ -984,8 +1009,7 @@ async function forgejoMergePR(
       // field (`ForgeMergeResult.mergeCommitSha` is optional for exactly this reason).
       let mergeCommitSha: string | undefined;
       try {
-        const raw = await http.getJson(`repos/${encOwner}/${encRepo}/pulls/${number}`);
-        mergeCommitSha = forgejoPullSchema.parse(raw).merge_commit_sha ?? undefined;
+        mergeCommitSha = (await fetchPull(http, owner, repo, number)).pull.merge_commit_sha ?? undefined;
       } catch {
         mergeCommitSha = undefined;
       }
@@ -1068,11 +1092,9 @@ async function forgejoPrDiff(
     };
   }
 
-  const encOwner = encodeURIComponent(owner);
-  const encRepo = encodeURIComponent(repo);
+  const repoPrefix = repoPath(owner, repo);
   try {
-    const pullRaw = await http.getJson(`repos/${encOwner}/${encRepo}/pulls/${number}`);
-    const pull = forgejoPullSchema.parse(pullRaw);
+    const { pull } = await fetchPull(http, owner, repo, number);
     const headSha = pull.head?.sha;
     if (!headSha) return { available: false, reason: 'this pull request has no head commit yet' };
 
@@ -1090,12 +1112,12 @@ async function forgejoPrDiff(
     // exactly as if the diff had come back empty. A `/files` failure has no such soft landing (no
     // rows means nothing to report) and is left to propagate to this function's own outer `catch`.
     const [filesPage, diffMap] = await Promise.all([
-      http.paginate((p, l) => `repos/${encOwner}/${encRepo}/pulls/${number}/files?page=${p}&limit=${l}`, {
+      http.paginate((p, l) => `${repoPrefix}/pulls/${number}/files?page=${p}&limit=${l}`, {
         want: FJ_PR_DIFF_FILE_CAP,
         maxPages: FJ_FILES_MAX_PAGES,
       }),
       http
-        .getText(`repos/${encOwner}/${encRepo}/pulls/${number}.diff`, { accept: 'text/plain' })
+        .getText(`${repoPrefix}/pulls/${number}.diff`, { accept: 'text/plain' })
         .then(splitUnifiedDiff)
         .catch((): Map<string, ForgejoDiffEntry> => new Map()),
     ]);

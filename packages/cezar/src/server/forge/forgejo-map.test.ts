@@ -261,14 +261,19 @@ describe('mergeMethodsFromRepository', () => {
 });
 
 describe('rebaseToWebUrl', () => {
-  // Implemented here (both mappers above call it directly) and re-exported from forgejo.ts, which
-  // must import it FROM forgejo-map.ts rather than the reverse — forgejo-map.ts stays a leaf
-  // module, avoiding a forgejo.ts <-> forgejo-map.ts import cycle. forgejo.test.ts already covers
-  // the full behavior in detail; this is a single smoke check that the module wiring is correct,
-  // not a duplicate of that coverage.
+  // Implemented here (both mappers above call it directly) — `forgejo.ts` imports this straight
+  // from `forgejo-map.ts` (no re-export), since `forgejo-map.ts` must stay a leaf module (avoiding
+  // a `forgejo.ts` <-> `forgejo-map.ts` import cycle). This is the sole test home; there is no
+  // duplicate copy of this coverage in `forgejo.test.ts`.
   it('rebases host+path+query onto webUrl, path/query from html_url', () => {
     expect(rebaseToWebUrl('http://forgejo:3000/acme/demo/pulls/1?tab=files', webUrl)).toBe(
       'https://forge.example.com/acme/demo/pulls/1?tab=files',
+    );
+  });
+
+  it('preserves a hash fragment too', () => {
+    expect(rebaseToWebUrl('http://a.local/o/r/pulls/1#comment-9', 'http://b.local:8929')).toBe(
+      'http://b.local:8929/o/r/pulls/1#comment-9',
     );
   });
 });
@@ -384,6 +389,38 @@ describe('computeReviewDecision', () => {
   it('not enough approvals on a protected branch with a real requirement is review-required', () => {
     expect(computeReviewDecision([], protectedBranch({ requiredApprovals: 1 }))).toBe('review-required');
   });
+
+  it('a later COMMENT from the same reviewer supersedes (drops) their earlier APPROVED — pinned, intentional behavior, see the doc comment above', () => {
+    const reviews = [
+      reviewRow({ state: 'APPROVED', submitted_at: '2026-08-01T00:00:00Z' }),
+      reviewRow({ state: 'COMMENT', submitted_at: '2026-08-02T00:00:00Z' }),
+    ];
+    // Only one reviewer, and their standing review is now COMMENT — not enough to satisfy a
+    // required approval, but also not a REQUEST_CHANGES, so this is 'review-required', not
+    // 'changes-requested'.
+    expect(computeReviewDecision(reviews, protectedBranch({ requiredApprovals: 1 }))).toBe('review-required');
+  });
+
+  it('a DIFFERENT reviewer\'s COMMENT never touches another reviewer\'s standing APPROVED', () => {
+    const reviews = [
+      reviewRow({ state: 'APPROVED', user: { login: 'r1' } }),
+      reviewRow({ state: 'COMMENT', user: { login: 'r2' } }),
+    ];
+    expect(computeReviewDecision(reviews, protectedBranch({ requiredApprovals: 1 }))).toBe('approved');
+  });
+
+  it('collapses by NORMALIZED submitted_at, not the raw offset string — a later UTC instant with a smaller numeric offset still wins', () => {
+    // 2026-10-25T02:30:00+02:00 is 00:30 UTC; 2026-10-25T02:10:00+01:00 is 01:10 UTC — the second
+    // is chronologically LATER despite string-sorting earlier (raw "+01:00" < "+02:00" lexically
+    // loses to the hour digits, but the two clocks straddle a DST fold where a smaller offset means
+    // a later wall-clock hour). A stale REQUEST_CHANGES must not be resurrected by an earlier
+    // APPROVED that merely strings-compares as "later".
+    const reviews = [
+      reviewRow({ state: 'REQUEST_CHANGES', submitted_at: '2026-10-25T02:10:00+01:00' }),
+      reviewRow({ state: 'APPROVED', submitted_at: '2026-10-25T02:30:00+02:00' }),
+    ];
+    expect(computeReviewDecision(reviews, protectedBranch())).toBe('changes-requested');
+  });
 });
 
 function mergePullRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -441,10 +478,12 @@ describe('normalizeForgejoMergeState', () => {
       reviewsRaw: [],
     });
     expect(state.mergeable).toBe('unknown');
-    // Not "conflicting" — the ladder only special-cases `mergeable === 'conflicting'`, so a
-    // "Checking"-shaped unknown falls through and can still reach 'ready' once every other check
-    // clears, exactly like a resolved 'mergeable' would.
-    expect(state.eligibility).toBe('ready');
+    // Not "conflicting" — the ladder only special-cases `mergeable === 'conflicting'`. But it also
+    // must not fall all the way through to 'ready': a "Checking"-shaped unknown is NOT a confirmed
+    // mergeable PR, so the closing rung catches it and reports 'unknown' instead of a false-green
+    // merge button.
+    expect(state.eligibility).toBe('unknown');
+    expect(state.blockers[0]?.code).toBe('unknown');
   });
 
   it('a real conflict (open, non-draft, mergeable:false) maps to conflicting and blocks merging without override', () => {
@@ -545,6 +584,45 @@ describe('normalizeForgejoMergeState', () => {
       reviewsRaw: [],
     });
     expect(state.checks[0]?.url).toBe('http://ci.internal:9000/run/1');
+  });
+
+  it('a non-http(s) target_url (e.g. "javascript:") is dropped, never surfaced as a check url', () => {
+    const state = normalizeForgejoMergeState({
+      pullRaw: mergePullRow(),
+      statusRaw: { statuses: [{ status: 'success', context: 'ci/build', target_url: 'javascript:alert(1)' }] },
+      branch: unprotectedBranch,
+      repository: mergeStateRepo,
+      webUrl,
+      hasToken: false,
+      reviewsRaw: [],
+    });
+    expect(state.checks[0]?.url).toBeUndefined();
+  });
+
+  it('a check\'s required field is null ("we don\'t know") on an unreadable branch, never false ("known not required")', () => {
+    const state = normalizeForgejoMergeState({
+      pullRaw: mergePullRow(),
+      statusRaw: { statuses: [{ status: 'success', context: 'ci/build' }] },
+      branch: unreadableBranch,
+      repository: mergeStateRepo,
+      webUrl,
+      hasToken: false,
+      reviewsRaw: [],
+    });
+    expect(state.checks[0]?.required).toBeNull();
+  });
+
+  it('a check\'s context matching status_check_contexts on a readable, status-check-gated branch is required:true', () => {
+    const state = normalizeForgejoMergeState({
+      pullRaw: mergePullRow(),
+      statusRaw: { statuses: [{ status: 'success', context: 'ci/build' }] },
+      branch: protectedBranch({ enableStatusCheck: true, statusCheckContexts: ['ci/build'] }),
+      repository: mergeStateRepo,
+      webUrl,
+      hasToken: false,
+      reviewsRaw: [],
+    });
+    expect(state.checks[0]?.required).toBe(true);
   });
 
   it('a pending check maps to eligibility:pending when nothing else blocks', () => {
@@ -661,5 +739,24 @@ describe('normalizeForgejoMergeState', () => {
     });
     expect(state.methods).toEqual([]);
     expect(state.defaultMethod).toBeNull();
+  });
+
+  it('methods:[] (a repository with every merge-method flag off) closes the ladder at unknown, not a false ready', () => {
+    const noMethodsRepo: ForgejoRepository = forgejoRepositorySchema.parse({ default_branch: 'main' });
+    const state = normalizeForgejoMergeState({
+      pullRaw: mergePullRow(),
+      statusRaw: null,
+      branch: unprotectedBranch,
+      repository: noMethodsRepo,
+      webUrl,
+      hasToken: false,
+      reviewsRaw: [],
+    });
+    expect(state.methods).toEqual([]);
+    expect(state.eligibility).toBe('unknown');
+    expect(state.blockers).toEqual([{ code: 'unknown', message: expect.any(String) }]);
+    // The one blocker that closes the override door is a conflict — methods:[] is not that, but
+    // canOverride still requires methods.length > 0, so there is nothing to override onto either.
+    expect(state.canOverride).toBe(false);
   });
 });

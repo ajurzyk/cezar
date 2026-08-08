@@ -28,7 +28,7 @@ export interface ForgejoHttpDeps {
   token?: string | null;
   /** Injected delay, defaulted (in `forgejo.ts`) to a real `setTimeout`-backed promise. Not used by
    *  this module itself — `createForgejoHttp` never sleeps — but threaded through the same `deps`
-   *  bag `createForgejoDriver` already accepts so `prMergeState`'s pułapka-5 retry
+   *  bag `createForgejoDriver` already accepts so `prMergeState`'s `mergeable:false` retry
    *  (`normalizeForgejoMergeState`'s doc comment) can be tested with zero real wall-clock wait: a
    *  test passes `sleep: async () => {}` instead of reaching for `vi.useFakeTimers`. */
   sleep?: (ms: number) => Promise<void>;
@@ -126,21 +126,35 @@ export function firstLine(s: string): string {
   return s.split('\n').find((l) => l.trim().length > 0)?.trim() ?? 'request failed';
 }
 
+/** Extracts a human-readable message from an already-parsed error body: the JSON `message` field
+ *  wins when present and non-empty, otherwise the first non-blank line of the raw text. Exported
+ *  so `forgejo.ts`'s `sendErrorMessage` doesn't grow a second copy of this exact extraction —
+ *  that one works off `send()`'s already-drained `{status, json, text}` (`send` never throws, so
+ *  there is no live `Response` left to drain by the time that caller runs), while `describeErrorBody`
+ *  below both drains the `Response` AND adds its own status-specific 401/403 hint on top — the hint
+ *  stays local to `describeErrorBody`, deliberately NOT folded in here, because `forgejo.ts`'s own
+ *  create/merge callers each want their own wording for an auth failure (`mergePR`'s 403 message
+ *  never mentions the token at all, for instance). */
+export function messageFromBody(json: unknown, text: string): string {
+  if (json && typeof json === 'object' && 'message' in json) {
+    const m = (json as { message?: unknown }).message;
+    if (typeof m === 'string' && m) return m;
+  }
+  return firstLine(text);
+}
+
 async function describeErrorBody(res: Response): Promise<{ text: string; message: string }> {
   const text = await res.text().catch(() => '');
   // The live instance answers a bad path with `404 page not found\n` as `text/plain`, but a real
   // API error is `{"message":…,"url":…,"errors":[]}` — read the text FIRST, then try to parse it,
   // so a non-JSON body never throws inside this catch-all and masks itself as "unexpected token".
-  let message = firstLine(text) || `HTTP ${res.status}`;
+  let parsed: unknown = null;
   try {
-    const parsed: unknown = text ? JSON.parse(text) : null;
-    if (parsed && typeof parsed === 'object' && 'message' in parsed) {
-      const m = (parsed as { message?: unknown }).message;
-      if (typeof m === 'string' && m) message = m;
-    }
+    parsed = text ? JSON.parse(text) : null;
   } catch {
-    // not JSON — keep the text-derived message
+    // not JSON — messageFromBody falls back to the text-derived message
   }
+  let message = messageFromBody(parsed, text);
   if (res.status === 401 || res.status === 403) {
     message = `${message} — set CEZ_FORGEJO_TOKEN to authenticate`;
   }
@@ -288,7 +302,12 @@ export function createForgejoHttp(apiUrl: string, deps: ForgejoHttpDeps = {}): F
       rows.push(...pageRows);
       if (pageSize === null) pageSize = pageRows.length;
 
-      const atNaturalEnd = pageRows.length < pageSize || (total !== null && page * pageSize >= total);
+      // An EMPTY page is always a natural end, checked before the `pageRows.length < pageSize`
+      // comparison below: when the first page itself comes back empty, `pageSize` is 0 too (just
+      // set above), so `0 < 0` is false and would otherwise walk every remaining page for nothing,
+      // reporting a fake `stoppedShort:true` that callers use as a completeness gate (e.g.
+      // `prStatus`'s fallback).
+      const atNaturalEnd = pageRows.length === 0 || pageRows.length < pageSize || (total !== null && page * pageSize >= total);
       if (atNaturalEnd) {
         stoppedShort = false;
         break;

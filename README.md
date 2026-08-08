@@ -597,12 +597,22 @@ GitHub-only shortcut), and the PR-diff view (files + patches, joined from
 `/pulls/{n}/files` and a parsed `/pulls/{n}.diff`) — talks to a real Forgejo
 instance. What is still incremental is the *wiring*, not the driver: health and
 the merge route already call into it (see `server.ts:1511`, `:4747`, `:4761`),
-but the issues/PR tab's listing and the PR-diff view are routed differently —
-their routes in `server.ts` call the GitHub-only code paths directly and don't
-go through `resolveForge` at all yet, so a Forgejo repo sees no listing or diff
-there regardless of what the driver itself can already do. Closing that
-routing gap is later work. See the automations caveat below for the one other
-known gap.
+but several other routes are not wired to `resolveForge` yet and call
+GitHub-only code paths directly instead, so a Forgejo repo gets none of what
+the driver above can already do there:
+- the issues/PR tab's listing and the PR-diff view see no data at all
+  (`server.ts` calls the GitHub-only listing/diff code paths directly);
+- draft-PR creation (`POST /runs/:id/pr`, `server.ts:4126` → `pr.ts` →
+  `forge/github.ts`) is the same gap with a sharper edge: the web UI's
+  "Create PR" button is gated only on `forge.available` (`git-actions.ts`),
+  not on `forge.kind`, so it renders enabled for a Forgejo repo. Clicking it
+  commits the working tree and **pushes the branch to the Forgejo remote
+  successfully** before the GitHub-only `gh pr create` step fails — the push
+  is not rolled back. Until this route is wired, open the PR by hand in
+  Forgejo's own web UI once the branch has been pushed.
+
+Closing these routing gaps is later work. See the automations caveat below
+for a further, unrelated gap in the same vein.
 
 **The key fills a gap; it never overrides.** cezar asks its host table first
 (`github.com` → the GitHub driver) and consults `forge.kind` only for a host
@@ -654,14 +664,24 @@ repo's config can already run code as you. `forge.apiUrl`/`forge.webUrl`
 therefore don't raise that file's trust level; they are just two more
 addresses it can point at. `CEZ_FORGEJO_TOKEN` itself is scoped by the driver,
 not by this file: it is attached only to the Forgejo driver's own HTTP
-requests, and only when the request's resolved target shares `apiUrl`'s
-origin (redirects are rejected, never followed) — a malicious `apiUrl` value
-can point the driver at a different host, but it cannot make the driver leak
-the token to that host. The variable is not otherwise sandboxed, though: like
-`GITHUB_TOKEN`, it is still forwarded whole to spawned agent processes
-(`agent-env.ts`) and scrubbed from the on-disk NDJSON transcript by name
-(`secret-redaction.ts`) — the origin gate protects the driver's own requests,
-not every process that ever sees the token.
+requests, and only when the request's resolved target shares `apiOrigin` —
+the origin derived *from* `apiUrl` itself (`forgejo-http.ts:172`), not some
+independently trusted value. That means the gate does NOT protect the token
+from `apiUrl`'s own host: whatever host `apiUrl` names receives the token,
+same as pointing any other tool at an API endpoint always does — this is
+the same "code-trusted" reasoning as `systemPrompt` and `skillsRepos` above,
+applied to `apiUrl` specifically. What the gate DOES protect against is a
+leak to a DIFFERENT host than the one `apiUrl` names: `redirect: 'manual'`
+means a 3xx response is treated as a failure rather than followed, so no
+hop ever carries the Authorization header to a redirect target; and the
+same-origin check keeps a cross-origin URL that shows up elsewhere in a
+Forgejo response (a third-party CI `target_url`, for instance) from ever
+being mistaken for an API target and sent the token. The variable is not
+otherwise sandboxed, though: like `GITHUB_TOKEN`, it is still forwarded
+whole to spawned agent processes (`agent-env.ts`) and scrubbed from the
+on-disk NDJSON transcript by name (`secret-redaction.ts`) — the origin gate
+protects the driver's own requests, not every process that ever sees the
+token.
 
 Put the same `"modelsLocked": true` key in `~/.cezar/config.json` to apply it
 to every registered project. When the key is absent or `false` in both config

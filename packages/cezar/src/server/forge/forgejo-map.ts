@@ -108,9 +108,10 @@ export const forgejoPullSchema = z.object({
   merged: z.boolean().default(false),
   head: z.object({ ref: z.string(), sha: z.string() }).nullish(),
   /** Used only by `normalizeForgejoMergeState` — absent from every list/prStatus row this schema
-   *  also validates, hence `.nullish()`, never required. Pułapka 5: `false` here does NOT mean
-   *  "conflict" (see `normalizeForgejoMergeState`'s own doc comment for the four states Gitea
-   *  collapses into it) — only `normalizeForgejoMergeState` is allowed to read this field. */
+   *  also validates, hence `.nullish()`, never required. `false` here does NOT mean "conflict"
+   *  (Gitea collapses four distinct statuses — Checking/Conflict/Error/WIP — into this one boolean;
+   *  see `normalizeForgejoMergeState`'s own doc comment) — only `normalizeForgejoMergeState` is
+   *  allowed to read this field. */
   mergeable: z.boolean().nullish(),
   /** Merge-state only, same reasoning as `mergeable` above — list/prStatus rows never read it. */
   base: z.object({ ref: z.string() }).nullish(),
@@ -141,20 +142,32 @@ export const forgejoCombinedStatusSchema = z.object({
     .nullish(),
 });
 
+/** Classifies ONE raw Forgejo `CommitStatusState` value (`pending|success|error|failure|warning|""`,
+ *  or any other unrecognized string) — the single source `combinedStatusToChecks` (the aggregate
+ *  rollup, below) and `combinedStatusToPrChecks` (the per-check breakdown, further down) both build
+ *  on, replacing what used to be two independently hand-written copies of this same mapping.
+ *  `warning` counts as failing (a build that produced a warning-level status is not clean); `""`
+ *  and any other unrecognized value classify as `'unknown'` — `combinedStatusToChecks` then treats
+ *  `'unknown'` as neither failing nor pending (see its own doc comment for why a single
+ *  stray/unrecognized entry must never flip an otherwise-green build), while
+ *  `combinedStatusToPrChecks` surfaces `'unknown'` to the UI as-is. */
+function classifyCommitStatus(status: string): 'passing' | 'failing' | 'pending' | 'unknown' {
+  if (status === 'success') return 'passing';
+  if (status === 'failure' || status === 'error' || status === 'warning') return 'failing';
+  if (status === 'pending') return 'pending';
+  return 'unknown';
+}
+
 /**
- * `CommitStatusState` on the wire is `pending|success|error|failure|warning|""`. `warning` counts
- * as failing (a build that produced a warning-level status is not clean); `""` and any other
- * unrecognized value count as neither failing nor pending, so a single stray/unknown entry cannot
- * flip an otherwise-green build to a spinner or a red X. `null`/empty `statuses` (no CI configured)
- * maps to `null`, never `'pending'` — `'pending'` would spin the UI's CI indicator forever for a
- * repository that has no CI at all.
+ * `null`/empty `statuses` (no CI configured) maps to `null`, never `'pending'` — `'pending'` would
+ * spin the UI's CI indicator forever for a repository that has no CI at all.
  */
 export function combinedStatusToChecks(raw: unknown): 'passing' | 'failing' | 'pending' | null {
   const { statuses } = forgejoCombinedStatusSchema.parse(raw);
   if (!statuses || statuses.length === 0) return null;
-  const states = statuses.map((s) => s.status);
-  if (states.some((s) => s === 'failure' || s === 'error' || s === 'warning')) return 'failing';
-  if (states.some((s) => s === 'pending')) return 'pending';
+  const classified = statuses.map((s) => classifyCommitStatus(s.status));
+  if (classified.includes('failing')) return 'failing';
+  if (classified.includes('pending')) return 'pending';
   return 'passing';
 }
 
@@ -348,9 +361,9 @@ export type ForgejoBranchInfo =
  * `ReviewStateType` values — an unrecognized value must survive parsing as itself so
  * `computeReviewDecision`'s rule 0 can see it and refuse to silently drop it (an enum + `.catch('')`
  * would erase the exact signal that rule exists to catch). `dismissed`/`official`/`stale` are
- * siblings of `state`, not members of it — Forgejo has no `DISMISSED` review state on the wire
- * (pułapka 8): a dismissed review keeps whatever `state` it was submitted with, and `dismissed`
- * flags it separately.
+ * siblings of `state`, not members of it — Forgejo has no `DISMISSED` review state on the wire:
+ * a dismissed review keeps whatever `state` it was submitted with, and `dismissed` flags it
+ * separately.
  */
 export const forgejoReviewSchema = z.object({
   state: z
@@ -366,10 +379,11 @@ export const forgejoReviewSchema = z.object({
 type ForgejoReview = z.infer<typeof forgejoReviewSchema>;
 
 /** Every `ReviewStateType` value the live Gitea source is known to emit, PLUS `''` (no signal —
- *  pułapka 15: this dictionary is read from source, not measured on the wire). Deliberately does
- *  NOT include GitHub's `CHANGES_REQUESTED`/`COMMENTED`/`DISMISSED` (pułapka 8) — those never
- *  appear on a Forgejo payload, and treating them as "known" here would silently swallow the exact
- *  class of surprise rule 0 below exists to catch. */
+ *  this dictionary is read from source, not measured on the wire). Deliberately does NOT include
+ *  GitHub's `CHANGES_REQUESTED`/`COMMENTED`/`DISMISSED` — those never appear on a Forgejo payload
+ *  (Forgejo has no `DISMISSED` review state on the wire at all, see `forgejoReviewSchema`'s doc
+ *  comment above), and treating them as "known" here would silently swallow the exact class of
+ *  surprise rule 0 below exists to catch. */
 const KNOWN_REVIEW_STATES = new Set(['APPROVED', 'PENDING', 'COMMENT', 'REQUEST_CHANGES', 'REQUEST_REVIEW', '']);
 
 /**
@@ -388,7 +402,14 @@ const KNOWN_REVIEW_STATES = new Set(['APPROVED', 'PENDING', 'COMMENT', 'REQUEST_
  *   2. once any row is `official`, keep only official rows (Forgejo's own "counts toward the
  *      requirement" flag).
  *   3. collapse to the latest row per `user.login` by `submitted_at` — a reviewer's own later
- *      review supersedes their earlier one.
+ *      review supersedes their earlier one. This includes `COMMENT`: a reviewer's later `COMMENT`
+ *      supersedes an earlier `APPROVED` from the SAME reviewer, dropping their approval from the
+ *      count below. Intentional, not an oversight — `COMMENT` is still that reviewer's most recent
+ *      standing input, and it is neither an approval nor a rejection; treating it as "supersede"
+ *      rather than "ignore" means a reviewer who comments again after approving must be counted as
+ *      no longer having a standing approval, the same way GitHub's own reviewer-dismissal-on-new-
+ *      commit behavior works. A DIFFERENT reviewer's `COMMENT` never touches this one's approval —
+ *      the collapse is per-`user.login`.
  *   4. any surviving `REQUEST_CHANGES` → 'changes-requested'. This does NOT depend on branch
  *      readability — a review that plainly asked for changes blocks regardless of whether the
  *      branch-protection GET succeeded.
@@ -412,7 +433,15 @@ export function computeReviewDecision(reviewsRaw: unknown, branch: ForgejoBranch
   for (const row of scoped) {
     const login = row.user?.login ?? '';
     const prev = latestByUser.get(login);
-    if (!prev || (row.submitted_at ?? '') >= (prev.submitted_at ?? '')) latestByUser.set(login, row);
+    // Compare NORMALIZED timestamps, not the raw wire strings: two Forgejo timestamps with
+    // different numeric offsets (`+02:00` vs `+01:00`) do not string-compare in chronological
+    // order, so a stale review submitted in one offset can outrank a later one submitted in
+    // another — silently overturning e.g. a REQUEST_CHANGES with an out-of-date APPROVED.
+    if (
+      !prev ||
+      (normalizeForgejoTimestamp(row.submitted_at) ?? '') >= (normalizeForgejoTimestamp(prev.submitted_at) ?? '')
+    )
+      latestByUser.set(login, row);
   }
   const collapsed = [...latestByUser.values()];
 
@@ -425,9 +454,10 @@ export function computeReviewDecision(reviewsRaw: unknown, branch: ForgejoBranch
   return approvals >= required ? 'approved' : 'review-required';
 }
 
-/** `target_url` names a third-party CI system (a different host than both `apiUrl` and `webUrl`,
- *  pułapka 1's own documented exception) — filtered to http(s) but never rebased. Anything else
- *  (empty, `null`, a bare host, `javascript:` etc.) is dropped rather than surfaced as a link. */
+/** `target_url` names a third-party CI system (a different host than both `apiUrl` and `webUrl` —
+ *  a deliberate, documented exception to this driver's usual same-origin link rebasing) — filtered
+ *  to http(s) but never rebased. Anything else (empty, `null`, a bare host, `javascript:` etc.) is
+ *  dropped rather than surfaced as a link. */
 function checkUrl(targetUrl: string | null | undefined): string | undefined {
   return targetUrl && (targetUrl.startsWith('http://') || targetUrl.startsWith('https://')) ? targetUrl : undefined;
 }
@@ -441,14 +471,7 @@ function combinedStatusToPrChecks(statusRaw: unknown | null, branch: ForgejoBran
   const { statuses } = forgejoCombinedStatusSchema.parse(statusRaw);
   if (!statuses) return [];
   return statuses.map((s): ForgePrCheck => {
-    const state: ForgePrCheck['state'] =
-      s.status === 'success'
-        ? 'passing'
-        : s.status === 'failure' || s.status === 'error' || s.status === 'warning'
-          ? 'failing'
-          : s.status === 'pending'
-            ? 'pending'
-            : 'unknown';
+    const state: ForgePrCheck['state'] = classifyCommitStatus(s.status);
     // Unreadable branch: we don't know which contexts are required, so `required` is `null`
     // ("we don't know"), not `false` ("known not required") — the two must stay distinguishable in
     // the UI. Readable + no status-check gate configured: every check is genuinely optional (`false`).
@@ -463,15 +486,16 @@ function combinedStatusToPrChecks(statusRaw: unknown | null, branch: ForgejoBran
  * (`GET /pulls/{n}`, the combined commit status, the branch, the paginated review list, and the
  * repository body `detectCache` already carries) — `reviewsRaw` is threaded straight through to
  * `computeReviewDecision`, the only way `reviewDecision` (part of this function's own return type)
- * can be produced. Pure — all I/O (including the `mergeable:false` retry pułapka 5 requires)
- * happens one layer up, in `forgejo.ts`.
+ * can be produced. Pure — all I/O (including the `mergeable:false` retry described below) happens
+ * one layer up, in `forgejo.ts`.
  *
  * Eligibility ladder (mirrors `github.ts:1636-1667`'s structure; two deliberate divergences, each
  * cited where it happens): `terminal` (not open) → `blocked/draft` → `blocked/conflicts` →
  * `blocked/checks-failing` (`warning` counts as failing) → `blocked/reviews` (also catches an
  * unrecognized review state, via `computeReviewDecision`'s own rule 0) → `unknown/rules-unknown`
  * (ONLY when the branch GET failed — divergence 1) → `unauthorized/unauthorized` (ONLY with a token
- * present — divergence 2, pułapka 12) → `pending/pending` → `ready`.
+ * present — divergence 2) → `pending/pending` → `unknown/unknown` (mergeable still unresolved, or
+ * no merge method available — the ladder's own closing rung, github.ts:1660-1667) → `ready`.
  */
 export function normalizeForgejoMergeState(input: {
   pullRaw: unknown;
@@ -484,15 +508,15 @@ export function normalizeForgejoMergeState(input: {
 }): ForgePrMergeState {
   const pull = forgejoPullSchema.parse(input.pullRaw);
 
-  // Pułapka 6: `state` alone never means "merged" — a merged PR reports `state:'closed', merged:true`.
+  // `state` alone never means "merged" — a merged PR reports `state:'closed', merged:true`.
   const state: ForgePrMergeState['state'] = pull.merged ? 'merged' : pull.state;
 
-  // Pułapka 5: Gitea's `mergeable:false` collapses four distinct statuses (Checking/Conflict/
-  // Error/WIP) into one boolean — it is NEVER trusted for a terminal or draft PR (both already
-  // measured to report `false` while genuinely conflict-free). The retry this pułapka also demands
-  // (one re-fetch ~1.5s after a `false` reading, on the `refresh:true` path) is I/O and lives in
-  // `forgejo.ts`, one layer up — by the time `pullRaw` reaches this function, its `mergeable` value
-  // is already the retried one.
+  // Gitea's `mergeable:false` collapses four distinct statuses (Checking/Conflict/Error/WIP) into
+  // one boolean — it is NEVER trusted for a terminal or draft PR (both already measured to report
+  // `false` while genuinely conflict-free). The retry this ambiguity demands (one re-fetch ~1.5s
+  // after a `false` reading, on the `refresh:true` path) is I/O and lives in `forgejo.ts`, one layer
+  // up — by the time `pullRaw` reaches this function, its `mergeable` value is already the retried
+  // one.
   const mergeable: ForgePrMergeState['mergeable'] =
     state !== 'open' || pull.draft ? 'unknown' : pull.mergeable === true ? 'mergeable' : pull.mergeable === false ? 'conflicting' : 'unknown';
 
@@ -533,8 +557,8 @@ export function normalizeForgejoMergeState(input: {
     eligibility = 'unknown';
     blockers.push({ code: 'rules-unknown', message: 'Forgejo could not confirm branch-protection requirements.' });
   } else if (input.hasToken && !input.branch.userCanMerge) {
-    // Divergence 2 (pułapka 12): `Branch.user_can_merge` (and `Repository.permissions`) read as
-    // `false` for an ANONYMOUS request too — indistinguishable from "authenticated but forbidden"
+    // Divergence 2: `Branch.user_can_merge` (and `Repository.permissions`) read as `false` for an
+    // ANONYMOUS request too — indistinguishable from "authenticated but forbidden"
     // without gating on `hasToken`. `github.ts` has no `unauthorized` eligibility at all; Forgejo
     // needs one because, unlike `gh`, this driver can legitimately talk to a public repo with zero
     // credentials, where "false" carries no permission information whatsoever.
@@ -543,6 +567,14 @@ export function normalizeForgejoMergeState(input: {
   } else if (checks.some((c) => c.state === 'pending')) {
     eligibility = 'pending';
     blockers.push({ code: 'pending', message: 'Checks are still pending.' });
+  } else if (mergeable !== 'mergeable' || methods.length === 0) {
+    // Closing rung of the ladder, mirroring github.ts:1660-1667: everything above only rules OUT
+    // known blockers — it never confirms merge is actually possible. Without this rung, a PR whose
+    // `mergeable` reading is still 'unknown' (Gitea hasn't finished computing it) or whose repo
+    // exposes zero merge methods would fall through to the default `eligibility = 'ready'` above,
+    // reporting a green, mergeable-looking PR that `mergePR` would then reject.
+    eligibility = 'unknown';
+    blockers.push({ code: 'unknown', message: 'Forgejo could not confirm every merge requirement.' });
   }
 
   const canMerge = eligibility === 'ready';

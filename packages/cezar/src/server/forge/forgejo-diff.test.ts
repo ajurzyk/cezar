@@ -23,6 +23,11 @@ describe('unquoteGitPath', () => {
     expect(unquoteGitPath('"a/back\\\\slash"')).toBe('a/back\\slash');
   });
 
+  it('unescapes \\r and \\f inside a quoted path (git-changes.ts\'s sibling implementation handles the same two)', () => {
+    expect(unquoteGitPath('"a/car\\riage"')).toBe('a/car\riage');
+    expect(unquoteGitPath('"a/form\\ffeed"')).toBe('a/form\ffeed');
+  });
+
   it('decodes an octal byte escape (\\NNN) as a UTF-8 byte', () => {
     // "é" is U+00E9, UTF-8 bytes 0303 0251 (octal) — git emits exactly this for a non-ASCII
     // byte inside a quoted path.
@@ -165,6 +170,45 @@ describe('splitUnifiedDiff', () => {
     const entries = splitUnifiedDiff(diffText);
 
     expect([...entries.keys()]).toEqual(['pa\th']);
+  });
+
+  it('a removed line that itself reads as "--- …" inside the hunk body does not get mistaken for the minus-path header', () => {
+    const diffText = [
+      'diff --git a/db/schema.sql b/db/schema.sql',
+      'index 1111111..2222222 100644',
+      '--- a/db/schema.sql',
+      '+++ b/db/schema.sql',
+      '@@ -1,2 +1,1 @@',
+      ' CREATE TABLE foo (',
+      '--- legacy column, dropped in v2',
+      '+CREATE TABLE foo ();',
+    ].join('\n');
+
+    const entries = splitUnifiedDiff(diffText);
+
+    const entry = entries.get('db/schema.sql');
+    expect(entry?.path).toBe('db/schema.sql');
+    expect(entry?.previousPath).toBeUndefined();
+    expect(entry?.patch).toBe('@@ -1,2 +1,1 @@\n CREATE TABLE foo (\n--- legacy column, dropped in v2\n+CREATE TABLE foo ();');
+  });
+
+  it('an added line that itself reads as "+++ …" inside the hunk body does not get mistaken for the plus-path header', () => {
+    const diffText = [
+      'diff --git a/src/counter.c b/src/counter.c',
+      'index 1111111..2222222 100644',
+      '--- a/src/counter.c',
+      '+++ b/src/counter.c',
+      '@@ -1,2 +1,3 @@',
+      ' int i = 0;',
+      '+++ i;',
+      ' return i;',
+    ].join('\n');
+
+    const entries = splitUnifiedDiff(diffText);
+
+    const entry = entries.get('src/counter.c');
+    expect(entry?.path).toBe('src/counter.c');
+    expect(entry?.patch).toBe('@@ -1,2 +1,3 @@\n int i = 0;\n+++ i;\n return i;');
   });
 
   it('joining by filename (not by position) survives a file order that does not match the /files listing', () => {
