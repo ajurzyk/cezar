@@ -286,9 +286,11 @@ export type ForgejoRepository = z.infer<typeof forgejoRepositorySchema>;
  * Flattens a `ForgejoRepository`'s four independent merge-method flags into the ordered list the
  * merge-state UI renders, plus a `doFor` lookup a future `mergePR` implementation uses to pick the
  * Forgejo API merge-style string for a chosen `ForgeMergeMethod`. `allow_fast_forward_only_merge`
- * never adds a method — fast-forward-only is a *constraint* on how `merge` behaves, not a fourth
- * selectable method — but it IS a valid `default_merge_style` value, handled below as "whichever
- * method survived the flags, first" since there's no direct `ForgeMergeMethod` it maps onto.
+ * never adds a method — not because fast-forward-only isn't a real Forgejo merge style (its merge
+ * API accepts `fast-forward-only` as a `Do` value exactly like `merge`/`squash`/`rebase` are), but
+ * because cezar's own `ForgeMergeMethod` type has no value representing it, so there is nothing for
+ * the flag to map onto. It IS a valid `default_merge_style` value though, handled below as
+ * "whichever method survived the flags, first" since there's still no direct `ForgeMergeMethod` for it.
  *
  * `allow_rebase` and `allow_rebase_explicit` both produce the SAME `methods` entry (`'rebase'`) —
  * Forgejo exposes them as two different merge-style API values ('rebase' merges the true history,
@@ -645,10 +647,10 @@ export function normalizeForgejoMergeState(input: {
   } else if (methods.length === 0) {
     // Same closing rung, split from the `mergeable !== 'mergeable'` branch above so a READABLE
     // repository confirmed to expose zero usable merge methods (e.g. one flagging only
-    // `allow_fast_forward_only_merge` — a merge CONSTRAINT, never a selectable method, see
-    // `mergeMethodsFromRepository`'s own doc comment) gets an honest, specific message instead of
-    // the vague "could not confirm" one. `input.repository` is `null` only when the repository body
-    // itself could not be fetched/parsed — that case keeps the original vague wording, since THAT
+    // `allow_fast_forward_only_merge` — a real Forgejo merge style cezar's own `ForgeMergeMethod`
+    // has no value for, see `mergeMethodsFromRepository`'s own doc comment) gets an honest, specific
+    // message instead of the vague "could not confirm" one. `input.repository` is `null` only when
+    // the repository body itself could not be fetched/parsed — that case keeps the original vague wording, since THAT
     // one genuinely is an unread state, not a confirmed one.
     eligibility = 'unknown';
     blockers.push(

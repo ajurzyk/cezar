@@ -485,11 +485,14 @@ async function pullRowToStatus(
  * `head.ref: "refs/pull/N/head"`, so it can never match by branch name in the walk, and the
  * fallback exists to still find it. But firing the fallback after an UNFINISHED walk would let it
  * shadow a genuinely open PR sitting on a page the walk never reached — resurrecting the exact bug
- * the state=all walk exists to avoid. Two residual gaps, both accepted as known limitations:
+ * the state=all walk exists to avoid. Three residual gaps, all accepted as known limitations:
  * (a) a PR merged into a NON-default base with a deleted branch still returns `null` (the fallback
  * only tries the repo's `default_branch` as `base`); (b) with two terminal (closed/merged) PRs
  * sharing the same head, the fallback endpoint picks an arbitrary one, so `merged` vs `closed`
- * might describe the wrong one of the two.
+ * might describe the wrong one of the two; (c) the walk's own `found` check below runs BEFORE the
+ * `stoppedShort` gate, so a terminal (closed/merged) match seen on an unfinished walk is still
+ * returned and cached as proven — a genuinely open PR for the same branch sitting on a page the
+ * walk never reached never gets the chance to overtake it.
  */
 /** Distinguishes "this read taught us nothing" from a genuine, proven "no PR" answer — every place
  *  `resolveForgejoPrStatus` below cannot tell "no PR exists" apart from "the read that would have

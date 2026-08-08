@@ -662,12 +662,14 @@ Known limitations of the Forgejo merge-state driver
 deliberate, accepted trade-off rather than a bug:
 - A repository whose ONLY enabled merge policy is fast-forward-only
   (`allow_fast_forward_only_merge`, with every other `allow_*_merge` flag off)
-  reports zero usable merge methods — fast-forward-only is a *constraint* Gitea
-  applies to how a merge behaves, not a selectable method the way merge/squash/
-  rebase are, so there is nothing in `ForgeMergeMethod` for it to map onto. The
-  merge box shows this as "no merge method enabled that cezar supports", not a
-  generic "could not confirm" — that specific repository configuration is the
-  most common reason a Forgejo repo would ever land there.
+  reports zero usable merge methods. `fast-forward-only` IS a real, selectable
+  Forgejo merge style — its merge API accepts it as a `Do` value exactly like
+  `merge`/`squash`/`rebase` are — the gap is on cezar's own side: its
+  `ForgeMergeMethod` type has no value representing it, so there is nothing
+  for `mergeMethodsFromRepository` to map the flag onto. The merge box shows
+  this as "no merge method enabled that cezar supports", not a generic "could
+  not confirm" — that specific repository configuration is the most common
+  reason a Forgejo repo would ever land there.
 - Draft-PR creation ("WIP:" title prefix on `POST .../pulls`) relies on the
   target instance's own `WORK_IN_PROGRESS_PREFIXES` `app.ini` setting
   recognizing that exact prefix. cezar cannot read or override that
