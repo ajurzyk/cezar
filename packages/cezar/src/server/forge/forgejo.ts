@@ -1,8 +1,10 @@
 import { execFile } from 'node:child_process';
 import { autosaveCommit } from '../../git-worktree.ts';
+import { splitUnifiedDiff, type ForgejoDiffEntry } from './forgejo-diff.ts';
 import {
   createForgejoHttp,
   firstLine,
+  FJ_FILES_MAX_PAGES,
   FJ_LIST_MAX_PAGES,
   FJ_PAGE_LIMIT,
   ForgejoHttpError,
@@ -13,14 +15,17 @@ import {
 import {
   combinedStatusToChecks,
   forgejoBranchSchema,
+  forgejoChangedFileSchema,
   forgejoPullSchema,
   forgejoRepositorySchema,
+  mapChangedFileStatus,
   mapForgejoIssue,
   mapForgejoPull,
   mergeMethodsFromRepository,
   normalizeForgejoMergeState,
   rebaseToWebUrl,
   type ForgejoBranchInfo,
+  type ForgejoChangedFile,
   type ForgejoPull,
   type ForgejoRepository,
 } from './forgejo-map.ts';
@@ -39,6 +44,7 @@ import type {
   ForgeListOptions,
   ForgeMergeInput,
   ForgeMergeResult,
+  ForgePrChange,
   ForgePrDiffResult,
   ForgePrMergeStateResult,
   ForgePrStatus,
@@ -49,12 +55,14 @@ import type {
 /**
  * The Forgejo forge driver (cockpit-ui redesign spec §"Forge-driver seam") — structurally mirrors
  * `github.ts`, but speaks REST directly through `forgejo-http.ts` instead of shelling out to a
- * CLI. `kind`, `detect`/`detectCached` (the two call sites that already exist, `server.ts:1511`
- * health and `:3214` automations-availability), `viewUrl`, `rebaseToWebUrl`, `listIssues`,
- * `listPRs`, `prStatus`, `createPR`, `prMergeState` and `mergePR` are real; `prDiff` remains a
- * degraded stub whose real body lands as a follow-up change, with its own tests. A stub with no
- * caller yet is expected shape here, not a defect: `github.ts` itself implements every optional
- * method even though several of its own call sites were wired up separately, over time.
+ * CLI. Every method of `ForgeDriver` (`kind`, `detect`/`detectCached` — the two call sites that
+ * already exist, `server.ts:1511` health and `:3214` automations-availability — `viewUrl`,
+ * `rebaseToWebUrl`, `listIssues`, `listPRs`, `prStatus`, `createPR`, `prMergeState`, `mergePR`,
+ * `prDiff`) is real. Several of these have no production call site yet (`server.ts`'s list/diff
+ * routes still call `fetchGithub*` directly, bypassing `resolveForge` — that seam lands in a
+ * later stage): a fully-implemented method with no caller yet is expected shape here, not a
+ * defect — `github.ts` itself implements every optional method even though several of its own
+ * call sites were wired up separately, over time.
  * This driver deliberately reuses a few things straight from `github.ts` rather than re-deriving
  * them: `buildPrBody` (the PR body format has no forge-specific content), `mergePreflightAllowed`
  * (the eligibility formula is pure and forge-agnostic), and, transitively through
@@ -72,6 +80,14 @@ export interface ForgejoDriverCtx {
 
 const CACHE_MS = 60_000;
 const DETECT_CACHE_MAX = 50;
+
+/** `prDiff` limits — sizes copied verbatim from `github.ts`'s own `GH_PR_PATCH_CAP`/
+ *  `GH_PR_DIFF_JSON_CAP`/`GH_PR_DIFF_FILE_CAP` so both drivers' payloads stay comparable in shape
+ *  and cost, not because either forge measured differently. Exported so `forgejo.test.ts` builds
+ *  its over-cap fixtures against the real numbers instead of a magic literal that could drift. */
+export const FJ_PR_PATCH_CAP = 512 * 1024;
+export const FJ_PR_DIFF_JSON_CAP = 4 * 1024 * 1024;
+export const FJ_PR_DIFF_FILE_CAP = 300;
 
 /** `FJ_LIST_MAX_PAGES * FJ_PAGE_LIMIT` — the walk budget the `prStatus` full-history search uses
  *  as its `want`, parity with `github.ts`'s `GH_MAX_LIMIT` (1000). Also the ceiling `listIssues`/
@@ -135,6 +151,21 @@ const MERGE_STATE_CACHE_MAX = 500;
  *  a merge is in flight. Mirrors `github.ts`'s own `mergeInflight` (github.ts:1579). */
 const mergeInflight = new Set<string>();
 
+interface PrDiffCacheEntry {
+  at: number;
+  data: ForgePrDiffResult;
+}
+
+/** Keyed `repoRoot\0apiBase\0number\0headSha` — the `headSha` component (unlike every other cache
+ *  in this module) means a cache entry auto-invalidates the instant the PR's head commit moves,
+ *  with no eviction needed for that case specifically; `evictForgejoProjectCaches` still clears it
+ *  after a merge (below) because a merge can rewrite `head.sha` to the merge commit itself, which
+ *  would otherwise mint a "new" key that silently coexists with the stale pre-merge one forever.
+ *  Same 60s TTL as `listCache`/`prStatusCache` — a diff view refreshing a minute late is a much
+ *  smaller cost than a merge-state view doing the same (contrast `MERGE_STATE_CACHE_MS`). */
+const prDiffCache = new Map<string, PrDiffCacheEntry>();
+const PR_DIFF_CACHE_MAX = 50;
+
 function cacheKey(repoRoot: string, apiBase: string): string {
   return `${repoRoot}\0${apiBase}`;
 }
@@ -151,6 +182,10 @@ function mergeStateCacheKey(repoRoot: string, apiBase: string, number: number): 
   return `${repoRoot}\0${apiBase}\0${number}`;
 }
 
+function prDiffCacheKey(repoRoot: string, apiBase: string, number: number, headSha: string): string {
+  return `${repoRoot}\0${apiBase}\0${number}\0${headSha}`;
+}
+
 function evictOldest(cache: Map<string, unknown>, max: number): void {
   while (cache.size > max) {
     const oldest = cache.keys().next().value;
@@ -159,16 +194,16 @@ function evictOldest(cache: Map<string, unknown>, max: number): void {
   }
 }
 
-/** Clears every cache (and the merge mutex) this module owns. Grows as more caches are added
- *  alongside new methods (`prDiffCache` lands in a follow-up package) — tests call this in
- *  `beforeEach` so one test's warm cache, or a mutex left held by a test that never reached its
- *  `finally`, can never leak into the next. */
+/** Clears every cache (and the merge mutex) this module owns — tests call this in `beforeEach` so
+ *  one test's warm cache, or a mutex left held by a test that never reached its `finally`, can
+ *  never leak into the next. */
 export function __clearForgejoCachesForTests(): void {
   detectCache.clear();
   listCache.clear();
   prStatusCache.clear();
   mergeStateCache.clear();
   mergeInflight.clear();
+  prDiffCache.clear();
 }
 
 function describeError(err: unknown): string {
@@ -805,15 +840,16 @@ async function createForgejoPr(
 
 /** Clears every cache entry that belongs to one project (`repoRoot`+`apiBase` pair) after a
  *  successful merge — a merge changes list membership (the merged PR should stop showing as open
- *  in `listIssues`/`listPRs`), the merged PR's own merge-state (now `terminal`), and every OTHER
- *  open PR's merge-state too (their `head`/`base` didn't move, but a merge can flip branch-
- *  protection-derived fields that are shared across the whole repo — same reasoning `github.ts`'s
- *  `evictGithubProjectCaches` applies at repo scope, not PR scope). Mirrors
+ *  in `listIssues`/`listPRs`), the merged PR's own merge-state (now `terminal`), every OTHER open
+ *  PR's merge-state too (their `head`/`base` didn't move, but a merge can flip branch-protection-
+ *  derived fields that are shared across the whole repo — same reasoning `github.ts`'s
+ *  `evictGithubProjectCaches` applies at repo scope, not PR scope), and every cached diff (a merge
+ *  can rewrite the merged PR's `head.sha` to the merge commit, which `prDiffCache`'s own headSha-
+ *  keyed TTL would not otherwise catch — see that cache's own doc comment). Mirrors
  *  `evictGithubProjectCaches` (github.ts:1757-1765); unlike GitHub's version this one also needs the
  *  `apiBase` half of the key, since every cache in this module is keyed `repoRoot\0apiBase\0...`.
  *  `detectCache` is deliberately NOT cleared here — a merge doesn't change the repository's own
- *  merge-method flags or default branch, which is all that cache holds. A future `prDiffCache`
- *  extends this same prefix-delete once that cache exists. */
+ *  merge-method flags or default branch, which is all that cache holds. */
 function evictForgejoProjectCaches(repoRoot: string, apiBase: string): void {
   const prefix = `${repoRoot}\0${apiBase}\0`;
   listCache.forEach((_value, key) => {
@@ -824,6 +860,9 @@ function evictForgejoProjectCaches(repoRoot: string, apiBase: string): void {
   });
   mergeStateCache.forEach((_value, key) => {
     if (key.startsWith(prefix)) mergeStateCache.delete(key);
+  });
+  prDiffCache.forEach((_value, key) => {
+    if (key.startsWith(prefix)) prDiffCache.delete(key);
   });
 }
 
@@ -988,6 +1027,164 @@ async function forgejoMergePR(
   }
 }
 
+/** `ChangedFile` on the wire has no `patch` field at all — `forgejo-diff.ts`'s `splitUnifiedDiff`
+ *  is what supplies it, parsed from a SEPARATE `GET /pulls/{n}.diff` request. Used only by the
+ *  `CEZ_DRY_RUN=1` short-circuit below; `number`/`headSha` are overwritten per-call by the caller
+ *  (dry-run still echoes back whatever PR number was asked for), everything else is fixed. */
+const DRY_RUN_PR_DIFF_FIXTURE: ForgePrChange[] = [
+  { path: 'src/example.ts', status: 'modified', additions: 3, deletions: 1, patch: '@@ -1,2 +1,2 @@\n-old\n+new\n context' },
+  { path: 'src/new-name.ts', previousPath: 'src/old-name.ts', status: 'renamed', additions: 0, deletions: 0 },
+];
+
+/**
+ * Bounded, read-only file changes for a pull request: `GET pulls/{n}` (for `headSha` and to prove
+ * the PR exists) → cache-check (keyed on that `headSha`, see `prDiffCache`'s own doc comment) →
+ * paginated `GET pulls/{n}/files` (the AUTHORITY for `path`/`status`/`additions`/`deletions`) run
+ * in parallel with one `GET pulls/{n}.diff` (`text/plain`) split by `splitUnifiedDiff` — the diff
+ * contributes ONLY `patch` (and a fallback `previousPath` for renames `/files` didn't itself
+ * report one for). The join key is `filename` — never row order, never a re-derived `diff --git`
+ * header path: a misparsed header would silently hand one file's patch to a different file, which
+ * is exactly why `splitUnifiedDiff` itself keys its map by the parsed `+++ b/…` path rather than
+ * handing back an ordered list. Sizing/truncation algorithm mirrors `fetchGithubPrDiff`
+ * (github.ts:67-140) file-for-file.
+ */
+async function forgejoPrDiff(
+  repoRoot: string,
+  http: ForgejoHttp,
+  owner: string,
+  repo: string,
+  number: number,
+  opts: { refresh?: boolean } | undefined,
+): Promise<ForgePrDiffResult> {
+  if (process.env.CEZ_DRY_RUN === '1') {
+    return {
+      available: true,
+      number,
+      headSha: '0'.repeat(40),
+      files: DRY_RUN_PR_DIFF_FIXTURE,
+      additions: 3,
+      deletions: 1,
+      truncated: false,
+    };
+  }
+
+  const encOwner = encodeURIComponent(owner);
+  const encRepo = encodeURIComponent(repo);
+  try {
+    const pullRaw = await http.getJson(`repos/${encOwner}/${encRepo}/pulls/${number}`);
+    const pull = forgejoPullSchema.parse(pullRaw);
+    const headSha = pull.head?.sha;
+    if (!headSha) return { available: false, reason: 'this pull request has no head commit yet' };
+
+    const key = prDiffCacheKey(repoRoot, http.apiBase, number, headSha);
+    if (!opts?.refresh) {
+      const hit = prDiffCache.get(key);
+      if (hit && Date.now() - hit.at < CACHE_MS) return hit.data;
+    }
+
+    // The `/files` walk and the `.diff` fetch are independent reads of the same PR — run them
+    // concurrently. Only the `.diff` side has its own local `.catch`: the WHOLE `.diff` request
+    // failing (network/HTTP) degrades to a files-only list rather than failing the method
+    // outright — a filename+status+counts list with `not-provided` patches still beats
+    // `{available:false}`, and every row below finds no `diffMap` entry and degrades per-file,
+    // exactly as if the diff had come back empty. A `/files` failure has no such soft landing (no
+    // rows means nothing to report) and is left to propagate to this function's own outer `catch`.
+    const [filesPage, diffMap] = await Promise.all([
+      http.paginate((p, l) => `repos/${encOwner}/${encRepo}/pulls/${number}/files?page=${p}&limit=${l}`, {
+        want: FJ_PR_DIFF_FILE_CAP,
+        maxPages: FJ_FILES_MAX_PAGES,
+      }),
+      http
+        .getText(`repos/${encOwner}/${encRepo}/pulls/${number}.diff`, { accept: 'text/plain' })
+        .then(splitUnifiedDiff)
+        .catch((): Map<string, ForgejoDiffEntry> => new Map()),
+    ]);
+    const rows: ForgejoChangedFile[] = [];
+    for (const row of filesPage.rows) {
+      try {
+        rows.push(forgejoChangedFileSchema.parse(row));
+      } catch {
+        // A malformed row must not abort the whole diff — same policy `resolveForgejoPrStatus`
+        // applies to a malformed list row: skip it, keep the rest.
+      }
+    }
+
+    const rowsCapped = rows.slice(0, FJ_PR_DIFF_FILE_CAP);
+    // `rows.length` (not `filesPage.stoppedShort`) mirrors `fetchGithubPrDiff` exactly: a full cap
+    // worth of rows is conservatively called partial even though the walk itself might, in
+    // principle, have landed exactly on the true total.
+    let responseTruncated = rows.length >= FJ_PR_DIFF_FILE_CAP;
+    const reasons: string[] = responseTruncated ? [`Only the first ${FJ_PR_DIFF_FILE_CAP} files are shown.`] : [];
+
+    const files: ForgePrChange[] = rowsCapped.map((row) => {
+      const diffEntry = diffMap.get(row.filename);
+      let patch = diffEntry?.patch;
+      let truncated = false;
+      let patchUnavailableReason: 'binary' | 'too-large' | 'not-provided' | undefined;
+      if (!diffEntry || diffEntry.binary) {
+        patchUnavailableReason = diffEntry?.binary ? 'binary' : 'not-provided';
+      } else if (patch === undefined) {
+        // A block the splitter found but with no hunks at all (a pure rename or a mode-only
+        // change) — there is genuinely no patch to show, same as a file `/files` reported but the
+        // diff never mentioned.
+        patchUnavailableReason = 'not-provided';
+      } else if (Buffer.byteLength(patch, 'utf8') > FJ_PR_PATCH_CAP) {
+        patch = undefined;
+        truncated = true;
+        patchUnavailableReason = 'too-large';
+        responseTruncated = true;
+      }
+      // `/files`' own `previous_filename` is the primary source (it is the authority for this
+      // row); the diff's `previousPath` only fills in when `/files` didn't report one — a rename
+      // `/files` recognizes but the diff, for whatever reason, folded into a same-path block.
+      const previousPath = row.previous_filename ?? diffEntry?.previousPath;
+      return {
+        path: row.filename,
+        ...(previousPath ? { previousPath } : {}),
+        status: mapChangedFileStatus(row.status),
+        additions: row.additions,
+        deletions: row.deletions,
+        ...(patch !== undefined ? { patch } : {}),
+        ...(patchUnavailableReason ? { patchUnavailableReason } : {}),
+        ...(truncated ? { truncated: true } : {}),
+      };
+    });
+
+    let kept = files;
+    while (
+      kept.length > 0 &&
+      Buffer.byteLength(JSON.stringify({ available: true, number, headSha, files: kept }), 'utf8') > FJ_PR_DIFF_JSON_CAP
+    ) {
+      kept = kept.slice(0, -1);
+      responseTruncated = true;
+    }
+    if (kept.length < files.length) reasons.push('The response size limit omitted some files.');
+    if (files.some((file) => file.truncated)) reasons.push('One or more patches exceeded the per-file limit.');
+
+    const data: ForgePrDiffResult = {
+      available: true,
+      number,
+      headSha,
+      files: kept,
+      additions: rows.reduce((sum, row) => sum + row.additions, 0),
+      deletions: rows.reduce((sum, row) => sum + row.deletions, 0),
+      truncated: responseTruncated,
+      ...(reasons.length ? { reason: reasons.join(' ') } : {}),
+    };
+    prDiffCache.set(key, { at: Date.now(), data });
+    evictOldest(prDiffCache, PR_DIFF_CACHE_MAX);
+    return data;
+  } catch (err) {
+    // Two reads this method cannot degrade past land here: `GET pulls/{n}` (404 — bad PR number,
+    // network, timeout — without the PR body there is no `headSha` to key anything on) and the
+    // `/files` walk's own first page failing (`paginate` rethrows on page 1, see forgejo-http.ts —
+    // with zero rows collected there is nothing to report). Every OTHER read in this function
+    // (`.diff`, individual malformed `/files` rows) already degrades to its own safe default above
+    // instead of throwing, exactly so neither can take the whole response down with it.
+    return { available: false, reason: describeError(err) };
+  }
+}
+
 export function createForgejoDriver(ctx: ForgejoDriverCtx, deps?: ForgejoHttpDeps): ForgeDriver {
   const { repoRoot, owner, repo, settings } = ctx;
   const http = createForgejoHttp(settings.apiUrl, deps);
@@ -1011,10 +1208,7 @@ export function createForgejoDriver(ctx: ForgejoDriverCtx, deps?: ForgejoHttpDep
 
     mergePR: (number: number, input: ForgeMergeInput) => forgejoMergePR(repoRoot, http, owner, repo, webUrl, number, input, sleep),
 
-    prDiff: async (_number: number, _opts?: { refresh?: boolean }): Promise<ForgePrDiffResult> => ({
-      available: false,
-      reason: 'Forgejo PR diffs are not implemented yet.',
-    }),
+    prDiff: (number: number, opts?: { refresh?: boolean }) => forgejoPrDiff(repoRoot, http, owner, repo, number, opts),
 
     viewUrl: (kind: ForgeRefKind, ref: string | number): string => forgejoViewUrl(webUrl, owner, repo, kind, ref),
   };

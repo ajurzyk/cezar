@@ -183,6 +183,22 @@ export function mapChangedFileStatus(status: string): ForgePrChange['status'] {
   }
 }
 
+/** `GET /pulls/{n}/files` row. `status` is read as a plain string, not a `z.enum(...)` — an
+ *  unrecognized value must degrade through `mapChangedFileStatus`'s own `default: 'changed'`
+ *  branch, not throw and take the whole diff response down with it. `additions`/`deletions`
+ *  default to 0 for the same reason `forgejoPullSchema`'s do: a row that's otherwise readable
+ *  should never be discarded over one missing counter. `filename` is the join key `prDiff` uses
+ *  to match this row against `splitUnifiedDiff`'s parsed patches (`forgejo-diff.ts`) — never `id`,
+ *  this endpoint doesn't even carry one. */
+export const forgejoChangedFileSchema = z.object({
+  filename: z.string().min(1),
+  previous_filename: z.string().nullish(),
+  status: z.string(),
+  additions: z.number().int().nonnegative().default(0),
+  deletions: z.number().int().nonnegative().default(0),
+});
+export type ForgejoChangedFile = z.infer<typeof forgejoChangedFileSchema>;
+
 /**
  * Maps a raw `/issues` row to `ForgeItem`, or `null` when the row is actually a pull request (see
  * `forgejoIssueSchema`'s comment). `number`, never `id`: Forgejo's `id` is a global identifier

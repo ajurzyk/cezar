@@ -6,7 +6,14 @@ import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RunRecord } from '../../runs/store.ts';
 import type { ForgeSettings } from './types.ts';
-import { __clearForgejoCachesForTests, createForgejoDriver, rebaseToWebUrl, type ForgejoDriverCtx } from './forgejo.ts';
+import {
+  __clearForgejoCachesForTests,
+  createForgejoDriver,
+  FJ_PR_DIFF_FILE_CAP,
+  FJ_PR_PATCH_CAP,
+  rebaseToWebUrl,
+  type ForgejoDriverCtx,
+} from './forgejo.ts';
 
 // `vi.hoisted` so `execFileMock` exists before the (hoisted) vi.mock factory runs — same pattern
 // as `github.test.ts`. Default behavior delegates every call to the REAL `execFile`: `createPR`'s
@@ -48,9 +55,8 @@ function mockPush(result: { ok: boolean; stderr?: string }): void {
 /**
  * The Forgejo driver: `kind`, `detect`/`detectCached` (the two call sites that already exist,
  * `server.ts:1511`/`:3214`), `viewUrl`, `rebaseToWebUrl`, `listIssues`, `listPRs`, `prStatus`,
- * `createPR`, `prMergeState` and `mergePR` are real; `prDiff` remains a degraded stub whose real
- * body lands as a follow-up change. `fetch` is injected via `deps.fetch`; nothing here touches the
- * network.
+ * `createPR`, `prMergeState`, `mergePR` and `prDiff` are all real. `fetch` is injected via
+ * `deps.fetch`; nothing here touches the network.
  */
 
 function jsonResponse(body: unknown, init: { status?: number; headers?: Record<string, string> } = {}): Response {
@@ -1041,7 +1047,7 @@ describe('mergePR', () => {
     expect(result && result.merged && 'mergeCommitSha' in result).toBe(false);
   });
 
-  it('a successful merge evicts listCache, prStatusCache, and mergeStateCache for the whole project', async () => {
+  it('a successful merge evicts listCache, prStatusCache, mergeStateCache, and prDiffCache for the whole project', async () => {
     // PR #42 is deliberately a DIFFERENT pull than the one merged below — proves the eviction is
     // project-wide (keyed on repoRoot+apiBase), not scoped to the merged PR's own number.
     const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
@@ -1049,6 +1055,8 @@ describe('mergePR', () => {
       if (s.includes('/issues?')) return Promise.resolve(jsonResponse([], { headers: { 'x-total-count': '0' } }));
       if (s.includes('/pulls?state=all')) return Promise.resolve(jsonResponse([], { headers: { 'x-total-count': '0' } }));
       if (s.includes('/pulls/main/')) return Promise.resolve(jsonResponse({ message: 'not found' }, { status: 404 }));
+      if (s.includes('/pulls/42/files')) return Promise.resolve(jsonResponse([], { headers: { 'x-total-count': '0' } }));
+      if (s.endsWith('/pulls/42.diff')) return Promise.resolve(new Response('', { status: 200, headers: { 'content-type': 'text/plain' } }));
       if (s.endsWith('/pulls/42')) return Promise.resolve(jsonResponse(readyPullRow({ number: 42 })));
       if (s.endsWith('/pulls/9/merge')) return Promise.resolve(jsonResponse(null, { status: 200 }));
       if (s.endsWith('/pulls/9')) return Promise.resolve(jsonResponse(readyPullRow()));
@@ -1063,39 +1071,214 @@ describe('mergePR', () => {
     await driver.listIssues();
     await driver.prStatus('feat/x');
     await driver.prMergeState?.(42);
+    await driver.prDiff?.(42);
 
     const callCount = (pathIncludes: string) => fetchMock.mock.calls.filter((c) => String(c[0]).includes(pathIncludes)).length;
     const issuesBefore = callCount('/issues?');
     const prStatusBefore = callCount('/pulls?state=all');
     const pull42Before = callCount('/pulls/42');
+    const diff42FilesBefore = callCount('/pulls/42/files');
 
     // Warm caches must be free right now — proves they really were cached before the merge.
     await driver.listIssues();
     await driver.prStatus('feat/x');
     await driver.prMergeState?.(42);
+    await driver.prDiff?.(42);
     expect(callCount('/issues?')).toBe(issuesBefore);
     expect(callCount('/pulls?state=all')).toBe(prStatusBefore);
-    expect(callCount('/pulls/42')).toBe(pull42Before);
+    // `/pulls/42` itself is always re-read by `prDiff` (it needs the current `headSha` to build its
+    // cache key) — only the `/files` walk this warm assertion actually cares about must stay flat.
+    expect(callCount('/pulls/42/files')).toBe(diff42FilesBefore);
 
     await driver.mergePR?.(9, { method: 'merge', expectedHeadSha: 'a'.repeat(40) });
 
     await driver.listIssues();
     await driver.prStatus('feat/x');
     await driver.prMergeState?.(42);
+    await driver.prDiff?.(42);
     expect(callCount('/issues?')).toBeGreaterThan(issuesBefore);
     expect(callCount('/pulls?state=all')).toBeGreaterThan(prStatusBefore);
     expect(callCount('/pulls/42')).toBeGreaterThan(pull42Before);
+    expect(callCount('/pulls/42/files')).toBeGreaterThan(diff42FilesBefore);
   });
 });
 
-describe('stubbed methods (real bodies land as follow-up changes) never touch the network', () => {
-  const repoRoot = '/repo/stubs';
+describe('prDiff', () => {
+  const repoRoot = '/repo/pr-diff';
 
-  it('prDiff degrades to {available:false, reason}', async () => {
+  afterEach(() => {
+    delete process.env.CEZ_DRY_RUN;
+  });
+
+  function textResponse(body: string, status = 200): Response {
+    return new Response(body, { status, headers: { 'content-type': 'text/plain' } });
+  }
+
+  /** Routes the three requests a happy-path `prDiff(9)` issues: the PR itself (for `headSha`), the
+   *  paginated `/files` listing, and the single `.diff` text fetch. `filesRows`/`diffText` let each
+   *  test swap in exactly the fixture under test. */
+  function router(overrides: Partial<{ pull: unknown; filesRows: unknown[]; filesTotal: number; diffText: string; diffFails: boolean }> = {}) {
+    return vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.endsWith('/pulls/9')) return Promise.resolve(jsonResponse(overrides.pull ?? pullRow({ number: 9 })));
+      if (s.includes('/pulls/9/files')) {
+        const rows = overrides.filesRows ?? [];
+        return Promise.resolve(jsonResponse(rows, { headers: { 'x-total-count': String(overrides.filesTotal ?? rows.length) } }));
+      }
+      if (s.endsWith('/pulls/9.diff')) {
+        if (overrides.diffFails) return Promise.reject(new Error('connection reset'));
+        return Promise.resolve(textResponse(overrides.diffText ?? ''));
+      }
+      throw new Error(`unexpected url ${s}`);
+    });
+  }
+
+  it('CEZ_DRY_RUN=1 returns a mock ForgePrDiffResult without calling fetch', async () => {
+    process.env.CEZ_DRY_RUN = '1';
     const fetchMock = vi.fn();
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
-    const result = await driver.prDiff?.(1);
-    expect(result).toEqual({ available: false, reason: expect.any(String) });
+    const result = await driver.prDiff?.(777);
+    expect(result).toMatchObject({ available: true, files: expect.any(Array) });
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('joins /files rows with the parsed .diff by filename: a matched file gets its patch, a rename carries previousPath, a file absent from the diff degrades to not-provided', async () => {
+    const filesRows = [
+      { filename: 'src/a.ts', status: 'changed', additions: 2, deletions: 1 },
+      { filename: 'src/new-name.ts', previous_filename: 'src/old-name.ts', status: 'renamed', additions: 0, deletions: 0 },
+      { filename: 'src/untouched-in-diff.ts', status: 'changed', additions: 1, deletions: 0 },
+    ];
+    const diffText = [
+      'diff --git a/src/a.ts b/src/a.ts',
+      '--- a/src/a.ts',
+      '+++ b/src/a.ts',
+      '@@ -1,2 +1,2 @@',
+      '-old',
+      '+new a',
+      ' context',
+      'diff --git a/src/old-name.ts b/src/new-name.ts',
+      'rename from src/old-name.ts',
+      'rename to src/new-name.ts',
+    ].join('\n');
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: router({ filesRows, diffText }), token: null });
+
+    const result = await driver.prDiff?.(9);
+    if (!result?.available) throw new Error('expected available:true');
+    expect(result.files).toEqual([
+      { path: 'src/a.ts', status: 'modified', additions: 2, deletions: 1, patch: '@@ -1,2 +1,2 @@\n-old\n+new a\n context' },
+      {
+        path: 'src/new-name.ts',
+        previousPath: 'src/old-name.ts',
+        status: 'renamed',
+        additions: 0,
+        deletions: 0,
+        patchUnavailableReason: 'not-provided',
+      },
+      { path: 'src/untouched-in-diff.ts', status: 'modified', additions: 1, deletions: 0, patchUnavailableReason: 'not-provided' },
+    ]);
+  });
+
+  it('a malformed /files row (missing filename) is skipped, not fatal to the whole response', async () => {
+    const filesRows = [{ status: 'changed', additions: 1, deletions: 0 }, { filename: 'src/ok.ts', status: 'changed', additions: 1, deletions: 0 }];
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: router({ filesRows }), token: null });
+
+    const result = await driver.prDiff?.(9);
+    if (!result?.available) throw new Error('expected available:true');
+    expect(result.files).toEqual([{ path: 'src/ok.ts', status: 'modified', additions: 1, deletions: 0, patchUnavailableReason: 'not-provided' }]);
+  });
+
+  it('a binary entry in the diff maps to patchUnavailableReason:"binary", never a patch', async () => {
+    const filesRows = [{ filename: 'assets/logo.png', status: 'changed', additions: 0, deletions: 0 }];
+    const diffText = [
+      'diff --git a/assets/logo.png b/assets/logo.png',
+      'index 1111111..2222222 100644',
+      'GIT binary patch',
+      'literal 12',
+      'garbage',
+    ].join('\n');
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: router({ filesRows, diffText }), token: null });
+
+    const result = await driver.prDiff?.(9);
+    if (!result?.available) throw new Error('expected available:true');
+    expect(result.files).toEqual([{ path: 'assets/logo.png', status: 'modified', additions: 0, deletions: 0, patchUnavailableReason: 'binary' }]);
+  });
+
+  it('a patch over FJ_PR_PATCH_CAP is dropped with patchUnavailableReason:"too-large" and marks the result truncated', async () => {
+    const bigPatch = `@@ -1 +1 @@\n+${'x'.repeat(FJ_PR_PATCH_CAP + 10)}`;
+    const filesRows = [{ filename: 'src/big.ts', status: 'changed', additions: 1, deletions: 0 }];
+    const diffText = ['diff --git a/src/big.ts b/src/big.ts', '--- a/src/big.ts', '+++ b/src/big.ts', bigPatch].join('\n');
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: router({ filesRows, diffText }), token: null });
+
+    const result = await driver.prDiff?.(9);
+    if (!result?.available) throw new Error('expected available:true');
+    expect(result.files[0]).toMatchObject({ path: 'src/big.ts', patchUnavailableReason: 'too-large', truncated: true });
+    expect(result.files[0]!.patch).toBeUndefined();
+    expect(result.truncated).toBe(true);
+  });
+
+  it('caps the file list at FJ_PR_DIFF_FILE_CAP and marks the result truncated, with the cap in the reason', async () => {
+    const allRows = Array.from({ length: FJ_PR_DIFF_FILE_CAP + 1 }, (_, i) => ({
+      filename: `src/f${i}.ts`,
+      status: 'changed',
+      additions: 1,
+      deletions: 0,
+    }));
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.endsWith('/pulls/9')) return Promise.resolve(jsonResponse(pullRow({ number: 9 })));
+      if (s.includes('/pulls/9/files')) {
+        const page = Number(new URL(s).searchParams.get('page'));
+        const limit = Number(new URL(s).searchParams.get('limit'));
+        const start = (page - 1) * limit;
+        return Promise.resolve(
+          jsonResponse(allRows.slice(start, start + limit), { headers: { 'x-total-count': String(allRows.length) } }),
+        );
+      }
+      if (s.endsWith('/pulls/9.diff')) return Promise.resolve(textResponse(''));
+      throw new Error(`unexpected url ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.prDiff?.(9);
+    if (!result?.available) throw new Error('expected available:true');
+    expect(result.files).toHaveLength(FJ_PR_DIFF_FILE_CAP);
+    expect(result.truncated).toBe(true);
+    expect(result.reason).toContain(String(FJ_PR_DIFF_FILE_CAP));
+  });
+
+  it('a failed .diff request degrades to a files-only list, still available:true, every file not-provided', async () => {
+    const filesRows = [{ filename: 'src/a.ts', status: 'changed', additions: 1, deletions: 0 }];
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: router({ filesRows, diffFails: true }), token: null });
+
+    const result = await driver.prDiff?.(9);
+    if (!result?.available) throw new Error('expected available:true');
+    expect(result.files).toEqual([{ path: 'src/a.ts', status: 'modified', additions: 1, deletions: 0, patchUnavailableReason: 'not-provided' }]);
+  });
+
+  it('a 404 on GET pulls/{n} degrades to {available:false, reason}', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ message: 'not found' }, { status: 404 }));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.prDiff?.(999);
+    expect(result).toEqual({ available: false, reason: expect.any(String) });
+  });
+
+  it('caches for 60s keyed by headSha; refresh:true bypasses the cache', async () => {
+    const filesRows = [{ filename: 'src/a.ts', status: 'changed', additions: 1, deletions: 0 }];
+    const fetchMock = router({ filesRows });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+    const callCount = (pathIncludes: string) => fetchMock.mock.calls.filter((c) => String(c[0]).includes(pathIncludes)).length;
+
+    await driver.prDiff?.(9);
+    const filesAfterFirst = callCount('/files');
+    const diffAfterFirst = callCount('.diff');
+
+    await driver.prDiff?.(9); // warm cache — headSha is still re-read (needed to build the key), files/.diff are not
+    expect(callCount('/files')).toBe(filesAfterFirst);
+    expect(callCount('.diff')).toBe(diffAfterFirst);
+
+    await driver.prDiff?.(9, { refresh: true });
+    expect(callCount('/files')).toBeGreaterThan(filesAfterFirst);
+    expect(callCount('.diff')).toBeGreaterThan(diffAfterFirst);
   });
 });

@@ -588,20 +588,21 @@ never blocks startup):
 
 Declaring `"kind": "forgejo"` now wires up a real REST driver
 (`packages/cezar/src/server/forge/forgejo.ts`, behind `resolveForge`) instead of
-recognition-only. Health and the automations tab's availability check both call
-into it today and report the repo's true reachability, and so do the PR
-merge-state probe (mergeability, review decision, checks, eligibility) and the
-merge route itself: merging a Forgejo pull request goes through the same
-mutex, optimistic-concurrency preflight and status-code mapping the driver
-already applies everywhere else, not a GitHub-only shortcut. The PR-diff
-method is the one still incremental — until its real body lands, the driver
-answers it with the same quiet-degrade shape any undriven forge gets
-(`available:false`), never a crash. The issues/PR tab's own listing and the
-PR-diff view are further out still on the route side: their routes in
-`server.ts` call the GitHub-only code paths directly and don't go through
-`resolveForge` at all yet, so a Forgejo repo sees no listing there regardless
-of what the driver itself can already do. See the automations caveat below for
-the one other known gap.
+recognition-only, and the driver itself is complete: every method of the
+`ForgeDriver` interface — health/availability, issue and PR listing, PR status,
+draft-PR creation, the merge-state probe (mergeability, review decision,
+checks, eligibility) and merge itself (same mutex, optimistic-concurrency
+preflight and status-code mapping the driver applies everywhere else — never a
+GitHub-only shortcut), and the PR-diff view (files + patches, joined from
+`/pulls/{n}/files` and a parsed `/pulls/{n}.diff`) — talks to a real Forgejo
+instance. What is still incremental is the *wiring*, not the driver: health and
+the merge route already call into it (see `server.ts:1511`, `:4747`, `:4761`),
+but the issues/PR tab's listing and the PR-diff view are routed differently —
+their routes in `server.ts` call the GitHub-only code paths directly and don't
+go through `resolveForge` at all yet, so a Forgejo repo sees no listing or diff
+there regardless of what the driver itself can already do. Closing that
+routing gap is later work. See the automations caveat below for the one other
+known gap.
 
 **The key fills a gap; it never overrides.** cezar asks its host table first
 (`github.com` → the GitHub driver) and consults `forge.kind` only for a host
