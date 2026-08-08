@@ -92,7 +92,15 @@ function createPrAction(state: GitActionState): GitAction {
     return disabled(`Create PR unavailable — ${NO_WORKTREE_REASON}`)
   }
   if (state.forge === null) {
-    return disabled('Create PR unavailable — no supported forge remote (GitHub) detected')
+    return disabled('Create PR unavailable — no supported forge remote detected')
+  }
+  // `resolveForge` answers with a real driver for Forgejo, but `POST /runs/:id/pr` still runs the
+  // GitHub-only `createDraftPr` — which pushes the branch and only THEN calls `gh pr create`. An
+  // enabled button here is a mutation with no rollback, not a dead end, so the kind is gated until
+  // that route resolves its driver. The server refuses the same case with a 409; this mirrors it
+  // rather than letting the click discover it.
+  if (state.forge.kind !== 'github') {
+    return disabled('Create PR unavailable — not supported for this forge yet')
   }
   if (!state.forge.available) {
     return disabled(`Create PR unavailable — ${state.forge.reason ?? 'the forge is unreachable'}`)

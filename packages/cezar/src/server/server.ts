@@ -4145,6 +4145,18 @@ export function createApp(deps: ServerDeps) {
           400,
         );
       }
+      // `createDraftPr` is GitHub-only (it ends in `gh pr create`) and this route does NOT resolve
+      // a driver — but `resolveForge` now answers with a real Forgejo driver, so the cockpit's
+      // Create PR button is enabled for those repos. Letting the click through would push the
+      // branch (`createDraftPr` pushes BEFORE it creates) and only then fail, leaving the remote
+      // ahead with no rollback. Refuse before the mutation instead. Wiring this route through
+      // `resolveForge` — the Forgejo driver's own `createPR` is implemented and tested — is the
+      // later change that removes this gate. `git-actions.ts`'s `createPrAction` mirrors it so the
+      // button is disabled rather than the click discovering the 409.
+      const forge = resolveForge(await getRepoInfo(repoRoot), (await loadConfig(repoRoot)).forge);
+      if (forge && forge.kind !== 'github') {
+        return c.json({ error: 'Create PR is not supported for this forge yet', manual: `git merge ${run.branch}` }, 409);
+      }
       const outcome = await createDraftPr({
         repoRoot,
         run,
