@@ -166,6 +166,28 @@ export interface ForgeListOptions {
   limit?: number;
 }
 
+/** Result of `listIssues`/`listPRs` — flat, mirroring `githubDataSchema`
+ *  (`packages/contract/src/github.ts`, deliberately flat rather than a discriminated union) so the
+ *  `/api/github` route can compose one from the other without reshaping. A forge that cannot be
+ *  reached carries `available: false` + a human `reason` and STILL returns `items: []` — never an
+ *  empty list standing in for an unreported failure (a real "no issues" repo and a down forge used
+ *  to both serve `[]`, indistinguishably). The meta fields (`repo`/`syncedAt`/
+ *  `labelColors`) are optional so a route composing a byte-identical `GithubData` from this shape
+ *  can spread them conditionally without ever widening an absent key to `undefined` on the wire. */
+export interface ForgeListResult {
+  available: boolean;
+  /** Human-readable hint. Present on failure; the field itself is legal at `available:true` too
+   *  (`githubDataSchema`'s own doc: "never an error — a hint"), which a future `/api/github` route
+   *  composing `listIssues`+`listPRs` can use to surface "one of the two lists failed" without
+   *  gating the whole payload on it. */
+  reason?: string;
+  items: ForgeItem[];
+  /** owner/name, when known. */
+  repo?: string;
+  syncedAt?: string;
+  labelColors?: Record<string, string>;
+}
+
 /** Where an existing branch's PR stands — feeds the Create PR → View PR flip. */
 export interface ForgePrStatus {
   number: number;
@@ -273,8 +295,8 @@ export interface ForgeDriver {
   /** Non-blocking availability for the health path: cached result, or null while warming — never
    *  shells out on the read (keeps /api/health under the bookmarklet's latency budget). */
   detectCached(): ForgeAvailability | null;
-  listIssues(opts?: ForgeListOptions): Promise<ForgeItem[]>;
-  listPRs(opts?: ForgeListOptions): Promise<ForgeItem[]>;
+  listIssues(opts?: ForgeListOptions): Promise<ForgeListResult>;
+  listPRs(opts?: ForgeListOptions): Promise<ForgeListResult>;
   /** Draft-PR creation for the review gate (spec 009). Never throws. */
   createPR(input: DraftPrInput): Promise<DraftPrOutcome>;
   /** The branch's open/merged PR, or null when none (or the forge is down). */

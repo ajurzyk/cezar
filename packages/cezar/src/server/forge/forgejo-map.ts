@@ -82,7 +82,11 @@ export const forgejoIssueSchema = z.object({
   html_url: z.string(),
   user: forgejoUserSchema.nullish(),
   created_at: z.string(),
-  labels: z.array(z.object({ name: z.string() })).default([]),
+  // `color` (6-hex, no `#`) is absent on older servers, hence `.optional()` — mirrors
+  // `github.ts`'s own `ghLabel` schema. `listForgejo` (`forgejo.ts`) reads it via
+  // `mapForgejoIssue`'s `onLabel` callback to build the same repo-wide label→color map
+  // `fetchGithub` already does.
+  labels: z.array(z.object({ name: z.string(), color: z.string().optional() })).default([]),
   body: z.string().nullish(),
   comments: z.number().int().default(0),
   pull_request: z.unknown().nullish(),
@@ -98,7 +102,8 @@ export const forgejoPullSchema = z.object({
   html_url: z.string(),
   user: forgejoUserSchema.nullish(),
   created_at: z.string(),
-  labels: z.array(z.object({ name: z.string() })).default([]),
+  // See `forgejoIssueSchema.labels` above for why `color` is optional.
+  labels: z.array(z.object({ name: z.string(), color: z.string().optional() })).default([]),
   body: z.string().nullish(),
   comments: z.number().int().default(0),
   draft: z.boolean().default(false),
@@ -219,15 +224,24 @@ export const forgejoChangedFileSchema = z.object({
 });
 export type ForgejoChangedFile = z.infer<typeof forgejoChangedFileSchema>;
 
+/** Callback `mapForgejoIssue`/`mapForgejoPull` invoke once per label on a mapped row — how
+ *  `listForgejo` (`forgejo.ts`) builds its repo-wide label→color map (`ForgeListResult.labelColors`),
+ *  parity with `fetchGithub`'s own `recordColor` (`github.ts:420`). `color` absent
+ *  (older server, or the row got dropped before mapping) simply means that label contributes no
+ *  color — the caller's own "first color wins, missing color is skipped" policy lives there, not
+ *  here. */
+export type ForgejoLabelListener = (label: { name: string; color?: string }) => void;
+
 /**
  * Maps a raw `/issues` row to `ForgeItem`, or `null` when the row is actually a pull request (see
  * `forgejoIssueSchema`'s comment). `number`, never `id`: Forgejo's `id` is a global identifier
  * across the whole instance (PR #1 in one repo can have `id: 11`), but every user-facing surface
  * and URL path segment uses the per-repo `number` instead.
  */
-export function mapForgejoIssue(raw: unknown, webUrl: string): ForgeItem | null {
+export function mapForgejoIssue(raw: unknown, webUrl: string, onLabel?: ForgejoLabelListener): ForgeItem | null {
   const parsed = forgejoIssueSchema.parse(raw);
   if (parsed.pull_request != null) return null;
+  parsed.labels.forEach((l) => onLabel?.(l));
   return {
     kind: 'issue',
     number: parsed.number,
@@ -244,8 +258,9 @@ export function mapForgejoIssue(raw: unknown, webUrl: string): ForgeItem | null 
 /** Maps a raw `/pulls` row to `ForgeItem`. `checks: null` — parity with `github.ts`'s own list
  *  mapping (#664): a list of 30 rows never pays for 30 CI-status round-trips, only the row a user
  *  actually opens gets one (via `prStatus`/a future detail fetch). */
-export function mapForgejoPull(raw: unknown, webUrl: string): ForgeItem {
+export function mapForgejoPull(raw: unknown, webUrl: string, onLabel?: ForgejoLabelListener): ForgeItem {
   const parsed = forgejoPullSchema.parse(raw);
+  parsed.labels.forEach((l) => onLabel?.(l));
   return {
     kind: 'pr',
     number: parsed.number,
