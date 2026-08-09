@@ -176,8 +176,11 @@ describe('error normalization', () => {
   });
 
   it('surfaces the API JSON message field', async () => {
+    // Runs WITH a token on purpose: the anonymous 404 path adds its own private-repo hint (see the
+    // `hasToken` cases below), which would make this assertion about "the JSON message field wins"
+    // depend on a second, unrelated rule.
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ message: 'repository not found', url: 'x', errors: [] }, { status: 404 }));
-    const http = createForgejoHttp('http://forgejo:3000', { fetch: fetchMock, token: null });
+    const http = createForgejoHttp('http://forgejo:3000', { fetch: fetchMock, token: 'tok' });
     await expect(http.getJson('repos/o/r')).rejects.toMatchObject({ status: 404, message: 'repository not found' });
   });
 
@@ -186,6 +189,76 @@ describe('error normalization', () => {
     const http = createForgejoHttp('http://forgejo:3000', { fetch: fetchMock, token: null });
     await expect(http.getJson('repos/o/r')).rejects.toMatchObject({
       status: 401,
+      message: expect.stringContaining('CEZ_FORGEJO_TOKEN'),
+    });
+  });
+
+  /**
+   * Measured against the live instance (`q7010-dev:8929`, 15.0.3+gitea-1.22.0) on 2026-08-09:
+   * Forgejo echoes the credential it just REJECTED back inside the error body. That body used to be
+   * copied verbatim into `ForgejoHttpError#message`, which `forgejo.ts`'s `describeError` hands on
+   * as `ForgeAvailability.reason` — a string the cockpit renders to the user and the server writes
+   * to its log. The two shapes below are the real one and an invented one: the fix must be "do not
+   * trust a 401/403 body at all", not "strip the `[sha: …]` shape", because only the first shape was
+   * ever observed and the next Forgejo version is free to pick another.
+   */
+  describe.each([401, 403] as const)('a %i body is never echoed back to the user', (status) => {
+    it.each([
+      ['the live instance shape', (t: string) => `access token does not exist [sha: ${t}]`],
+      ['some other shape a future version might use', (t: string) => `credential ${t} was rejected`],
+    ])('%s', async (_label, buildMessage) => {
+      const token = 'nie-ma-takiego-tokenu-0000000000000000000';
+      const fetchMock = vi.fn().mockResolvedValue(
+        jsonResponse({ message: buildMessage(token), url: 'http://q7010-dev.local:8929/api/swagger' }, { status }),
+      );
+      const http = createForgejoHttp('http://forgejo:3000', { fetch: fetchMock, token });
+
+      const err = await http.getJson('repos/o/r').then(
+        () => null,
+        (e: unknown) => e as ForgejoHttpError,
+      );
+      expect(err).toBeInstanceOf(ForgejoHttpError);
+      expect(err!.message).not.toContain(token);
+      expect(err!.message).toContain('CEZ_FORGEJO_TOKEN'); // still actionable, just not verbatim
+    });
+  });
+
+  /**
+   * Also measured on the live instance: a PRIVATE repo answers an ANONYMOUS request with 404, not
+   * 401 — byte-identical to a repo that genuinely does not exist. "The target couldn't be found."
+   * is therefore an ambiguous answer whenever no token is configured, and saying so beats repeating
+   * the API's word for it. The `hasToken` gate is what keeps the hint honest: with a token in hand
+   * the ambiguity is gone, so the same 404 must NOT suggest setting a token that is already set.
+   */
+  it('a 404 with no token configured says the repository may be private', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({ message: "The target couldn't be found.", url: 'http://q7010-dev.local:8929/api/swagger', errors: [] }, { status: 404 }),
+    );
+    const http = createForgejoHttp('http://forgejo:3000', { fetch: fetchMock, token: null });
+    await expect(http.getJson('repos/o/r')).rejects.toMatchObject({
+      status: 404,
+      message: expect.stringContaining('CEZ_FORGEJO_TOKEN'),
+    });
+  });
+
+  it('a 404 WITH a token configured stays a plain "not found" — the private-repo hint would be a lie there', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({ message: "The target couldn't be found.", url: 'http://q7010-dev.local:8929/api/swagger', errors: [] }, { status: 404 }),
+    );
+    const http = createForgejoHttp('http://forgejo:3000', { fetch: fetchMock, token: 'a-valid-looking-token' });
+    await expect(http.getJson('repos/o/r')).rejects.toMatchObject({
+      status: 404,
+      message: expect.not.stringContaining('CEZ_FORGEJO_TOKEN'),
+    });
+  });
+
+  it('the private-repo hint follows the token, not the constructor — a blank token counts as absent', async () => {
+    // `hasToken()` already treats `''` as absent (an `export CEZ_FORGEJO_TOKEN=` in a shell script)
+    // and no Authorization header is sent, so the 404 really is anonymous and really is ambiguous.
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ message: "The target couldn't be found." }, { status: 404 }));
+    const http = createForgejoHttp('http://forgejo:3000', { fetch: fetchMock, token: '   ' });
+    await expect(http.getJson('repos/o/r')).rejects.toMatchObject({
+      status: 404,
       message: expect.stringContaining('CEZ_FORGEJO_TOKEN'),
     });
   });
