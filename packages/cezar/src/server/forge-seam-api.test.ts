@@ -325,6 +325,95 @@ describe('the forge seam — GET /github', () => {
     expect(body.issues).toEqual([]);
     expect(body.prs).toEqual([]);
   });
+
+  /** Three issue/PR rows each — enough to prove `?limit=1` actually truncates the composed
+   *  payload instead of just happening to match a single-row fixture. */
+  function issueRow(n: number): Record<string, unknown> {
+    return {
+      number: n,
+      title: `Issue ${n}`,
+      html_url: `http://forge.internal/acme/demo/issues/${n}`,
+      user: { login: 'ajr' },
+      created_at: '2026-08-07T10:00:00Z',
+      labels: [],
+      body: '',
+      comments: 0,
+      pull_request: null,
+    };
+  }
+  function prRow(n: number): Record<string, unknown> {
+    return {
+      number: n,
+      title: `PR ${n}`,
+      html_url: `http://forge.internal/acme/demo/pulls/${n}`,
+      user: { login: 'ajr' },
+      created_at: '2026-08-07T10:00:00Z',
+      labels: [],
+      body: '',
+      comments: 0,
+      draft: false,
+      additions: 1,
+      deletions: 1,
+      state: 'open',
+      merged: false,
+      head: { ref: `feat/${n}`, sha: 'a'.repeat(40) },
+    };
+  }
+
+  it('?limit= reaches listIssues/listPRs — the composed payload is capped to the requested size, not left at the default 30', async () => {
+    ({ repoRoot, store } = initForgejoRepo());
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/repos/acme/demo/issues?')) {
+        return Promise.resolve(jsonResponse([issueRow(1), issueRow(2), issueRow(3)], { headers: { 'x-total-count': '3' } }));
+      }
+      if (s.includes('/repos/acme/demo/pulls?')) {
+        return Promise.resolve(jsonResponse([prRow(1), prRow(2), prRow(3)], { headers: { 'x-total-count': '3' } }));
+      }
+      throw new Error(`unexpected url ${s}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const app = createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test' });
+    const res = await apiRequest(app, '/api/v1/github?limit=1');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as GithubData;
+    // A dropped `limit` argument would leave the driver's own default (30) in play, and all 3 rows
+    // the forge served would come back — this fails exactly that way if `?limit=` stops reaching
+    // `listIssues`/`listPRs`.
+    expect(body.issues).toHaveLength(1);
+    expect(body.prs).toHaveLength(1);
+  });
+
+  it('?refresh=1 reaches listIssues/listPRs — bypasses the list cache instead of replaying the first response', async () => {
+    ({ repoRoot, store } = initForgejoRepo());
+    let issueTitle = 'Issue v1';
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/repos/acme/demo/issues?')) {
+        return Promise.resolve(jsonResponse([{ ...issueRow(1), title: issueTitle }], { headers: { 'x-total-count': '1' } }));
+      }
+      if (s.includes('/repos/acme/demo/pulls?')) return Promise.resolve(jsonResponse([], { headers: { 'x-total-count': '0' } }));
+      throw new Error(`unexpected url ${s}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const app = createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test' });
+
+    const first = (await (await apiRequest(app, '/api/v1/github')).json()) as GithubData;
+    expect(first.issues[0]).toEqual(expect.objectContaining({ title: 'Issue v1' }));
+
+    issueTitle = 'Issue v2'; // the forge's state moves on
+    const stillCached = (await (await apiRequest(app, '/api/v1/github')).json()) as GithubData;
+    // Sanity leg: without `?refresh=1` this repeat call must be served from the list cache
+    // populated above — proves the test's own cache actually engaged, so the refresh assertion
+    // below is proving a bypass, not just an unrelated live read.
+    expect(stillCached.issues[0]).toEqual(expect.objectContaining({ title: 'Issue v1' }));
+
+    // A dropped `refresh` argument would leave this indistinguishable from the call above — still
+    // served from the cache populated by the first request, never seeing 'Issue v2'.
+    const refreshed = (await (await apiRequest(app, '/api/v1/github?refresh=1')).json()) as GithubData;
+    expect(refreshed.issues[0]).toEqual(expect.objectContaining({ title: 'Issue v2' }));
+  });
 });
 
 describe('the forge seam — GET /github/comments/:kind/:number', () => {
