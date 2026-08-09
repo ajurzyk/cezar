@@ -10,6 +10,7 @@ import type {
   ForgeCommentsData,
   ForgeDriver,
   ForgeItem,
+  ForgeListResult,
   ForgeMergeInput,
   ForgeMergeMethod,
   ForgeMergeResult,
@@ -377,6 +378,17 @@ const LIST_CACHE_MAX = 50;
 const CACHE_MS = 60_000;
 export const GH_MAX_LIMIT = 1000;
 
+/** Coalesces concurrent `fetchGithub` calls for the same `repoRoot` + capped `limit` into ONE `gh`
+ *  walk — `createGithubDriver.listIssues`/`listPRs` compose from two separate calls
+ *  into this function, and a caller (the `/api/github` route) that awaits both in parallel on a
+ *  cold cache would otherwise pay for `repo view`+`issue list`+`pr list` TWICE. Keyed identically
+ *  to `listCache`'s own lookup (`repoRoot`+`capped`), registered only after the cache is confirmed
+ *  missed (a hit never reaches this map), `finally` removes the entry so the NEXT cold call starts
+ *  its own fresh walk rather than replaying a stale promise — mirrors `mergeInflight`'s own
+ *  register/`finally`-release shape below (`:1579`), a `Set`-based mutex for a different job
+ *  (rejecting a second concurrent merge) than this `Map`'s (sharing one in-flight answer). */
+const listInflight = new Map<string, Promise<GithubData>>();
+
 export async function fetchGithub(repoRoot: string, refresh = false, limit = 30): Promise<GithubData> {
   if (process.env.CEZ_DRY_RUN === '1') return mockGithub();
   const capped = Math.min(Math.max(limit, 1), GH_MAX_LIMIT);
@@ -384,6 +396,19 @@ export async function fetchGithub(repoRoot: string, refresh = false, limit = 30)
   if (!refresh && hit && Date.now() - hit.at < CACHE_MS && hit.limit >= capped) {
     return hit.data;
   }
+  const inflightKey = `${repoRoot}\0${capped}`;
+  const inflight = listInflight.get(inflightKey);
+  if (inflight) return inflight;
+  const promise = fetchGithubUncached(repoRoot, capped);
+  listInflight.set(inflightKey, promise);
+  try {
+    return await promise;
+  } finally {
+    listInflight.delete(inflightKey);
+  }
+}
+
+async function fetchGithubUncached(repoRoot: string, capped: number): Promise<GithubData> {
   try {
     // No `comments` field — `gh … --json comments` ships full comment bodies.
     // No `statusCheckRollup` either (#664): the CI rollup for every open PR was the
@@ -1812,6 +1837,23 @@ export function mergePreflightAllowed(current: ForgePrMergeState, overrideRules 
   return current.canMerge || (overrideRules && current.canOverride);
 }
 
+/** Adapts `fetchGithub`'s single `GithubData` fetch (both lists + shared meta) to the
+ *  `ForgeListResult` `listIssues`/`listPRs` each return — one list picked by `which`,
+ *  the meta fields spread conditionally on presence (never widened to an `undefined` key: a spread
+ *  guarded by `!== undefined`/truthiness, per AGENTS.md's own `key: maybeUndefined` pitfall) so a
+ *  route composing `GithubData` back out of this shape reproduces the exact wire keys `fetchGithub`
+ *  itself would have sent. */
+function toListResult(data: GithubData, which: 'issues' | 'prs'): ForgeListResult {
+  return {
+    available: data.available,
+    items: data[which],
+    ...(data.reason !== undefined ? { reason: data.reason } : {}),
+    ...(data.repo !== undefined ? { repo: data.repo } : {}),
+    ...(data.syncedAt !== undefined ? { syncedAt: data.syncedAt } : {}),
+    ...(data.labelColors ? { labelColors: data.labelColors } : {}),
+  };
+}
+
 /** owner/repo parsed out of the origin remote — feeds `viewUrl`. */
 export interface GithubRepoRef {
   owner: string;
@@ -1830,9 +1872,9 @@ export function createGithubDriver(repoRoot: string, repoRef: GithubRepoRef | nu
     detect: () => detectGithub(repoRoot),
     detectCached: () => detectGithubCached(repoRoot),
 
-    listIssues: async (opts) => (await fetchGithub(repoRoot, opts?.refresh, opts?.limit)).issues,
+    listIssues: async (opts) => toListResult(await fetchGithub(repoRoot, opts?.refresh, opts?.limit), 'issues'),
 
-    listPRs: async (opts) => (await fetchGithub(repoRoot, opts?.refresh, opts?.limit)).prs,
+    listPRs: async (opts) => toListResult(await fetchGithub(repoRoot, opts?.refresh, opts?.limit), 'prs'),
     prDiff: (number, opts) => fetchGithubPrDiff(repoRoot, number, opts?.refresh),
 
     createPR: (input) => createDraftPr(input),

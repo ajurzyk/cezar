@@ -28,6 +28,7 @@ import {
   rebaseToWebUrl,
   type ForgejoBranchInfo,
   type ForgejoChangedFile,
+  type ForgejoLabelListener,
   type ForgejoPull,
   type ForgejoRepository,
 } from './forgejo-map.ts';
@@ -44,6 +45,7 @@ import type {
   ForgeDriver,
   ForgeItem,
   ForgeListOptions,
+  ForgeListResult,
   ForgeMergeInput,
   ForgeMergeResult,
   ForgePrChange,
@@ -115,7 +117,13 @@ const detectCache = new Map<string, DetectCacheEntry>();
 interface ListCacheEntry {
   at: number;
   limit: number;
-  data: ForgeItem[];
+  items: ForgeItem[];
+  labelColors: Record<string, string>;
+  /** Captured at fetch time, NOT recomputed on a cache hit — mirrors `github.ts`'s own
+   *  `listCache`, where `syncedAt` lives inside the cached `GithubData` rather than being derived
+   *  from `at` on read. A `syncedAt` that moved on every cache hit would misreport a stale answer
+   *  as freshly synced. */
+  syncedAt: string;
 }
 
 /** Keyed `repoRoot\0apiBase\0issues|prs` — same TTL/bound as `detectCache`, one entry per
@@ -392,6 +400,13 @@ function forgejoViewUrl(webUrl: string, owner: string, repo: string, kind: Forge
  * for the PR rows `/issues` also serves — never happens for `/pulls`, but sharing one function
  * keeps that filter written exactly once), and re-slice to `limit` since `paginate`'s own `want`
  * is a stop heuristic, not a hard cap (a full first page can overshoot a small `limit`).
+ *
+ * Returns `ForgeListResult` rather than a bare `ForgeItem[]`: a forge the driver could
+ * not reach must report `available:false` + a `reason`, never an empty list standing in for an
+ * unreported failure — the ambiguity `fetchGithub`'s equivalent (`github.ts`) never had, because a
+ * `gh` failure there always had somewhere to put a reason. `repo`/`syncedAt`/`labelColors` mirror
+ * `githubDataSchema`'s own optional meta fields, so `/api/github`'s route (a later package) can
+ * compose one `GithubData`-shaped response from `listIssues`+`listPRs` without reshaping either.
  */
 async function listForgejo(
   listKind: 'issues' | 'prs',
@@ -401,13 +416,16 @@ async function listForgejo(
   repo: string,
   webUrl: string,
   opts: ForgeListOptions | undefined,
-): Promise<ForgeItem[]> {
-  if (process.env.CEZ_DRY_RUN === '1') return [];
+): Promise<ForgeListResult> {
+  if (process.env.CEZ_DRY_RUN === '1') return { available: true, items: [] };
   const limit = Math.min(Math.max(opts?.limit ?? 30, 1), FJ_MAX_LIST_LIMIT);
   const key = listCacheKey(repoRoot, http.apiBase, listKind);
+  const repoHandle = `${owner}/${repo}`;
   if (!opts?.refresh) {
     const hit = listCache.get(key);
-    if (hit && Date.now() - hit.at < CACHE_MS && hit.limit >= limit) return hit.data.slice(0, limit);
+    if (hit && Date.now() - hit.at < CACHE_MS && hit.limit >= limit) {
+      return { available: true, items: hit.items.slice(0, limit), repo: repoHandle, syncedAt: hit.syncedAt, labelColors: hit.labelColors };
+    }
   }
 
   const repoPrefix = repoPath(owner, repo);
@@ -416,11 +434,19 @@ async function listForgejo(
   // is the second, belt-and-braces layer for whatever slips through.
   const query = listKind === 'issues' ? 'state=open&type=issues' : 'state=open';
   const segment = listKind === 'issues' ? 'issues' : 'pulls';
-  const mapRow: (raw: unknown, webUrl: string) => ForgeItem | null = listKind === 'issues' ? mapForgejoIssue : mapForgejoPull;
+  const mapRow: (raw: unknown, webUrl: string, onLabel?: ForgejoLabelListener) => ForgeItem | null =
+    listKind === 'issues' ? mapForgejoIssue : mapForgejoPull;
 
   try {
     const page = await http.paginate((p, l) => `${repoPrefix}/${segment}?${query}&page=${p}&limit=${l}`, { want: limit });
     const items: ForgeItem[] = [];
+    // One repo-wide label→color map, filled as each row is mapped — parity with `fetchGithub`'s
+    // own `recordColor` (`github.ts:420`): first color wins, a label with no color contributes
+    // nothing.
+    const labelColors: Record<string, string> = {};
+    const recordColor: ForgejoLabelListener = (l) => {
+      if (l.color && !labelColors[l.name]) labelColors[l.name] = l.color;
+    };
     for (const row of page.rows) {
       // Per-row, not per-walk: one row that fails `forgejoIssueSchema`/`forgejoPullSchema` (or
       // whose `html_url` is not absolute, which makes `rebaseToWebUrl` throw a `TypeError`) must
@@ -429,21 +455,23 @@ async function listForgejo(
       // `resolveForgejoPrStatus` and `forgejoPrDiff` already apply to their own walks.
       let item: ForgeItem | null;
       try {
-        item = mapRow(row, webUrl);
+        item = mapRow(row, webUrl, recordColor);
       } catch {
         continue;
       }
       if (item) items.push(item);
       if (items.length >= limit) break;
     }
-    listCache.set(key, { at: Date.now(), limit, data: items });
+    const syncedAt = new Date().toISOString();
+    listCache.set(key, { at: Date.now(), limit, items, labelColors, syncedAt });
     evictOldest(listCache, LIST_CACHE_MAX);
-    return items;
-  } catch {
-    // Never throw from a read — an HTTP failure or a timeout degrades to an empty list here.
-    // (A malformed individual ROW no longer reaches this catch: it is skipped in the loop above.)
-    // Deliberately NOT cached: a transient forge outage must not pin an empty list for the TTL.
-    return [];
+    return { available: true, items: items.slice(0, limit), repo: repoHandle, syncedAt, labelColors };
+  } catch (err) {
+    // Never throw from a read — an HTTP failure or a timeout degrades to `available:false` + a
+    // reason here (previously a silent `[]`, indistinguishable from "no items"). (A malformed
+    // individual ROW no longer reaches this catch: it is skipped in the loop above.) Deliberately
+    // NOT cached: a transient forge outage must not pin a failure answer for the TTL.
+    return { available: false, reason: describeError(err), items: [] };
   }
 }
 

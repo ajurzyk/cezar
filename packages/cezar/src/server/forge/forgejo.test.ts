@@ -258,9 +258,10 @@ describe('listIssues', () => {
     const fetchMock = vi.fn().mockImplementation(pageOf(rows, rows.length));
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
 
-    const items = await driver.listIssues();
+    const result = await driver.listIssues();
 
-    expect(items).toEqual([
+    expect(result.available).toBe(true);
+    expect(result.items).toEqual([
       expect.objectContaining({ kind: 'issue', number: 1, url: 'https://forge.example.com/acme/demo/issues/1' }),
     ]);
     const requestedUrl = String(fetchMock.mock.calls[0]![0]);
@@ -284,15 +285,59 @@ describe('listIssues', () => {
     // exhausted — proving the driver-level `limit` re-slice runs, not `paginate`'s own stop logic.
     const fetchMock = vi.fn().mockImplementation(pageOf(Array.from({ length: 50 }, (_, i) => issueRow(i + 1))));
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
-    const items = await driver.listIssues({ limit: 10 });
-    expect(items).toHaveLength(10);
+    const result = await driver.listIssues({ limit: 10 });
+    expect(result.items).toHaveLength(10);
     expect(fetchMock).toHaveBeenCalledTimes(1); // one full page already satisfies want=10
   });
 
-  it('degrades to [] on an HTTP error, never throws', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ message: 'nope' }, { status: 500 }));
+  it('a transport failure resolves available:false with a reason, NEVER a silent []', async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
-    await expect(driver.listIssues()).resolves.toEqual([]);
+
+    const result = await driver.listIssues({ refresh: true });
+
+    expect(result.available).toBe(false);
+    expect(result.items).toEqual([]);
+    expect(result.reason).toEqual(expect.any(String));
+    expect(result.reason).not.toBe('');
+  });
+
+  it('a 401 reports a CEZ_FORGEJO_TOKEN hint without echoing the rejected token', async () => {
+    const token = 'nie-ma-takiego-tokenu-0000000000000000000';
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse({ message: `access token does not exist [sha: ${token}]` }, { status: 401 }));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token });
+
+    const result = await driver.listIssues({ refresh: true });
+
+    expect(result.available).toBe(false);
+    expect(result.reason).toContain('CEZ_FORGEJO_TOKEN');
+    expect(result.reason).not.toContain(token);
+  });
+
+  it('a happy path carries repo, syncedAt and labelColors alongside the mapped items', async () => {
+    const rows = [issueRow(1, { labels: [{ name: 'bug', color: 'd73a4a' }] })];
+    const fetchMock = vi.fn().mockImplementation(pageOf(rows, rows.length));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listIssues({ refresh: true });
+
+    expect(result.repo).toBe('acme/demo');
+    expect(result.labelColors).toEqual({ bug: 'd73a4a' });
+    expect(() => new Date(result.syncedAt as string).toISOString()).not.toThrow();
+    expect(result.items).toEqual([expect.objectContaining({ kind: 'issue', number: 1, labels: ['bug'] })]);
+  });
+
+  it('a cache hit within TTL returns the SAME syncedAt as the original fetch', async () => {
+    const fetchMock = vi.fn().mockImplementation(pageOf([issueRow(1)], 1));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const first = await driver.listIssues({ refresh: true });
+    const second = await driver.listIssues();
+
+    expect(second.syncedAt).toBe(first.syncedAt);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('skips a malformed row and keeps the rest, instead of wiping the whole list', async () => {
@@ -302,16 +347,16 @@ describe('listIssues', () => {
     const fetchMock = vi.fn().mockImplementation(pageOf(rows, rows.length));
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
 
-    const items = await driver.listIssues({ refresh: true });
+    const result = await driver.listIssues({ refresh: true });
 
-    expect(items).toEqual([expect.objectContaining({ kind: 'issue', number: 7 })]);
+    expect(result.items).toEqual([expect.objectContaining({ kind: 'issue', number: 7 })]);
   });
 
-  it('CEZ_DRY_RUN=1 short-circuits to [] without calling fetch', async () => {
+  it('CEZ_DRY_RUN=1 short-circuits to an available empty list without calling fetch', async () => {
     process.env.CEZ_DRY_RUN = '1';
     const fetchMock = vi.fn();
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
-    await expect(driver.listIssues()).resolves.toEqual([]);
+    await expect(driver.listIssues()).resolves.toEqual({ available: true, items: [] });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
@@ -328,9 +373,10 @@ describe('listPRs', () => {
     const fetchMock = vi.fn().mockImplementation(pageOf(rows, rows.length));
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
 
-    const items = await driver.listPRs();
+    const result = await driver.listPRs();
 
-    expect(items).toEqual([
+    expect(result.available).toBe(true);
+    expect(result.items).toEqual([
       expect.objectContaining({ kind: 'pr', number: 9, title: 'add y', isDraft: true, labels: ['draft'], checks: null }),
     ]);
     const requestedUrl = String(fetchMock.mock.calls[0]![0]);
@@ -338,11 +384,34 @@ describe('listPRs', () => {
     expect(requestedUrl).not.toContain('type=issues');
   });
 
-  it('CEZ_DRY_RUN=1 short-circuits to [] without calling fetch', async () => {
+  it('a transport failure resolves available:false with a reason, NEVER a silent []', async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listPRs({ refresh: true });
+
+    expect(result.available).toBe(false);
+    expect(result.items).toEqual([]);
+    expect(result.reason).toEqual(expect.any(String));
+    expect(result.reason).not.toBe('');
+  });
+
+  it('a happy path carries repo and syncedAt alongside the mapped items', async () => {
+    const rows = [pullRow({ number: 9 })];
+    const fetchMock = vi.fn().mockImplementation(pageOf(rows, rows.length));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listPRs({ refresh: true });
+
+    expect(result.repo).toBe('acme/demo');
+    expect(() => new Date(result.syncedAt as string).toISOString()).not.toThrow();
+  });
+
+  it('CEZ_DRY_RUN=1 short-circuits to an available empty list without calling fetch', async () => {
     process.env.CEZ_DRY_RUN = '1';
     const fetchMock = vi.fn();
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
-    await expect(driver.listPRs()).resolves.toEqual([]);
+    await expect(driver.listPRs()).resolves.toEqual({ available: true, items: [] });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
