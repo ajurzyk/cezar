@@ -258,9 +258,10 @@ describe('listIssues', () => {
     const fetchMock = vi.fn().mockImplementation(pageOf(rows, rows.length));
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
 
-    const items = await driver.listIssues();
+    const result = await driver.listIssues();
 
-    expect(items).toEqual([
+    expect(result.available).toBe(true);
+    expect(result.items).toEqual([
       expect.objectContaining({ kind: 'issue', number: 1, url: 'https://forge.example.com/acme/demo/issues/1' }),
     ]);
     const requestedUrl = String(fetchMock.mock.calls[0]![0]);
@@ -284,15 +285,59 @@ describe('listIssues', () => {
     // exhausted — proving the driver-level `limit` re-slice runs, not `paginate`'s own stop logic.
     const fetchMock = vi.fn().mockImplementation(pageOf(Array.from({ length: 50 }, (_, i) => issueRow(i + 1))));
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
-    const items = await driver.listIssues({ limit: 10 });
-    expect(items).toHaveLength(10);
+    const result = await driver.listIssues({ limit: 10 });
+    expect(result.items).toHaveLength(10);
     expect(fetchMock).toHaveBeenCalledTimes(1); // one full page already satisfies want=10
   });
 
-  it('degrades to [] on an HTTP error, never throws', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ message: 'nope' }, { status: 500 }));
+  it('a transport failure resolves available:false with a reason, NEVER a silent []', async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
-    await expect(driver.listIssues()).resolves.toEqual([]);
+
+    const result = await driver.listIssues({ refresh: true });
+
+    expect(result.available).toBe(false);
+    expect(result.items).toEqual([]);
+    expect(result.reason).toEqual(expect.any(String));
+    expect(result.reason).not.toBe('');
+  });
+
+  it('a 401 reports a CEZ_FORGEJO_TOKEN hint without echoing the rejected token', async () => {
+    const token = 'nie-ma-takiego-tokenu-0000000000000000000';
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse({ message: `access token does not exist [sha: ${token}]` }, { status: 401 }));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token });
+
+    const result = await driver.listIssues({ refresh: true });
+
+    expect(result.available).toBe(false);
+    expect(result.reason).toContain('CEZ_FORGEJO_TOKEN');
+    expect(result.reason).not.toContain(token);
+  });
+
+  it('a happy path carries repo, syncedAt and labelColors alongside the mapped items', async () => {
+    const rows = [issueRow(1, { labels: [{ name: 'bug', color: 'd73a4a' }] })];
+    const fetchMock = vi.fn().mockImplementation(pageOf(rows, rows.length));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listIssues({ refresh: true });
+
+    expect(result.repo).toBe('acme/demo');
+    expect(result.labelColors).toEqual({ bug: 'd73a4a' });
+    expect(() => new Date(result.syncedAt as string).toISOString()).not.toThrow();
+    expect(result.items).toEqual([expect.objectContaining({ kind: 'issue', number: 1, labels: ['bug'] })]);
+  });
+
+  it('a cache hit within TTL returns the SAME syncedAt as the original fetch', async () => {
+    const fetchMock = vi.fn().mockImplementation(pageOf([issueRow(1)], 1));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const first = await driver.listIssues({ refresh: true });
+    const second = await driver.listIssues();
+
+    expect(second.syncedAt).toBe(first.syncedAt);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('skips a malformed row and keeps the rest, instead of wiping the whole list', async () => {
@@ -302,17 +347,48 @@ describe('listIssues', () => {
     const fetchMock = vi.fn().mockImplementation(pageOf(rows, rows.length));
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
 
-    const items = await driver.listIssues({ refresh: true });
+    const result = await driver.listIssues({ refresh: true });
 
-    expect(items).toEqual([expect.objectContaining({ kind: 'issue', number: 7 })]);
+    expect(result.items).toEqual([expect.objectContaining({ kind: 'issue', number: 7 })]);
   });
 
-  it('CEZ_DRY_RUN=1 short-circuits to [] without calling fetch', async () => {
+  it('CEZ_DRY_RUN=1 short-circuits to an available empty list without calling fetch', async () => {
     process.env.CEZ_DRY_RUN = '1';
     const fetchMock = vi.fn();
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
-    await expect(driver.listIssues()).resolves.toEqual([]);
+    await expect(driver.listIssues()).resolves.toEqual({ available: true, items: [] });
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('every row failing to parse resolves available:false with a reason, NOT a false "no open issues", and is NOT cached', async () => {
+    const rows = [{ number: 'not-a-number' }, { number: 'also-not-a-number' }];
+    const fetchMock = vi.fn().mockImplementation(pageOf(rows, rows.length));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listIssues({ refresh: true });
+
+    expect(result.available).toBe(false);
+    expect(result.items).toEqual([]);
+    expect(result.reason).toEqual(expect.any(String));
+    expect(result.reason).not.toBe('');
+
+    // Deliberately not cached: an immediate follow-up call (no refresh) must re-fetch, not serve
+    // the failed read for 60s.
+    await driver.listIssues();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('a response of only legitimate PR-rows (mapForgejoIssue returns null for each, never throws) stays available:true with an empty list, not a false "all rows failed to parse"', async () => {
+    const rows = [
+      issueRow(1, { pull_request: { merged: false, merged_at: null } }),
+      issueRow(2, { pull_request: { merged: true, merged_at: '2026-01-01T00:00:00Z' } }),
+    ];
+    const fetchMock = vi.fn().mockImplementation(pageOf(rows, rows.length));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listIssues({ refresh: true });
+
+    expect(result).toEqual(expect.objectContaining({ available: true, items: [] }));
   });
 });
 
@@ -328,9 +404,10 @@ describe('listPRs', () => {
     const fetchMock = vi.fn().mockImplementation(pageOf(rows, rows.length));
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
 
-    const items = await driver.listPRs();
+    const result = await driver.listPRs();
 
-    expect(items).toEqual([
+    expect(result.available).toBe(true);
+    expect(result.items).toEqual([
       expect.objectContaining({ kind: 'pr', number: 9, title: 'add y', isDraft: true, labels: ['draft'], checks: null }),
     ]);
     const requestedUrl = String(fetchMock.mock.calls[0]![0]);
@@ -338,12 +415,51 @@ describe('listPRs', () => {
     expect(requestedUrl).not.toContain('type=issues');
   });
 
-  it('CEZ_DRY_RUN=1 short-circuits to [] without calling fetch', async () => {
+  it('a transport failure resolves available:false with a reason, NEVER a silent []', async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listPRs({ refresh: true });
+
+    expect(result.available).toBe(false);
+    expect(result.items).toEqual([]);
+    expect(result.reason).toEqual(expect.any(String));
+    expect(result.reason).not.toBe('');
+  });
+
+  it('a happy path carries repo and syncedAt alongside the mapped items', async () => {
+    const rows = [pullRow({ number: 9 })];
+    const fetchMock = vi.fn().mockImplementation(pageOf(rows, rows.length));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listPRs({ refresh: true });
+
+    expect(result.repo).toBe('acme/demo');
+    expect(() => new Date(result.syncedAt as string).toISOString()).not.toThrow();
+  });
+
+  it('CEZ_DRY_RUN=1 short-circuits to an available empty list without calling fetch', async () => {
     process.env.CEZ_DRY_RUN = '1';
     const fetchMock = vi.fn();
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
-    await expect(driver.listPRs()).resolves.toEqual([]);
+    await expect(driver.listPRs()).resolves.toEqual({ available: true, items: [] });
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('every row failing to parse resolves available:false with a reason, NOT a false "no open pull requests", and is NOT cached', async () => {
+    const rows = [{ number: 'not-a-number' }, { title: 'missing everything else' }];
+    const fetchMock = vi.fn().mockImplementation(pageOf(rows, rows.length));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listPRs({ refresh: true });
+
+    expect(result.available).toBe(false);
+    expect(result.items).toEqual([]);
+    expect(result.reason).toEqual(expect.any(String));
+    expect(result.reason).not.toBe('');
+
+    await driver.listPRs();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -367,11 +483,8 @@ describe('prStatus', () => {
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
 
     await expect(driver.prStatus('feat/x')).resolves.toEqual({
-      number: 5,
-      url: 'https://forge.example.com/acme/demo/pulls/5',
-      state: 'open',
-      isDraft: false,
-      checks: 'passing',
+      available: true,
+      status: { number: 5, url: 'https://forge.example.com/acme/demo/pulls/5', state: 'open', isDraft: false, checks: 'passing' },
     });
   });
 
@@ -386,11 +499,8 @@ describe('prStatus', () => {
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
 
     await expect(driver.prStatus('feat/x')).resolves.toEqual({
-      number: 5,
-      url: 'https://forge.example.com/acme/demo/pulls/5',
-      state: 'open',
-      isDraft: false,
-      checks: null,
+      available: true,
+      status: { number: 5, url: 'https://forge.example.com/acme/demo/pulls/5', state: 'open', isDraft: false, checks: null },
     });
   });
 
@@ -403,8 +513,8 @@ describe('prStatus', () => {
       return Promise.resolve(jsonResponse({ statuses: null }));
     });
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
-    const status = await driver.prStatus('feat/x');
-    expect(status?.state).toBe('merged');
+    const result = await driver.prStatus('feat/x');
+    expect(result.available && result.status?.state).toBe('merged');
   });
 
   it('prefers an open match over an earlier closed match with the same head.ref', async () => {
@@ -420,9 +530,9 @@ describe('prStatus', () => {
       return Promise.resolve(jsonResponse({ statuses: null }));
     });
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
-    const status = await driver.prStatus('feat/x');
-    expect(status?.number).toBe(5);
-    expect(status?.state).toBe('open');
+    const result = await driver.prStatus('feat/x');
+    expect(result.available && result.status?.number).toBe(5);
+    expect(result.available && result.status?.state).toBe('open');
   });
 
   it('an exhausted walk (stoppedShort:false) with no match falls back to /pulls/{base}/{head}', async () => {
@@ -451,15 +561,25 @@ describe('prStatus', () => {
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
 
     await expect(driver.prStatus('feat/skipped-branch')).resolves.toEqual({
-      number: 7,
-      url: 'https://forge.example.com/acme/demo/pulls/7',
-      state: 'merged',
-      isDraft: false,
-      checks: null,
+      available: true,
+      status: { number: 7, url: 'https://forge.example.com/acme/demo/pulls/7', state: 'merged', isDraft: false, checks: null },
     });
   });
 
-  it('an unfinished walk (stoppedShort:true) returns null WITHOUT ever calling the base/head fallback', async () => {
+  it('a complete walk with no match at all and a 404 fallback reports a proven "no PR"', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/pulls?state=all')) return Promise.resolve(jsonResponse([], { headers: { 'x-total-count': '0' } }));
+      if (s.endsWith('/repos/acme/demo')) return Promise.resolve(jsonResponse({ default_branch: 'main' }));
+      if (s.includes('/pulls/main/feat/x')) return Promise.resolve(jsonResponse({ message: 'not found' }, { status: 404 }));
+      throw new Error(`unexpected url ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    await expect(driver.prStatus('feat/x')).resolves.toEqual({ available: true, status: null });
+  });
+
+  it('an unfinished walk (stoppedShort:true, a one-off budget stop) reports available:false WITHOUT ever calling the base/head fallback', async () => {
     let now = 0;
     const fetchMock = vi.fn().mockImplementation((_url: URL | string) => {
       now += 14_000; // leaves < minPageMs (2s) of the default 15s budget after one page
@@ -467,12 +587,12 @@ describe('prStatus', () => {
     });
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, now: () => now, token: null });
 
-    await expect(driver.prStatus('feat/x')).resolves.toBeNull();
+    await expect(driver.prStatus('feat/x')).resolves.toEqual({ available: false, reason: 'the pull request search did not finish' });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(String(fetchMock.mock.calls[0]![0])).toContain('/pulls?state=all');
   });
 
-  it('a primary walk that deterministically exhausts its own page/row ceiling (never an error, never a budget timeout) is cached briefly, not re-walked in full on every call', async () => {
+  it('a primary walk that deterministically exhausts its own page/row ceiling (stopReason:"limit") reports available:false and is cached briefly, not re-walked in full on every call', async () => {
     // Every page is a full 50-row page (never short) with a huge x-total-count (5000) that the walk
     // never gets close to — the walk stops ONLY because it ran out of its own fixed budget
     // (FJ_LIST_MAX_PAGES pages / FJ_MAX_LIST_LIMIT rows), the exact "persistent ceiling" trait a
@@ -490,11 +610,12 @@ describe('prStatus', () => {
     });
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
 
-    await expect(driver.prStatus('feat/x')).resolves.toBeNull();
+    const expected = { available: false, reason: 'the pull request history is larger than the search budget' };
+    await expect(driver.prStatus('feat/x')).resolves.toEqual(expected);
     expect(walkCalls).toBe(FJ_LIST_MAX_PAGES); // hit the walk's own ceiling, not an error or a timeout
     const callsAfterFirst = walkCalls;
 
-    await expect(driver.prStatus('feat/x')).resolves.toBeNull();
+    await expect(driver.prStatus('feat/x')).resolves.toEqual(expected);
     // A repo this large hits the SAME ceiling on every call — unlike a one-off network/HTTP failure,
     // this is worth a short negative-TTL cache instead of repeating the full, expensive walk.
     expect(walkCalls).toBe(callsAfterFirst);
@@ -527,20 +648,35 @@ describe('prStatus', () => {
     }
   });
 
-  it('caches for 60s', async () => {
+  it('caches a resolved match for 60s', async () => {
     const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
       const s = String(url);
       if (s.includes('/pulls?state=all')) return Promise.resolve(jsonResponse([pullRow()], { headers: { 'x-total-count': '1' } }));
       return Promise.resolve(jsonResponse({ statuses: null }));
     });
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
-    await driver.prStatus('feat/x');
+    const first = await driver.prStatus('feat/x');
+    expect(first.available).toBe(true);
     const callsAfterFirst = fetchMock.mock.calls.length;
-    await driver.prStatus('feat/x');
+    await expect(driver.prStatus('feat/x')).resolves.toEqual(first);
     expect(fetchMock.mock.calls.length).toBe(callsAfterFirst);
   });
 
-  it('a network/HTTP failure on the initial walk degrades to null and is NOT cached — a later call retries instead of serving a stale "no PR"', async () => {
+  it('a 401 reports a CEZ_FORGEJO_TOKEN hint without echoing the rejected token', async () => {
+    const token = 'nie-ma-takiego-tokenu-0000000000000000000';
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse({ message: `access token does not exist [sha: ${token}]` }, { status: 401 }));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token });
+
+    const result = await driver.prStatus('feat/x');
+
+    expect(result.available).toBe(false);
+    expect(!result.available && result.reason).toContain('CEZ_FORGEJO_TOKEN');
+    expect(!result.available && result.reason).not.toContain(token);
+  });
+
+  it('a network/HTTP failure on the initial walk resolves available:false and is NOT cached — a later call retries instead of serving a stale "no PR"', async () => {
     let walkCalls = 0;
     const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
       const s = String(url);
@@ -552,14 +688,15 @@ describe('prStatus', () => {
     });
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
 
-    await expect(driver.prStatus('feat/x')).resolves.toBeNull();
+    const expected = { available: false, reason: 'network down' };
+    await expect(driver.prStatus('feat/x')).resolves.toEqual(expected);
     expect(walkCalls).toBe(1);
 
-    await expect(driver.prStatus('feat/x')).resolves.toBeNull();
+    await expect(driver.prStatus('feat/x')).resolves.toEqual(expected);
     expect(walkCalls).toBe(2); // a failed read must not poison the 60s cache with "no PR"
   });
 
-  it('an unfinished walk (stoppedShort:true) with no match is NOT cached — a later call retries instead of serving a stale "no PR"', async () => {
+  it('an unfinished walk (stoppedShort:true, a one-off error stop) with no match is NOT cached — a later call retries instead of serving a stale "no PR"', async () => {
     // Page 1 is a full, non-matching page (so the walk does not throw and keeps what it collected —
     // parity with `fetchForgejoReviews`'s stoppedShort test above); page 2 500s, tripping
     // `stoppedShort:true` with the walk still unproven. The fallback could shadow a real match on the
@@ -580,13 +717,14 @@ describe('prStatus', () => {
     });
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
 
-    await expect(driver.prStatus('feat/x')).resolves.toBeNull();
+    const expected = { available: false, reason: 'the pull request search did not finish' };
+    await expect(driver.prStatus('feat/x')).resolves.toEqual(expected);
     expect(walkCalls).toBe(1);
-    await expect(driver.prStatus('feat/x')).resolves.toBeNull();
+    await expect(driver.prStatus('feat/x')).resolves.toEqual(expected);
     expect(walkCalls).toBe(2); // a stopped-short walk must not poison the 60s cache with "no PR"
   });
 
-  it('a row this schema cannot parse cannot be ruled out as the match — the walk must not settle on a proven "no match" and a later fallback 404 must not be cached as "no PR"', async () => {
+  it('a row this schema cannot parse cannot be ruled out as the match — resolves available:false, never reaches the fallback, and is NOT cached', async () => {
     // The walk itself looks COMPLETE (short page, matching x-total-count) — `page.stoppedShort` is
     // false here, isolating this from the `stoppedShort:true` case above. The one row this page
     // returns fails `forgejoPullSchema.parse` (missing every required field), so this driver never
@@ -608,10 +746,11 @@ describe('prStatus', () => {
     });
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
 
-    await expect(driver.prStatus('feat/x')).resolves.toBeNull();
+    const expected = { available: false, reason: 'a pull request row could not be parsed' };
+    await expect(driver.prStatus('feat/x')).resolves.toEqual(expected);
     expect(walkCalls).toBe(1);
-    expect(fallbackCalls).toBe(0); // an unparseable row must short-circuit straight to UNRESOLVED, never reach the fallback
-    await expect(driver.prStatus('feat/x')).resolves.toBeNull();
+    expect(fallbackCalls).toBe(0); // an unparseable row must short-circuit straight to unresolved, never reach the fallback
+    await expect(driver.prStatus('feat/x')).resolves.toEqual(expected);
     expect(walkCalls).toBe(2); // must not poison the 60s cache with "no PR" off an unproven read
     expect(fallbackCalls).toBe(0);
   });
@@ -633,9 +772,10 @@ describe('prStatus', () => {
     });
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
 
-    await expect(driver.prStatus('feat/skipped-branch')).resolves.toBeNull();
+    const expected = { available: false, reason: 'the repository default branch could not be resolved' };
+    await expect(driver.prStatus('feat/skipped-branch')).resolves.toEqual(expected);
     expect(repoCalls).toBe(1);
-    await expect(driver.prStatus('feat/skipped-branch')).resolves.toBeNull();
+    await expect(driver.prStatus('feat/skipped-branch')).resolves.toEqual(expected);
     expect(repoCalls).toBe(2); // an unresolved default branch must not poison the 60s cache with "no PR"
   });
 
@@ -656,9 +796,11 @@ describe('prStatus', () => {
     });
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
 
-    await expect(driver.prStatus('feat/skipped-branch')).resolves.toBeNull();
+    const first = await driver.prStatus('feat/skipped-branch');
+    expect(first.available).toBe(false);
     expect(fallbackCalls).toBe(1);
-    await expect(driver.prStatus('feat/skipped-branch')).resolves.toBeNull();
+    const second = await driver.prStatus('feat/skipped-branch');
+    expect(second.available).toBe(false);
     expect(fallbackCalls).toBe(2); // a transient 500 on the fallback must not poison the 60s cache with "no PR"
   });
 
@@ -677,13 +819,13 @@ describe('prStatus', () => {
     });
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
 
-    await expect(driver.prStatus('feat/skipped-branch')).resolves.toBeNull();
+    await expect(driver.prStatus('feat/skipped-branch')).resolves.toEqual({ available: true, status: null });
     expect(fallbackCalls).toBe(1);
-    await expect(driver.prStatus('feat/skipped-branch')).resolves.toBeNull();
+    await expect(driver.prStatus('feat/skipped-branch')).resolves.toEqual({ available: true, status: null });
     expect(fallbackCalls).toBe(1); // a proven 404 stays cached, same as before this fix
   });
 
-  it('a matched row with a non-absolute html_url degrades to null instead of throwing (rebaseToWebUrl cannot parse it)', async () => {
+  it('a matched row with a non-absolute html_url resolves available:false instead of throwing (rebaseToWebUrl cannot parse it)', async () => {
     const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
       const s = String(url);
       if (s.includes('/pulls?state=all')) {
@@ -693,7 +835,10 @@ describe('prStatus', () => {
     });
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
 
-    await expect(driver.prStatus('feat/x')).resolves.toBeNull();
+    await expect(driver.prStatus('feat/x')).resolves.toEqual({
+      available: false,
+      reason: 'the matched pull request could not be fully read',
+    });
   });
 
   it('a matched row with a non-absolute html_url is NOT cached — the PR was proven to exist, so the degrade must not pin "no PR" for 60s', async () => {
@@ -708,13 +853,14 @@ describe('prStatus', () => {
     });
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
 
-    await expect(driver.prStatus('feat/x')).resolves.toBeNull();
+    const expected = { available: false, reason: 'the matched pull request could not be fully read' };
+    await expect(driver.prStatus('feat/x')).resolves.toEqual(expected);
     expect(walkCalls).toBe(1);
-    await expect(driver.prStatus('feat/x')).resolves.toBeNull();
+    await expect(driver.prStatus('feat/x')).resolves.toEqual(expected);
     expect(walkCalls).toBe(2); // a proven match that only failed to RENDER must not poison the 60s cache with "no PR"
   });
 
-  it('a /pulls/{base}/{head} fallback match with a non-absolute html_url degrades to null instead of throwing', async () => {
+  it('a /pulls/{base}/{head} fallback match with a non-absolute html_url resolves available:false instead of throwing', async () => {
     const walkRow = pullRow({ number: 7, state: 'closed', merged: true, head: { ref: 'refs/pull/7/head', sha: 'c'.repeat(40) } });
     const fallbackRow = pullRow({
       number: 7,
@@ -734,14 +880,592 @@ describe('prStatus', () => {
     });
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
 
-    await expect(driver.prStatus('feat/skipped-branch')).resolves.toBeNull();
+    const result = await driver.prStatus('feat/skipped-branch');
+    expect(result.available).toBe(false);
   });
 
-  it('CEZ_DRY_RUN=1 short-circuits to null without calling fetch', async () => {
+  it('CEZ_DRY_RUN=1 short-circuits to a proven "no PR" without calling fetch', async () => {
     process.env.CEZ_DRY_RUN = '1';
     const fetchMock = vi.fn();
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
-    await expect(driver.prStatus('feat/x')).resolves.toBeNull();
+    await expect(driver.prStatus('feat/x')).resolves.toEqual({ available: true, status: null });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+/** Shape confirmed by a live measurement against a real Forgejo instance — NOT guessed from the
+ *  swagger. */
+function commentRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: 1,
+    user: { login: 'ajr', avatar_url: 'https://example.com/a.png' },
+    created_at: '2026-08-09T09:00:00Z',
+    body: 'hello',
+    html_url: 'http://forgejo:3000/acme/demo/issues/7#issuecomment-1',
+    ...overrides,
+  };
+}
+
+function reviewRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: 10,
+    user: { login: 'ajr' },
+    state: 'APPROVED',
+    dismissed: false,
+    official: false,
+    stale: false,
+    submitted_at: '2026-08-09T10:00:00Z',
+    body: 'lgtm',
+    html_url: 'http://forgejo:3000/acme/demo/pulls/7#issuecomment-2',
+    ...overrides,
+  };
+}
+
+describe('listComments', () => {
+  const repoRoot = '/repo/list-comments';
+
+  afterEach(() => {
+    delete process.env.CEZ_DRY_RUN;
+  });
+
+  /** Dispatches by URL: `/issues/{n}/comments` and `/pulls/{n}/reviews` are two independent
+   *  `paginate` calls the driver makes for a `kind:'pr'` thread. */
+  function threadFetch(comments: unknown[], reviews: unknown[] = []): (url: URL | string) => Promise<Response> {
+    return (url) => {
+      const s = String(url);
+      if (s.includes('/issues/7/comments')) return Promise.resolve(jsonResponse(comments, { headers: { 'x-total-count': String(comments.length) } }));
+      if (s.includes('/pulls/7/reviews')) return Promise.resolve(jsonResponse(reviews, { headers: { 'x-total-count': String(reviews.length) } }));
+      throw new Error(`unexpected url ${s}`);
+    };
+  }
+
+  it('issue happy path: maps comments, rebases url onto webUrl, and never fetches reviews', async () => {
+    const fetchMock = vi.fn().mockImplementation(threadFetch([commentRow()]));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listComments?.('issue', 7);
+
+    expect(result?.available).toBe(true);
+    expect(result?.comments).toEqual([
+      expect.objectContaining({ id: 1, kind: 'comment', url: 'https://forge.example.com/acme/demo/issues/7#issuecomment-1' }),
+    ]);
+    // `kind:'issue'` must not walk `pulls/{n}/reviews` at all — only the one comments call.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('pr happy path: merges comments and reviews chronologically, reviews carry kind/reviewState', async () => {
+    const fetchMock = vi.fn().mockImplementation(
+      threadFetch(
+        [commentRow({ id: 1, created_at: '2026-08-09T09:00:00Z' })],
+        [reviewRow({ id: 10, state: 'REQUEST_CHANGES', submitted_at: '2026-08-09T10:00:00Z' })],
+      ),
+    );
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listComments?.('pr', 7);
+
+    expect(result?.available).toBe(true);
+    expect(result?.comments.map((c) => c.kind)).toEqual(['comment', 'review']);
+    expect(result?.comments[1]).toEqual(expect.objectContaining({ kind: 'review', reviewState: 'changes_requested' }));
+  });
+
+  it('a thread whose reviews were all legitimately content-filtered (not schema-broken) stays available:true, empty', async () => {
+    // Distinguishes the thread's schema-drift gate from a legitimate content filter: every row
+    // here PARSES fine (`forgejoReviewSchema` never throws on these) and is dropped only because
+    // it carries no signal — a real "no comments" thread, not a "the response shape drifted" one.
+    const reviews = [
+      reviewRow({ id: 1, state: 'COMMENT', body: '' }),
+      reviewRow({ id: 2, state: 'PENDING', body: '' }),
+      reviewRow({ id: 3, state: 'REQUEST_REVIEW', body: '' }),
+    ];
+    const fetchMock = vi.fn().mockImplementation(threadFetch([], reviews));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listComments?.('pr', 7);
+
+    expect(result?.available).toBe(true);
+    expect(result?.comments).toEqual([]);
+  });
+
+  // Content-filter rules for review rows (empty-body COMMENT/PENDING/REQUEST_REVIEW drops,
+  // dismissed:true -> 'dismissed', an unrecognized state keeping the row) are unit-tested directly
+  // against `mapForgejoReview` in `forgejo-map.test.ts` — no need to re-prove them here through an
+  // HTTP-mocked driver. The 'pr happy path' test above already proves the driver actually WIRES
+  // `mapForgejoReview` into the merged thread (kind/reviewState survive end to end).
+
+  it('a comment row with a non-absolute html_url is dropped, not the whole thread (rebaseToWebUrl cannot parse it)', async () => {
+    const rows = [commentRow({ id: 1 }), commentRow({ id: 2, html_url: 'not-a-url' })];
+    const fetchMock = vi.fn().mockImplementation(threadFetch(rows));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listComments?.('issue', 7);
+
+    expect(result?.available).toBe(true);
+    expect(result?.comments).toEqual([expect.objectContaining({ id: 1 })]);
+  });
+
+  it('a review row with a non-absolute html_url is dropped, not the whole thread (rebaseToWebUrl cannot parse it)', async () => {
+    const reviews = [reviewRow({ id: 10 }), reviewRow({ id: 11, html_url: 'not-a-url' })];
+    const fetchMock = vi.fn().mockImplementation(threadFetch([], reviews));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listComments?.('pr', 7);
+
+    expect(result?.available).toBe(true);
+    expect(result?.comments).toEqual([expect.objectContaining({ id: 10 })]);
+  });
+
+  it('when comments map fine but every review row fails its schema, the thread stays visible with a reason — the schema-drift gate is thread-wide, not per-stream', async () => {
+    const rows = [commentRow({ id: 1 })];
+    const reviews = ['not-an-object']; // fails forgejoReviewSchema.parse outright — a genuine schema drift, not a content filter
+    const fetchMock = vi.fn().mockImplementation(threadFetch(rows, reviews));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listComments?.('pr', 7);
+
+    expect(result?.available).toBe(true);
+    expect(result?.comments).toEqual([expect.objectContaining({ id: 1 })]);
+    expect(result?.reason).toBeTruthy();
+  });
+
+  it('when reviews map fine but every comment row fails its schema, the thread stays visible with a reason — the same thread-wide gate, symmetric direction', async () => {
+    // Missing `id` fails `forgejoCommentSchema` entirely (it has no `.nullish()` there) — a genuine
+    // schema drift, same class as the reviews-side test above, mirrored to the comments stream.
+    const rows = [{ body: 'no id field at all', html_url: 'http://forgejo:3000/x', created_at: '2026-08-09T10:00:00Z' }];
+    const reviews = [reviewRow({ id: 10 })];
+    const fetchMock = vi.fn().mockImplementation(threadFetch(rows, reviews));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listComments?.('pr', 7);
+
+    expect(result?.available).toBe(true);
+    expect(result?.comments).toEqual([expect.objectContaining({ id: 10, kind: 'review' })]);
+    expect(result?.reason).toBeTruthy();
+  });
+
+  it('every comment row fails its schema and every review row is legitimately content-filtered — the merged thread is empty, so it degrades to available:false, not a silent []', async () => {
+    // Guards the regression this fixes: counting a review row that PARSED but was then
+    // content-filtered away (empty-body COMMENT here, `mapForgejoReview`'s own legitimate filter)
+    // as "signal" used to mask a genuine comments-side schema drift behind a quiet
+    // `{available:true, comments:[]}` — indistinguishable from a real empty thread.
+    const rows = [{ body: 'no id field at all', html_url: 'http://forgejo:3000/x', created_at: '2026-08-09T10:00:00Z' }]; // schema drift
+    const reviews = [reviewRow({ id: 1, state: 'COMMENT', body: '' })]; // parses fine, content-filtered to nothing (legit)
+    const fetchMock = vi.fn().mockImplementation(threadFetch(rows, reviews));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listComments?.('pr', 7);
+
+    expect(result?.available).toBe(false);
+    expect(result?.comments).toEqual([]);
+    expect(result?.reason).toBeTruthy();
+  });
+
+  it('every review row fails its schema and there are no comments at all — the merged thread is empty, so it degrades to available:false', async () => {
+    const reviews = ['not-an-object']; // fails forgejoReviewSchema.parse outright — a genuine schema drift
+    const fetchMock = vi.fn().mockImplementation(threadFetch([], reviews));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listComments?.('pr', 7);
+
+    expect(result?.available).toBe(false);
+    expect(result?.comments).toEqual([]);
+    expect(result?.reason).toBeTruthy();
+  });
+
+  it('every review row parses but is missing id/html_url and there are no comments at all — a structural gap degrades to available:false, not a silent []', async () => {
+    // `forgejoReviewSchema` keeps `id`/`html_url` `.nullish()`, so a row missing either PARSES fine
+    // (unlike the parse-failure case above) yet `mapForgejoReview` still returns `null` for it — a
+    // schema-drift signal, not the legitimate empty-body content filter (which requires a row that
+    // DID carry id/html_url). Must not read as a real empty thread.
+    const reviews = [reviewRow({ id: null })];
+    const fetchMock = vi.fn().mockImplementation(threadFetch([], reviews));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listComments?.('pr', 7);
+
+    expect(result?.available).toBe(false);
+    expect(result?.comments).toEqual([]);
+    expect(result?.reason).toBeTruthy();
+  });
+
+  it('a thread with a partial stream drift (reason set) is never cached — a second call without refresh:true still refetches', async () => {
+    const rows = [commentRow({ id: 1 })];
+    const reviews = ['not-an-object'];
+    const fetchMock = vi.fn().mockImplementation(threadFetch(rows, reviews));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const first = await driver.listComments?.('pr', 7);
+    const callsAfterFirst = fetchMock.mock.calls.length;
+    const second = await driver.listComments?.('pr', 7);
+
+    expect(first?.reason).toBeTruthy();
+    expect(second?.reason).toBeTruthy();
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(callsAfterFirst);
+  });
+
+  it('a transport failure resolves available:false with a reason, NEVER a silent []', async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listComments?.('issue', 7);
+
+    expect(result?.available).toBe(false);
+    expect(result?.comments).toEqual([]);
+    expect(result?.reason).toEqual(expect.any(String));
+    expect(result?.reason).not.toBe('');
+  });
+
+  it('a 401 reports a CEZ_FORGEJO_TOKEN hint without echoing the rejected token', async () => {
+    const token = 'nie-ma-takiego-tokenu-0000000000000000000';
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ message: `access token does not exist [sha: ${token}]` }, { status: 401 }));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token });
+
+    const result = await driver.listComments?.('issue', 7);
+
+    expect(result?.available).toBe(false);
+    expect(result?.reason).toContain('CEZ_FORGEJO_TOKEN');
+    expect(result?.reason).not.toContain(token);
+  });
+
+  it('a non-empty raw response that maps to zero rows degrades to available:false, not an empty list', async () => {
+    // Every row is missing `id` — fails `forgejoCommentSchema` entirely, a real schema-drift
+    // signal, never "this thread genuinely has no comments" (which would report available:true).
+    const rows = [{ body: 'no id field at all', html_url: 'http://forgejo:3000/x', created_at: '2026-08-09T10:00:00Z' }];
+    const fetchMock = vi.fn().mockImplementation(threadFetch(rows));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listComments?.('issue', 7);
+
+    expect(result?.available).toBe(false);
+    expect(result?.comments).toEqual([]);
+    expect(result?.reason).toBeTruthy();
+  });
+
+  it('more than FJ_THREAD_ENTRY_CAP (200) comment rows truncates the thread to 200, truncated:true', async () => {
+    const rows = Array.from({ length: 201 }, (_, i) => commentRow({ id: i + 1 }));
+    const fetchMock = vi.fn().mockImplementation(threadFetch(rows));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listComments?.('issue', 7);
+
+    expect(result?.available).toBe(true);
+    expect(result?.comments).toHaveLength(200);
+    expect(result?.truncated).toBe(true);
+  });
+
+  it('the reviews walk stopping short (a page-2 failure) truncates the thread even with few rows', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/issues/7/comments')) return Promise.resolve(jsonResponse([], { headers: { 'x-total-count': '0' } }));
+      if (s.includes('/pulls/7/reviews')) {
+        const page = new URL(s).searchParams.get('page');
+        // Page 1 comes back as a FULL page (50 rows, no total-count) so the walk does not treat it
+        // as a natural end and tries page 2 — which fails, tripping `stoppedShort` via the 'error'
+        // stop reason (forgejo-http.ts's `paginate`, page !== 1 branch).
+        if (page === '1') return Promise.resolve(jsonResponse(Array.from({ length: 50 }, (_, i) => reviewRow({ id: i + 1 })), { status: 200 }));
+        return Promise.resolve(jsonResponse({ message: 'boom' }, { status: 500 }));
+      }
+      throw new Error(`unexpected url ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listComments?.('pr', 7);
+
+    expect(result?.available).toBe(true);
+    expect(result?.truncated).toBe(true);
+  });
+
+  it('caches for 60s; refresh:true bypasses the cache', async () => {
+    const fetchMock = vi.fn().mockImplementation(threadFetch([commentRow()]));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    await driver.listComments?.('issue', 7);
+    await driver.listComments?.('issue', 7);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await driver.listComments?.('issue', 7, { refresh: true });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('CEZ_DRY_RUN=1 short-circuits to an available empty thread without calling fetch', async () => {
+    process.env.CEZ_DRY_RUN = '1';
+    const fetchMock = vi.fn();
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+    await expect(driver.listComments?.('issue', 7)).resolves.toEqual({ available: true, comments: [] });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('listChecks', () => {
+  const repoRoot = '/repo/list-checks';
+
+  afterEach(() => {
+    delete process.env.CEZ_DRY_RUN;
+  });
+
+  /** `pulls?state=open` walk row carrying just enough for the `number -> head.sha` map this
+   *  method builds — reuses `pullRow`'s own defaults for every field the row's own schema
+   *  (`forgejoPullSchema`) still requires. */
+  function openRow(number: number, sha: string): Record<string, unknown> {
+    return pullRow({ number, head: { ref: `feat/${number}`, sha } });
+  }
+
+  it('maps success/failure/pending/no-CI combined statuses onto the requested numbers', async () => {
+    const shas = { 1: 'a'.repeat(40), 2: 'b'.repeat(40), 3: 'c'.repeat(40), 4: 'd'.repeat(40) };
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/pulls?state=open')) {
+        return Promise.resolve(jsonResponse([openRow(1, shas[1]), openRow(2, shas[2]), openRow(3, shas[3]), openRow(4, shas[4])], { headers: { 'x-total-count': '4' } }));
+      }
+      if (s.endsWith(`/commits/${shas[1]}/status`)) return Promise.resolve(jsonResponse({ statuses: [{ status: 'success' }] }));
+      if (s.endsWith(`/commits/${shas[2]}/status`)) return Promise.resolve(jsonResponse({ statuses: [{ status: 'failure' }] }));
+      if (s.endsWith(`/commits/${shas[3]}/status`)) return Promise.resolve(jsonResponse({ statuses: [{ status: 'pending' }] }));
+      if (s.endsWith(`/commits/${shas[4]}/status`)) return Promise.resolve(jsonResponse({ statuses: null }));
+      throw new Error(`unexpected url ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listChecks?.([1, 2, 3, 4]);
+
+    expect(result).toEqual({ available: true, checks: { 1: 'passing', 2: 'failing', 3: 'pending', 4: null } });
+  });
+
+  it('a number outside the open-PR walk falls back to GET pulls/{n}; a 404 there degrades to a null glyph, not a failed response', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/pulls?state=open')) return Promise.resolve(jsonResponse([], { headers: { 'x-total-count': '0' } }));
+      if (s.endsWith('/pulls/9')) return Promise.resolve(jsonResponse({ message: 'not found' }, { status: 404 }));
+      throw new Error(`unexpected url ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listChecks?.([9]);
+
+    expect(result).toEqual({ available: true, checks: { 9: null } });
+  });
+
+  it('a non-404 transport failure on the per-number fallback degrades the WHOLE response, never a partial glyph map', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/pulls?state=open')) return Promise.resolve(jsonResponse([], { headers: { 'x-total-count': '0' } }));
+      if (s.endsWith('/pulls/9')) return Promise.resolve(jsonResponse({ message: 'internal error' }, { status: 500 }));
+      throw new Error(`unexpected url ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listChecks?.([9]);
+
+    expect(result?.available).toBe(false);
+    if (!result?.available) expect(result?.reason).toBeTruthy();
+  });
+
+  it('a non-404 transport failure on the per-number fallback degrades ONLY that number — numbers the open-PR walk already resolved stay intact', async () => {
+    const sha = 'a'.repeat(40);
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/pulls?state=open')) return Promise.resolve(jsonResponse([openRow(1, sha)], { headers: { 'x-total-count': '1' } }));
+      if (s.endsWith(`/commits/${sha}/status`)) return Promise.resolve(jsonResponse({ statuses: [{ status: 'success' }] }));
+      if (s.endsWith('/pulls/9')) return Promise.resolve(jsonResponse({ message: 'internal error' }, { status: 500 }));
+      throw new Error(`unexpected url ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listChecks?.([1, 9]);
+
+    expect(result).toEqual({ available: true, checks: { 1: 'passing', 9: null } });
+  });
+
+  it('a non-404 transport failure on the per-number fallback stops issuing further fallback requests for the remaining misses — no serial pile-up of timeouts', async () => {
+    const sha = 'a'.repeat(40);
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/pulls?state=open')) return Promise.resolve(jsonResponse([openRow(1, sha)], { headers: { 'x-total-count': '1' } }));
+      if (s.endsWith(`/commits/${sha}/status`)) return Promise.resolve(jsonResponse({ statuses: [{ status: 'success' }] }));
+      // Every per-number fallback fails non-404 — if the loop kept going after the first one, it
+      // would hit all three of these instead of stopping after `/pulls/9`.
+      if (s.endsWith('/pulls/9') || s.endsWith('/pulls/10') || s.endsWith('/pulls/11')) {
+        return Promise.resolve(jsonResponse({ message: 'internal error' }, { status: 500 }));
+      }
+      throw new Error(`unexpected url ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    // 1 is covered by the open-PR walk; 9, 10, 11 all need the per-number fallback.
+    const result = await driver.listChecks?.([1, 9, 10, 11]);
+
+    // Number 1 (resolved by the walk) survives; the three fallback numbers all degrade to `null`
+    // instead of a partial glyph map — same "don't blank what already worked" instinct as the
+    // single-number case above, just proven across a batch.
+    expect(result).toEqual({ available: true, checks: { 1: 'passing', 9: null, 10: null, 11: null } });
+    // 1 list walk + 1 status read + exactly ONE fallback attempt (`/pulls/9`) — `/pulls/10` and
+    // `/pulls/11` are never requested once the first fallback proves the transport unhealthy.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).endsWith('/pulls/10'))).toBe(false);
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).endsWith('/pulls/11'))).toBe(false);
+  });
+
+  it('a non-404 fallback failure salvages a LATER miss the open-PR walk already resolved, before the break — not just the one already visited', async () => {
+    // `numbers` = [9, 10]: 9 is visited FIRST by the per-number fallback loop and fails non-404
+    // (triggering the salvage-then-break path), while 10 was never individually visited yet but
+    // IS already in `openShaByNumber` from the walk. The salvage loop must still pick 10 up from
+    // the walk instead of leaving it stranded in `misses` (which the old code did, since a plain
+    // `failedNumbers.push(remaining)` for every leftover miss also passes every OTHER test here —
+    // they only ever break on the LAST miss, where there is nothing left to salvage).
+    const sha10 = 'b'.repeat(40);
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/pulls?state=open')) return Promise.resolve(jsonResponse([openRow(10, sha10)], { headers: { 'x-total-count': '1' } }));
+      if (s.endsWith('/pulls/9')) return Promise.resolve(jsonResponse({ message: 'internal error' }, { status: 500 }));
+      if (s.endsWith(`/commits/${sha10}/status`)) return Promise.resolve(jsonResponse({ statuses: [{ status: 'success' }] }));
+      throw new Error(`unexpected url ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listChecks?.([9, 10]);
+
+    // 10 survives (salvaged from the walk, its status still read); 9 degrades to `null` — the
+    // failed fallback costs only the number it was actually for.
+    expect(result).toEqual({ available: true, checks: { 9: null, 10: 'passing' } });
+    // 1 list walk + 1 failed fallback (`/pulls/9`) + 1 status read for 10 — number 10 is never
+    // re-fetched via its own `GET pulls/10` once the walk already resolved it.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).endsWith('/pulls/10'))).toBe(false);
+  });
+
+  it('a 401 on the open-PR walk reports a CEZ_FORGEJO_TOKEN hint without echoing the rejected token', async () => {
+    const token = 'nie-ma-takiego-tokenu-0000000000000000000';
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ message: `access token does not exist [sha: ${token}]` }, { status: 401 }));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token });
+
+    const result = await driver.listChecks?.([1]);
+
+    expect(result?.available).toBe(false);
+    if (result && !result.available) {
+      expect(result.reason).toContain('CEZ_FORGEJO_TOKEN');
+      expect(result.reason).not.toContain(token);
+    }
+  });
+
+  it('caches a resolved glyph for 60s — a second call for the same number never refetches', async () => {
+    const sha = 'a'.repeat(40);
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/pulls?state=open')) return Promise.resolve(jsonResponse([openRow(1, sha)], { headers: { 'x-total-count': '1' } }));
+      if (s.endsWith(`/commits/${sha}/status`)) return Promise.resolve(jsonResponse({ statuses: [{ status: 'success' }] }));
+      throw new Error(`unexpected url ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    await driver.listChecks?.([1]);
+    const callsAfterFirst = fetchMock.mock.calls.length;
+    await driver.listChecks?.([1]);
+
+    expect(fetchMock.mock.calls.length).toBe(callsAfterFirst);
+  });
+
+  it('N numbers covered entirely by the open-PR walk cost exactly 1 list request + N status requests — zero per-number GET pulls/{n}', async () => {
+    const shas = { 1: 'a'.repeat(40), 2: 'b'.repeat(40), 3: 'c'.repeat(40) };
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/pulls?state=open')) {
+        return Promise.resolve(jsonResponse([openRow(1, shas[1]), openRow(2, shas[2]), openRow(3, shas[3])], { headers: { 'x-total-count': '3' } }));
+      }
+      if (s.includes('/commits/') && s.endsWith('/status')) return Promise.resolve(jsonResponse({ statuses: [{ status: 'success' }] }));
+      throw new Error(`unexpected url ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    await driver.listChecks?.([1, 2, 3]);
+
+    // 1 list walk + 3 status reads — no call ever hits a bare `/pulls/{n}` fallback path.
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    for (const call of fetchMock.mock.calls) {
+      const url = String(call[0]);
+      expect(url).not.toMatch(/\/pulls\/\d+$/);
+    }
+  });
+
+  it('the open-PR walk succeeding but ALL combined-status reads failing degrades the whole response, never a list of empty glyphs', async () => {
+    const shas = { 1: 'a'.repeat(40), 2: 'b'.repeat(40) };
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/pulls?state=open')) {
+        return Promise.resolve(jsonResponse([openRow(1, shas[1]), openRow(2, shas[2])], { headers: { 'x-total-count': '2' } }));
+      }
+      if (s.includes('/commits/') && s.endsWith('/status')) return Promise.reject(new TypeError('fetch failed'));
+      throw new Error(`unexpected url ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listChecks?.([1, 2]);
+
+    expect(result?.available).toBe(false);
+    if (!result?.available) expect(result?.reason).toBeTruthy();
+  });
+
+  it('a partial combined-status failure (some numbers read, some fail) stays available:true with no reason field, keeping the numbers that DID resolve', async () => {
+    const shas = { 1: 'a'.repeat(40), 2: 'b'.repeat(40) };
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/pulls?state=open')) {
+        return Promise.resolve(jsonResponse([openRow(1, shas[1]), openRow(2, shas[2])], { headers: { 'x-total-count': '2' } }));
+      }
+      if (s.endsWith(`/commits/${shas[1]}/status`)) return Promise.resolve(jsonResponse({ statuses: [{ status: 'success' }] }));
+      if (s.endsWith(`/commits/${shas[2]}/status`)) return Promise.reject(new TypeError('fetch failed'));
+      throw new Error(`unexpected url ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listChecks?.([1, 2]);
+
+    // `ForgeChecksResult`'s `available:true` branch carries no `reason` field (mirrors
+    // `githubChecksDataSchema`) — a per-item failure degrades silently to a `null` glyph instead.
+    expect(result).toEqual({ available: true, checks: { 1: 'passing', 2: null } });
+  });
+
+  it('a status-read chunk that fails ENTIRELY aborts the remaining chunks — a hung forge must not serialize every leftover number', async () => {
+    // 17 numbers, all resolved from the open-PR walk (no per-number fallback needed) so the ONLY
+    // status-read requests below are the chunked combined-status reads this test is about.
+    // FJ_CHECKS_CONCURRENCY=8 splits them into chunk1=[1..8] (all succeed), chunk2=[9..16] (all
+    // fail — a hung/unhealthy forge), chunk3=[17] (must never be requested once chunk2 proves the
+    // transport unhealthy — same "stop serializing once a whole batch fails" instinct as the
+    // per-number fallback loop above, just applied to the status-read stage).
+    const numbers = Array.from({ length: 17 }, (_, i) => i + 1);
+    const shaOf = (n: number) => `sha-${n}`;
+    const openRows = numbers.map((n) => openRow(n, shaOf(n)));
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/pulls?state=open')) return Promise.resolve(jsonResponse(openRows, { headers: { 'x-total-count': String(numbers.length) } }));
+      for (const n of numbers) {
+        if (s.endsWith(`/commits/${shaOf(n)}/status`)) {
+          if (n <= 8) return Promise.resolve(jsonResponse({ statuses: [{ status: 'success' }] }));
+          if (n <= 16) return Promise.reject(new TypeError('fetch failed'));
+          throw new Error(`chunk3 must never be requested (number ${n})`);
+        }
+      }
+      throw new Error(`unexpected url ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listChecks?.(numbers);
+
+    // chunk1 resolved (passing), chunk2 all degraded to `null`, chunk3's number 17 also folds to
+    // `null` — but WITHOUT ever being requested (the mock throws if it is).
+    expect(result?.available).toBe(true);
+    if (result?.available) {
+      for (let n = 1; n <= 8; n++) expect(result.checks[n]).toBe('passing');
+      for (let n = 9; n <= 17; n++) expect(result.checks[n]).toBeNull();
+    }
+    // 1 list walk + 8 chunk1 status reads + 8 chunk2 status reads = 17 — chunk3 never fires.
+    expect(fetchMock).toHaveBeenCalledTimes(17);
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).endsWith(`/commits/${shaOf(17)}/status`))).toBe(false);
+  });
+
+  it('CEZ_DRY_RUN=1 short-circuits to an available empty map without calling fetch', async () => {
+    process.env.CEZ_DRY_RUN = '1';
+    const fetchMock = vi.fn();
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    await expect(driver.listChecks?.([1])).resolves.toEqual({ available: true, checks: {} });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
@@ -898,6 +1622,10 @@ describe('createPR', () => {
         walkCalls += 1;
         return Promise.resolve(jsonResponse([], { headers: { 'x-total-count': '0' } }));
       }
+      if (s.endsWith('/repos/acme/demo') && (!init?.method || init.method === 'GET')) {
+        return Promise.resolve(jsonResponse({ default_branch: 'main' }));
+      }
+      if (s.includes('/pulls/main/')) return Promise.resolve(jsonResponse({ message: 'not found' }, { status: 404 }));
       if (s.endsWith('/repos/acme/demo/pulls') && init?.method === 'POST') {
         return Promise.resolve(
           jsonResponse(pullRow({ number: 42, html_url: 'http://forgejo:3000/acme/demo/pulls/42' }), { status: 201 }),
@@ -907,14 +1635,19 @@ describe('createPR', () => {
     });
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
 
-    await expect(driver.prStatus('feat/x')).resolves.toBeNull(); // warms the 60s cache with "no PR"
+    // The walk resolves empty and the `/pulls/{base}/{head}` fallback genuinely 404s — a PROVEN
+    // "no PR", which IS cached (same as the dedicated fallback-404 test above). A second identical
+    // call must be served from that cache, not re-walk.
+    await expect(driver.prStatus('feat/x')).resolves.toEqual({ available: true, status: null });
     expect(walkCalls).toBe(1);
+    await driver.prStatus('feat/x');
+    expect(walkCalls).toBe(1); // served from the warm cache
 
     const result = await driver.createPR(input({ baseBranch: 'main' }));
     expect(result.ok).toBe(true);
 
     await driver.prStatus('feat/x');
-    expect(walkCalls).toBe(2); // eviction forced a fresh walk instead of serving the stale cached null
+    expect(walkCalls).toBe(2); // createPR evicted the cache — this call re-walks instead of reusing the stale "no PR"
   });
 
   it('a base that looks like a sha is rejected and falls back to Repository.default_branch', async () => {
@@ -984,6 +1717,9 @@ describe('createPR', () => {
         walkCalls += 1;
         return Promise.resolve(jsonResponse([], { headers: { 'x-total-count': '0' } }));
       }
+      if (s.endsWith('/repos/acme/demo') && (!init?.method || init.method === 'GET')) {
+        return Promise.resolve(jsonResponse({ default_branch: 'main' }));
+      }
       if (s.endsWith('/repos/acme/demo/pulls') && init?.method === 'POST') {
         return Promise.resolve(jsonResponse({ message: 'PR already exists' }, { status: 409 }));
       }
@@ -994,14 +1730,22 @@ describe('createPR', () => {
     });
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
 
-    await expect(driver.prStatus('feat/x')).resolves.toBeNull(); // warms the 60s cache with "no PR"
+    // The walk resolves empty, but the `/pulls/{base}/{head}` fallback finds an already-open match
+    // (the "open-match" case this test names) — a resolved answer, cached like any other. A second
+    // identical call must be served from that cache, not re-walk.
+    await expect(driver.prStatus('feat/x')).resolves.toEqual({
+      available: true,
+      status: expect.objectContaining({ number: 11 }),
+    });
     expect(walkCalls).toBe(1);
+    await driver.prStatus('feat/x');
+    expect(walkCalls).toBe(1); // served from the warm cache
 
     const result = await driver.createPR(input({ baseBranch: 'main' }));
     expect(result.ok).toBe(true);
 
     await driver.prStatus('feat/x');
-    expect(walkCalls).toBe(2); // eviction forced a fresh walk instead of serving the stale cached null
+    expect(walkCalls).toBe(2); // createPR evicted the cache — this call re-walks instead of reusing the stale match
   });
 
   it('a 201 response with a non-absolute html_url degrades to a best-effort success (repo pulls link), never throws', async () => {
@@ -1521,13 +2265,15 @@ describe('mergePR', () => {
     expect(result && result.merged && 'mergeCommitSha' in result).toBe(false);
   });
 
-  it('a successful merge evicts listCache, prStatusCache, mergeStateCache, and prDiffCache for the whole project', async () => {
+  it('a successful merge evicts every PROJECT_CACHES cache — listCache, prStatusCache, mergeStateCache, prDiffCache, forgejoCommentsCache, forgejoChecksCache — for the whole project', async () => {
     // PR #42 is deliberately a DIFFERENT pull than the one merged below — proves the eviction is
     // project-wide (keyed on repoRoot+apiBase), not scoped to the merged PR's own number.
     const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
       const s = String(url);
       if (s.includes('/issues?')) return Promise.resolve(jsonResponse([], { headers: { 'x-total-count': '0' } }));
+      if (s.includes('/issues/42/comments')) return Promise.resolve(jsonResponse([], { headers: { 'x-total-count': '0' } }));
       if (s.includes('/pulls?state=all')) return Promise.resolve(jsonResponse([], { headers: { 'x-total-count': '0' } }));
+      if (s.includes('/pulls?state=open')) return Promise.resolve(jsonResponse([], { headers: { 'x-total-count': '0' } }));
       if (s.includes('/pulls/main/')) return Promise.resolve(jsonResponse({ message: 'not found' }, { status: 404 }));
       if (s.includes('/pulls/42/files')) return Promise.resolve(jsonResponse([], { headers: { 'x-total-count': '0' } }));
       if (s.endsWith('/pulls/42.diff')) return Promise.resolve(new Response('', { status: 200, headers: { 'content-type': 'text/plain' } }));
@@ -1546,23 +2292,31 @@ describe('mergePR', () => {
     await driver.prStatus('feat/x');
     await driver.prMergeState?.(42);
     await driver.prDiff?.(42);
+    await driver.listComments?.('pr', 42);
+    await driver.listChecks?.([42]);
 
     const callCount = (pathIncludes: string) => fetchMock.mock.calls.filter((c) => String(c[0]).includes(pathIncludes)).length;
     const issuesBefore = callCount('/issues?');
     const prStatusBefore = callCount('/pulls?state=all');
     const pull42Before = callCount('/pulls/42');
     const diff42FilesBefore = callCount('/pulls/42/files');
+    const comments42Before = callCount('/issues/42/comments');
+    const checksWalkBefore = callCount('/pulls?state=open');
 
     // Warm caches must be free right now — proves they really were cached before the merge.
     await driver.listIssues();
     await driver.prStatus('feat/x');
     await driver.prMergeState?.(42);
     await driver.prDiff?.(42);
+    await driver.listComments?.('pr', 42);
+    await driver.listChecks?.([42]);
     expect(callCount('/issues?')).toBe(issuesBefore);
     expect(callCount('/pulls?state=all')).toBe(prStatusBefore);
     // `/pulls/42` itself is always re-read by `prDiff` (it needs the current `headSha` to build its
     // cache key) — only the `/files` walk this warm assertion actually cares about must stay flat.
     expect(callCount('/pulls/42/files')).toBe(diff42FilesBefore);
+    expect(callCount('/issues/42/comments')).toBe(comments42Before);
+    expect(callCount('/pulls?state=open')).toBe(checksWalkBefore);
 
     await driver.mergePR?.(9, { method: 'merge', expectedHeadSha: 'a'.repeat(40) });
 
@@ -1570,10 +2324,14 @@ describe('mergePR', () => {
     await driver.prStatus('feat/x');
     await driver.prMergeState?.(42);
     await driver.prDiff?.(42);
+    await driver.listComments?.('pr', 42);
+    await driver.listChecks?.([42]);
     expect(callCount('/issues?')).toBeGreaterThan(issuesBefore);
     expect(callCount('/pulls?state=all')).toBeGreaterThan(prStatusBefore);
     expect(callCount('/pulls/42')).toBeGreaterThan(pull42Before);
     expect(callCount('/pulls/42/files')).toBeGreaterThan(diff42FilesBefore);
+    expect(callCount('/issues/42/comments')).toBeGreaterThan(comments42Before);
+    expect(callCount('/pulls?state=open')).toBeGreaterThan(checksWalkBefore);
   });
 });
 
@@ -1659,6 +2417,24 @@ describe('prDiff', () => {
     const result = await driver.prDiff?.(9);
     if (!result?.available) throw new Error('expected available:true');
     expect(result.files).toEqual([{ path: 'src/ok.ts', status: 'modified', additions: 1, deletions: 0, patchUnavailableReason: 'not-provided' }]);
+  });
+
+  it('every /files row failing to parse resolves available:false with a reason, NOT a false "no changes, +0 -0", and is NOT cached', async () => {
+    const filesRows = [{ status: 'changed', additions: 1, deletions: 0 }, { additions: 2, deletions: 0 }];
+    const fetchMock = router({ filesRows });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.prDiff?.(9);
+
+    if (!result || result.available) throw new Error('expected available:false');
+    expect(result.reason).toEqual(expect.any(String));
+    expect(result.reason).not.toBe('');
+
+    // Deliberately not cached: an immediate follow-up call (no refresh) must re-fetch, not serve
+    // the failed read for 60s.
+    const callsAfterFirst = fetchMock.mock.calls.length;
+    await driver.prDiff?.(9);
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(callsAfterFirst);
   });
 
   it('a binary entry in the diff maps to patchUnavailableReason:"binary", never a patch', async () => {

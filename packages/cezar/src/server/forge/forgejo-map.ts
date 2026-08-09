@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { ForgeItem, ForgeMergeMethod, ForgePrChange, ForgePrCheck, ForgePrMergeState } from './types.ts';
+import type { ForgeComment, ForgeItem, ForgeMergeMethod, ForgePrChange, ForgePrCheck, ForgePrMergeState } from './types.ts';
 
 /**
  * Pure Forgejo REST → cockpit shape mappers, plus the zod schemas that validate the wire payloads
@@ -82,7 +82,11 @@ export const forgejoIssueSchema = z.object({
   html_url: z.string(),
   user: forgejoUserSchema.nullish(),
   created_at: z.string(),
-  labels: z.array(z.object({ name: z.string() })).default([]),
+  // `color` (6-hex, no `#`) is absent on older servers, hence `.optional()` — mirrors
+  // `github.ts`'s own `ghLabel` schema. `listForgejo` (`forgejo.ts`) reads it via
+  // `mapForgejoIssue`'s `onLabel` callback to build the same repo-wide label→color map
+  // `fetchGithub` already does.
+  labels: z.array(z.object({ name: z.string(), color: z.string().optional() })).default([]),
   body: z.string().nullish(),
   comments: z.number().int().default(0),
   pull_request: z.unknown().nullish(),
@@ -98,7 +102,8 @@ export const forgejoPullSchema = z.object({
   html_url: z.string(),
   user: forgejoUserSchema.nullish(),
   created_at: z.string(),
-  labels: z.array(z.object({ name: z.string() })).default([]),
+  // See `forgejoIssueSchema.labels` above for why `color` is optional.
+  labels: z.array(z.object({ name: z.string(), color: z.string().optional() })).default([]),
   body: z.string().nullish(),
   comments: z.number().int().default(0),
   draft: z.boolean().default(false),
@@ -219,15 +224,24 @@ export const forgejoChangedFileSchema = z.object({
 });
 export type ForgejoChangedFile = z.infer<typeof forgejoChangedFileSchema>;
 
+/** Callback `mapForgejoIssue`/`mapForgejoPull` invoke once per label on a mapped row — how
+ *  `listForgejo` (`forgejo.ts`) builds its repo-wide label→color map (`ForgeListResult.labelColors`),
+ *  parity with `fetchGithub`'s own `recordColor` (`github.ts:420`). `color` absent
+ *  (older server, or the row got dropped before mapping) simply means that label contributes no
+ *  color — the caller's own "first color wins, missing color is skipped" policy lives there, not
+ *  here. */
+export type ForgejoLabelListener = (label: { name: string; color?: string }) => void;
+
 /**
  * Maps a raw `/issues` row to `ForgeItem`, or `null` when the row is actually a pull request (see
  * `forgejoIssueSchema`'s comment). `number`, never `id`: Forgejo's `id` is a global identifier
  * across the whole instance (PR #1 in one repo can have `id: 11`), but every user-facing surface
  * and URL path segment uses the per-repo `number` instead.
  */
-export function mapForgejoIssue(raw: unknown, webUrl: string): ForgeItem | null {
+export function mapForgejoIssue(raw: unknown, webUrl: string, onLabel?: ForgejoLabelListener): ForgeItem | null {
   const parsed = forgejoIssueSchema.parse(raw);
   if (parsed.pull_request != null) return null;
+  parsed.labels.forEach((l) => onLabel?.(l));
   return {
     kind: 'issue',
     number: parsed.number,
@@ -244,8 +258,9 @@ export function mapForgejoIssue(raw: unknown, webUrl: string): ForgeItem | null 
 /** Maps a raw `/pulls` row to `ForgeItem`. `checks: null` — parity with `github.ts`'s own list
  *  mapping (#664): a list of 30 rows never pays for 30 CI-status round-trips, only the row a user
  *  actually opens gets one (via `prStatus`/a future detail fetch). */
-export function mapForgejoPull(raw: unknown, webUrl: string): ForgeItem {
+export function mapForgejoPull(raw: unknown, webUrl: string, onLabel?: ForgejoLabelListener): ForgeItem {
   const parsed = forgejoPullSchema.parse(raw);
+  parsed.labels.forEach((l) => onLabel?.(l));
   return {
     kind: 'pr',
     number: parsed.number,
@@ -381,6 +396,12 @@ export type ForgejoBranchInfo =
  * siblings of `state`, not members of it — Forgejo has no `DISMISSED` review state on the wire:
  * a dismissed review keeps whatever `state` it was submitted with, and `dismissed` flags it
  * separately.
+ *
+ * `id`/`body`/`html_url` extend this SAME schema rather than a second one — all three
+ * `.nullish()` so every existing `computeReviewDecision` fixture (built without them) keeps
+ * parsing unchanged, and `computeReviewDecision` itself never reads any of the three.
+ * `user.avatar_url` is the same kind of addition, needed only by `mapForgejoReview`'s own
+ * `avatarUrl`. Confirmed against a live measurement of a real review payload, not the swagger.
  */
 export const forgejoReviewSchema = z.object({
   state: z
@@ -391,9 +412,12 @@ export const forgejoReviewSchema = z.object({
   official: z.boolean().default(false),
   stale: z.boolean().default(false),
   submitted_at: z.string().nullish(),
-  user: z.object({ login: z.string() }).nullish(),
+  user: z.object({ login: z.string(), avatar_url: z.string().nullish() }).nullish(),
+  id: z.number().nullish(),
+  body: z.string().nullish(),
+  html_url: z.string().nullish(),
 });
-type ForgejoReview = z.infer<typeof forgejoReviewSchema>;
+export type ForgejoReview = z.infer<typeof forgejoReviewSchema>;
 
 /** Every `ReviewStateType` value the live Gitea source is known to emit, PLUS `''` (no signal —
  *  this dictionary is read from source, not measured on the wire). Deliberately does NOT include
@@ -485,6 +509,90 @@ export function computeReviewDecision(reviewsRaw: unknown, branch: ForgejoBranch
   const required = Math.max(1, branch.requiredApprovals);
   const approvals = collapsed.filter((r) => r.state === 'APPROVED' && !r.stale).length;
   return { decision: approvals >= required ? 'approved' : 'review-required', unrecognized: false };
+}
+
+/**
+ * `GET /issues/{n}/comments` row — shape confirmed by a live measurement against a real Forgejo
+ * instance, not the swagger. The SAME endpoint also serves a pull request's conversation comments
+ * (measured: posting to `issues/{pr-number}/comments` landed the row in `pulls/{n}` on the web
+ * UI) — `forgejo.ts`'s `forgejoListComments` reuses this schema for both `kind:'issue'` and
+ * `kind:'pr'` threads.
+ */
+export const forgejoCommentSchema = z.object({
+  id: z.number(),
+  user: z.object({ login: z.string(), avatar_url: z.string().nullish() }).nullish(),
+  created_at: z.string(),
+  body: z.string().nullish(),
+  html_url: z.string(),
+});
+
+/**
+ * Maps one raw `/issues/{n}/comments` row to `ForgeComment`, or `null` when the row fails
+ * `forgejoCommentSchema` — the caller (`forgejo.ts`) treats a null as an unmappable row, same
+ * per-row drop policy `listForgejo` already applies to its own walk (one bad row costs that row,
+ * not the whole thread). `raw`, not an already-parsed value: this schema has no OTHER filter (every
+ * row that parses is kept), so a `null` return here is always a genuine schema mismatch — the
+ * signal `forgejoListComments`'s own availability guard reads to tell "no comments" apart from
+ * "the response shape drifted and nothing survived mapping".
+ */
+export function mapForgejoComment(raw: unknown, webUrl: string): ForgeComment | null {
+  let parsed: z.infer<typeof forgejoCommentSchema>;
+  try {
+    parsed = forgejoCommentSchema.parse(raw);
+  } catch {
+    return null;
+  }
+  return {
+    id: parsed.id,
+    author: parsed.user?.login ?? '?',
+    avatarUrl: parsed.user?.avatar_url ?? undefined,
+    createdAt: normalizeForgejoTimestamp(parsed.created_at) ?? parsed.created_at,
+    body: (parsed.body ?? '').slice(0, FJ_BODY_CAP),
+    kind: 'comment',
+    url: rebaseToWebUrl(parsed.html_url, webUrl),
+  };
+}
+
+/** Every `ReviewStateType` this thread's chip actually renders — deliberately NOT the same
+ *  dictionary `computeReviewDecision` uses for its merge-eligibility ladder (that one also reads
+ *  `DISMISSED`/`PENDING` as "known but inactive"; this one only needs the three states that map to
+ *  a `ForgeComment.reviewState` chip). A state outside this map (including a legitimately-kept
+ *  `PENDING`/an unrecognized future value) leaves `reviewState` absent — parity with `github.ts`'s
+ *  own `normalizeReviews`/`REVIEW_STATE`, which does the same for anything outside ITS map. */
+const FORGEJO_REVIEW_STATE: Record<string, ForgeComment['reviewState']> = {
+  APPROVED: 'approved',
+  REQUEST_CHANGES: 'changes_requested',
+  COMMENT: 'commented',
+};
+
+/**
+ * Maps one ALREADY-PARSED `forgejoReviewSchema` row to `ForgeComment`, or `null` when the row
+ * carries no signal worth a thread entry — mirrors `github.ts`'s `normalizeReviews`, with two
+ * Forgejo-specific additions: `REQUEST_REVIEW` joins `COMMENT`/`PENDING` in the empty-body drop
+ * (GitHub never emits a REQUEST_REVIEW review row at all, so `normalizeReviews` has nothing to
+ * mirror there), and a row missing `id`/`html_url` is dropped too (a `ForgeComment` cannot be
+ * built without them — `forgejoReviewSchema` keeps both `.nullish()` for `computeReviewDecision`'s
+ * older fixtures, so this function is where the requirement is actually enforced).
+ *
+ * Unlike `mapForgejoComment`, this takes the PARSED `ForgejoReview`, not `raw`: the caller
+ * (`forgejo.ts`) already runs `forgejoReviewSchema.parse` itself per row (to tell a genuine schema
+ * mismatch apart from this function's own, content-based drops, which are never a mismatch).
+ */
+export function mapForgejoReview(review: ForgejoReview, webUrl: string): ForgeComment | null {
+  if (review.id == null || review.html_url == null) return null;
+  const state = review.state.toUpperCase();
+  const emptyBody = (review.body ?? '').trim().length === 0;
+  if (emptyBody && (state === 'COMMENT' || state === 'PENDING' || state === 'REQUEST_REVIEW')) return null;
+  return {
+    id: review.id,
+    author: review.user?.login ?? '?',
+    avatarUrl: review.user?.avatar_url ?? undefined,
+    createdAt: normalizeForgejoTimestamp(review.submitted_at) ?? review.submitted_at ?? '',
+    body: (review.body ?? '').slice(0, FJ_BODY_CAP),
+    kind: 'review',
+    reviewState: review.dismissed ? 'dismissed' : FORGEJO_REVIEW_STATE[state],
+    url: rebaseToWebUrl(review.html_url, webUrl),
+  };
 }
 
 /** `target_url` names a third-party CI system (a different host than both `apiUrl` and `webUrl` —

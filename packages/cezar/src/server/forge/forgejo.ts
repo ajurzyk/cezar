@@ -20,14 +20,18 @@ import {
   forgejoChangedFileSchema,
   forgejoPullSchema,
   forgejoRepositorySchema,
+  forgejoReviewSchema,
   mapChangedFileStatus,
+  mapForgejoComment,
   mapForgejoIssue,
   mapForgejoPull,
+  mapForgejoReview,
   mergeMethodsFromRepository,
   normalizeForgejoMergeState,
   rebaseToWebUrl,
   type ForgejoBranchInfo,
   type ForgejoChangedFile,
+  type ForgejoLabelListener,
   type ForgejoPull,
   type ForgejoRepository,
 } from './forgejo-map.ts';
@@ -41,15 +45,20 @@ import type {
   DraftPrInput,
   DraftPrOutcome,
   ForgeAvailability,
+  ForgeChecksResult,
+  ForgeComment,
+  ForgeCommentsData,
   ForgeDriver,
   ForgeItem,
   ForgeListOptions,
+  ForgeListResult,
   ForgeMergeInput,
   ForgeMergeResult,
   ForgePrChange,
   ForgePrDiffResult,
   ForgePrMergeStateResult,
   ForgePrStatus,
+  ForgePrStatusResult,
   ForgeRefKind,
   ForgeSettings,
 } from './types.ts';
@@ -57,14 +66,12 @@ import type {
 /**
  * The Forgejo forge driver (cockpit-ui redesign spec §"Forge-driver seam") — structurally mirrors
  * `github.ts`, but speaks REST directly through `forgejo-http.ts` instead of shelling out to a
- * CLI. Every method of `ForgeDriver` (`kind`, `detect`/`detectCached` — the two call sites that
- * already exist, `server.ts:1511` health and `:3214` automations-availability — `viewUrl`,
- * `listIssues`, `listPRs`, `prStatus`, `createPR`, `prMergeState`, `mergePR`,
- * `prDiff`) is real. Several of these have no production call site yet (`server.ts`'s list/diff
- * routes still call `fetchGithub*` directly, bypassing `resolveForge` — that seam lands in a
- * later stage): a fully-implemented method with no caller yet is expected shape here, not a
- * defect — `github.ts` itself implements every optional method even though several of its own
- * call sites were wired up separately, over time.
+ * CLI. Every method of `ForgeDriver` is real: `kind`, `detect`/`detectCached` (`server.ts:1511`
+ * health and `:3214` automations-availability), `viewUrl`, `listIssues`, `listPRs`, `prStatus`,
+ * `createPR`, `prMergeState`, `mergePR`, `prDiff`, `listComments` and `listChecks` — the whole
+ * `/api/v1/github*` route family now reaches this driver through `resolveForgeOrGithub`
+ * (`forge/index.ts`), the same seam `github.ts`'s own `createGithubDriver` answers through for a
+ * GitHub-hosted or unplaceable repo.
  * This driver deliberately reuses a few things straight from `github.ts` rather than re-deriving
  * them: `buildPrBody` (the PR body format has no forge-specific content), `mergePreflightAllowed`
  * (the eligibility formula is pure and forge-agnostic), and, transitively through
@@ -115,7 +122,13 @@ const detectCache = new Map<string, DetectCacheEntry>();
 interface ListCacheEntry {
   at: number;
   limit: number;
-  data: ForgeItem[];
+  items: ForgeItem[];
+  labelColors: Record<string, string>;
+  /** Captured at fetch time, NOT recomputed on a cache hit — mirrors `github.ts`'s own
+   *  `listCache`, where `syncedAt` lives inside the cached `GithubData` rather than being derived
+   *  from `at` on read. A `syncedAt` that moved on every cache hit would misreport a stale answer
+   *  as freshly synced. */
+  syncedAt: string;
 }
 
 /** Keyed `repoRoot\0apiBase\0issues|prs` — same TTL/bound as `detectCache`, one entry per
@@ -126,11 +139,11 @@ const LIST_CACHE_MAX = 50;
 
 interface PrStatusCacheEntry {
   at: number;
-  data: ForgePrStatus | null;
-  /** This entry's own TTL — `CACHE_MS` (60s) for a resolved answer (a found PR, or a PROVEN "no
-   *  PR"), `PR_STATUS_UNRESOLVED_CACHE_MS` (much shorter) for a `FORGEJO_PR_STATUS_UNRESOLVED_PERSISTENT`
-   *  read (`data` is `null`, but it means "don't know", not "proven no PR" — see that symbol's own
-   *  doc comment). Per-entry rather than a single module constant so the two flavors can share one
+  data: ForgePrStatusResult;
+  /** This entry's own TTL — `CACHE_MS` (60s) for a resolved answer (`available:true`, a found PR or
+   *  a PROVEN "no PR"), `PR_STATUS_UNRESOLVED_CACHE_MS` (much shorter) for the one `available:false`
+   *  flavor worth caching at all (a persistent read — see `ForgejoPrStatusResolution`'s own doc
+   *  comment). Per-entry rather than a single module constant so the two flavors can share one
    *  cache/read path without a second lookup table. */
   ttlMs: number;
 }
@@ -139,7 +152,7 @@ interface PrStatusCacheEntry {
  *  can never answer for a different branch in the same project. */
 const prStatusCache = new Map<string, PrStatusCacheEntry>();
 const PR_STATUS_CACHE_MAX = 50;
-/** TTL for a `FORGEJO_PR_STATUS_UNRESOLVED_PERSISTENT` read — short enough that a repo whose walk
+/** TTL for a `persistent` unresolved `ForgejoPrStatusResolution` read — short enough that a repo whose walk
  *  hits its own page/row ceiling self-heals quickly if the underlying data ever changes (a PR
  *  closes, history shrinks), long enough to absorb rapid repeat calls for the same branch (multiple
  *  UI panels, a user refreshing) without repeating the full, expensive walk every time. Deliberately
@@ -181,6 +194,41 @@ interface PrDiffCacheEntry {
 const prDiffCache = new Map<string, PrDiffCacheEntry>();
 const PR_DIFF_CACHE_MAX = 50;
 
+interface CommentsCacheEntry {
+  at: number;
+  data: ForgeCommentsData;
+}
+
+/** Keyed `repoRoot\0apiBase\0kind#number` — same shape as `github.ts`'s own `commentsCache` key.
+ *  Same 60s TTL as `listCache`/`prStatusCache`/`prDiffCache`; a thread view refreshing a minute
+ *  late is a low-stakes staleness, same reasoning `prDiffCache`'s own doc comment gives. */
+const forgejoCommentsCache = new Map<string, CommentsCacheEntry>();
+const FORGEJO_COMMENTS_CACHE_MAX = 50;
+
+/** `listComments`'s own entry cap — parity with `github.ts`'s `THREAD_ENTRY_CAP` (200), the same
+ *  number for the same reason (a thread view is not a full-history export). */
+const FJ_THREAD_ENTRY_CAP = 200;
+
+interface ChecksCacheEntry {
+  at: number;
+  glyph: 'passing' | 'failing' | 'pending' | null;
+}
+
+/** Keyed `repoRoot\0apiBase\0number` — one glyph per PR, mirrors `github.ts`'s own `checksCache`
+ *  key shape. Unlike that one, this IS a member of `PROJECT_CACHES` below: a merge rewrites the
+ *  PR's `head.sha` to the merge commit, so a cached glyph for the PR NUMBER would otherwise answer
+ *  from the pre-merge commit's status for up to `CACHE_MS` after the merge — the same staleness
+ *  `prDiffCache`'s own doc comment gives for why IT is a member. */
+const forgejoChecksCache = new Map<string, ChecksCacheEntry>();
+const FORGEJO_CHECKS_CACHE_MAX = 500;
+
+/** Bounds how many `commits/{sha}/status` reads `forgejoListChecks` fires at once — a request
+ *  list of up to `GH_CHECKS_MAX` (100, `github.ts`) misses would otherwise open 100 simultaneous
+ *  connections to the same instance. A conservative, unmeasured number: no live Forgejo Actions
+ *  run exists on any instance this driver has been tried against, so there is no real traffic
+ *  pattern to size it from — see `forgejoListChecks`'s own doc comment. */
+const FJ_CHECKS_CONCURRENCY = 8;
+
 /** Every cache in this module keyed `repoRoot\0apiBase\0...` — the ONE list both
  *  `evictForgejoProjectCaches` (prefix-deletes per project after a merge) and
  *  `__clearForgejoCachesForTests` (full-clears everything between tests) iterate, so a future
@@ -190,9 +238,16 @@ const PR_DIFF_CACHE_MAX = 50;
  *  it separately, alongside the `mergeInflight` `Set`, which isn't keyed the same way either).
  *  `Map<string, unknown>[]` (not a bespoke interface): each cache below has a different entry value
  *  type, but `evictOldest` below already types its own parameter as `Map<string, unknown>` and every
- *  one of this module's five caches (these four, plus `detectCache`) is assignable to it as-is —
+ *  one of this module's caches (these six, plus `detectCache`) is assignable to it as-is —
  *  TypeScript's structural typing has no variance fight to sidestep here. */
-const PROJECT_CACHES: Map<string, unknown>[] = [listCache, prStatusCache, mergeStateCache, prDiffCache];
+const PROJECT_CACHES: Map<string, unknown>[] = [
+  listCache,
+  prStatusCache,
+  mergeStateCache,
+  prDiffCache,
+  forgejoCommentsCache,
+  forgejoChecksCache,
+];
 
 function cacheKey(repoRoot: string, apiBase: string): string {
   return `${repoRoot}\0${apiBase}`;
@@ -212,6 +267,14 @@ function mergeStateCacheKey(repoRoot: string, apiBase: string, number: number): 
 
 function prDiffCacheKey(repoRoot: string, apiBase: string, number: number, headSha: string): string {
   return `${repoRoot}\0${apiBase}\0${number}\0${headSha}`;
+}
+
+function commentsCacheKey(repoRoot: string, apiBase: string, kind: 'issue' | 'pr', number: number): string {
+  return `${repoRoot}\0${apiBase}\0${kind}#${number}`;
+}
+
+function checksCacheKey(repoRoot: string, apiBase: string, number: number): string {
+  return `${repoRoot}\0${apiBase}\0${number}`;
 }
 
 function evictOldest(cache: Map<string, unknown>, max: number): void {
@@ -392,6 +455,22 @@ function forgejoViewUrl(webUrl: string, owner: string, repo: string, kind: Forge
  * for the PR rows `/issues` also serves — never happens for `/pulls`, but sharing one function
  * keeps that filter written exactly once), and re-slice to `limit` since `paginate`'s own `want`
  * is a stop heuristic, not a hard cap (a full first page can overshoot a small `limit`).
+ *
+ * Returns `ForgeListResult` rather than a bare `ForgeItem[]`: a forge the driver could
+ * not reach must report `available:false` + a `reason`, never an empty list standing in for an
+ * unreported failure — the ambiguity `fetchGithub`'s equivalent (`github.ts`) never had, because a
+ * `gh` failure there always had somewhere to put a reason. `repo`/`syncedAt`/`labelColors` mirror
+ * `githubDataSchema`'s own optional meta fields, so the `/api/github` route (`server.ts`'s
+ * `githubRoutes.get('/github', ...)`) composes one `GithubData`-shaped response from
+ * `listIssues`+`listPRs` without reshaping either.
+ *
+ * The same "never an empty list standing in for a failure" rule applies one level down, per row:
+ * a non-empty page where EVERY row fails to parse also degrades to `available:false`, not the same
+ * silent `{available:true, items:[]}` a single dropped row would produce — same per-stream gate
+ * `forgejoListComments` below applies to its own comment/review walks. That gate counts rows that
+ * survived the parser, not rows that produced an `ForgeItem`: `mapForgejoIssue` legitimately
+ * returns `null` for a `/issues` row that parsed fine but turned out to be a PR row, which must
+ * never itself trip the gate.
  */
 async function listForgejo(
   listKind: 'issues' | 'prs',
@@ -401,13 +480,16 @@ async function listForgejo(
   repo: string,
   webUrl: string,
   opts: ForgeListOptions | undefined,
-): Promise<ForgeItem[]> {
-  if (process.env.CEZ_DRY_RUN === '1') return [];
+): Promise<ForgeListResult> {
+  if (process.env.CEZ_DRY_RUN === '1') return { available: true, items: [] };
   const limit = Math.min(Math.max(opts?.limit ?? 30, 1), FJ_MAX_LIST_LIMIT);
   const key = listCacheKey(repoRoot, http.apiBase, listKind);
+  const repoHandle = `${owner}/${repo}`;
   if (!opts?.refresh) {
     const hit = listCache.get(key);
-    if (hit && Date.now() - hit.at < CACHE_MS && hit.limit >= limit) return hit.data.slice(0, limit);
+    if (hit && Date.now() - hit.at < CACHE_MS && hit.limit >= limit) {
+      return { available: true, items: hit.items.slice(0, limit), repo: repoHandle, syncedAt: hit.syncedAt, labelColors: hit.labelColors };
+    }
   }
 
   const repoPrefix = repoPath(owner, repo);
@@ -416,11 +498,27 @@ async function listForgejo(
   // is the second, belt-and-braces layer for whatever slips through.
   const query = listKind === 'issues' ? 'state=open&type=issues' : 'state=open';
   const segment = listKind === 'issues' ? 'issues' : 'pulls';
-  const mapRow: (raw: unknown, webUrl: string) => ForgeItem | null = listKind === 'issues' ? mapForgejoIssue : mapForgejoPull;
+  const mapRow: (raw: unknown, webUrl: string, onLabel?: ForgejoLabelListener) => ForgeItem | null =
+    listKind === 'issues' ? mapForgejoIssue : mapForgejoPull;
 
   try {
     const page = await http.paginate((p, l) => `${repoPrefix}/${segment}?${query}&page=${p}&limit=${l}`, { want: limit });
     const items: ForgeItem[] = [];
+    // One repo-wide label→color map, filled as each row is mapped — parity with `fetchGithub`'s
+    // own `recordColor` (`github.ts:420`): first color wins, a label with no color contributes
+    // nothing.
+    const labelColors: Record<string, string> = {};
+    const recordColor: ForgejoLabelListener = (l) => {
+      if (l.color && !labelColors[l.name]) labelColors[l.name] = l.color;
+    };
+    // Rows that survived the parser (`forgejoIssueSchema`/`forgejoPullSchema` AND
+    // `rebaseToWebUrl`), counted separately from `items.length`/`mapRow`'s return: `mapForgejoIssue`
+    // LEGITIMATELY returns `null` for a row it parsed fine but that turned out to be a PR row
+    // (`/issues` also serves those — measured live: 3/3 rows). That is a content filter, not a
+    // parse failure, so it must still count as "survived" below — otherwise a `/issues` response
+    // that is entirely, legitimately PR rows would trip the all-rows-failed gate and report a false
+    // `available:false` for a repo that genuinely has zero open issues.
+    let survivedRows = 0;
     for (const row of page.rows) {
       // Per-row, not per-walk: one row that fails `forgejoIssueSchema`/`forgejoPullSchema` (or
       // whose `html_url` is not absolute, which makes `rebaseToWebUrl` throw a `TypeError`) must
@@ -429,21 +527,42 @@ async function listForgejo(
       // `resolveForgejoPrStatus` and `forgejoPrDiff` already apply to their own walks.
       let item: ForgeItem | null;
       try {
-        item = mapRow(row, webUrl);
+        item = mapRow(row, webUrl, recordColor);
+        survivedRows++;
       } catch {
         continue;
       }
       if (item) items.push(item);
       if (items.length >= limit) break;
     }
-    listCache.set(key, { at: Date.now(), limit, data: items });
+    if (page.rows.length > 0 && survivedRows === 0) {
+      // The "29 of 30" comment above covers ONE bad row; this covers the OTHER end of that same
+      // invariant — a non-empty page where every single row failed to even parse means the response
+      // shape drifted out from under this driver's schemas, not "this repo has nothing open". Same
+      // per-stream gate `forgejoListComments` already applies (`commentsUnmappable`/
+      // `reviewsUnmappable`, this file's `forgejoListComments`) — collapsing "all rows drifted" into
+      // a quiet `available:true, items:[]` would be exactly the silent-failure shape this driver is
+      // built to avoid. Deliberately NOT cached, same reasoning as the catch block below: a
+      // drifted read must not pin a false "there is nothing here" for the 60s TTL.
+      return {
+        available: false,
+        reason:
+          listKind === 'issues'
+            ? 'the issue list response did not match the expected shape'
+            : 'the pull request list response did not match the expected shape',
+        items: [],
+      };
+    }
+    const syncedAt = new Date().toISOString();
+    listCache.set(key, { at: Date.now(), limit, items, labelColors, syncedAt });
     evictOldest(listCache, LIST_CACHE_MAX);
-    return items;
-  } catch {
-    // Never throw from a read — an HTTP failure or a timeout degrades to an empty list here.
-    // (A malformed individual ROW no longer reaches this catch: it is skipped in the loop above.)
-    // Deliberately NOT cached: a transient forge outage must not pin an empty list for the TTL.
-    return [];
+    return { available: true, items: items.slice(0, limit), repo: repoHandle, syncedAt, labelColors };
+  } catch (err) {
+    // Never throw from a read — an HTTP failure or a timeout degrades to `available:false` + a
+    // reason here (previously a silent `[]`, indistinguishable from "no items"). (A malformed
+    // individual ROW no longer reaches this catch: it is skipped in the loop above.) Deliberately
+    // NOT cached: a transient forge outage must not pin a failure answer for the TTL.
+    return { available: false, reason: describeError(err), items: [] };
   }
 }
 
@@ -484,41 +603,35 @@ async function pullRowToStatus(
   };
 }
 
-/** Distinguishes "this read taught us nothing" from a genuine, proven "no PR" answer — every place
- *  `resolveForgejoPrStatus` below cannot tell "no PR exists" apart from "the read that would have
- *  proven it failed" returns this instead of `null`: a page-1 throw (nothing collected), a later
- *  page failing (`stoppedShort`, rows kept but the walk unproven — the fallback below could shadow a
- *  match on the unread remainder), an unresolvable default branch (the fallback could not even be
- *  attempted), a non-404 failure on the fallback lookup itself, and a matched row that failed to
- *  RENDER (`pullRowToStatus` throwing on an already-proven match). `forgejoPrStatus` below reads this
- *  to skip `prStatusCache.set` for exactly these cases — the SAME reasoning `listForgejo`'s own
- *  `catch` already applies (that function's `catch` never touches `listCache` either): a transient
- *  forge outage must not pin "no PR" onto a branch for the next 60s. A module-level `Symbol` (not a
- *  discriminated union) so this one, narrow "don't cache this" signal never has to be threaded
- *  through `resolveForgejoPrStatus`'s one remaining ordinary `null`: a fallback lookup that 404s,
- *  the API's own proven "no PR for this base/head pair" answer. */
-const FORGEJO_PR_STATUS_UNRESOLVED = Symbol('forgejo-pr-status-unresolved');
-
-/** Same "don't know" contract as `FORGEJO_PR_STATUS_UNRESOLVED` above — `forgejoPrStatus` below
- *  still returns `null` to its own caller either way — but distinguishes ONE specific route to
- *  UNRESOLVED that is a PERSISTENT trait of the repo/branch rather than a one-off hiccup: the
- *  primary `pulls?state=all` walk hitting its own fixed ceiling (`ForgejoPage.stopReason:'limit'`
- *  — ran out of pages/rows before it could prove "no match", not because a request failed or the
- *  time budget ran out). A repo whose open+closed PR history is larger than that walk's own
- *  ceiling hits this on EVERY call, forever, so `forgejoPrStatus` caches this flavor under a short
- *  negative TTL (`PR_STATUS_UNRESOLVED_CACHE_MS`) instead of repeating the full, expensive walk on
- *  every single call — a real, measured cost against an already-loaded instance.
+/** Distinguishes a resolved answer (a real PR, or a PROVEN "no PR") from an UNRESOLVED read — every
+ *  place `resolveForgejoPrStatus` below cannot tell "no PR exists" apart from "the read that would
+ *  have proven it failed" returns `{ kind: 'unresolved', ... }` instead of a resolved `null`: a
+ *  page-1 throw (nothing collected), a later page failing (`stoppedShort`, rows kept but the walk
+ *  unproven — the fallback below could shadow a match on the unread remainder), an unparseable row
+ *  (this driver never learned whether it was the match), an unresolvable default branch (the
+ *  fallback could not even be attempted), a non-404 failure on the fallback lookup itself, and a
+ *  matched row that failed to RENDER (`pullRowToStatus` throwing on an already-proven match).
+ *  `forgejoPrStatus` below reads this to skip `prStatusCache.set` for exactly these cases — the SAME
+ *  reasoning `listForgejo`'s own `catch` already applies (that function's `catch` never touches
+ *  `listCache` either): a transient forge outage must not pin "no PR" onto a branch for the next
+ *  `CACHE_MS`.
  *
- *  This must NEVER be returned for a `stoppedShort` caused by `'budget'` or `'error'` (both are
- *  one-off, plausibly transient, and must keep retrying on every call, uncached, exactly like
- *  `FORGEJO_PR_STATUS_UNRESOLVED`), nor for ANY of the other UNRESOLVED routes below (a page-1
- *  throw, an unparseable row, a failed default-branch lookup, a non-404 fallback failure, a matched
- *  row that failed to render) — none of those are a stable trait of the repo, and caching them even
- *  briefly would risk exactly the false "no PR" the negative-TTL cache must never produce. Caching
- *  the ANSWER "I don't know" briefly is safe; caching "there is no PR" ever, from an unproven read,
- *  is the defect this whole UNRESOLVED mechanism exists to prevent — the short TTL narrows the
- *  window this trades away completeness for, it does not remove the invariant. */
-const FORGEJO_PR_STATUS_UNRESOLVED_PERSISTENT = Symbol('forgejo-pr-status-unresolved-persistent');
+ *  `persistent: true` marks the ONE unresolved route that is a stable trait of the repo/branch
+ *  rather than a one-off hiccup: the primary `pulls?state=all` walk hitting its own fixed ceiling
+ *  (`ForgejoPage.stopReason:'limit'` — ran out of pages/rows before it could prove "no match", not
+ *  because a request failed or the time budget ran out). A repo whose open+closed PR history is
+ *  larger than that walk's own ceiling hits this on EVERY call, forever, so `forgejoPrStatus` caches
+ *  THIS flavor under a short negative TTL (`PR_STATUS_UNRESOLVED_CACHE_MS`) instead of repeating the
+ *  full, expensive walk on every single call — a real, measured cost against an already-loaded
+ *  instance. Every OTHER unresolved route above is `persistent: false` and must never be cached,
+ *  even briefly: none of them are a stable trait of the repo, and caching them would risk exactly
+ *  the false "no PR" this whole mechanism exists to prevent. Caching the ANSWER "I don't know"
+ *  briefly is safe; caching "there is no PR" ever, from an unproven read, is the defect this whole
+ *  mechanism exists to prevent — the short TTL narrows the window this trades away completeness
+ *  for, it does not remove the invariant. */
+type ForgejoPrStatusResolution =
+  | { kind: 'resolved'; status: ForgePrStatus | null }
+  | { kind: 'unresolved'; persistent: boolean; reason: string };
 
 /**
  * Walks `repos/{o}/{r}/pulls?state=all` (NOT the `GET pulls/{base}/{head}` shortcut as the primary
@@ -548,7 +661,7 @@ async function resolveForgejoPrStatus(
   repo: string,
   webUrl: string,
   branch: string,
-): Promise<ForgePrStatus | null | typeof FORGEJO_PR_STATUS_UNRESOLVED | typeof FORGEJO_PR_STATUS_UNRESOLVED_PERSISTENT> {
+): Promise<ForgejoPrStatusResolution> {
   const repoPrefix = repoPath(owner, repo);
 
   let page: ForgejoPage;
@@ -556,13 +669,12 @@ async function resolveForgejoPrStatus(
     page = await http.paginate((p, l) => `${repoPrefix}/pulls?state=all&page=${p}&limit=${l}`, {
       want: FJ_MAX_LIST_LIMIT,
     });
-  } catch {
+  } catch (err) {
     // Page 1 is the only page `paginate` can fail on without having collected anything (a later
     // page's failure keeps what was gathered and marks `stoppedShort`, see forgejo-http.ts) — either
     // way there is nothing here proving completeness, so the fallback below must not run. Unlike
-    // every OTHER `null` this function returns, this one is UNRESOLVED, not a proven "no PR" —
-    // see `FORGEJO_PR_STATUS_UNRESOLVED`'s own doc comment.
-    return FORGEJO_PR_STATUS_UNRESOLVED;
+    // every OTHER unresolved route, this one carries the raw transport error as its reason.
+    return { kind: 'unresolved', persistent: false, reason: describeError(err) };
   }
 
   let openMatch: ForgejoPull | null = null;
@@ -595,13 +707,13 @@ async function resolveForgejoPrStatus(
     // non-absolute `html_url` — a read must never throw past this function. The `/pulls/{base}/{head}`
     // fallback just below needs the SAME protection for the SAME reason; both `try`s must `await`
     // the `pullRowToStatus` call, not just wrap it, or the rejection skips the `catch` entirely.
-    // UNRESOLVED, never a proven `null`: `found` means the PR's EXISTENCE is already proven by this
+    // UNRESOLVED, never a resolved `null`: `found` means the PR's EXISTENCE is already proven by this
     // walk — the throw only means it could not be fully rendered, so caching this as "no PR" would
     // pin a wrong answer onto a branch that plainly has one.
     try {
-      return await pullRowToStatus(http, owner, repo, webUrl, found);
+      return { kind: 'resolved', status: await pullRowToStatus(http, owner, repo, webUrl, found) };
     } catch {
-      return FORGEJO_PR_STATUS_UNRESOLVED;
+      return { kind: 'unresolved', persistent: false, reason: 'the matched pull request could not be fully read' };
     }
   }
   // walk unproven (a later page errored/hit budget/hit the page cap) — the fallback below could
@@ -611,36 +723,41 @@ async function resolveForgejoPrStatus(
   if (page.stoppedShort) {
     // A deterministic ceiling hit (`stopReason:'limit'` — the walk always needs more pages/rows
     // than its own fixed budget allows) is a PERSISTENT trait of this repo/branch, unlike a one-off
-    // 'budget'/'error' stop — see `FORGEJO_PR_STATUS_UNRESOLVED_PERSISTENT`'s own doc comment for
-    // why only that one flavor is worth a short negative cache.
-    return page.stopReason === 'limit' ? FORGEJO_PR_STATUS_UNRESOLVED_PERSISTENT : FORGEJO_PR_STATUS_UNRESOLVED;
+    // 'budget'/'error' stop — see `ForgejoPrStatusResolution`'s own doc comment for why only that
+    // one flavor is worth a short negative cache.
+    return page.stopReason === 'limit'
+      ? { kind: 'unresolved', persistent: true, reason: 'the pull request history is larger than the search budget' }
+      : { kind: 'unresolved', persistent: false, reason: 'the pull request search did not finish' };
   }
   // A row this schema could not parse can never be checked against `branch` — the walk otherwise
   // LOOKS complete (short page, matching X-Total-Count), but this driver cannot rule out that the
   // skipped row was the match, so this must stay UNRESOLVED too, never a proven "no PR". A one-off
-  // malformed row (not a repo-wide trait), so this always uses the transient symbol, never the
-  // persistent one.
-  if (unparseableRowSeen) return FORGEJO_PR_STATUS_UNRESOLVED;
+  // malformed row (not a repo-wide trait), so this is never `persistent`.
+  if (unparseableRowSeen) {
+    return { kind: 'unresolved', persistent: false, reason: 'a pull request row could not be parsed' };
+  }
 
   const base = await resolveDefaultBranch(repoRoot, http, owner, repo);
   // `resolveDefaultBranch` collapses BOTH "the repo GET failed" and "resolveRepository never learned
   // a default_branch" to `null` — there is no way to tell those apart here, but neither is a proven
   // "no PR": the fallback simply could not be attempted, so this is UNRESOLVED too.
-  if (!base) return FORGEJO_PR_STATUS_UNRESOLVED;
+  if (!base) {
+    return { kind: 'unresolved', persistent: false, reason: 'the repository default branch could not be resolved' };
+  }
   try {
     const raw = await http.getJson(`${repoPrefix}/pulls/${encodeRefSegments(base)}/${encodeRefSegments(branch)}`);
     // `await` here is load-bearing: without it, this `try` returns the pending promise itself and
     // resolves/rejects OUTSIDE this frame, so a `pullRowToStatus` rejection (a non-absolute
-    // `html_url`, see the comment above) skips this `catch` entirely instead of degrading to `null`.
-    return await pullRowToStatus(http, owner, repo, webUrl, forgejoPullSchema.parse(raw));
+    // `html_url`, see the comment above) skips this `catch` entirely instead of degrading correctly.
+    return { kind: 'resolved', status: await pullRowToStatus(http, owner, repo, webUrl, forgejoPullSchema.parse(raw)) };
   } catch (err) {
     // A 404 here is the API's own proven answer: no PR exists for this exact base/head pair — a
     // genuine "no PR", safe to cache. Any OTHER failure (network, 5xx, a malformed body that fails
     // `forgejoPullSchema.parse`, or `pullRowToStatus`'s own degrade path above) means this read
     // taught us nothing, so it must stay UNRESOLVED rather than pin a "no PR" reading onto a branch
     // that might genuinely have one.
-    if (err instanceof ForgejoHttpError && err.status === 404) return null;
-    return FORGEJO_PR_STATUS_UNRESOLVED;
+    if (err instanceof ForgejoHttpError && err.status === 404) return { kind: 'resolved', status: null };
+    return { kind: 'unresolved', persistent: false, reason: describeError(err) };
   }
 }
 
@@ -651,29 +768,29 @@ async function forgejoPrStatus(
   repo: string,
   webUrl: string,
   branch: string,
-): Promise<ForgePrStatus | null> {
-  if (process.env.CEZ_DRY_RUN === '1') return null;
+): Promise<ForgePrStatusResult> {
+  if (process.env.CEZ_DRY_RUN === '1') return { available: true, status: null };
   const key = prStatusCacheKey(repoRoot, http.apiBase, branch);
   const hit = prStatusCache.get(key);
   if (hit && Date.now() - hit.at < hit.ttlMs) return hit.data;
-  const data = await resolveForgejoPrStatus(repoRoot, http, owner, repo, webUrl, branch);
-  // A transient UNRESOLVED read (the primary walk itself failed for a one-off reason) must never
-  // poison the cache with "no PR" — same reasoning `listForgejo`'s own `catch` already applies to
-  // `listCache`. Not cached at all: the next call retries from scratch.
-  if (data === FORGEJO_PR_STATUS_UNRESOLVED) return null;
-  // A PERSISTENT UNRESOLVED read (the walk hit its own fixed ceiling, a repo/branch trait — see
-  // `FORGEJO_PR_STATUS_UNRESOLVED_PERSISTENT`'s own doc comment) still answers `null` to THIS
-  // caller, but is worth a SHORT negative cache so rapid repeat calls don't each re-pay the full,
-  // expensive walk. Never the 60s `CACHE_MS` used for proven answers below — this is "don't know",
-  // not "no PR", and must self-heal quickly.
-  if (data === FORGEJO_PR_STATUS_UNRESOLVED_PERSISTENT) {
-    prStatusCache.set(key, { at: Date.now(), data: null, ttlMs: PR_STATUS_UNRESOLVED_CACHE_MS });
-    evictOldest(prStatusCache, PR_STATUS_CACHE_MAX);
-    return null;
+  const resolution = await resolveForgejoPrStatus(repoRoot, http, owner, repo, webUrl, branch);
+  if (resolution.kind === 'unresolved') {
+    const result: ForgePrStatusResult = { available: false, reason: resolution.reason };
+    // Only the PERSISTENT flavor (the walk's own deterministic ceiling — a repo/branch trait) is
+    // worth a SHORT negative cache so rapid repeat calls don't each re-pay the full, expensive walk.
+    // Never the 60s `CACHE_MS` used for resolved answers below — this is "don't know", not "no PR",
+    // and must self-heal quickly. Every other unresolved reason is a one-off, plausibly transient
+    // read and must never be cached — the next call retries from scratch.
+    if (resolution.persistent) {
+      prStatusCache.set(key, { at: Date.now(), data: result, ttlMs: PR_STATUS_UNRESOLVED_CACHE_MS });
+      evictOldest(prStatusCache, PR_STATUS_CACHE_MAX);
+    }
+    return result;
   }
-  prStatusCache.set(key, { at: Date.now(), data, ttlMs: CACHE_MS });
+  const result: ForgePrStatusResult = { available: true, status: resolution.status };
+  prStatusCache.set(key, { at: Date.now(), data: result, ttlMs: CACHE_MS });
   evictOldest(prStatusCache, PR_STATUS_CACHE_MAX);
-  return data;
+  return result;
 }
 
 /** `GET /repos/{o}/{r}/branches/{ref}` — every field here is readable anonymously (measured); the
@@ -1335,6 +1452,15 @@ async function forgejoPrDiff(
         // applies to a malformed list row: skip it, keep the rest.
       }
     }
+    if (filesPage.rows.length > 0 && rows.length === 0) {
+      // Same gate `listForgejo` applies to its own walk (`forgejo.ts`'s `listForgejo` doc comment):
+      // a non-empty `/files` page where every row fails `forgejoChangedFileSchema` means the
+      // response shape drifted, not "this PR has no changes" — left unchecked this would render a
+      // real PR as a false "+0 −0, no changes". Returned before the `prDiffCache.set` below, so a
+      // drifted read is never pinned for the 60s TTL, same reasoning as this function's own outer
+      // `catch`.
+      return { available: false, reason: 'the file list response did not match the expected shape' };
+    }
 
     const rowsCapped = rows.slice(0, FJ_PR_DIFF_FILE_CAP);
     // Two independent reasons the file list can be incomplete: a full cap worth of rows (`rows.length`
@@ -1416,6 +1542,343 @@ async function forgejoPrDiff(
   }
 }
 
+/**
+ * The comment/review thread for one issue or pull request (#499). `events` (the timeline axis,
+ * #525) is out of scope here, so this always answers with `events` absent, which the contract
+ * already treats as a degrade to comments-only, not a defect.
+ *
+ * `kind === 'pr'` walks TWO independent endpoints (`issues/{n}/comments` for the conversation body
+ * — the same endpoint `kind === 'issue'` uses, measured to also serve a PR's conversation comments
+ * — and `pulls/{n}/reviews` for the review summaries) and merges them chronologically; every row
+ * that fails its schema is dropped individually (the per-row policy `listForgejo` and
+ * `resolveForgejoPrStatus` already apply to their own walks), never the whole thread.
+ *
+ * A stream (comments or reviews) that received rows but mapped/parsed NONE of them signals a
+ * schema drift on THAT stream (`commentsUnmappable` / `reviewsUnmappable` below). A drift on one
+ * stream alone must not blank a thread whose OTHER stream still produced comments — same "don't
+ * blank what already worked" instinct as the rest of this driver, so the thread stays visible with
+ * a `reason` as long as the MERGED result carries something. Only when the merged result across
+ * BOTH streams comes back genuinely empty does a drift get to degrade the whole response to
+ * `available:false` — a genuinely comment-less thread and a Forgejo response whose shape drifted
+ * out from under this driver's schemas must never collapse to the same `{available:true,
+ * comments:[]}`. This is distinct from `mapForgejoReview`'s own content-based drops (an empty-body
+ * COMMENT/PENDING review carries no signal, which is a legitimate zero, not a schema mismatch): a
+ * review row that PARSED but was then content-filtered away never counts as "unmappable" on its
+ * own, so a thread whose reviews are entirely (legitimate) empty-body filters and whose comments
+ * are genuinely absent still reads as a real empty thread, `available:true`. It only stops being
+ * legitimate once the OTHER stream (or this same one) shows an actual schema drift AND the merged
+ * result is empty — that combination is what degrades. A payload carrying a partial-drift `reason`
+ * is never cached (below), same as the fully-degraded case, since the drift may be transient.
+ */
+async function forgejoListComments(
+  repoRoot: string,
+  http: ForgejoHttp,
+  owner: string,
+  repo: string,
+  webUrl: string,
+  kind: 'issue' | 'pr',
+  number: number,
+  opts: { refresh?: boolean } | undefined,
+): Promise<ForgeCommentsData> {
+  if (process.env.CEZ_DRY_RUN === '1') return { available: true, comments: [] };
+  const key = commentsCacheKey(repoRoot, http.apiBase, kind, number);
+  if (!opts?.refresh) {
+    const hit = forgejoCommentsCache.get(key);
+    if (hit && Date.now() - hit.at < CACHE_MS) return hit.data;
+  }
+
+  const repoPrefix = repoPath(owner, repo);
+  try {
+    const commentsPage = await http.paginate((p, l) => `${repoPrefix}/issues/${number}/comments?page=${p}&limit=${l}`, {
+      want: FJ_THREAD_ENTRY_CAP,
+    });
+    const collected: ForgeComment[] = [];
+    let mappedCommentsCount = 0;
+    for (const row of commentsPage.rows) {
+      // Per-row, not per-thread: a row whose `html_url` is not absolute makes `rebaseToWebUrl`
+      // throw a `TypeError` — that must cost this ONE row, not degrade the whole thread to
+      // `available:false`, same per-row policy `listForgejo` already applies to its own walk
+      // (`:510`).
+      let mapped: ForgeComment | null;
+      try {
+        mapped = mapForgejoComment(row, webUrl);
+      } catch {
+        continue;
+      }
+      if (mapped) {
+        collected.push(mapped);
+        mappedCommentsCount++;
+      }
+    }
+    // Every comment row that parses is kept (no content filter on this side, unlike reviews below)
+    // — so a null from `mapForgejoComment` on every row is always a genuine schema mismatch.
+    const commentsUnmappable = commentsPage.rows.length > 0 && mappedCommentsCount === 0;
+
+    let reviewsStoppedShort = false;
+    let reviewsRawCount = 0;
+    let reviewsStructurallyValidCount = 0;
+    if (kind === 'pr') {
+      const reviewsPage = await http.paginate((p, l) => `${repoPrefix}/pulls/${number}/reviews?page=${p}&limit=${l}`, {
+        want: FJ_THREAD_ENTRY_CAP,
+      });
+      reviewsStoppedShort = reviewsPage.stoppedShort;
+      reviewsRawCount = reviewsPage.rows.length;
+      for (const row of reviewsPage.rows) {
+        let parsed;
+        try {
+          parsed = forgejoReviewSchema.parse(row);
+        } catch {
+          continue; // unparseable row — not the whole walk (same per-row policy as everywhere else)
+        }
+        if (parsed.id == null || parsed.html_url == null) {
+          // A structural gap, not a content filter: `forgejoReviewSchema` keeps both `.nullish()`
+          // for `computeReviewDecision`'s older fixtures, so a row can PARSE fine and still lack
+          // what a `ForgeComment` requires. `mapForgejoReview` would also return `null` here, but
+          // for a reason this gate must count as schema drift below, distinct from its legitimate
+          // empty-body content filter (which only ever fires on a row that DOES carry id/html_url).
+          continue;
+        }
+        reviewsStructurallyValidCount++;
+        // Same per-row policy as the comments loop above — a non-absolute `html_url` must drop
+        // only this row, not the whole thread.
+        let mapped: ForgeComment | null;
+        try {
+          mapped = mapForgejoReview(parsed, webUrl);
+        } catch {
+          continue;
+        }
+        if (mapped) collected.push(mapped);
+      }
+    }
+    // Distinct from a null `mapForgejoReview` return on a structurally valid row: THAT can be a
+    // legitimate content filter (an empty-body COMMENT/PENDING/REQUEST_REVIEW review), never a
+    // schema mismatch on its own. Only "every row failed to even parse, or parsed but without the
+    // id/html_url a `ForgeComment` requires" signals a schema drift on the reviews side.
+    const reviewsUnmappable = reviewsRawCount > 0 && reviewsStructurallyValidCount === 0;
+
+    // The schema-drift gate degrades to `available:false` only when a stream actually drifted
+    // (`commentsUnmappable` or `reviewsUnmappable` — rows arrived but none of them mapped/parsed)
+    // AND the thread's merged result is empty. `reviewsStructurallyValidCount` alone is NOT
+    // "signal" for this gate — a review row that parsed fine, carried id/html_url, but was then
+    // legitimately content-filtered away (empty-body COMMENT/PENDING/REQUEST_REVIEW,
+    // `mapForgejoReview`'s own filter) never lands in `collected`, so checking `collected.length`
+    // (not `reviewsStructurallyValidCount`) is what keeps that legitimate filter from masking a
+    // genuine drift on the comments side (regression fixed here —
+    // a comments-side drift next to an all-filtered reviews page must NOT read as a quiet
+    // `{available:true, comments:[]}`). A drift on one stream next to a healthy other stream that
+    // still produced comments stays visible (`collected.length > 0`) with a `reason` below.
+    if ((commentsUnmappable || reviewsUnmappable) && collected.length === 0) {
+      // Deliberately NOT cached, same reasoning `listForgejo`'s own catch gives: a response shape
+      // that just drifted is exactly the kind of thing that must not pin a failure for the TTL.
+      return { available: false, reason: 'the comment thread response did not match the expected shape', comments: [] };
+    }
+
+    collected.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    const cappedByLength = collected.length > FJ_THREAD_ENTRY_CAP;
+    const comments = cappedByLength ? collected.slice(0, FJ_THREAD_ENTRY_CAP) : collected;
+    const truncated = cappedByLength || commentsPage.stoppedShort || reviewsStoppedShort;
+
+    // The thread is visible past this point. When exactly one stream individually drifted while
+    // the OTHER stream carried the whole thread's signal, surface that in `reason` rather than
+    // gating the payload on it — `ForgeCommentsData.reason` is legal at `available:true` (mirrors
+    // `ForgeListResult`'s own doc: "never an error — a hint"), unlike `ForgeChecksResult`'s
+    // `available:true` branch, which carries no such field at all.
+    const reason = commentsUnmappable
+      ? 'the comment stream response did not match the expected shape — showing reviews only'
+      : reviewsUnmappable
+        ? 'the review stream response did not match the expected shape — showing comments only'
+        : undefined;
+
+    const data: ForgeCommentsData = { available: true, comments, ...(truncated ? { truncated: true } : {}), ...(reason ? { reason } : {}) };
+    // A partial-stream drift (`reason` set) is never cached — same instinct as the `available:false`
+    // branch above: pinning a drifted read for the full TTL would keep re-serving a degraded thread
+    // even after the forge recovers. Only a fully clean read (no `reason`) is worth memoizing.
+    if (!reason) {
+      forgejoCommentsCache.set(key, { at: Date.now(), data });
+      evictOldest(forgejoCommentsCache, FORGEJO_COMMENTS_CACHE_MAX);
+    }
+    return data;
+  } catch (err) {
+    // A transport failure (network, non-404 HTTP) on either walk — page 1 of `paginate` rethrows
+    // with nothing collected (forgejo-http.ts), so there is nothing here to salvage. Never cached,
+    // same policy as every other read failure in this module.
+    return { available: false, reason: describeError(err), comments: [] };
+  }
+}
+
+/**
+ * Batched CI-status glyphs for the given PR numbers (`GET /github/checks`, #664's lazy hydration
+ * ported to the Forgejo driver). A naive per-number fan-out (a lookup PLUS a status read for each
+ * of up to `GH_CHECKS_MAX` (100) numbers) would cost up to 200 serial round-trips for one call
+ * against one open-PR-only response GitHub answers in one batch — instead this walks
+ * `pulls?state=open` ONCE to build a `number -> head.sha` map (the dominant case: every visible PR
+ * row is open) and only falls back to a per-number `GET pulls/{n}` for a number the walk didn't
+ * cover (closed/merged, or beyond the walk's own page budget).
+ *
+ * `fetchForgejoCombinedStatus` swallows EVERY failure into `{ok:false}` — the same collapse
+ * `pullRowToStatus` above relies on to fold "the read failed" and "no CI configured" into one
+ * `null` glyph for a SINGLE list-row badge, where that ambiguity is cheap. Reusing that collapse
+ * unconditionally here would let a Forgejo outage that strikes AFTER a successful open-PR walk
+ * render as a quiet, all-null glyph map — indistinguishable from "nobody configured CI on any of
+ * these PRs", the exact silent-failure shape a caller must be able to tell apart from a genuine
+ * "no CI configured anywhere" reading. So this function counts the combined-status reads it
+ * resolves for itself: if NONE of the requested numbers end up with an answer (no cache hit, no
+ * proven-absent 404, no successful status read), the whole response degrades to `available:false`
+ * + a reason — never a `checks` map full of `null`s standing in for an unreported failure. A
+ * PARTIAL failure (some numbers resolved, some didn't) stays `available:true` with the numbers
+ * that DID resolve intact — same "don't blank what already worked" instinct `/github`'s own list
+ * composition uses (`server.ts`'s `/github` handler), but with no `reason` to spend on it:
+ * `ForgeChecksResult`'s `available:true` branch mirrors `githubChecksDataSchema`
+ * (`packages/contract/src/github.ts:65`), which has never carried one, so a per-item failure here
+ * collapses silently to a `null` glyph — the same degrade `fetchPrChecks`/`fetchCommitChecks`
+ * (`github.ts`) already apply to their own per-chunk failures. The threshold is deliberately "zero
+ * resolved", not "any failure": a single flaky status read must not blank a batch of 99 healthy
+ * ones.
+ */
+async function forgejoListChecks(
+  repoRoot: string,
+  http: ForgejoHttp,
+  owner: string,
+  repo: string,
+  numbers: number[],
+): Promise<ForgeChecksResult> {
+  if (process.env.CEZ_DRY_RUN === '1') return { available: true, checks: {} };
+  const checks: Record<number, 'passing' | 'failing' | 'pending' | null> = {};
+  const misses: number[] = [];
+  const now = Date.now();
+  for (const n of numbers) {
+    const hit = forgejoChecksCache.get(checksCacheKey(repoRoot, http.apiBase, n));
+    if (hit && now - hit.at < CACHE_MS) checks[n] = hit.glyph;
+    else misses.push(n);
+  }
+  if (misses.length === 0) return { available: true, checks };
+
+  const repoPrefix = repoPath(owner, repo);
+  const openShaByNumber = new Map<number, string>();
+  try {
+    const page = await http.paginate((p, l) => `${repoPrefix}/pulls?state=open&page=${p}&limit=${l}`, { want: FJ_MAX_LIST_LIMIT });
+    for (const row of page.rows) {
+      let parsed: ForgejoPull;
+      try {
+        parsed = forgejoPullSchema.parse(row);
+      } catch {
+        continue; // an unparseable row simply never joins the map — its number, if it was a miss, falls to the per-number fallback below
+      }
+      if (parsed.head?.sha) openShaByNumber.set(parsed.number, parsed.head.sha);
+    }
+  } catch (err) {
+    // Page 1 of `paginate` is the only page that can fail with nothing collected — never throw
+    // from a read, degrade the whole response instead (same policy `listForgejo`'s own catch
+    // applies to its own walk).
+    return { available: false, reason: describeError(err) };
+  }
+
+  // A number the open-PR walk didn't cover (closed/merged, or beyond its own page budget) needs
+  // its own `GET pulls/{n}`. A 404 there is the API's own proven answer ("no such PR") — a genuine
+  // `null` glyph, not a transport failure. Any OTHER failure means this read taught the driver
+  // nothing about THIS number's sha — it degrades only THIS number to a failed-read glyph (folded
+  // into `null` below, alongside `failedNumbers`, same as a failed combined-status read), never
+  // aborting numbers the open-PR walk or the cache already resolved. The response as a whole still
+  // degrades to `available:false` if NOTHING resolves (the gate below), same as before.
+  //
+  // A non-404 failure additionally means the fallback TRANSPORT itself is unhealthy (network,
+  // timeout, 5xx) — issuing one more `GET pulls/{n}` per remaining miss would serialize up to
+  // `misses.length` more `FJ_TIMEOUT_MS` waits (up to `GH_CHECKS_MAX` = 100) for a single call, with
+  // no retry budget. So the first non-404 stops the fallback loop outright: every miss from that
+  // point on is resolved from `openShaByNumber` if the walk already covered it (never re-fetched —
+  // same "numbers the walk resolved never disappear" guarantee as above) and otherwise folded into
+  // `failedNumbers` without another network round-trip.
+  const shaByNumber = new Map<number, string | null>();
+  const failedNumbers: number[] = [];
+  for (const [i, n] of misses.entries()) {
+    const sha = openShaByNumber.get(n);
+    if (sha) {
+      shaByNumber.set(n, sha);
+      continue;
+    }
+    try {
+      const { pull } = await fetchPull(http, owner, repo, n);
+      shaByNumber.set(n, pull.head?.sha ?? null);
+    } catch (err) {
+      if (err instanceof ForgejoHttpError && err.status === 404) {
+        shaByNumber.set(n, null);
+        continue;
+      }
+      for (const remaining of misses.slice(i)) {
+        const walkedSha = openShaByNumber.get(remaining);
+        if (walkedSha) shaByNumber.set(remaining, walkedSha);
+        else failedNumbers.push(remaining);
+      }
+      break;
+    }
+  }
+
+  const toFetch: Array<[number, string]> = [];
+  for (const [n, sha] of shaByNumber) {
+    if (sha) {
+      toFetch.push([n, sha]);
+    } else {
+      // A proven-absent PR (404 on the fallback) — a resolved `null`, cached like any other
+      // resolved answer, unlike the failed-read `null`s below.
+      checks[n] = null;
+      forgejoChecksCache.set(checksCacheKey(repoRoot, http.apiBase, n), { at: now, glyph: null });
+    }
+  }
+
+  for (let i = 0; i < toFetch.length; i += FJ_CHECKS_CONCURRENCY) {
+    const chunk = toFetch.slice(i, i + FJ_CHECKS_CONCURRENCY);
+    const results = await Promise.all(
+      chunk.map(async ([n, sha]) => ({ n, status: await fetchForgejoCombinedStatus(http, owner, repo, sha) })),
+    );
+    for (const { n, status } of results) {
+      if (!status.ok) {
+        // Deliberately NOT written into `checks` yet — the "did anything resolve at all" gate
+        // below needs to tell a failed read apart from a resolved `null`.
+        failedNumbers.push(n);
+        continue;
+      }
+      let glyph: 'passing' | 'failing' | 'pending' | null;
+      try {
+        glyph = combinedStatusToChecks(status.value);
+      } catch {
+        glyph = null; // a malformed-but-syntactically-valid body degrades this ONE glyph, same as `pullRowToStatus` above
+      }
+      checks[n] = glyph;
+      forgejoChecksCache.set(checksCacheKey(repoRoot, http.apiBase, n), { at: now, glyph });
+    }
+    // A chunk where EVERY read failed is the same "transport is unhealthy" signal the per-number
+    // fallback loop above already acts on (a lone flaky read is expected and cheap — see this
+    // function's own doc comment — but a whole batch failing together is not). Serializing every
+    // remaining chunk against a hung forge (up to `FJ_TIMEOUT_MS` per number) would multiply the
+    // wait for nothing, so this stops here: every number this stage hasn't visited yet folds into
+    // `failedNumbers` (unresolved) without another round-trip, same "never fetched" treatment the
+    // fallback loop's own salvage-then-break gives its own leftovers.
+    if (results.every((r) => !r.status.ok)) {
+      for (const [n] of toFetch.slice(i + FJ_CHECKS_CONCURRENCY)) failedNumbers.push(n);
+      break;
+    }
+  }
+
+  if (Object.keys(checks).length === 0) {
+    // Nothing resolved at all — every miss's status read failed and none were a proven-absent PR
+    // (see this function's own doc comment above). A `checks` map with every value forced to
+    // `null` would be indistinguishable from a real "no CI anywhere" reading, so this reports the
+    // read itself failed instead.
+    return { available: false, reason: 'checks status could not be read from the forge' };
+  }
+  evictOldest(forgejoChecksCache, FORGEJO_CHECKS_CACHE_MAX);
+  // `ForgeChecksResult`'s `available:true` branch carries no `reason` field — unlike
+  // `ForgeListResult` (`githubDataSchema` is flat, a `reason` is legal at `available:true` there),
+  // `ForgeChecksResult` mirrors `githubChecksDataSchema`'s discriminated union, whose `true` branch
+  // has never carried one (`packages/contract/src/github.ts:65`). A per-item failed read here
+  // collapses to a `null` glyph with no separate signal — the SAME degrade `fetchPrChecks`/
+  // `fetchCommitChecks` (`github.ts`) already apply to their own per-chunk failures, for the
+  // identical reason: a batched, best-effort read where losing one item's badge is expected and
+  // cheap, unlike `/github`'s own list composition, which has a `reason` field to spend on it.
+  for (const n of failedNumbers) checks[n] = null; // never cached — see the loop above
+  return { available: true, checks };
+}
+
 export function createForgejoDriver(ctx: ForgejoDriverCtx, deps?: ForgejoHttpDeps): ForgeDriver {
   const { repoRoot, owner, repo, settings } = ctx;
   const http = createForgejoHttp(settings.apiUrl, deps);
@@ -1440,6 +1903,11 @@ export function createForgejoDriver(ctx: ForgejoDriverCtx, deps?: ForgejoHttpDep
     mergePR: (number: number, input: ForgeMergeInput) => forgejoMergePR(repoRoot, http, owner, repo, webUrl, number, input, sleep),
 
     prDiff: (number: number, opts?: { refresh?: boolean }) => forgejoPrDiff(repoRoot, http, owner, repo, number, opts),
+
+    listComments: (kind: 'issue' | 'pr', number: number, opts?: { refresh?: boolean }) =>
+      forgejoListComments(repoRoot, http, owner, repo, webUrl, kind, number, opts),
+
+    listChecks: (numbers: number[]) => forgejoListChecks(repoRoot, http, owner, repo, numbers),
 
     viewUrl: (kind: ForgeRefKind, ref: string | number): string => forgejoViewUrl(webUrl, owner, repo, kind, ref),
   };

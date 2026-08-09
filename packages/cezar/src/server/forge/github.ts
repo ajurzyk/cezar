@@ -10,6 +10,7 @@ import type {
   ForgeCommentsData,
   ForgeDriver,
   ForgeItem,
+  ForgeListResult,
   ForgeMergeInput,
   ForgeMergeMethod,
   ForgeMergeResult,
@@ -377,6 +378,25 @@ const LIST_CACHE_MAX = 50;
 const CACHE_MS = 60_000;
 export const GH_MAX_LIMIT = 1000;
 
+/** Coalesces concurrent `fetchGithub` calls for the same `repoRoot` + capped `limit` + `refresh`
+ *  into ONE `gh` walk — `createGithubDriver.listIssues`/`listPRs` compose from two separate calls
+ *  into this function, and a caller (the `/api/github` route) that awaits both in parallel on a
+ *  cold cache would otherwise pay for `repo view`+`issue list`+`pr list` TWICE. Keyed by
+ *  `repoRoot`+`capped`+`refresh` (`repoRoot\0capped\0refresh`, below) — NOT the same key `listCache`
+ *  uses. `listCache` keys by `repoRoot` ALONE and compares `limit` against `capped` INSIDE the found
+ *  entry (a cached superset request serves a smaller one without a second `gh` walk, see above);
+ *  this map has no such superset check, so two concurrent calls for the same `repoRoot` with
+ *  DIFFERENT `capped` values never share an in-flight promise here — each spawns its own walk. The
+ *  `refresh` segment of the key exists so a `refresh:true` call (the "Refresh" button) never joins
+ *  an already in-flight `refresh:false` walk (or vice versa) and returns that walk's pre-click
+ *  answer — it partitions dedupe into "concurrent refreshes share a walk" and "concurrent
+ *  non-refreshes share a walk", never across the two. Registered only after the cache is confirmed
+ *  missed (a hit never reaches this map), `finally` removes the entry so the NEXT cold call starts
+ *  its own fresh walk rather than replaying a stale promise — mirrors `mergeInflight`'s own
+ *  register/`finally`-release shape further below, a `Set`-based mutex for a different job
+ *  (rejecting a second concurrent merge) than this `Map`'s (sharing one in-flight answer). */
+const listInflight = new Map<string, Promise<GithubData>>();
+
 export async function fetchGithub(repoRoot: string, refresh = false, limit = 30): Promise<GithubData> {
   if (process.env.CEZ_DRY_RUN === '1') return mockGithub();
   const capped = Math.min(Math.max(limit, 1), GH_MAX_LIMIT);
@@ -384,6 +404,26 @@ export async function fetchGithub(repoRoot: string, refresh = false, limit = 30)
   if (!refresh && hit && Date.now() - hit.at < CACHE_MS && hit.limit >= capped) {
     return hit.data;
   }
+  // `refresh` is part of the key: without it, a `refresh:true` call landing while an ALREADY
+  // in-flight `refresh:false` walk for the same `repoRoot`+`capped` is still running would join
+  // that stale walk and hand the "Refresh" button click back the pre-click answer — the walk it
+  // joins never re-ran `gh` for this call at all. Partitioning by `refresh` keeps two refreshing
+  // calls (e.g. `listIssues({refresh:true})`+`listPRs({refresh:true})` from one button click)
+  // deduped into ONE walk with each other, while a refresh never shares a walk with a concurrent
+  // non-refresh caller (and vice versa) — each starts its own.
+  const inflightKey = `${repoRoot}\0${capped}\0${refresh}`;
+  const inflight = listInflight.get(inflightKey);
+  if (inflight) return inflight;
+  const promise = fetchGithubUncached(repoRoot, capped);
+  listInflight.set(inflightKey, promise);
+  try {
+    return await promise;
+  } finally {
+    listInflight.delete(inflightKey);
+  }
+}
+
+async function fetchGithubUncached(repoRoot: string, capped: number): Promise<GithubData> {
   try {
     // No `comments` field — `gh … --json comments` ships full comment bodies.
     // No `statusCheckRollup` either (#664): the CI rollup for every open PR was the
@@ -1812,6 +1852,23 @@ export function mergePreflightAllowed(current: ForgePrMergeState, overrideRules 
   return current.canMerge || (overrideRules && current.canOverride);
 }
 
+/** Adapts `fetchGithub`'s single `GithubData` fetch (both lists + shared meta) to the
+ *  `ForgeListResult` `listIssues`/`listPRs` each return — one list picked by `which`,
+ *  the meta fields spread conditionally on presence (never widened to an `undefined` key: a spread
+ *  guarded by `!== undefined`/truthiness, per AGENTS.md's own `key: maybeUndefined` pitfall) so a
+ *  route composing `GithubData` back out of this shape reproduces the exact wire keys `fetchGithub`
+ *  itself would have sent. */
+function toListResult(data: GithubData, which: 'issues' | 'prs'): ForgeListResult {
+  return {
+    available: data.available,
+    items: data[which],
+    ...(data.reason !== undefined ? { reason: data.reason } : {}),
+    ...(data.repo !== undefined ? { repo: data.repo } : {}),
+    ...(data.syncedAt !== undefined ? { syncedAt: data.syncedAt } : {}),
+    ...(data.labelColors ? { labelColors: data.labelColors } : {}),
+  };
+}
+
 /** owner/repo parsed out of the origin remote — feeds `viewUrl`. */
 export interface GithubRepoRef {
   owner: string;
@@ -1830,29 +1887,48 @@ export function createGithubDriver(repoRoot: string, repoRef: GithubRepoRef | nu
     detect: () => detectGithub(repoRoot),
     detectCached: () => detectGithubCached(repoRoot),
 
-    listIssues: async (opts) => (await fetchGithub(repoRoot, opts?.refresh, opts?.limit)).issues,
+    listIssues: async (opts) => toListResult(await fetchGithub(repoRoot, opts?.refresh, opts?.limit), 'issues'),
 
-    listPRs: async (opts) => (await fetchGithub(repoRoot, opts?.refresh, opts?.limit)).prs,
+    listPRs: async (opts) => toListResult(await fetchGithub(repoRoot, opts?.refresh, opts?.limit), 'prs'),
     prDiff: (number, opts) => fetchGithubPrDiff(repoRoot, number, opts?.refresh),
+    listComments: (kind, number, opts) => fetchGithubComments(repoRoot, kind, number, opts?.refresh),
+    // `GithubChecksData` (this file, above) is structurally identical to `ForgeChecksResult`
+    // (`types.ts`) — both mirror `githubChecksDataSchema`'s own discriminated union.
+    listChecks: (numbers) => fetchGithubChecks(repoRoot, numbers),
 
     createPR: (input) => createDraftPr(input),
 
-    // Null covers everything from "no PR yet" to "gh missing" — the callers
-    // (Create PR → View PR flip) treat all of it as "nothing to link".
+    // `status: null` at `available:true` is a proven "no PR" — gh's own "no pull requests
+    // found for branch …" error on a clean repo proves it, same as a plain "nothing to link" the
+    // callers (Create PR → View PR flip) used to see. Anything else that fails the read (gh missing,
+    // network, an unparseable response) is a genuine availability failure and must not be silently
+    // folded into the same "no PR" answer.
     prStatus: async (branch) => {
-      if (process.env.CEZ_DRY_RUN === '1') return null;
+      if (process.env.CEZ_DRY_RUN === '1') return { available: true, status: null };
       try {
         const out = await gh(repoRoot, ['pr', 'view', branch, '--json', 'number,url,state,isDraft,statusCheckRollup']);
         const pr = ghPrViewSchema.parse(JSON.parse(out));
         return {
-          number: pr.number,
-          url: pr.url,
-          state: GH_PR_STATES[pr.state.toUpperCase()] ?? 'open',
-          isDraft: pr.isDraft,
-          checks: rollupToChecks(pr.statusCheckRollup) ?? null,
+          available: true,
+          status: {
+            number: pr.number,
+            url: pr.url,
+            state: GH_PR_STATES[pr.state.toUpperCase()] ?? 'open',
+            isDraft: pr.isDraft,
+            checks: rollupToChecks(pr.statusCheckRollup) ?? null,
+          },
         };
-      } catch {
-        return null;
+      } catch (error) {
+        // Match against the FULL message, not `firstLine(message)`: `promisify(execFile)`
+        // puts its own "Command failed: gh pr view …" summary on line 1 and gh's real stderr
+        // (where "no pull requests found" and "ENOENT" actually live) on line 2+. Only the
+        // final `reason` gets `firstLine`d, same split as `fetchGithubPrDiff` above.
+        const message = error instanceof Error ? error.message : String(error);
+        if (/no pull requests? found/i.test(message)) return { available: true, status: null };
+        if (/ENOENT/.test(message)) {
+          return { available: false, reason: 'gh CLI not found — install it and run `gh auth login`' };
+        }
+        return { available: false, reason: firstLine(message) };
       }
     },
 

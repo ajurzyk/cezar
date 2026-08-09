@@ -4,9 +4,12 @@ import {
   computeReviewDecision,
   FJ_BODY_CAP,
   forgejoRepositorySchema,
+  forgejoReviewSchema,
   mapChangedFileStatus,
+  mapForgejoComment,
   mapForgejoIssue,
   mapForgejoPull,
+  mapForgejoReview,
   mergeMethodsFromRepository,
   normalizeForgejoMergeState,
   normalizeForgejoTimestamp,
@@ -841,5 +844,115 @@ describe('normalizeForgejoMergeState', () => {
     // The one blocker that closes the override door is a conflict — methods:[] is not that, but
     // canOverride still requires methods.length > 0, so there is nothing to override onto either.
     expect(state.canOverride).toBe(false);
+  });
+});
+
+describe('mapForgejoComment', () => {
+  // Shape confirmed by a live measurement against a real Forgejo instance — NOT guessed from the
+  // swagger.
+  function commentRow(overrides: Record<string, unknown> = {}): unknown {
+    return {
+      id: 144,
+      user: { login: 'ajr', avatar_url: 'https://example.com/a.png' },
+      created_at: '2026-08-09T13:37:33+02:00',
+      body: 'hello there',
+      html_url: 'http://forgejo:3000/acme/demo/issues/24#issuecomment-144',
+      ...overrides,
+    };
+  }
+
+  it('maps id/author/avatarUrl/body/url, rebasing html_url onto webUrl and normalizing the timestamp', () => {
+    expect(mapForgejoComment(commentRow(), webUrl)).toEqual({
+      id: 144,
+      author: 'ajr',
+      avatarUrl: 'https://example.com/a.png',
+      createdAt: '2026-08-09T11:37:33.000Z',
+      body: 'hello there',
+      kind: 'comment',
+      url: 'https://forge.example.com/acme/demo/issues/24#issuecomment-144',
+    });
+  });
+
+  it('falls back to "?" author and an absent avatarUrl when user is missing', () => {
+    const mapped = mapForgejoComment(commentRow({ user: null }), webUrl);
+    expect(mapped?.author).toBe('?');
+    expect(mapped?.avatarUrl).toBeUndefined();
+  });
+
+  it('slices the body to FJ_BODY_CAP, the same cap item bodies use', () => {
+    const mapped = mapForgejoComment(commentRow({ body: 'x'.repeat(FJ_BODY_CAP + 500) }), webUrl);
+    expect(mapped?.body).toHaveLength(FJ_BODY_CAP);
+  });
+
+  it('returns null for a row that fails schema validation (a real schema-drift signal)', () => {
+    expect(mapForgejoComment({ body: 'no id at all', html_url: 'http://forgejo:3000/x', created_at: '2026-08-09T10:00:00Z' }, webUrl)).toBeNull();
+  });
+});
+
+describe('mapForgejoReview', () => {
+  // `id`/`body`/`html_url` extend `forgejoReviewSchema` — parsed through the real schema (not
+  // hand-typed) so a schema/mapper drift shows up here, not just in `forgejo.ts`.
+  function review(overrides: Record<string, unknown> = {}) {
+    return forgejoReviewSchema.parse({
+      id: 10,
+      user: { login: 'ajr', avatar_url: 'https://example.com/a.png' },
+      state: 'COMMENT',
+      dismissed: false,
+      official: false,
+      stale: false,
+      submitted_at: '2026-08-09T13:37:33+02:00',
+      body: 'looks good',
+      html_url: 'http://forgejo:3000/acme/demo/pulls/25#issuecomment-146',
+      ...overrides,
+    });
+  }
+
+  it('maps id/author/avatarUrl/body/url like a comment, plus kind:review', () => {
+    expect(mapForgejoReview(review({ state: 'APPROVED' }), webUrl)).toEqual({
+      id: 10,
+      author: 'ajr',
+      avatarUrl: 'https://example.com/a.png',
+      createdAt: '2026-08-09T11:37:33.000Z',
+      body: 'looks good',
+      kind: 'review',
+      reviewState: 'approved',
+      url: 'https://forge.example.com/acme/demo/pulls/25#issuecomment-146',
+    });
+  });
+
+  it.each([
+    ['APPROVED', 'approved'],
+    ['REQUEST_CHANGES', 'changes_requested'],
+    ['COMMENT', 'commented'],
+  ] as const)('maps state %s to reviewState %s', (state, expected) => {
+    expect(mapForgejoReview(review({ state, body: 'non-empty' }), webUrl)?.reviewState).toBe(expected);
+  });
+
+  it('a non-empty, unrecognized state leaves reviewState absent but keeps the row (parity with normalizeReviews)', () => {
+    const mapped = mapForgejoReview(review({ state: 'SOME_FUTURE_STATE', body: 'still here' }), webUrl);
+    expect(mapped).not.toBeNull();
+    expect(mapped?.reviewState).toBeUndefined();
+  });
+
+  it('dismissed:true maps to reviewState "dismissed" regardless of state', () => {
+    expect(mapForgejoReview(review({ state: 'APPROVED', dismissed: true }), webUrl)?.reviewState).toBe('dismissed');
+  });
+
+  it.each(['COMMENT', 'PENDING', 'REQUEST_REVIEW'])('drops an empty-body %s review — no signal in a flat thread', (state) => {
+    expect(mapForgejoReview(review({ state, body: '' }), webUrl)).toBeNull();
+  });
+
+  it('keeps an empty-body APPROVED review (a bare approve click still is a verdict)', () => {
+    const mapped = mapForgejoReview(review({ state: 'APPROVED', body: '' }), webUrl);
+    expect(mapped).not.toBeNull();
+    expect(mapped?.body).toBe('');
+  });
+
+  it('drops a row with no id — a ForgeComment cannot be built without one', () => {
+    expect(mapForgejoReview(review({ id: null }), webUrl)).toBeNull();
+  });
+
+  it('drops a row with no html_url — a ForgeComment cannot be built without one', () => {
+    expect(mapForgejoReview(review({ html_url: null }), webUrl)).toBeNull();
   });
 });

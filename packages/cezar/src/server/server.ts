@@ -147,8 +147,8 @@ import { agentHomePaths, expandTilde } from '../paths.ts';
 import { isLoopbackHostHeader, normalizeHostname, resolveCapabilities } from './capabilities.ts';
 import { createSocketHub, type SocketHub, type WsUpgradeVerdict } from './ws.ts';
 import { browseDirectory, isInsideBrowseRoot, isLexicallyInsideBrowseRoot, resolveBrowseRoot } from './fs-browse.ts';
-import { parseRemote, resolveForge, type ForgeAvailability } from './forge/index.ts';
-import { fetchGithub, fetchGithubChecks, fetchGithubComments, fetchGithubPrDiff, GithubPrNotFoundError, GH_CHECKS_MAX } from './github.ts';
+import { parseRemote, resolveForge, resolveForgeOrGithub, type ForgeAvailability } from './forge/index.ts';
+import { GithubPrNotFoundError, GH_CHECKS_MAX } from './github.ts';
 import { ensureLaunchKey } from './launch-key.ts';
 import { openInTerminal } from './open-in-terminal.ts';
 import { agentCliRunner, detectOpenTargets, openFileInDefaultApp, openInApp } from './open-in-app.ts';
@@ -4752,6 +4752,13 @@ export function createApp(deps: ServerDeps) {
   const mergeNumberParams = z.object({ number: z.coerce.number().int().positive() });
   const prChangesParams = z.object({ number: z.coerce.number().int().positive().safe() });
   const prChangesQuery = z.object({ refresh: queryValue.refine((v) => v === undefined || v === '1') });
+  // Parallel, not nested awaits: `getRepoInfo` spawns git and the config read hits the disk, they
+  // don't depend on each other. Shared by every route below that resolves a driver (four through
+  // `resolveForgeOrGithub`, two through `resolveForge` directly) — the preamble is byte-identical
+  // either way, and the cockpit polls several of these routes while a PR page is open.
+  async function loadForgeInputs(repoRoot: string) {
+    return Promise.all([getRepoInfo(repoRoot), readForgeSettings(repoRoot)] as const);
+  }
   const githubRoutes = new Hono<ProjectApiEnv>()
     .get(
       '/github',
@@ -4761,8 +4768,31 @@ export function createApp(deps: ServerDeps) {
       async (c) => {
         const { root: repoRoot } = c.get('project');
         const query = c.req.valid('query');
-        const limit = Number.parseInt(query.limit ?? '', 10);
-        return c.json(await fetchGithub(repoRoot, query.refresh === '1', Number.isFinite(limit) ? limit : 30));
+        const parsedLimit = Number.parseInt(query.limit ?? '', 10);
+        const limit = Number.isFinite(parsedLimit) ? parsedLimit : 30;
+        const refresh = query.refresh === '1';
+        const [repoInfo, forgeSettings] = await loadForgeInputs(repoRoot);
+        const forge = resolveForgeOrGithub(repoRoot, repoInfo, forgeSettings);
+        const [issues, prs] = await Promise.all([forge.listIssues({ refresh, limit }), forge.listPRs({ refresh, limit })]);
+        // available = at least one list came back OK. The cockpit rejects the WHOLE payload at
+        // available:false (`packages/web/src/routes/github/github.tsx:270`), so one failed list
+        // must not blank out the other. GitHub itself never hits this branch: one `fetchGithub`
+        // call backs both lists, so they succeed or fail together.
+        const available = issues.available || prs.available;
+        const failedReason = !issues.available ? issues.reason : !prs.available ? prs.reason : undefined;
+        const repo = issues.repo ?? prs.repo;
+        const syncedAt = issues.syncedAt ?? prs.syncedAt;
+        const labelColors =
+          issues.labelColors || prs.labelColors ? { ...prs.labelColors, ...issues.labelColors } : undefined;
+        return c.json({
+          available,
+          ...(failedReason !== undefined ? { reason: failedReason } : {}),
+          ...(repo !== undefined ? { repo } : {}),
+          ...(syncedAt !== undefined ? { syncedAt } : {}),
+          issues: issues.items,
+          prs: prs.items,
+          ...(labelColors ? { labelColors } : {}),
+        });
       },
     )
 
@@ -4773,8 +4803,11 @@ export function createApp(deps: ServerDeps) {
         number: c.req.param('number'),
       });
       if (!parsed.success) return c.json({ error: 'invalid kind or number' }, 400);
+      const [repoInfo, forgeSettings] = await loadForgeInputs(repoRoot);
+      const forge = resolveForgeOrGithub(repoRoot, repoInfo, forgeSettings);
+      if (!forge.listComments) return c.json({ available: false, reason: 'comments are unavailable for this forge', comments: [] });
       return c.json(
-        await fetchGithubComments(repoRoot, parsed.data.kind, parsed.data.number, c.req.valid('query').refresh === '1'),
+        await forge.listComments(parsed.data.kind, parsed.data.number, { refresh: c.req.valid('query').refresh === '1' }),
       );
     })
 
@@ -4796,7 +4829,10 @@ export function createApp(deps: ServerDeps) {
         if (!Number.isInteger(n) || n <= 0 || String(n) !== part) return c.json({ error: 'invalid prs query' }, 400);
         numbers.push(n);
       }
-      return c.json(await fetchGithubChecks(repoRoot, numbers));
+      const [repoInfo, forgeSettings] = await loadForgeInputs(repoRoot);
+      const forge = resolveForgeOrGithub(repoRoot, repoInfo, forgeSettings);
+      if (!forge.listChecks) return c.json({ available: false as const, reason: 'checks are unavailable for this forge' });
+      return c.json(await forge.listChecks(numbers));
     })
 
     .get(
@@ -4806,10 +4842,7 @@ export function createApp(deps: ServerDeps) {
       async (c) => {
         const { root: repoRoot } = c.get('project');
         const parsed = { data: c.req.valid('param') };
-        // Parallel, not nested awaits: `getRepoInfo` spawns git and the config read hits the
-        // disk, they don't depend on each other, and the cockpit polls this route while a PR
-        // page is open.
-        const [repoInfo, forgeSettings] = await Promise.all([getRepoInfo(repoRoot), readForgeSettings(repoRoot)]);
+        const [repoInfo, forgeSettings] = await loadForgeInputs(repoRoot);
         const forge = resolveForge(repoInfo, forgeSettings);
         if (!forge?.prMergeState) return c.json({ available: false, reason: 'GitHub merge state is unavailable' });
         return c.json(await forge.prMergeState(parsed.data.number, { refresh: c.req.valid('query').refresh === '1' }));
@@ -4824,7 +4857,7 @@ export function createApp(deps: ServerDeps) {
         const { root: repoRoot } = c.get('project');
         const parsedNumber = { data: c.req.valid('param') };
         const body = { data: c.req.valid('json') };
-        const [repoInfo, forgeSettings] = await Promise.all([getRepoInfo(repoRoot), readForgeSettings(repoRoot)]);
+        const [repoInfo, forgeSettings] = await loadForgeInputs(repoRoot);
         const forge = resolveForge(repoInfo, forgeSettings);
         if (!forge?.mergePR) return c.json({ error: 'GitHub merge is unavailable' }, 409);
         const result = await forge.mergePR(parsedNumber.data.number, body.data);
@@ -4851,10 +4884,11 @@ export function createApp(deps: ServerDeps) {
       async (c) => {
         const { root: repoRoot } = c.get('project');
         const parsed = { data: c.req.valid('param') };
+        const [repoInfo, forgeSettings] = await loadForgeInputs(repoRoot);
+        const forge = resolveForgeOrGithub(repoRoot, repoInfo, forgeSettings);
+        if (!forge.prDiff) return c.json({ available: false as const, reason: 'PR changes are unavailable for this forge' });
         try {
-          return c.json(
-            await fetchGithubPrDiff(repoRoot, parsed.data.number, c.req.valid('query').refresh === '1'),
-          );
+          return c.json(await forge.prDiff(parsed.data.number, { refresh: c.req.valid('query').refresh === '1' }));
         } catch (err) {
           if (err instanceof GithubPrNotFoundError) return c.json({ error: err.message }, 404);
           throw err;

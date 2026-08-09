@@ -126,6 +126,15 @@ export function resolveForge(repoInfo: RepoInfo | null, forge?: ForgeSettings): 
   return null;
 }
 
+/** The `/api/v1/github*` route family answered via `gh` for EVERY repo before this seam existed:
+ *  no remote, a remote outside the host table, and `CEZ_DRY_RUN` all landed in `fetchGithub*`'s own
+ *  degrade paths/mocks. So this family's routes get a fallback to the GitHub driver (`repoRef null`)
+ *  instead of gating on `null` — that keeps those payloads byte-for-byte unchanged. Scoped to this
+ *  route family only; health, automations and `createPR` keep calling `resolveForge` directly. */
+export function resolveForgeOrGithub(repoRoot: string, repoInfo: RepoInfo | null, forge?: ForgeSettings): ForgeDriver {
+  return resolveForge(repoInfo, forge) ?? createGithubDriver(repoRoot, null);
+}
+
 export type {
   ForgeDriver,
   ForgeAvailability,

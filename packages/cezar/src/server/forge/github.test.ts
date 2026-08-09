@@ -17,6 +17,7 @@ import {
   __clearCommentsCacheForTests,
   __clearRepoHandleCacheForTests,
   resolveRepoHandle,
+  createGithubDriver,
   detectGithubCached,
   fetchGithubComments,
   fetchTimelinePages,
@@ -480,6 +481,205 @@ describe('fetchGithub per-project list-cache isolation (step 2.6)', () => {
     expect(execFileMock.mock.calls.length).toBe(calls);
     // …and it is A's data, not B's (B's fetch didn't overwrite A's key).
     expect(a2.issues[0]?.title).toBe('a-issue');
+  });
+});
+
+/** `listIssues`/`listPRs` carry availability — a `gh` failure now reports
+ *  `{available:false, reason, items:[]}` instead of the old, indistinguishable `[]`. These tests
+ *  drive `createGithubDriver` directly (unlike the rest of this file, which tests `fetchGithub*`
+ *  and its helpers) — the driver's list methods are thin adapters over `fetchGithub`, so only the
+ *  adapter shape and the dedupe below are this describe's own job; `fetchGithub`'s own mapping is
+ *  already covered above. */
+describe('createGithubDriver — list availability', () => {
+  beforeEach(() => {
+    vi.stubEnv('CEZ_DRY_RUN', ''); // dry-run would short-circuit the cache/dedupe paths under test
+    execFileMock.mockReset();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('listIssues() reports available:false with a gh-CLI hint on ENOENT, never a silent []', async () => {
+    execFileMock.mockImplementation((...args: unknown[]) => {
+      const cb = args[args.length - 1] as (e: unknown, r: unknown) => void;
+      cb(new Error('spawn gh ENOENT'), null);
+    });
+    const driver = createGithubDriver('/repo/list-avail-enoent-issues', null);
+
+    const result = await driver.listIssues();
+
+    expect(result).toEqual({
+      available: false,
+      reason: 'gh CLI not found — install it and run `gh auth login`',
+      items: [],
+    });
+  });
+
+  it('listPRs() reports the same availability contract on ENOENT', async () => {
+    execFileMock.mockImplementation((...args: unknown[]) => {
+      const cb = args[args.length - 1] as (e: unknown, r: unknown) => void;
+      cb(new Error('spawn gh ENOENT'), null);
+    });
+    const driver = createGithubDriver('/repo/list-avail-enoent-prs', null);
+
+    const result = await driver.listPRs();
+
+    expect(result).toEqual({
+      available: false,
+      reason: 'gh CLI not found — install it and run `gh auth login`',
+      items: [],
+    });
+  });
+
+  it('a happy listIssues()/listPRs() carry repo, syncedAt and labelColors 1:1 with fetchGithub', async () => {
+    ghByCwd();
+    const repoRoot = '/repo/list-avail-happy';
+    const driver = createGithubDriver(repoRoot, null);
+
+    const [issues, prs] = await Promise.all([driver.listIssues(), driver.listPRs()]);
+    const data = await fetchGithub(repoRoot); // served from the now-warm cache, no new gh calls
+
+    expect(issues).toEqual({
+      available: true,
+      items: data.issues,
+      repo: data.repo,
+      syncedAt: data.syncedAt,
+      labelColors: data.labelColors,
+    });
+    expect(prs).toEqual({
+      available: true,
+      items: data.prs,
+      repo: data.repo,
+      syncedAt: data.syncedAt,
+      labelColors: data.labelColors,
+    });
+  });
+
+  it('a cold cache: parallel listIssues()+listPRs() dedupe into ONE gh walk', async () => {
+    ghByCwd();
+    const repoRoot = '/repo/list-avail-dedupe';
+    const driver = createGithubDriver(repoRoot, null);
+
+    await Promise.all([driver.listIssues(), driver.listPRs()]);
+
+    // `repo view`, `issue list` and `pr list` each run exactly once — a second `fetchGithub` body
+    // running for the second caller (before the first's promise resolved) would double every one
+    // of these three.
+    const listingCalls = execFileMock.mock.calls.filter((call) => {
+      const argv = call[1] as string[];
+      return argv[0] === 'repo' || argv[0] === 'issue' || argv[0] === 'pr';
+    });
+    expect(listingCalls).toHaveLength(3);
+  });
+
+  it('two concurrent refresh:true calls still dedupe into ONE gh walk (the "Refresh" button click itself)', async () => {
+    ghByCwd();
+    const repoRoot = '/repo/list-avail-dedupe-refresh';
+    const driver = createGithubDriver(repoRoot, null);
+
+    await Promise.all([driver.listIssues({ refresh: true }), driver.listPRs({ refresh: true })]);
+
+    const listingCalls = execFileMock.mock.calls.filter((call) => {
+      const argv = call[1] as string[];
+      return argv[0] === 'repo' || argv[0] === 'issue' || argv[0] === 'pr';
+    });
+    expect(listingCalls).toHaveLength(3);
+  });
+
+  it('a refresh:true call does NOT join an already in-flight refresh:false walk — it starts its own, fresh walk', async () => {
+    ghByCwd();
+    const repoRoot = '/repo/list-avail-refresh-vs-stale-inflight';
+
+    // Fired back-to-back, synchronously, so the second call's `fetchGithub` body runs while the
+    // first's `fetchGithubUncached` promise is still registered in `listInflight` — exactly the
+    // "Refresh" button click landing while a background, non-refreshing fetch is already in
+    // flight. A refresh must never return that stale run's answer.
+    await Promise.all([fetchGithub(repoRoot, false), fetchGithub(repoRoot, true)]);
+
+    const listingCalls = execFileMock.mock.calls.filter((call) => {
+      const argv = call[1] as string[];
+      return argv[0] === 'repo' || argv[0] === 'issue' || argv[0] === 'pr';
+    });
+    // Two INDEPENDENT walks (3 gh calls each) — a refresh joining the stale in-flight walk would
+    // collapse this to 3.
+    expect(listingCalls).toHaveLength(6);
+  });
+});
+
+/** `createGithubDriver('...').prStatus` — thin adapter over `gh pr view`, same rationale as the
+ *  list-availability describe above: only the adapter's own three-way split (proven "no PR" vs
+ *  availability failure vs a real match) is this describe's job. */
+describe('createGithubDriver — prStatus', () => {
+  beforeEach(() => {
+    vi.stubEnv('CEZ_DRY_RUN', '');
+    execFileMock.mockReset();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('CEZ_DRY_RUN=1 short-circuits to a proven "no PR" without shelling out to gh', async () => {
+    vi.stubEnv('CEZ_DRY_RUN', '1');
+    const driver = createGithubDriver('/repo/pr-status-dry-run', null);
+
+    await expect(driver.prStatus('feat/x')).resolves.toEqual({ available: true, status: null });
+    expect(execFileMock).not.toHaveBeenCalled();
+  });
+
+  it('a "no pull requests found" gh error is a proven "no PR", not an availability failure', async () => {
+    // Real shape from `promisify(execFile)`: the "Command failed: …" summary is line 1, gh's
+    // own stderr ("no pull requests found…") is line 2+ — never line 1. Matching against
+    // `firstLine(error.message)` instead of the full message would miss this every time.
+    execFileMock.mockImplementation((...args: unknown[]) => {
+      const cb = args[args.length - 1] as (e: unknown, r: unknown) => void;
+      cb(
+        new Error(
+          'Command failed: gh pr view feat/x --json number,url,state,isDraft,statusCheckRollup\n' +
+            'no pull requests found for branch "feat/x"\n',
+        ),
+        null,
+      );
+    });
+    const driver = createGithubDriver('/repo/pr-status-no-pr', null);
+
+    await expect(driver.prStatus('feat/x')).resolves.toEqual({ available: true, status: null });
+  });
+
+  it('reports available:false with a gh-CLI hint on ENOENT, never a silent status:null', async () => {
+    execFileMock.mockImplementation((...args: unknown[]) => {
+      const cb = args[args.length - 1] as (e: unknown, r: unknown) => void;
+      cb(new Error('spawn gh ENOENT'), null);
+    });
+    const driver = createGithubDriver('/repo/pr-status-enoent', null);
+
+    await expect(driver.prStatus('feat/x')).resolves.toEqual({
+      available: false,
+      reason: 'gh CLI not found — install it and run `gh auth login`',
+    });
+  });
+
+  it('a happy pr view carries number/url/state/isDraft/checks', async () => {
+    execFileMock.mockImplementation((...args: unknown[]) => {
+      const cb = args[args.length - 1] as (e: unknown, r: unknown) => void;
+      cb(null, {
+        stdout: JSON.stringify({
+          number: 12,
+          url: 'https://github.com/owner/repo/pull/12',
+          state: 'OPEN',
+          isDraft: false,
+          statusCheckRollup: [{ conclusion: 'SUCCESS' }],
+        }),
+        stderr: '',
+      });
+    });
+    const driver = createGithubDriver('/repo/pr-status-happy', null);
+
+    await expect(driver.prStatus('feat/x')).resolves.toEqual({
+      available: true,
+      status: { number: 12, url: 'https://github.com/owner/repo/pull/12', state: 'open', isDraft: false, checks: 'passing' },
+    });
   });
 });
 

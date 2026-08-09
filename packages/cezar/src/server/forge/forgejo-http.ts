@@ -84,7 +84,7 @@ export interface ForgejoPage {
    *  a stable answer worth remembering past the current call. Exists so a caller like
    *  `resolveForgejoPrStatus` can distinguish "this repo always has more history than this walk's
    *  own budget allows" (worth a short negative cache, see `forgejo.ts`'s
-   *  `FORGEJO_PR_STATUS_UNRESOLVED_PERSISTENT`) from "the server hiccuped this one time" (must
+   *  `ForgejoPrStatusResolution`'s `persistent` flag) from "the server hiccuped this one time" (must
    *  never be cached, not even briefly). */
   stopReason?: 'budget' | 'error' | 'limit';
 }

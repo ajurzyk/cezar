@@ -166,6 +166,28 @@ export interface ForgeListOptions {
   limit?: number;
 }
 
+/** Result of `listIssues`/`listPRs` — flat, mirroring `githubDataSchema`
+ *  (`packages/contract/src/github.ts`, deliberately flat rather than a discriminated union) so the
+ *  `/api/github` route can compose one from the other without reshaping. A forge that cannot be
+ *  reached carries `available: false` + a human `reason` and STILL returns `items: []` — never an
+ *  empty list standing in for an unreported failure (a real "no issues" repo and a down forge used
+ *  to both serve `[]`, indistinguishably). The meta fields (`repo`/`syncedAt`/
+ *  `labelColors`) are optional so a route composing a byte-identical `GithubData` from this shape
+ *  can spread them conditionally without ever widening an absent key to `undefined` on the wire. */
+export interface ForgeListResult {
+  available: boolean;
+  /** Human-readable hint. Present on failure; the field itself is legal at `available:true` too
+   *  (`githubDataSchema`'s own doc: "never an error — a hint"), which the `/api/github` route
+   *  (`server.ts`'s `githubRoutes.get('/github', ...)`), composing `listIssues`+`listPRs`, uses to
+   *  surface "one of the two lists failed" without gating the whole payload on it. */
+  reason?: string;
+  items: ForgeItem[];
+  /** owner/name, when known. */
+  repo?: string;
+  syncedAt?: string;
+  labelColors?: Record<string, string>;
+}
+
 /** Where an existing branch's PR stands — feeds the Create PR → View PR flip. */
 export interface ForgePrStatus {
   number: number;
@@ -174,6 +196,26 @@ export interface ForgePrStatus {
   isDraft: boolean;
   checks: 'passing' | 'failing' | 'pending' | null;
 }
+
+/** Result of `prStatus` — a discriminated union (precedent: `ForgePrDiffResult`,
+ *  `ForgePrMergeStateResult` below), unlike `ForgeListResult`'s flat shape: there is no
+ *  `GithubData`-style route composing this back into a bigger payload, so nothing needs the meta
+ *  fields spreadable. `status: null` at `available:true` is a proven "no PR for this
+ *  branch" — the driver actually read enough to know. `available:false` means the read that would
+ *  have proven either answer failed (forge down, bad token, transport error, or the driver's own
+ *  search walk running out of budget before it could prove "no match") — the caller (Create PR →
+ *  View PR flip) must not treat that the same as a genuinely absent PR. */
+export type ForgePrStatusResult =
+  | { available: true; status: ForgePrStatus | null }
+  | { available: false; reason: string };
+
+/** Result of `listChecks` — a discriminated union (same precedent as `ForgePrStatusResult`/
+ *  `ForgePrDiffResult`), mirroring `githubChecksDataSchema` (`packages/contract/src/github.ts:65`,
+ *  itself a `z.discriminatedUnion('available', …)`) rather than `ForgeListResult`'s flat shape:
+ *  there is no bigger payload this composes into, so nothing needs spreadable meta fields. */
+export type ForgeChecksResult =
+  | { available: true; checks: Record<number, 'passing' | 'failing' | 'pending' | null> }
+  | { available: false; reason: string };
 
 export type ForgeMergeMethod = 'merge' | 'squash' | 'rebase';
 
@@ -273,16 +315,24 @@ export interface ForgeDriver {
   /** Non-blocking availability for the health path: cached result, or null while warming — never
    *  shells out on the read (keeps /api/health under the bookmarklet's latency budget). */
   detectCached(): ForgeAvailability | null;
-  listIssues(opts?: ForgeListOptions): Promise<ForgeItem[]>;
-  listPRs(opts?: ForgeListOptions): Promise<ForgeItem[]>;
+  listIssues(opts?: ForgeListOptions): Promise<ForgeListResult>;
+  listPRs(opts?: ForgeListOptions): Promise<ForgeListResult>;
   /** Draft-PR creation for the review gate (spec 009). Never throws. */
   createPR(input: DraftPrInput): Promise<DraftPrOutcome>;
-  /** The branch's open/merged PR, or null when none (or the forge is down). */
-  prStatus(branch: string): Promise<ForgePrStatus | null>;
+  /** The branch's open/merged PR, `status: null` when none — see `ForgePrStatusResult`'s own doc
+   *  comment for the availability split. */
+  prStatus(branch: string): Promise<ForgePrStatusResult>;
   prMergeState?(number: number, opts?: { refresh?: boolean }): Promise<ForgePrMergeStateResult>;
   mergePR?(number: number, input: ForgeMergeInput): Promise<ForgeMergeResult>;
   /** Bounded, read-only file changes for a pull request. */
   prDiff?(number: number, opts?: { refresh?: boolean }): Promise<ForgePrDiffResult>;
+  /** The full comment/review thread for one issue or pull request (#499). `events` (the timeline
+   *  axis, #525) is out of scope for this method — a forge implementing it without a timeline read
+   *  simply never sets `ForgeCommentsData.events`, which the contract already treats as a
+   *  comments-only degradation, not a defect. */
+  listComments?(kind: 'issue' | 'pr', number: number, opts?: { refresh?: boolean }): Promise<ForgeCommentsData>;
+  /** Batched CI-status glyphs for the given PR numbers (lazy hydration for on-screen rows, #664). */
+  listChecks?(numbers: number[]): Promise<ForgeChecksResult>;
   /** Web URL for a ref on the forge, or null when the remote isn't parseable. */
   viewUrl(kind: ForgeRefKind, ref: string | number): string | null;
 }
