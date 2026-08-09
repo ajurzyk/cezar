@@ -359,6 +359,37 @@ describe('listIssues', () => {
     await expect(driver.listIssues()).resolves.toEqual({ available: true, items: [] });
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it('every row failing to parse resolves available:false with a reason, NOT a false "no open issues", and is NOT cached', async () => {
+    const rows = [{ number: 'not-a-number' }, { number: 'also-not-a-number' }];
+    const fetchMock = vi.fn().mockImplementation(pageOf(rows, rows.length));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listIssues({ refresh: true });
+
+    expect(result.available).toBe(false);
+    expect(result.items).toEqual([]);
+    expect(result.reason).toEqual(expect.any(String));
+    expect(result.reason).not.toBe('');
+
+    // Deliberately not cached: an immediate follow-up call (no refresh) must re-fetch, not serve
+    // the failed read for 60s.
+    await driver.listIssues();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('a response of only legitimate PR-rows (mapForgejoIssue returns null for each, never throws) stays available:true with an empty list, not a false "all rows failed to parse"', async () => {
+    const rows = [
+      issueRow(1, { pull_request: { merged: false, merged_at: null } }),
+      issueRow(2, { pull_request: { merged: true, merged_at: '2026-01-01T00:00:00Z' } }),
+    ];
+    const fetchMock = vi.fn().mockImplementation(pageOf(rows, rows.length));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listIssues({ refresh: true });
+
+    expect(result).toEqual(expect.objectContaining({ available: true, items: [] }));
+  });
 });
 
 describe('listPRs', () => {
@@ -413,6 +444,22 @@ describe('listPRs', () => {
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
     await expect(driver.listPRs()).resolves.toEqual({ available: true, items: [] });
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('every row failing to parse resolves available:false with a reason, NOT a false "no open pull requests", and is NOT cached', async () => {
+    const rows = [{ number: 'not-a-number' }, { title: 'missing everything else' }];
+    const fetchMock = vi.fn().mockImplementation(pageOf(rows, rows.length));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listPRs({ refresh: true });
+
+    expect(result.available).toBe(false);
+    expect(result.items).toEqual([]);
+    expect(result.reason).toEqual(expect.any(String));
+    expect(result.reason).not.toBe('');
+
+    await driver.listPRs();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -2370,6 +2417,24 @@ describe('prDiff', () => {
     const result = await driver.prDiff?.(9);
     if (!result?.available) throw new Error('expected available:true');
     expect(result.files).toEqual([{ path: 'src/ok.ts', status: 'modified', additions: 1, deletions: 0, patchUnavailableReason: 'not-provided' }]);
+  });
+
+  it('every /files row failing to parse resolves available:false with a reason, NOT a false "no changes, +0 -0", and is NOT cached', async () => {
+    const filesRows = [{ status: 'changed', additions: 1, deletions: 0 }, { additions: 2, deletions: 0 }];
+    const fetchMock = router({ filesRows });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.prDiff?.(9);
+
+    if (!result || result.available) throw new Error('expected available:false');
+    expect(result.reason).toEqual(expect.any(String));
+    expect(result.reason).not.toBe('');
+
+    // Deliberately not cached: an immediate follow-up call (no refresh) must re-fetch, not serve
+    // the failed read for 60s.
+    const callsAfterFirst = fetchMock.mock.calls.length;
+    await driver.prDiff?.(9);
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(callsAfterFirst);
   });
 
   it('a binary entry in the diff maps to patchUnavailableReason:"binary", never a patch', async () => {

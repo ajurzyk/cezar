@@ -463,6 +463,14 @@ function forgejoViewUrl(webUrl: string, owner: string, repo: string, kind: Forge
  * `githubDataSchema`'s own optional meta fields, so the `/api/github` route (`server.ts`'s
  * `githubRoutes.get('/github', ...)`) composes one `GithubData`-shaped response from
  * `listIssues`+`listPRs` without reshaping either.
+ *
+ * The same "never an empty list standing in for a failure" rule applies one level down, per row:
+ * a non-empty page where EVERY row fails to parse also degrades to `available:false`, not the same
+ * silent `{available:true, items:[]}` a single dropped row would produce — same per-stream gate
+ * `forgejoListComments` below applies to its own comment/review walks. That gate counts rows that
+ * survived the parser, not rows that produced an `ForgeItem`: `mapForgejoIssue` legitimately
+ * returns `null` for a `/issues` row that parsed fine but turned out to be a PR row, which must
+ * never itself trip the gate.
  */
 async function listForgejo(
   listKind: 'issues' | 'prs',
@@ -503,6 +511,14 @@ async function listForgejo(
     const recordColor: ForgejoLabelListener = (l) => {
       if (l.color && !labelColors[l.name]) labelColors[l.name] = l.color;
     };
+    // Rows that survived the parser (`forgejoIssueSchema`/`forgejoPullSchema` AND
+    // `rebaseToWebUrl`), counted separately from `items.length`/`mapRow`'s return: `mapForgejoIssue`
+    // LEGITIMATELY returns `null` for a row it parsed fine but that turned out to be a PR row
+    // (`/issues` also serves those — measured live: 3/3 rows). That is a content filter, not a
+    // parse failure, so it must still count as "survived" below — otherwise a `/issues` response
+    // that is entirely, legitimately PR rows would trip the all-rows-failed gate and report a false
+    // `available:false` for a repo that genuinely has zero open issues.
+    let survivedRows = 0;
     for (const row of page.rows) {
       // Per-row, not per-walk: one row that fails `forgejoIssueSchema`/`forgejoPullSchema` (or
       // whose `html_url` is not absolute, which makes `rebaseToWebUrl` throw a `TypeError`) must
@@ -512,11 +528,30 @@ async function listForgejo(
       let item: ForgeItem | null;
       try {
         item = mapRow(row, webUrl, recordColor);
+        survivedRows++;
       } catch {
         continue;
       }
       if (item) items.push(item);
       if (items.length >= limit) break;
+    }
+    if (page.rows.length > 0 && survivedRows === 0) {
+      // The "29 of 30" comment above covers ONE bad row; this covers the OTHER end of that same
+      // invariant — a non-empty page where every single row failed to even parse means the response
+      // shape drifted out from under this driver's schemas, not "this repo has nothing open". Same
+      // per-stream gate `forgejoListComments` already applies (`commentsUnmappable`/
+      // `reviewsUnmappable`, this file's `forgejoListComments`) — collapsing "all rows drifted" into
+      // a quiet `available:true, items:[]` would be exactly the silent-failure shape this driver is
+      // built to avoid. Deliberately NOT cached, same reasoning as the catch block below: a
+      // drifted read must not pin a false "there is nothing here" for the 60s TTL.
+      return {
+        available: false,
+        reason:
+          listKind === 'issues'
+            ? 'the issue list response did not match the expected shape'
+            : 'the pull request list response did not match the expected shape',
+        items: [],
+      };
     }
     const syncedAt = new Date().toISOString();
     listCache.set(key, { at: Date.now(), limit, items, labelColors, syncedAt });
@@ -1416,6 +1451,15 @@ async function forgejoPrDiff(
         // A malformed row must not abort the whole diff — same policy `resolveForgejoPrStatus`
         // applies to a malformed list row: skip it, keep the rest.
       }
+    }
+    if (filesPage.rows.length > 0 && rows.length === 0) {
+      // Same gate `listForgejo` applies to its own walk (`forgejo.ts`'s `listForgejo` doc comment):
+      // a non-empty `/files` page where every row fails `forgejoChangedFileSchema` means the
+      // response shape drifted, not "this PR has no changes" — left unchecked this would render a
+      // real PR as a false "+0 −0, no changes". Returned before the `prDiffCache.set` below, so a
+      // drifted read is never pinned for the 60s TTL, same reasoning as this function's own outer
+      // `catch`.
+      return { available: false, reason: 'the file list response did not match the expected shape' };
     }
 
     const rowsCapped = rows.slice(0, FJ_PR_DIFF_FILE_CAP);
