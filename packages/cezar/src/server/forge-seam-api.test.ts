@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RunStore } from '../runs/store.ts';
 import type { RunManager } from '../workflows/run.ts';
+import type { ForgeCommentsData } from './forge/types.ts';
 import { fetchGithub } from './github.ts';
 import type { ForgePrDiffResult, GithubData, GithubItem } from './github.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
@@ -13,9 +14,9 @@ import { createApp } from './server.ts';
 /**
  * Route-level coverage for the shared forge seam (`resolveForgeOrGithub`, `forge/index.ts`) that
  * the `/api/v1/github*` route family is repointed at, one route at a time. Covers
- * `GET /github/prs/:number/changes` and `GET /github` so far — the remaining sibling routes
- * (`/github/comments`, `/github/checks`) grow their own `describe` blocks here as they are
- * repointed too.
+ * `GET /github/prs/:number/changes`, `GET /github` and `GET /github/comments/:kind/:number` so
+ * far — the remaining sibling route (`/github/checks`) grows its own `describe` block here as it
+ * is repointed too.
  */
 
 /** A self-hosted remote + repo-config `forge` declaration — the only way a config can name a
@@ -326,5 +327,74 @@ describe('the forge seam — GET /github', () => {
     expect(body.reason).toBeTruthy();
     expect(body.issues).toEqual([]);
     expect(body.prs).toEqual([]);
+  });
+});
+
+describe('the forge seam — GET /github/comments/:kind/:number', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  const previousDryRun = process.env.CEZ_DRY_RUN;
+
+  beforeEach(() => {
+    delete process.env.CEZ_DRY_RUN;
+  });
+
+  afterEach(() => {
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+    vi.unstubAllGlobals();
+    if (previousDryRun === undefined) delete process.env.CEZ_DRY_RUN;
+    else process.env.CEZ_DRY_RUN = previousDryRun;
+  });
+
+  it('routes a Forgejo repo through the seam and maps the thread with the Forgejo driver', async () => {
+    ({ repoRoot, store } = initForgejoRepo());
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/repos/acme/demo/issues/7/comments')) {
+        return Promise.resolve(
+          jsonResponse(
+            [
+              {
+                id: 1,
+                user: { login: 'ajr' },
+                created_at: '2026-08-09T10:00:00Z',
+                body: 'hello from forgejo',
+                html_url: 'http://forge.internal/acme/demo/issues/7#issuecomment-1',
+              },
+            ],
+            { headers: { 'x-total-count': '1' } },
+          ),
+        );
+      }
+      throw new Error(`unexpected url ${s}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const app = createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test' });
+    const res = await apiRequest(app, '/api/v1/github/comments/issue/7');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ForgeCommentsData;
+    expect(body.available).toBe(true);
+    // The rebased url (forge.internal, not github.com) proves the request went through the
+    // Forgejo driver, not a GitHub fallback.
+    expect(body.comments).toEqual([
+      expect.objectContaining({ id: 1, kind: 'comment', url: 'http://forge.internal/acme/demo/issues/7#issuecomment-1' }),
+    ]);
+    expect(fetchMock).toHaveBeenCalled();
+  });
+
+  it('degrades to available:false with a non-empty reason when the Forgejo transport is unreachable', async () => {
+    ({ repoRoot, store } = initForgejoRepo());
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const app = createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test' });
+    const res = await apiRequest(app, '/api/v1/github/comments/issue/7');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ForgeCommentsData;
+    expect(body.available).toBe(false);
+    expect(body.reason).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalled();
   });
 });

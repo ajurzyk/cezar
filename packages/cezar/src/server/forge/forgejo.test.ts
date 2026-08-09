@@ -846,6 +846,183 @@ describe('prStatus', () => {
   });
 });
 
+/** Shape confirmed by a live measurement against a real Forgejo instance — NOT guessed from the
+ *  swagger. */
+function commentRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: 1,
+    user: { login: 'ajr', avatar_url: 'https://example.com/a.png' },
+    created_at: '2026-08-09T09:00:00Z',
+    body: 'hello',
+    html_url: 'http://forgejo:3000/acme/demo/issues/7#issuecomment-1',
+    ...overrides,
+  };
+}
+
+function reviewRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: 10,
+    user: { login: 'ajr' },
+    state: 'APPROVED',
+    dismissed: false,
+    official: false,
+    stale: false,
+    submitted_at: '2026-08-09T10:00:00Z',
+    body: 'lgtm',
+    html_url: 'http://forgejo:3000/acme/demo/pulls/7#issuecomment-2',
+    ...overrides,
+  };
+}
+
+describe('listComments', () => {
+  const repoRoot = '/repo/list-comments';
+
+  afterEach(() => {
+    delete process.env.CEZ_DRY_RUN;
+  });
+
+  /** Dispatches by URL: `/issues/{n}/comments` and `/pulls/{n}/reviews` are two independent
+   *  `paginate` calls the driver makes for a `kind:'pr'` thread. */
+  function threadFetch(comments: unknown[], reviews: unknown[] = []): (url: URL | string) => Promise<Response> {
+    return (url) => {
+      const s = String(url);
+      if (s.includes('/issues/7/comments')) return Promise.resolve(jsonResponse(comments, { headers: { 'x-total-count': String(comments.length) } }));
+      if (s.includes('/pulls/7/reviews')) return Promise.resolve(jsonResponse(reviews, { headers: { 'x-total-count': String(reviews.length) } }));
+      throw new Error(`unexpected url ${s}`);
+    };
+  }
+
+  it('issue happy path: maps comments, rebases url onto webUrl, and never fetches reviews', async () => {
+    const fetchMock = vi.fn().mockImplementation(threadFetch([commentRow()]));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listComments?.('issue', 7);
+
+    expect(result?.available).toBe(true);
+    expect(result?.comments).toEqual([
+      expect.objectContaining({ id: 1, kind: 'comment', url: 'https://forge.example.com/acme/demo/issues/7#issuecomment-1' }),
+    ]);
+    // `kind:'issue'` must not walk `pulls/{n}/reviews` at all — only the one comments call.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('pr happy path: merges comments and reviews chronologically, reviews carry kind/reviewState', async () => {
+    const fetchMock = vi.fn().mockImplementation(
+      threadFetch(
+        [commentRow({ id: 1, created_at: '2026-08-09T09:00:00Z' })],
+        [reviewRow({ id: 10, state: 'REQUEST_CHANGES', submitted_at: '2026-08-09T10:00:00Z' })],
+      ),
+    );
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listComments?.('pr', 7);
+
+    expect(result?.available).toBe(true);
+    expect(result?.comments.map((c) => c.kind)).toEqual(['comment', 'review']);
+    expect(result?.comments[1]).toEqual(expect.objectContaining({ kind: 'review', reviewState: 'changes_requested' }));
+  });
+
+  it('a thread whose reviews were all legitimately content-filtered (not schema-broken) stays available:true, empty', async () => {
+    // Distinguishes Q2's schema-drift gate from P9's content filter: every row here PARSES fine
+    // (`forgejoReviewSchema` never throws on these) and is dropped only because it carries no
+    // signal — a real "no comments" thread, not a "the response shape drifted" one.
+    const reviews = [
+      reviewRow({ id: 1, state: 'COMMENT', body: '' }),
+      reviewRow({ id: 2, state: 'PENDING', body: '' }),
+      reviewRow({ id: 3, state: 'REQUEST_REVIEW', body: '' }),
+    ];
+    const fetchMock = vi.fn().mockImplementation(threadFetch([], reviews));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listComments?.('pr', 7);
+
+    expect(result?.available).toBe(true);
+    expect(result?.comments).toEqual([]);
+  });
+
+  it('drops empty-body COMMENT/PENDING/REQUEST_REVIEW reviews, keeps a non-empty unrecognized state', async () => {
+    const reviews = [
+      reviewRow({ id: 1, state: 'COMMENT', body: '' }),
+      reviewRow({ id: 2, state: 'PENDING', body: '   ' }),
+      reviewRow({ id: 3, state: 'REQUEST_REVIEW', body: '' }),
+      reviewRow({ id: 4, state: 'SOME_FUTURE_STATE', body: 'still here' }),
+    ];
+    const fetchMock = vi.fn().mockImplementation(threadFetch([], reviews));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listComments?.('pr', 7);
+
+    expect(result?.available).toBe(true);
+    expect(result?.comments).toEqual([expect.objectContaining({ id: 4, reviewState: undefined })]);
+  });
+
+  it('dismissed:true maps to reviewState "dismissed" regardless of state', async () => {
+    const fetchMock = vi.fn().mockImplementation(threadFetch([], [reviewRow({ id: 5, state: 'APPROVED', dismissed: true })]));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listComments?.('pr', 7);
+
+    expect(result?.comments).toEqual([expect.objectContaining({ reviewState: 'dismissed' })]);
+  });
+
+  it('a transport failure resolves available:false with a reason, NEVER a silent []', async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listComments?.('issue', 7);
+
+    expect(result?.available).toBe(false);
+    expect(result?.comments).toEqual([]);
+    expect(result?.reason).toEqual(expect.any(String));
+    expect(result?.reason).not.toBe('');
+  });
+
+  it('a 401 reports a CEZ_FORGEJO_TOKEN hint without echoing the rejected token', async () => {
+    const token = 'nie-ma-takiego-tokenu-0000000000000000000';
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ message: `access token does not exist [sha: ${token}]` }, { status: 401 }));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token });
+
+    const result = await driver.listComments?.('issue', 7);
+
+    expect(result?.available).toBe(false);
+    expect(result?.reason).toContain('CEZ_FORGEJO_TOKEN');
+    expect(result?.reason).not.toContain(token);
+  });
+
+  it('a non-empty raw response that maps to zero rows degrades to available:false, not an empty list', async () => {
+    // Every row is missing `id` — fails `forgejoCommentSchema` entirely, a real schema-drift
+    // signal, never "this thread genuinely has no comments" (which would report available:true).
+    const rows = [{ body: 'no id field at all', html_url: 'http://forgejo:3000/x', created_at: '2026-08-09T10:00:00Z' }];
+    const fetchMock = vi.fn().mockImplementation(threadFetch(rows));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listComments?.('issue', 7);
+
+    expect(result?.available).toBe(false);
+    expect(result?.comments).toEqual([]);
+    expect(result?.reason).toBeTruthy();
+  });
+
+  it('caches for 60s; refresh:true bypasses the cache', async () => {
+    const fetchMock = vi.fn().mockImplementation(threadFetch([commentRow()]));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    await driver.listComments?.('issue', 7);
+    await driver.listComments?.('issue', 7);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await driver.listComments?.('issue', 7, { refresh: true });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('CEZ_DRY_RUN=1 short-circuits to an available empty thread without calling fetch', async () => {
+    process.env.CEZ_DRY_RUN = '1';
+    const fetchMock = vi.fn();
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+    await expect(driver.listComments?.('issue', 7)).resolves.toEqual({ available: true, comments: [] });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
 
 describe('createPR', () => {

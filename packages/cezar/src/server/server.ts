@@ -148,7 +148,7 @@ import { isLoopbackHostHeader, normalizeHostname, resolveCapabilities } from './
 import { createSocketHub, type SocketHub, type WsUpgradeVerdict } from './ws.ts';
 import { browseDirectory, isInsideBrowseRoot, isLexicallyInsideBrowseRoot, resolveBrowseRoot } from './fs-browse.ts';
 import { parseRemote, resolveForge, resolveForgeOrGithub, type ForgeAvailability } from './forge/index.ts';
-import { fetchGithubChecks, fetchGithubComments, GithubPrNotFoundError, GH_CHECKS_MAX } from './github.ts';
+import { fetchGithubChecks, GithubPrNotFoundError, GH_CHECKS_MAX } from './github.ts';
 import { ensureLaunchKey } from './launch-key.ts';
 import { openInTerminal } from './open-in-terminal.ts';
 import { agentCliRunner, detectOpenTargets, openFileInDefaultApp, openInApp } from './open-in-app.ts';
@@ -4753,8 +4753,11 @@ export function createApp(deps: ServerDeps) {
         number: c.req.param('number'),
       });
       if (!parsed.success) return c.json({ error: 'invalid kind or number' }, 400);
+      const [repoInfo, forgeSettings] = await Promise.all([getRepoInfo(repoRoot), readForgeSettings(repoRoot)]);
+      const forge = resolveForgeOrGithub(repoRoot, repoInfo, forgeSettings);
+      if (!forge.listComments) return c.json({ available: false, reason: 'comments are unavailable for this forge', comments: [] });
       return c.json(
-        await fetchGithubComments(repoRoot, parsed.data.kind, parsed.data.number, c.req.valid('query').refresh === '1'),
+        await forge.listComments(parsed.data.kind, parsed.data.number, { refresh: c.req.valid('query').refresh === '1' }),
       );
     })
 

@@ -20,9 +20,12 @@ import {
   forgejoChangedFileSchema,
   forgejoPullSchema,
   forgejoRepositorySchema,
+  forgejoReviewSchema,
   mapChangedFileStatus,
+  mapForgejoComment,
   mapForgejoIssue,
   mapForgejoPull,
+  mapForgejoReview,
   mergeMethodsFromRepository,
   normalizeForgejoMergeState,
   rebaseToWebUrl,
@@ -42,6 +45,8 @@ import type {
   DraftPrInput,
   DraftPrOutcome,
   ForgeAvailability,
+  ForgeComment,
+  ForgeCommentsData,
   ForgeDriver,
   ForgeItem,
   ForgeListOptions,
@@ -190,6 +195,21 @@ interface PrDiffCacheEntry {
 const prDiffCache = new Map<string, PrDiffCacheEntry>();
 const PR_DIFF_CACHE_MAX = 50;
 
+interface CommentsCacheEntry {
+  at: number;
+  data: ForgeCommentsData;
+}
+
+/** Keyed `repoRoot\0apiBase\0kind#number` — same shape as `github.ts`'s own `commentsCache` key.
+ *  Same 60s TTL as `listCache`/`prStatusCache`/`prDiffCache`; a thread view refreshing a minute
+ *  late is a low-stakes staleness, same reasoning `prDiffCache`'s own doc comment gives. */
+const forgejoCommentsCache = new Map<string, CommentsCacheEntry>();
+const FORGEJO_COMMENTS_CACHE_MAX = 50;
+
+/** `listComments`'s own entry cap — parity with `github.ts`'s `THREAD_ENTRY_CAP` (200), the same
+ *  number for the same reason (a thread view is not a full-history export). */
+const FJ_THREAD_ENTRY_CAP = 200;
+
 /** Every cache in this module keyed `repoRoot\0apiBase\0...` — the ONE list both
  *  `evictForgejoProjectCaches` (prefix-deletes per project after a merge) and
  *  `__clearForgejoCachesForTests` (full-clears everything between tests) iterate, so a future
@@ -199,9 +219,9 @@ const PR_DIFF_CACHE_MAX = 50;
  *  it separately, alongside the `mergeInflight` `Set`, which isn't keyed the same way either).
  *  `Map<string, unknown>[]` (not a bespoke interface): each cache below has a different entry value
  *  type, but `evictOldest` below already types its own parameter as `Map<string, unknown>` and every
- *  one of this module's five caches (these four, plus `detectCache`) is assignable to it as-is —
+ *  one of this module's caches (these five, plus `detectCache`) is assignable to it as-is —
  *  TypeScript's structural typing has no variance fight to sidestep here. */
-const PROJECT_CACHES: Map<string, unknown>[] = [listCache, prStatusCache, mergeStateCache, prDiffCache];
+const PROJECT_CACHES: Map<string, unknown>[] = [listCache, prStatusCache, mergeStateCache, prDiffCache, forgejoCommentsCache];
 
 function cacheKey(repoRoot: string, apiBase: string): string {
   return `${repoRoot}\0${apiBase}`;
@@ -221,6 +241,10 @@ function mergeStateCacheKey(repoRoot: string, apiBase: string, number: number): 
 
 function prDiffCacheKey(repoRoot: string, apiBase: string, number: number, headSha: string): string {
   return `${repoRoot}\0${apiBase}\0${number}\0${headSha}`;
+}
+
+function commentsCacheKey(repoRoot: string, apiBase: string, kind: 'issue' | 'pr', number: number): string {
+  return `${repoRoot}\0${apiBase}\0${kind}#${number}`;
 }
 
 function evictOldest(cache: Map<string, unknown>, max: number): void {
@@ -1443,6 +1467,108 @@ async function forgejoPrDiff(
   }
 }
 
+/**
+ * The comment/review thread for one issue or pull request (#499). `events` (the timeline axis,
+ * #525) is out of scope here, so this always answers with `events` absent, which the contract
+ * already treats as a degrade to comments-only, not a defect.
+ *
+ * `kind === 'pr'` walks TWO independent endpoints (`issues/{n}/comments` for the conversation body
+ * — the same endpoint `kind === 'issue'` uses, measured to also serve a PR's conversation comments
+ * — and `pulls/{n}/reviews` for the review summaries) and merges them chronologically; every row
+ * that fails its schema is dropped individually (the per-row policy `listForgejo` and
+ * `resolveForgejoPrStatus` already apply to their own walks), never the whole thread.
+ *
+ * A raw response that is NON-EMPTY but maps to ZERO rows degrades to `available:false` — a
+ * genuinely comment-less thread and a Forgejo response whose shape drifted out from under this
+ * driver's schemas must never collapse to the same `{available:true, comments:[]}`. This is
+ * distinct from `mapForgejoReview`'s own content-based drops (an empty-body COMMENT/PENDING review
+ * carries no signal, which is a legitimate zero, not a schema mismatch) — the shape-mismatch check
+ * only fires when a row failed to PARSE at all (tracked separately from the content-filter drops
+ * below).
+ */
+async function forgejoListComments(
+  repoRoot: string,
+  http: ForgejoHttp,
+  owner: string,
+  repo: string,
+  webUrl: string,
+  kind: 'issue' | 'pr',
+  number: number,
+  opts: { refresh?: boolean } | undefined,
+): Promise<ForgeCommentsData> {
+  if (process.env.CEZ_DRY_RUN === '1') return { available: true, comments: [] };
+  const key = commentsCacheKey(repoRoot, http.apiBase, kind, number);
+  if (!opts?.refresh) {
+    const hit = forgejoCommentsCache.get(key);
+    if (hit && Date.now() - hit.at < CACHE_MS) return hit.data;
+  }
+
+  const repoPrefix = repoPath(owner, repo);
+  try {
+    const commentsPage = await http.paginate((p, l) => `${repoPrefix}/issues/${number}/comments?page=${p}&limit=${l}`, {
+      want: FJ_THREAD_ENTRY_CAP,
+    });
+    const collected: ForgeComment[] = [];
+    let mappedCommentsCount = 0;
+    for (const row of commentsPage.rows) {
+      const mapped = mapForgejoComment(row, webUrl);
+      if (mapped) {
+        collected.push(mapped);
+        mappedCommentsCount++;
+      }
+    }
+    // Every comment row that parses is kept (no content filter on this side, unlike reviews below)
+    // — so a null from `mapForgejoComment` on every row is always a genuine schema mismatch.
+    const commentsUnmappable = commentsPage.rows.length > 0 && mappedCommentsCount === 0;
+
+    let reviewsStoppedShort = false;
+    let reviewsUnmappable = false;
+    if (kind === 'pr') {
+      const reviewsPage = await http.paginate((p, l) => `${repoPrefix}/pulls/${number}/reviews?page=${p}&limit=${l}`, {
+        want: FJ_THREAD_ENTRY_CAP,
+      });
+      reviewsStoppedShort = reviewsPage.stoppedShort;
+      let parsedReviewsCount = 0;
+      for (const row of reviewsPage.rows) {
+        let parsed;
+        try {
+          parsed = forgejoReviewSchema.parse(row);
+        } catch {
+          continue; // unparseable row — not the whole walk (same per-row policy as everywhere else)
+        }
+        parsedReviewsCount++;
+        const mapped = mapForgejoReview(parsed, webUrl);
+        if (mapped) collected.push(mapped);
+      }
+      // Distinct from a null `mapForgejoReview` return: THAT can be a legitimate content filter
+      // (an empty-body COMMENT/PENDING review), never a schema mismatch on its own. Only "every row
+      // failed to even PARSE" signals a schema drift on the reviews side.
+      reviewsUnmappable = reviewsPage.rows.length > 0 && parsedReviewsCount === 0;
+    }
+
+    if (commentsUnmappable || reviewsUnmappable) {
+      // Deliberately NOT cached, same reasoning `listForgejo`'s own catch gives: a response shape
+      // that just drifted is exactly the kind of thing that must not pin a failure for the TTL.
+      return { available: false, reason: 'the comment thread response did not match the expected shape', comments: [] };
+    }
+
+    collected.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    const cappedByLength = collected.length > FJ_THREAD_ENTRY_CAP;
+    const comments = cappedByLength ? collected.slice(0, FJ_THREAD_ENTRY_CAP) : collected;
+    const truncated = cappedByLength || commentsPage.stoppedShort || reviewsStoppedShort;
+
+    const data: ForgeCommentsData = { available: true, comments, ...(truncated ? { truncated: true } : {}) };
+    forgejoCommentsCache.set(key, { at: Date.now(), data });
+    evictOldest(forgejoCommentsCache, FORGEJO_COMMENTS_CACHE_MAX);
+    return data;
+  } catch (err) {
+    // A transport failure (network, non-404 HTTP) on either walk — page 1 of `paginate` rethrows
+    // with nothing collected (forgejo-http.ts), so there is nothing here to salvage. Never cached,
+    // same policy as every other read failure in this module.
+    return { available: false, reason: describeError(err), comments: [] };
+  }
+}
+
 export function createForgejoDriver(ctx: ForgejoDriverCtx, deps?: ForgejoHttpDeps): ForgeDriver {
   const { repoRoot, owner, repo, settings } = ctx;
   const http = createForgejoHttp(settings.apiUrl, deps);
@@ -1467,6 +1593,9 @@ export function createForgejoDriver(ctx: ForgejoDriverCtx, deps?: ForgejoHttpDep
     mergePR: (number: number, input: ForgeMergeInput) => forgejoMergePR(repoRoot, http, owner, repo, webUrl, number, input, sleep),
 
     prDiff: (number: number, opts?: { refresh?: boolean }) => forgejoPrDiff(repoRoot, http, owner, repo, number, opts),
+
+    listComments: (kind: 'issue' | 'pr', number: number, opts?: { refresh?: boolean }) =>
+      forgejoListComments(repoRoot, http, owner, repo, webUrl, kind, number, opts),
 
     viewUrl: (kind: ForgeRefKind, ref: string | number): string => forgejoViewUrl(webUrl, owner, repo, kind, ref),
   };

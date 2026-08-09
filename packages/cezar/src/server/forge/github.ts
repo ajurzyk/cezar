@@ -1876,6 +1876,7 @@ export function createGithubDriver(repoRoot: string, repoRef: GithubRepoRef | nu
 
     listPRs: async (opts) => toListResult(await fetchGithub(repoRoot, opts?.refresh, opts?.limit), 'prs'),
     prDiff: (number, opts) => fetchGithubPrDiff(repoRoot, number, opts?.refresh),
+    listComments: (kind, number, opts) => fetchGithubComments(repoRoot, kind, number, opts?.refresh),
 
     createPR: (input) => createDraftPr(input),
 

@@ -318,6 +318,11 @@ export interface ForgeDriver {
   mergePR?(number: number, input: ForgeMergeInput): Promise<ForgeMergeResult>;
   /** Bounded, read-only file changes for a pull request. */
   prDiff?(number: number, opts?: { refresh?: boolean }): Promise<ForgePrDiffResult>;
+  /** The full comment/review thread for one issue or pull request (#499). `events` (the timeline
+   *  axis, #525) is out of scope for this method — a forge implementing it without a timeline read
+   *  simply never sets `ForgeCommentsData.events`, which the contract already treats as a
+   *  comments-only degradation, not a defect. */
+  listComments?(kind: 'issue' | 'pr', number: number, opts?: { refresh?: boolean }): Promise<ForgeCommentsData>;
   /** Web URL for a ref on the forge, or null when the remote isn't parseable. */
   viewUrl(kind: ForgeRefKind, ref: string | number): string | null;
 }
