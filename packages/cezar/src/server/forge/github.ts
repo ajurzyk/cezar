@@ -1904,12 +1904,16 @@ export function createGithubDriver(repoRoot: string, repoRef: GithubRepoRef | nu
           },
         };
       } catch (error) {
-        const message = firstLine(error instanceof Error ? error.message : String(error));
+        // Match against the FULL message, not `firstLine(message)`: `promisify(execFile)`
+        // puts its own "Command failed: gh pr view …" summary on line 1 and gh's real stderr
+        // (where "no pull requests found" and "ENOENT" actually live) on line 2+. Only the
+        // final `reason` gets `firstLine`d, same split as `fetchGithubPrDiff` above.
+        const message = error instanceof Error ? error.message : String(error);
         if (/no pull requests? found/i.test(message)) return { available: true, status: null };
         if (/ENOENT/.test(message)) {
           return { available: false, reason: 'gh CLI not found — install it and run `gh auth login`' };
         }
-        return { available: false, reason: message };
+        return { available: false, reason: firstLine(message) };
       }
     },
 

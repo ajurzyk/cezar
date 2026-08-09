@@ -596,9 +596,18 @@ describe('createGithubDriver — prStatus', () => {
   });
 
   it('a "no pull requests found" gh error is a proven "no PR", not an availability failure', async () => {
+    // Real shape from `promisify(execFile)`: the "Command failed: …" summary is line 1, gh's
+    // own stderr ("no pull requests found…") is line 2+ — never line 1. Matching against
+    // `firstLine(error.message)` instead of the full message would miss this every time.
     execFileMock.mockImplementation((...args: unknown[]) => {
       const cb = args[args.length - 1] as (e: unknown, r: unknown) => void;
-      cb(new Error('no pull requests found for branch "feat/x"'), null);
+      cb(
+        new Error(
+          'Command failed: gh pr view feat/x --json number,url,state,isDraft,statusCheckRollup\n' +
+            'no pull requests found for branch "feat/x"\n',
+        ),
+        null,
+      );
     });
     const driver = createGithubDriver('/repo/pr-status-no-pr', null);
 
