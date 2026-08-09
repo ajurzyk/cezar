@@ -572,6 +572,39 @@ describe('createGithubDriver — list availability', () => {
     });
     expect(listingCalls).toHaveLength(3);
   });
+
+  it('two concurrent refresh:true calls still dedupe into ONE gh walk (the "Refresh" button click itself)', async () => {
+    ghByCwd();
+    const repoRoot = '/repo/list-avail-dedupe-refresh';
+    const driver = createGithubDriver(repoRoot, null);
+
+    await Promise.all([driver.listIssues({ refresh: true }), driver.listPRs({ refresh: true })]);
+
+    const listingCalls = execFileMock.mock.calls.filter((call) => {
+      const argv = call[1] as string[];
+      return argv[0] === 'repo' || argv[0] === 'issue' || argv[0] === 'pr';
+    });
+    expect(listingCalls).toHaveLength(3);
+  });
+
+  it('a refresh:true call does NOT join an already in-flight refresh:false walk — it starts its own, fresh walk', async () => {
+    ghByCwd();
+    const repoRoot = '/repo/list-avail-refresh-vs-stale-inflight';
+
+    // Fired back-to-back, synchronously, so the second call's `fetchGithub` body runs while the
+    // first's `fetchGithubUncached` promise is still registered in `listInflight` — exactly the
+    // "Refresh" button click landing while a background, non-refreshing fetch is already in
+    // flight. A refresh must never return that stale run's answer.
+    await Promise.all([fetchGithub(repoRoot, false), fetchGithub(repoRoot, true)]);
+
+    const listingCalls = execFileMock.mock.calls.filter((call) => {
+      const argv = call[1] as string[];
+      return argv[0] === 'repo' || argv[0] === 'issue' || argv[0] === 'pr';
+    });
+    // Two INDEPENDENT walks (3 gh calls each) — a refresh joining the stale in-flight walk would
+    // collapse this to 3.
+    expect(listingCalls).toHaveLength(6);
+  });
 });
 
 /** `createGithubDriver('...').prStatus` — thin adapter over `gh pr view`, same rationale as the

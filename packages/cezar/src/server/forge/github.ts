@@ -378,20 +378,23 @@ const LIST_CACHE_MAX = 50;
 const CACHE_MS = 60_000;
 export const GH_MAX_LIMIT = 1000;
 
-/** Coalesces concurrent `fetchGithub` calls for the same `repoRoot` + capped `limit` into ONE `gh`
- *  walk — `createGithubDriver.listIssues`/`listPRs` compose from two separate calls
+/** Coalesces concurrent `fetchGithub` calls for the same `repoRoot` + capped `limit` + `refresh`
+ *  into ONE `gh` walk — `createGithubDriver.listIssues`/`listPRs` compose from two separate calls
  *  into this function, and a caller (the `/api/github` route) that awaits both in parallel on a
  *  cold cache would otherwise pay for `repo view`+`issue list`+`pr list` TWICE. Keyed by
- *  `repoRoot`+`capped` (`repoRoot\0capped`, below) — NOT the same key `listCache` uses. `listCache`
- *  keys by `repoRoot` ALONE and compares `limit` against `capped` INSIDE the found entry (a cached
- *  superset request serves a smaller one without a second `gh` walk, see above); this map has no
- *  such superset check, so two concurrent calls for the same `repoRoot` with DIFFERENT `capped`
- *  values never share an in-flight promise here — each spawns its own walk. Registered only after
- *  the cache is confirmed missed (a hit never reaches this map), `finally` removes the entry so the
- *  NEXT cold call starts its own fresh walk rather than replaying a stale promise — mirrors
- *  `mergeInflight`'s own register/`finally`-release shape further below, a `Set`-based mutex for a
- *  different job (rejecting a second concurrent merge) than this `Map`'s (sharing one in-flight
- *  answer). */
+ *  `repoRoot`+`capped`+`refresh` (`repoRoot\0capped\0refresh`, below) — NOT the same key `listCache`
+ *  uses. `listCache` keys by `repoRoot` ALONE and compares `limit` against `capped` INSIDE the found
+ *  entry (a cached superset request serves a smaller one without a second `gh` walk, see above);
+ *  this map has no such superset check, so two concurrent calls for the same `repoRoot` with
+ *  DIFFERENT `capped` values never share an in-flight promise here — each spawns its own walk. The
+ *  `refresh` segment of the key exists so a `refresh:true` call (the "Refresh" button) never joins
+ *  an already in-flight `refresh:false` walk (or vice versa) and returns that walk's pre-click
+ *  answer — it partitions dedupe into "concurrent refreshes share a walk" and "concurrent
+ *  non-refreshes share a walk", never across the two. Registered only after the cache is confirmed
+ *  missed (a hit never reaches this map), `finally` removes the entry so the NEXT cold call starts
+ *  its own fresh walk rather than replaying a stale promise — mirrors `mergeInflight`'s own
+ *  register/`finally`-release shape further below, a `Set`-based mutex for a different job
+ *  (rejecting a second concurrent merge) than this `Map`'s (sharing one in-flight answer). */
 const listInflight = new Map<string, Promise<GithubData>>();
 
 export async function fetchGithub(repoRoot: string, refresh = false, limit = 30): Promise<GithubData> {
@@ -401,7 +404,14 @@ export async function fetchGithub(repoRoot: string, refresh = false, limit = 30)
   if (!refresh && hit && Date.now() - hit.at < CACHE_MS && hit.limit >= capped) {
     return hit.data;
   }
-  const inflightKey = `${repoRoot}\0${capped}`;
+  // `refresh` is part of the key: without it, a `refresh:true` call landing while an ALREADY
+  // in-flight `refresh:false` walk for the same `repoRoot`+`capped` is still running would join
+  // that stale walk and hand the "Refresh" button click back the pre-click answer — the walk it
+  // joins never re-ran `gh` for this call at all. Partitioning by `refresh` keeps two refreshing
+  // calls (e.g. `listIssues({refresh:true})`+`listPRs({refresh:true})` from one button click)
+  // deduped into ONE walk with each other, while a refresh never shares a walk with a concurrent
+  // non-refresh caller (and vice versa) — each starts its own.
+  const inflightKey = `${repoRoot}\0${capped}\0${refresh}`;
   const inflight = listInflight.get(inflightKey);
   if (inflight) return inflight;
   const promise = fetchGithubUncached(repoRoot, capped);
