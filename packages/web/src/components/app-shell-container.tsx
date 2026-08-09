@@ -10,6 +10,7 @@ import { ProviderBannerContainer } from '@/components/provider-banner-container'
 import { ProjectGroups } from '@/components/project-groups'
 import { TaskQuickListContainer } from '@/components/task-quick-list'
 import { ToolsMenu } from '@/components/tools-menu'
+import { useForgeKind } from '@/lib/use-forge-kind'
 import { useDocumentTitle } from '@/lib/use-document-title'
 import { useActiveProjectId } from '@/lib/project-router'
 import { unreadDoneCount } from '@/lib/read-state'
@@ -63,6 +64,10 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
   // GitHub automations are opt-in too (#801) — same honesty rule: without the server's word for
   // it the nav must not offer a tab whose every request would 409.
   const automationsAvailable = health.data?.capabilities.automations === true
+  // Which forge the flat nav's tab is named after. The hook prefers the URL project's own
+  // registry entry and falls back to health — in single-project mode, where the flat nav lives,
+  // those are the same folder.
+  const forgeKind = useForgeKind()
   const todos = useTodos(inboxAvailable)
   // One query in the shell feeds every rendering of the active project's navigation (desktop,
   // mobile drawer, and grouped sidebar). Routes reuse this TanStack Query cache entry.
@@ -127,6 +132,10 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
         // the chips: the nav must not claim a GitHub tab it cannot back. The Tools menu's
         // forge note says why it is absent.
         forgeAvailable={health.data?.forge?.available === true}
+        // WHICH forge, so the tab carries its real name (Stage 4). Only the FLAT nav reads this —
+        // a grouped sidebar's tabs are named per project by `ProjectGroups`, from each registry
+        // entry's own `forge`.
+        forgeKind={forgeKind}
         // Hidden unless health reports the opt-in inbox (#471) — same honesty rule as above:
         // the nav must not offer an Inbox this server will never fill.
         inboxAvailable={inboxAvailable}

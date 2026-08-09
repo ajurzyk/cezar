@@ -300,3 +300,45 @@ describe('githubRunBody backend (#401)', () => {
     expect(JSON.parse(JSON.stringify(clean))).not.toHaveProperty('model')
   })
 })
+
+/**
+ * Stage 4: the ref block is an INSTRUCTION sent to an agent, not a label on a screen — telling
+ * an agent to "fix GitHub issue #24" when the issue lives on Forgejo is simply false.
+ *
+ * What is load-bearing here is the SHAPE, not the forge's name: `extractTaskRefs`
+ * (packages/cezar/src/runs/task-refs.ts) recovers a run's PR/issue attribution from the words
+ * "issue"/"pull request" and the `#N`, both of which survive the rename. Its tier-1 URL patterns
+ * are github.com-only, so on Forgejo the worded tier is the ONLY thing carrying attribution.
+ */
+describe('the forge name in the ref block', () => {
+  it('names Forgejo for a Forgejo issue', () => {
+    expect(githubTaskRef(item(), 'forgejo')).toContain('Fix Forgejo issue #142:')
+  })
+
+  it('names Forgejo for a Forgejo pull request', () => {
+    expect(githubTaskRef(item({ kind: 'pr', number: 7 }), 'forgejo'))
+      .toContain('Address Forgejo pull request #7:')
+  })
+
+  it('still says GitHub with no kind — every existing caller is unchanged', () => {
+    expect(githubTaskRef(item())).toContain('Fix GitHub issue #142:')
+    expect(githubTaskRef(item(), 'github')).toBe(githubTaskRef(item()))
+  })
+
+  it('carries the forge name through every prompt the tab can send', () => {
+    expect(githubTaskPrompt(item(), [], 'forgejo')).toContain('Fix Forgejo issue #142:')
+    expect(composeGithubTask(item(), [], 'rebase this onto develop', 'forgejo'))
+      .toContain('Fix Forgejo issue #142:')
+    const body = githubRunBody(item(), null, [], undefined, {}, 'forgejo')
+    expect(body.task).toContain('Fix Forgejo issue #142:')
+  })
+
+  // The reason the rename is safe at all — asserted against the real extractor, not a comment.
+  // A Forgejo URL matches none of its tier-1 patterns, so the worded tier is all there is.
+  it('still gives extractTaskRefs the attribution it keys on', () => {
+    const issue = item({ url: 'http://forge.internal:3000/ajr/orakton/issues/142' })
+    expect(extractTaskRefs(githubTaskRef(issue, 'forgejo')).issueNumber).toBe(142)
+    const pr = item({ kind: 'pr', number: 7, url: 'http://forge.internal:3000/ajr/orakton/pulls/7' })
+    expect(extractTaskRefs(githubTaskRef(pr, 'forgejo')).prNumber).toBe(7)
+  })
+})

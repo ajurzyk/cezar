@@ -196,6 +196,24 @@ describe('forgeNote', () => {
     expect(note).toContain('GitHub tab is hidden')
   })
 
+  // Stage 4: an unreachable Forgejo is not an unreachable GitHub, and the note that explains the
+  // missing tab must name the forge the server actually tried.
+  it('names Forgejo when that is the forge that failed', () => {
+    const note = forgeNote({
+      ...HEALTH,
+      forge: { kind: 'forgejo', available: false, reason: 'CEZ_FORGEJO_TOKEN is not set' },
+    })
+    expect(note).toContain('Forgejo is unreachable')
+    expect(note).toContain('Forgejo tab is hidden')
+    expect(note).not.toContain('GitHub')
+  })
+
+  // A null forge has no kind to read, and "no GitHub remote" is still the honest reading: the
+  // forge-less case IS a repo whose remote parsed to nothing the cockpit recognizes.
+  it('keeps the GitHub wording when there is no forge at all', () => {
+    expect(forgeNote(HEALTH)).toContain('No GitHub remote detected')
+  })
+
   it('renders in the open menu when the forge is absent, and not when it works', async () => {
     const { unmount } = renderMenu(HEALTH)
     let menu = await openMenu()

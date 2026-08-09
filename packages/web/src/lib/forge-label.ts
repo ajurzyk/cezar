@@ -1,0 +1,56 @@
+import type { ForgeInfo } from '@open-mercato/cezar-api-client'
+
+/**
+ * Which forge answered. Taken from the contract rather than re-declared, so the day the service's
+ * `FORGE_KINDS` grows a third entry this file is a type error instead of a silent mislabel.
+ */
+export type ForgeKind = ForgeInfo['kind']
+
+/**
+ * What the cockpit CALLS the forge — the single source of truth for every label on the forge
+ * surface (nav item, screen header, "open on …" links, hand-off prompt).
+ *
+ * The `undefined` default is load-bearing, not tidiness: every surface that has no kind to offer
+ * — a presentational shell rendered without health, a registry entry with no `forge`, a screen
+ * whose queries have not answered yet — keeps saying "GitHub", exactly as it did before Stage 4.
+ * That is what lets this change cost the GitHub path (the upstream path) zero test expectations.
+ * An unknown kind lands here too: a raw `gitlab` slug on screen would be worse than the default.
+ */
+export function forgeLabel(kind?: ForgeKind): string {
+  return kind === 'forgejo' ? 'Forgejo' : 'GitHub'
+}
+
+/** One run of hint text. `mono` marks the command/identifier runs the empty state renders in
+ *  `font-mono` — the reason this is segments and not one string. */
+export type ForgeHintSegment = { text: string; mono?: true }
+
+/**
+ * What the forge tab NEEDS, for the empty state — never why it is currently unavailable. The
+ * reason stays with the server's own `reason` (Stage 3 made it a sensible sentence for Forgejo);
+ * duplicating it here would give the user two answers that can disagree.
+ */
+export function forgeHint(kind?: ForgeKind): ForgeHintSegment[] {
+  if (kind === 'forgejo') {
+    return [
+      { text: 'The tab needs a Forgejo token in ' },
+      { text: 'CEZ_FORGEJO_TOKEN', mono: true },
+      { text: ' and a ' },
+      { text: 'forge.apiUrl', mono: true },
+      { text: ' declared in the repo’s ' },
+      { text: '.ai/cezar/config.json', mono: true },
+      { text: '. Everything else in cezar works without it.' },
+    ]
+  }
+  return [
+    { text: 'The tab needs the ' },
+    { text: 'gh', mono: true },
+    { text: ' CLI, logged in (' },
+    { text: 'gh auth login', mono: true },
+    { text: '), and a repo with a GitHub remote. Everything else in cezar works without it.' },
+  ]
+}
+
+/** The hint as flat text — what a test asserts on, and what a non-styling caller can read. */
+export function forgeHintText(kind?: ForgeKind): string {
+  return forgeHint(kind).map((part) => part.text).join('')
+}

@@ -102,6 +102,18 @@ describe('AppShell', () => {
     expect(links).toHaveLength(NAV_ITEMS.filter((item) => !item.forge).length)
   })
 
+  // Stage 4: the flat nav (single-project mode) names the tab after the forge health reported.
+  it('names the forge item after the forge health reported', () => {
+    renderShell('/', { forgeAvailable: true, forgeKind: 'forgejo' })
+    expect(within(nav()).getByRole('link', { name: 'Forgejo' }).getAttribute('href')).toBe('/github')
+    expect(within(nav()).queryByRole('link', { name: 'GitHub' })).toBeNull()
+  })
+
+  it('still says GitHub when no kind is passed — the shell alone renders as it always did', () => {
+    renderShell('/', { forgeAvailable: true })
+    expect(within(nav()).getByRole('link', { name: 'GitHub' }).getAttribute('href')).toBe('/github')
+  })
+
   // #801: same degradation for the opt-in automations capability — the item disappears, it does
   // not render disabled. The two gates on that item are independent: a forge alone is not enough.
   it('drops the Automations item when the capability is off', () => {

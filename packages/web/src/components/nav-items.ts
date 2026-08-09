@@ -1,5 +1,6 @@
 import {
   GitBranchIcon,
+  GitPullRequestIcon,
   InboxIcon,
   ListChecksIcon,
   SettingsIcon,
@@ -10,6 +11,7 @@ import {
 import type { ComponentType, SVGProps } from 'react'
 
 import { GithubIcon } from '@/components/icons'
+import { forgeLabel, type ForgeKind } from '@/lib/forge-label'
 
 export type NavItem = {
   /** Where the item navigates. Also its identity — `activeNavPath` returns this. */
@@ -30,7 +32,12 @@ export type NavItem = {
   /** Automations-gated (#801): the item exists only while `/api/health` reports
    *  `capabilities.automations` — GitHub automations are opt-in via `CEZ_AUTOMATIONS=1`.
    *  Independent of `forge`: the Automations item carries BOTH, because the feature needs a
-   *  forge to poll AND the operator's opt-in to exist at all. See `visibleNavItems`. */
+   *  forge to poll AND the operator's opt-in to exist at all. See `visibleNavItems`.
+   *
+   *  GitHub-only in fact, not just in name: the poller (`src/automations/github-poller.ts`)
+   *  shells out to the `gh` CLI directly and never goes through `resolveForge`, so it has
+   *  nothing to say about a Forgejo remote. `visibleNavItems` gates on the forge KIND for
+   *  this reason — see its `forgeKind` handling. */
   automations?: boolean
 }
 
@@ -55,10 +62,28 @@ export const NAV_ITEMS: NavItem[] = [
 export type NavAvailability = {
   /** `forge.available` (spec §"GitHub tab (forge tab)"). */
   forge?: boolean
+  /** WHICH forge answered — `health.forge.kind` for the flat nav, the registry entry's own
+   *  `forge` for a project group. Names the forge item and withholds Automations from a forge
+   *  the poller cannot reach. Absent means "not said yet", which reads as GitHub throughout
+   *  (`forgeLabel`), so a surface that never passes it behaves exactly as it did before. */
+  forgeKind?: ForgeKind
   /** `capabilities.followups` — the opt-in global inbox (#471). */
   inbox?: boolean
   /** `capabilities.automations` — the opt-in GitHub automations (#801). */
   automations?: boolean
+}
+
+/** The forge item, wearing the name and mark of the forge that actually answered.
+ *
+ *  Returns the ORIGINAL item unless something has to change: the nav's items are compared by
+ *  identity in places (and every surface re-renders on every health tick), so minting a fresh
+ *  object per render for the overwhelmingly common GitHub case would be pure churn. */
+function forgeItem(item: NavItem, kind: ForgeKind | undefined): NavItem {
+  const label = forgeLabel(kind)
+  if (label === item.label) return item
+  // lucide ships no Forgejo mark, and the octocat next to the word "Forgejo" is precisely the
+  // mismatch this stage removes — so a neutral forge-shaped icon stands in.
+  return { ...item, label, icon: GitPullRequestIcon }
 }
 
 /**
@@ -78,13 +103,20 @@ export type NavAvailability = {
  */
 export function visibleNavItems({
   forge = false,
+  forgeKind,
   inbox = false,
   automations = false,
 }: NavAvailability = {}): NavItem[] {
-  return NAV_ITEMS.filter((item) =>
-    (item.forge ? forge : true)
-    && (item.inbox ? inbox : true)
-    && (item.automations ? automations : true))
+  // Automations carry a third condition the other gates do not: the forge must be one the
+  // poller can actually talk to. An unknown kind is treated like a non-GitHub one — offering a
+  // tab that cannot work is worse than withholding one that could.
+  const pollable = forgeKind === undefined || forgeKind === 'github'
+  return NAV_ITEMS
+    .filter((item) =>
+      (item.forge ? forge : true)
+      && (item.inbox ? inbox : true)
+      && (item.automations ? automations && pollable : true))
+    .map((item) => (item.forge && !item.automations ? forgeItem(item, forgeKind) : item))
 }
 
 /** Does `pathname` sit inside the area rooted at `prefix`?

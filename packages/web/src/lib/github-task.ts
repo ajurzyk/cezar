@@ -1,5 +1,7 @@
 import type { CreateRunInput, GithubItem, WorkflowStepDef } from '@open-mercato/cezar-api-client'
 
+import { forgeLabel, type ForgeKind } from './forge-label'
+
 /**
  * The GitHub tab's hand-to-agent contract, ported verbatim from the legacy tab
  * (`web/app.js` `ghTaskPrompt` / `runOnGithub` / `wbSkillStep`) so a run started from the
@@ -16,12 +18,20 @@ export const MAX_CHAIN_STEPS = 8
  * irreducible context: without it "port this one to develop" names nothing, and `extractTaskRefs`
  * (`src/runs/task-refs.ts`) has no `#N` or URL to recover the run's PR/issue attribution from.
  *
- * The wording is load-bearing, not decorative: `task-refs.ts`'s tier-2 patterns were written to
- * match "Address GitHub pull request #N" / "Fix GitHub issue #N" verbatim. Rewording this without
- * updating those regexes silently costs every run its PR/issue chip and its `#N` title prefix.
+ * The SHAPE is load-bearing, the forge's name is not: `task-refs.ts`'s tier-2 patterns key on the
+ * words "issue" / "pull request" and the `#N` — `/\bissue\s*#?\s*(\d+)/i` and its PR twin — so
+ * "Fix Forgejo issue #24" reads exactly as well as the GitHub spelling. Dropping either of those
+ * words, or the `#`, silently costs every run its PR/issue chip and its `#N` title prefix. On a
+ * non-GitHub forge this wording is the ONLY thing carrying attribution: tier 1 matches github.com
+ * URLs alone, and a Forgejo item's URL is not one.
+ *
+ * `forge` names the forge the item actually lives on. This text is an INSTRUCTION handed to an
+ * agent, not a label on a screen — "fix GitHub issue #24" about a Forgejo issue is simply false.
+ * Omitted keeps the pre-Stage-4 GitHub wording, which is why every existing caller is unchanged.
  */
-export function githubTaskRef(item: GithubItem): string {
-  return `${item.kind === 'pr' ? 'Address GitHub pull request' : 'Fix GitHub issue'} #${item.number}: ${item.title}\n\n${item.url}`
+export function githubTaskRef(item: GithubItem, forge?: ForgeKind): string {
+  const name = forgeLabel(forge)
+  return `${item.kind === 'pr' ? `Address ${name} pull request` : `Fix ${name} issue`} #${item.number}: ${item.title}\n\n${item.url}`
 }
 
 /**
@@ -34,8 +44,12 @@ export function githubTaskRef(item: GithubItem): string {
  * `githubTaskRef` alone, per #524: a wall of quoted issue body is unreadable in a textarea the
  * user is meant to edit, and the agent can read the item itself from the URL.
  */
-export function githubTaskPrompt(item: GithubItem, skillNames: readonly string[] = []): string {
-  let task = githubTaskRef(item)
+export function githubTaskPrompt(
+  item: GithubItem,
+  skillNames: readonly string[] = [],
+  forge?: ForgeKind,
+): string {
+  let task = githubTaskRef(item, forge)
   if (item.body?.trim()) task += `\n\n---\n\n${item.body.trim()}`
   if (skillNames.length) task += skillsHint(skillNames)
   return task
@@ -100,10 +114,11 @@ export function composeGithubTask(
   item: GithubItem,
   skillNames: readonly string[],
   customPrompt?: string,
+  forge?: ForgeKind,
 ): string {
   const raw = (customPrompt ?? '').trim()
-  if (!raw) return githubTaskPrompt(item, skillNames)
-  const ref = githubTaskRef(item)
+  if (!raw) return githubTaskPrompt(item, skillNames, forge)
+  const ref = githubTaskRef(item, forge)
   // Substitute tokens only in what the USER contributed. The box is pre-filled with `ref`, which
   // embeds `item.title` — and a title may itself contain a token ("Support {{url}} in prompt
   // templates"), which would otherwise be rewritten inside our own reference block.
@@ -146,17 +161,24 @@ export function githubRunBody(
   skills: readonly string[],
   customPrompt?: string,
   backend: Pick<CreateRunInput, 'model' | 'runner'> = {},
+  forge?: ForgeKind,
 ): CreateRunInput {
   // A custom prompt EXTENDS the item context rather than replacing it (#524) — see
   // `composeGithubTask`. The workflow/skill routing and the #401 `backend` spread are unchanged;
   // only the task text is.
-  if (workflow) return { ...backend, workflow, task: composeGithubTask(item, skills, customPrompt) }
+  if (workflow) {
+    return { ...backend, workflow, task: composeGithubTask(item, skills, customPrompt, forge) }
+  }
   if (skills.length) {
     return {
       ...backend,
       steps: skillChainSteps(skills),
-      task: composeGithubTask(item, [], customPrompt),
+      task: composeGithubTask(item, [], customPrompt, forge),
     }
   }
-  return { ...backend, workflow: 'quick-task', task: composeGithubTask(item, [], customPrompt) }
+  return {
+    ...backend,
+    workflow: 'quick-task',
+    task: composeGithubTask(item, [], customPrompt, forge),
+  }
 }

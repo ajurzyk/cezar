@@ -32,6 +32,7 @@ import { toast } from '@/components/ui/toaster'
 import { PromptTemplateMenu } from '@/components/prompt-template-menu'
 import { SkillPreviewDialog } from '@/components/skill-detail'
 import { githubRunBody, githubTaskRef } from '@/lib/github-task'
+import { useForgeKind } from '@/lib/use-forge-kind'
 import {
   autoApplyText,
   insertTemplate,
@@ -116,11 +117,30 @@ export function HandToAgent({
   // that replaces it — github.tsx), and the component is keyed by `item.url`, not by title — so a
   // title that differs between the two payloads would otherwise leave `prompt !== base`, which
   // reads as "user-owned": the pre-fill would be persisted as a draft and auto-apply would stop.
-  const [base] = useState(() => githubTaskRef(item))
+  // The forge the item lives on, so the prompt handed to the agent names it correctly (Stage 4).
+  const forgeKind = useForgeKind()
+  const [base, setBase] = useState(() => githubTaskRef(item, forgeKind))
   // The route remounts this component per item (key={item.url}); the DRAFT — not plain component
   // state (#408) — restores whatever was typed for THIS item, so switching away and back (or a
   // page refresh) never loses it. No draft stored → the pre-fill.
   const [prompt, setPrompt] = useState(() => readFollowupPrompt(item.url) || base)
+  // The one thing allowed to break the capture-once rule above, and only once: the forge kind
+  // comes from the project registry, a DIFFERENT query from the list that produced `item`, so on
+  // a cold deep link it can answer after this component has already mounted and pre-filled. Left
+  // alone, a Forgejo item would carry "Fix GitHub issue #N" to the agent for the rest of the
+  // mount — a false instruction, not a stale label. A late TITLE still must not do this (that is
+  // what the rule exists for), hence the ref: exactly one correction, when a kind first arrives.
+  const kindSettled = useRef(forgeKind !== undefined)
+  useEffect(() => {
+    if (kindSettled.current || forgeKind === undefined) return
+    kindSettled.current = true
+    const corrected = githubTaskRef(item, forgeKind)
+    if (corrected === base) return
+    // Only an UNTOUCHED box is re-seeded. What the user typed is theirs; the forge name still
+    // reaches the agent, through the ref block `composeGithubTask` attaches to their text.
+    setPrompt((typed) => (typed === base ? corrected : typed))
+    setBase(corrected)
+  }, [forgeKind, item, base])
   const resolved = useResolvedEngine(engine)
   const promptRef = useRef<HTMLTextAreaElement>(null)
   useEffect(() => {
@@ -180,7 +200,9 @@ export function HandToAgent({
   const start = useMutation({
     mutationFn: async () => {
       if (!resolved.canRun) return null
-      return createRun(githubRunBody(item, workflow, validSkills, prompt, engineBody(resolved)))
+      return createRun(
+        githubRunBody(item, workflow, validSkills, prompt, engineBody(resolved), forgeKind),
+      )
     },
     onSuccess: (created) => {
       if (created === null) return

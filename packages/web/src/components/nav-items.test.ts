@@ -152,6 +152,39 @@ describe('visibleNavItems', () => {
     expect(labelsOf()).toEqual(labelsOf({ forge: false, inbox: false, automations: false }))
   })
 
+  // Stage 4: the tab is named after the forge that actually answered. `forgeKind` is the ONLY
+  // thing that renames it — the gate itself is untouched.
+  it('names the forge item after the forge that answered', () => {
+    const forgejo = visibleNavItems({ forge: true, forgeKind: 'forgejo' })
+    expect(forgejo.map((item) => item.label)).toContain('Forgejo')
+    expect(forgejo.map((item) => item.label)).not.toContain('GitHub')
+  })
+
+  it('keeps saying GitHub when no kind is known — the upstream path is unchanged', () => {
+    expect(labelsOf({ forge: true })).toContain('GitHub')
+    expect(labelsOf({ forge: true, forgeKind: 'github' })).toContain('GitHub')
+  })
+
+  // An octocat next to the word "Forgejo" is exactly the mismatch this stage removes.
+  it('drops the GitHub mark for a forge that is not GitHub', () => {
+    const iconOf = (opts: Parameters<typeof visibleNavItems>[0]) =>
+      visibleNavItems(opts).find((item) => item.to === '/github')?.icon
+    const githubMark = iconOf({ forge: true })
+    expect(iconOf({ forge: true, forgeKind: 'github' })).toBe(githubMark)
+    expect(iconOf({ forge: true, forgeKind: 'forgejo' })).not.toBe(githubMark)
+  })
+
+  // Automations poll GitHub through the `gh` CLI directly (src/automations/github-poller.ts) —
+  // they never go through `resolveForge`. Widening the forge gate must not offer a Forgejo
+  // project a tab that cannot work.
+  it('withholds Automations from a non-GitHub forge', () => {
+    expect(labelsOf({ forge: true, automations: true, forgeKind: 'forgejo' }))
+      .not.toContain('Automations')
+    expect(labelsOf({ forge: true, automations: true, forgeKind: 'github' }))
+      .toContain('Automations')
+    expect(labelsOf({ forge: true, automations: true })).toContain('Automations')
+  })
+
   it('never invents an item — the result is always a subset of NAV_ITEMS, in order', () => {
     for (const forge of [true, false]) {
       for (const inbox of [true, false]) {

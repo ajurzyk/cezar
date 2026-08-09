@@ -15,6 +15,7 @@ import { AddProjectDialog } from '@/components/add-project-dialog'
 import { CloneProjectDialog } from '@/components/clone-project-dialog'
 import { openCommandPalette } from '@/components/command-palette'
 import { GithubIcon } from '@/components/icons'
+import { type ForgeKind } from '@/lib/forge-label'
 import { commandShortcutHint } from '@/lib/use-command-shortcut'
 import { Link, stripProjectPrefix } from '@/lib/project-router'
 import { StatusDot } from '@/components/status-dot'
@@ -82,6 +83,10 @@ export type AppShellProps = {
    *  Defaults to shown so the presentational shell stays renderable alone; the container
    *  passes the health payload's truth. */
   forgeAvailable?: boolean
+  /** WHICH forge answered (`health.forge.kind`) — names the forge nav item and keeps Automations
+   *  off a forge its poller cannot reach. Absent keeps the pre-Stage-4 "GitHub", which is why
+   *  the shell renders unchanged for every caller that does not pass it. */
+  forgeKind?: ForgeKind
   /** Inbox gating (#471): `false` drops the Inbox nav item and its badge — the global inbox is
    *  opt-in via `CEZ_FOLLOWUPS=1`. Defaults to shown for the same reason as `forgeAvailable`. */
   inboxAvailable?: boolean
@@ -149,6 +154,7 @@ export function AppShell({
   taskQuickList,
   toolsMenu,
   forgeAvailable = true,
+  forgeKind,
   inboxAvailable = true,
   automationsAvailable = true,
   singleProject = false,
@@ -207,7 +213,12 @@ export function AppShell({
 
   const nav = {
     activeTo,
-    items: visibleNavItems({ forge: forgeAvailable, inbox: inboxAvailable, automations: automationsAvailable }),
+    items: visibleNavItems({
+      forge: forgeAvailable,
+      forgeKind,
+      inbox: inboxAvailable,
+      automations: automationsAvailable,
+    }),
     repo,
     // The badge belongs to the Inbox item — with the item gone there is nothing to badge.
     inboxCount: inboxAvailable ? inboxCount : null,

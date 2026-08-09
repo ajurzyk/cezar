@@ -2202,3 +2202,142 @@ describe('groupCommitRuns', () => {
     expect(groupCommitRuns([])).toEqual([])
   })
 })
+
+/**
+ * Stage 4: the screen is named after the forge that actually answered, not after the file it
+ * lives in. The route, the endpoints and the fixtures are unchanged — `/api/v1/github*` keeps
+ * serving both forges (BACKWARD_COMPATIBILITY.md §2); only what the user reads changes.
+ *
+ * The kind comes from the project in the URL, never from `/api/v1/health`: health is global and
+ * describes the boot folder, which on a real multi-project workspace is a different repo.
+ */
+describe('forge naming', () => {
+  const REGISTRY = {
+    projects: [{
+      id: 'orakton',
+      name: 'orakton',
+      root: '/srv/dev/orakton',
+      addedAt: '2026-08-01T00:00:00.000Z',
+      lastOpenedAt: '2026-08-08T00:00:00.000Z',
+      source: 'local' as const,
+      status: 'ok' as const,
+      forge: 'forgejo' as const,
+    }],
+    bootProject: 'cezar-lab',
+    projectsDir: '/srv/dev',
+  }
+
+  const forgejoStubs = (over: Record<string, () => Response | Promise<Response>> = {}) => ({
+    'GET /api/v1/projects': () => jsonResponse(REGISTRY),
+    // The boot folder has no forge at all — exactly the live instance's shape, and the case a
+    // health-driven label would get wrong.
+    'GET /api/v1/health': () => jsonResponse(health(['claude'])),
+    ...over,
+  })
+
+  it('titles the screen and its controls after Forgejo', async () => {
+    stubFetch(forgejoStubs())
+    renderAt('/p/orakton/github/issues/142')
+
+    await waitFor(() => expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Forgejo'))
+    expect(document.querySelector('[data-slot="gh-refresh"]')?.getAttribute('title'))
+      .toBe('Refresh from Forgejo')
+    await waitFor(() => expect(screen.getAllByText('open on Forgejo').length).toBeGreaterThan(0))
+  })
+
+  it('says nothing about GitHub anywhere on a Forgejo screen', async () => {
+    stubFetch(forgejoStubs())
+    renderAt('/p/orakton/github/issues/142')
+
+    await waitFor(() => expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Forgejo'))
+    const route = document.querySelector('[data-route="github"]') as HTMLElement
+    expect(route.textContent).not.toContain('GitHub')
+  })
+
+  it('tells a Forgejo user what the tab needs — its token, not the gh CLI', async () => {
+    stubFetch(forgejoStubs({
+      'GET /api/v1/github?limit=1000': () =>
+        jsonResponse({ available: false, reason: 'CEZ_FORGEJO_TOKEN is not set', issues: [], prs: [] }),
+      'GET /api/v1/github': () =>
+        jsonResponse({ available: false, reason: 'CEZ_FORGEJO_TOKEN is not set', issues: [], prs: [] }),
+    }))
+    renderAt('/p/orakton/github')
+
+    await waitFor(() => expect(screen.getByText('Forgejo is unavailable here')).toBeTruthy())
+    const route = document.querySelector('[data-route="github"]') as HTMLElement
+    expect(route.textContent).toContain('CEZ_FORGEJO_TOKEN')
+    expect(route.textContent).not.toContain('gh auth login')
+    // The server's own reason is still what explains the outage — the hint only says what is needed.
+    expect(route.textContent).toContain('CEZ_FORGEJO_TOKEN is not set')
+  })
+
+  // The hand-off box is not a label — it is the text an agent receives. Telling it to "fix
+  // GitHub issue #142" about a Forgejo issue would be a false instruction, not a cosmetic slip.
+  it('hands the agent a prompt that names Forgejo', async () => {
+    stubFetch(forgejoStubs())
+    renderAt('/p/orakton/github/issues/142')
+
+    await waitFor(() => expect(promptValue()).toContain('Fix Forgejo issue #142'))
+    expect(promptValue()).not.toContain('GitHub')
+  })
+
+  // The pre-fill is captured ONCE per mount (#524's snapshot rule), and the registry that names
+  // the forge is a different query from the list that produced the item — so on a cold deep link
+  // it can answer second. The box must still end up naming the right forge; a prompt frozen at
+  // the wrong one is a false instruction that survives until the user notices.
+  it('corrects the prompt when the registry answers after the item list', async () => {
+    let releaseRegistry!: () => void
+    const registryArrived = new Promise<void>((resolve) => { releaseRegistry = resolve })
+    stubFetch(forgejoStubs({
+      'GET /api/v1/projects': async () => {
+        await registryArrived
+        return jsonResponse(REGISTRY)
+      },
+    }))
+    renderAt('/p/orakton/github/issues/142')
+
+    // The box exists before the registry has said anything — and reads as GitHub, the default.
+    await waitFor(() => expect(promptValue()).toContain('Fix GitHub issue #142'))
+    await act(async () => {
+      releaseRegistry()
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(promptValue()).toContain('Fix Forgejo issue #142'))
+  })
+
+  it('leaves a prompt the user has edited alone when the registry answers late', async () => {
+    let releaseRegistry!: () => void
+    const registryArrived = new Promise<void>((resolve) => { releaseRegistry = resolve })
+    stubFetch(forgejoStubs({
+      'GET /api/v1/projects': async () => {
+        await registryArrived
+        return jsonResponse(REGISTRY)
+      },
+    }))
+    renderAt('/p/orakton/github/issues/142')
+
+    await waitFor(() => expect(promptValue()).toContain('Fix GitHub issue #142'))
+    fireEvent.change(promptField(), { target: { value: 'rebase this onto develop' } })
+    await act(async () => {
+      releaseRegistry()
+      await Promise.resolve()
+    })
+    // Their words are theirs. The forge name reaches the agent through the ref block the run
+    // body attaches, not by rewriting what they typed.
+    expect(promptValue()).toBe('rebase this onto develop')
+  })
+
+  it('keeps every GitHub label when the project is on GitHub', async () => {
+    stubFetch({
+      'GET /api/v1/projects': () => jsonResponse({
+        ...REGISTRY,
+        projects: [{ ...REGISTRY.projects[0]!, id: 'demo', name: 'demo', forge: 'github' as const }],
+      }),
+    })
+    renderAt('/p/demo/github/issues/142')
+
+    await waitFor(() => expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('GitHub'))
+    expect(document.querySelector('[data-slot="gh-refresh"]')?.getAttribute('title'))
+      .toBe('Refresh from GitHub')
+  })
+})
