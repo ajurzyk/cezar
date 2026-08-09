@@ -148,7 +148,7 @@ import { isLoopbackHostHeader, normalizeHostname, resolveCapabilities } from './
 import { createSocketHub, type SocketHub, type WsUpgradeVerdict } from './ws.ts';
 import { browseDirectory, isInsideBrowseRoot, isLexicallyInsideBrowseRoot, resolveBrowseRoot } from './fs-browse.ts';
 import { parseRemote, resolveForge, resolveForgeOrGithub, type ForgeAvailability } from './forge/index.ts';
-import { fetchGithub, fetchGithubChecks, fetchGithubComments, GithubPrNotFoundError, GH_CHECKS_MAX } from './github.ts';
+import { fetchGithubChecks, fetchGithubComments, GithubPrNotFoundError, GH_CHECKS_MAX } from './github.ts';
 import { ensureLaunchKey } from './launch-key.ts';
 import { openInTerminal } from './open-in-terminal.ts';
 import { agentCliRunner, detectOpenTargets, openFileInDefaultApp, openInApp } from './open-in-app.ts';
@@ -4718,8 +4718,31 @@ export function createApp(deps: ServerDeps) {
       async (c) => {
         const { root: repoRoot } = c.get('project');
         const query = c.req.valid('query');
-        const limit = Number.parseInt(query.limit ?? '', 10);
-        return c.json(await fetchGithub(repoRoot, query.refresh === '1', Number.isFinite(limit) ? limit : 30));
+        const parsedLimit = Number.parseInt(query.limit ?? '', 10);
+        const limit = Number.isFinite(parsedLimit) ? parsedLimit : 30;
+        const refresh = query.refresh === '1';
+        const [repoInfo, forgeSettings] = await Promise.all([getRepoInfo(repoRoot), readForgeSettings(repoRoot)]);
+        const forge = resolveForgeOrGithub(repoRoot, repoInfo, forgeSettings);
+        const [issues, prs] = await Promise.all([forge.listIssues({ refresh, limit }), forge.listPRs({ refresh, limit })]);
+        // available = at least one list came back OK. The cockpit rejects the WHOLE payload at
+        // available:false (`packages/web/src/routes/github/github.tsx:270`), so one failed list
+        // must not blank out the other. GitHub itself never hits this branch: one `fetchGithub`
+        // call backs both lists, so they succeed or fail together.
+        const available = issues.available || prs.available;
+        const failedReason = !issues.available ? issues.reason : !prs.available ? prs.reason : undefined;
+        const repo = issues.repo ?? prs.repo;
+        const syncedAt = issues.syncedAt ?? prs.syncedAt;
+        const labelColors =
+          issues.labelColors || prs.labelColors ? { ...prs.labelColors, ...issues.labelColors } : undefined;
+        return c.json({
+          available,
+          ...(failedReason !== undefined ? { reason: failedReason } : {}),
+          ...(repo !== undefined ? { repo } : {}),
+          ...(syncedAt !== undefined ? { syncedAt } : {}),
+          issues: issues.items,
+          prs: prs.items,
+          ...(labelColors ? { labelColors } : {}),
+        });
       },
     )
 
