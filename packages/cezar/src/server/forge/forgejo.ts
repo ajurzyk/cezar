@@ -45,6 +45,7 @@ import type {
   DraftPrInput,
   DraftPrOutcome,
   ForgeAvailability,
+  ForgeChecksResult,
   ForgeComment,
   ForgeCommentsData,
   ForgeDriver,
@@ -65,14 +66,12 @@ import type {
 /**
  * The Forgejo forge driver (cockpit-ui redesign spec §"Forge-driver seam") — structurally mirrors
  * `github.ts`, but speaks REST directly through `forgejo-http.ts` instead of shelling out to a
- * CLI. Every method of `ForgeDriver` (`kind`, `detect`/`detectCached` — the two call sites that
- * already exist, `server.ts:1511` health and `:3214` automations-availability — `viewUrl`,
- * `listIssues`, `listPRs`, `prStatus`, `createPR`, `prMergeState`, `mergePR`,
- * `prDiff`) is real. Several of these have no production call site yet (`server.ts`'s list/diff
- * routes still call `fetchGithub*` directly, bypassing `resolveForge` — that seam lands in a
- * later stage): a fully-implemented method with no caller yet is expected shape here, not a
- * defect — `github.ts` itself implements every optional method even though several of its own
- * call sites were wired up separately, over time.
+ * CLI. Every method of `ForgeDriver` is real: `kind`, `detect`/`detectCached` (`server.ts:1511`
+ * health and `:3214` automations-availability), `viewUrl`, `listIssues`, `listPRs`, `prStatus`,
+ * `createPR`, `prMergeState`, `mergePR`, `prDiff`, `listComments` and `listChecks` — the whole
+ * `/api/v1/github*` route family now reaches this driver through `resolveForgeOrGithub`
+ * (`forge/index.ts`), the same seam `github.ts`'s own `createGithubDriver` answers through for a
+ * GitHub-hosted or unplaceable repo.
  * This driver deliberately reuses a few things straight from `github.ts` rather than re-deriving
  * them: `buildPrBody` (the PR body format has no forge-specific content), `mergePreflightAllowed`
  * (the eligibility formula is pure and forge-agnostic), and, transitively through
@@ -210,6 +209,26 @@ const FORGEJO_COMMENTS_CACHE_MAX = 50;
  *  number for the same reason (a thread view is not a full-history export). */
 const FJ_THREAD_ENTRY_CAP = 200;
 
+interface ChecksCacheEntry {
+  at: number;
+  glyph: 'passing' | 'failing' | 'pending' | null;
+}
+
+/** Keyed `repoRoot\0apiBase\0number` — one glyph per PR, mirrors `github.ts`'s own `checksCache`
+ *  key shape. Unlike that one, this IS a member of `PROJECT_CACHES` below: a merge rewrites the
+ *  PR's `head.sha` to the merge commit, so a cached glyph for the PR NUMBER would otherwise answer
+ *  from the pre-merge commit's status for up to `CACHE_MS` after the merge — the same staleness
+ *  `prDiffCache`'s own doc comment gives for why IT is a member. */
+const forgejoChecksCache = new Map<string, ChecksCacheEntry>();
+const FORGEJO_CHECKS_CACHE_MAX = 500;
+
+/** Bounds how many `commits/{sha}/status` reads `forgejoListChecks` fires at once — a request
+ *  list of up to `GH_CHECKS_MAX` (100, `github.ts`) misses would otherwise open 100 simultaneous
+ *  connections to the same instance. A conservative, unmeasured number: no live Forgejo Actions
+ *  run exists on any instance this driver has been tried against, so there is no real traffic
+ *  pattern to size it from — see `forgejoListChecks`'s own doc comment. */
+const FJ_CHECKS_CONCURRENCY = 8;
+
 /** Every cache in this module keyed `repoRoot\0apiBase\0...` — the ONE list both
  *  `evictForgejoProjectCaches` (prefix-deletes per project after a merge) and
  *  `__clearForgejoCachesForTests` (full-clears everything between tests) iterate, so a future
@@ -219,9 +238,16 @@ const FJ_THREAD_ENTRY_CAP = 200;
  *  it separately, alongside the `mergeInflight` `Set`, which isn't keyed the same way either).
  *  `Map<string, unknown>[]` (not a bespoke interface): each cache below has a different entry value
  *  type, but `evictOldest` below already types its own parameter as `Map<string, unknown>` and every
- *  one of this module's caches (these five, plus `detectCache`) is assignable to it as-is —
+ *  one of this module's caches (these six, plus `detectCache`) is assignable to it as-is —
  *  TypeScript's structural typing has no variance fight to sidestep here. */
-const PROJECT_CACHES: Map<string, unknown>[] = [listCache, prStatusCache, mergeStateCache, prDiffCache, forgejoCommentsCache];
+const PROJECT_CACHES: Map<string, unknown>[] = [
+  listCache,
+  prStatusCache,
+  mergeStateCache,
+  prDiffCache,
+  forgejoCommentsCache,
+  forgejoChecksCache,
+];
 
 function cacheKey(repoRoot: string, apiBase: string): string {
   return `${repoRoot}\0${apiBase}`;
@@ -245,6 +271,10 @@ function prDiffCacheKey(repoRoot: string, apiBase: string, number: number, headS
 
 function commentsCacheKey(repoRoot: string, apiBase: string, kind: 'issue' | 'pr', number: number): string {
   return `${repoRoot}\0${apiBase}\0${kind}#${number}`;
+}
+
+function checksCacheKey(repoRoot: string, apiBase: string, number: number): string {
+  return `${repoRoot}\0${apiBase}\0${number}`;
 }
 
 function evictOldest(cache: Map<string, unknown>, max: number): void {
@@ -1569,6 +1599,154 @@ async function forgejoListComments(
   }
 }
 
+/**
+ * Batched CI-status glyphs for the given PR numbers (`GET /github/checks`, #664's lazy hydration
+ * ported to the Forgejo driver). A naive per-number fan-out (a lookup PLUS a status read for each
+ * of up to `GH_CHECKS_MAX` (100) numbers) would cost up to 200 serial round-trips for one call
+ * against one open-PR-only response GitHub answers in one batch — instead this walks
+ * `pulls?state=open` ONCE to build a `number -> head.sha` map (the dominant case: every visible PR
+ * row is open) and only falls back to a per-number `GET pulls/{n}` for a number the walk didn't
+ * cover (closed/merged, or beyond the walk's own page budget).
+ *
+ * `fetchForgejoCombinedStatus` swallows EVERY failure into `{ok:false}` — the same collapse
+ * `pullRowToStatus` above relies on to fold "the read failed" and "no CI configured" into one
+ * `null` glyph for a SINGLE list-row badge, where that ambiguity is cheap. Reusing that collapse
+ * unconditionally here would let a Forgejo outage that strikes AFTER a successful open-PR walk
+ * render as a quiet, all-null glyph map — indistinguishable from "nobody configured CI on any of
+ * these PRs", the exact silent-failure shape a caller must be able to tell apart from a genuine
+ * "no CI configured anywhere" reading. So this function counts the combined-status reads it
+ * resolves for itself: if NONE of the requested numbers end up with an answer (no cache hit, no
+ * proven-absent 404, no successful status read), the whole response degrades to `available:false`
+ * + a reason — never a `checks` map full of `null`s standing in for an unreported failure. A
+ * PARTIAL failure (some numbers resolved, some didn't) stays `available:true` with the numbers
+ * that DID resolve intact — same "don't blank what already worked" instinct `/github`'s own list
+ * composition uses (`server.ts`'s `/github` handler), but with no `reason` to spend on it:
+ * `ForgeChecksResult`'s `available:true` branch mirrors `githubChecksDataSchema`
+ * (`packages/contract/src/github.ts:65`), which has never carried one, so a per-item failure here
+ * collapses silently to a `null` glyph — the same degrade `fetchPrChecks`/`fetchCommitChecks`
+ * (`github.ts`) already apply to their own per-chunk failures. The threshold is deliberately "zero
+ * resolved", not "any failure": a single flaky status read must not blank a batch of 99 healthy
+ * ones.
+ */
+async function forgejoListChecks(
+  repoRoot: string,
+  http: ForgejoHttp,
+  owner: string,
+  repo: string,
+  numbers: number[],
+): Promise<ForgeChecksResult> {
+  if (process.env.CEZ_DRY_RUN === '1') return { available: true, checks: {} };
+  const checks: Record<number, 'passing' | 'failing' | 'pending' | null> = {};
+  const misses: number[] = [];
+  const now = Date.now();
+  for (const n of numbers) {
+    const hit = forgejoChecksCache.get(checksCacheKey(repoRoot, http.apiBase, n));
+    if (hit && now - hit.at < CACHE_MS) checks[n] = hit.glyph;
+    else misses.push(n);
+  }
+  if (misses.length === 0) return { available: true, checks };
+
+  const repoPrefix = repoPath(owner, repo);
+  const openShaByNumber = new Map<number, string>();
+  try {
+    const page = await http.paginate((p, l) => `${repoPrefix}/pulls?state=open&page=${p}&limit=${l}`, { want: FJ_MAX_LIST_LIMIT });
+    for (const row of page.rows) {
+      let parsed: ForgejoPull;
+      try {
+        parsed = forgejoPullSchema.parse(row);
+      } catch {
+        continue; // an unparseable row simply never joins the map — its number, if it was a miss, falls to the per-number fallback below
+      }
+      if (parsed.head?.sha) openShaByNumber.set(parsed.number, parsed.head.sha);
+    }
+  } catch (err) {
+    // Page 1 of `paginate` is the only page that can fail with nothing collected — never throw
+    // from a read, degrade the whole response instead (same policy `listForgejo`'s own catch
+    // applies to its own walk).
+    return { available: false, reason: describeError(err) };
+  }
+
+  // A number the open-PR walk didn't cover (closed/merged, or beyond its own page budget) needs
+  // its own `GET pulls/{n}`. A 404 there is the API's own proven answer ("no such PR") — a genuine
+  // `null` glyph, not a transport failure. Any OTHER failure means this read taught the driver
+  // nothing, and unlike a single failed combined-status read below there is no larger batch of
+  // OTHER resolved numbers to fall back on for just this one missing sha — it aborts the whole
+  // response, same policy `resolveForgejoPrStatus`'s own fallback throw applies.
+  const shaByNumber = new Map<number, string | null>();
+  for (const n of misses) {
+    const sha = openShaByNumber.get(n);
+    if (sha) {
+      shaByNumber.set(n, sha);
+      continue;
+    }
+    try {
+      const { pull } = await fetchPull(http, owner, repo, n);
+      shaByNumber.set(n, pull.head?.sha ?? null);
+    } catch (err) {
+      if (err instanceof ForgejoHttpError && err.status === 404) {
+        shaByNumber.set(n, null);
+        continue;
+      }
+      return { available: false, reason: describeError(err) };
+    }
+  }
+
+  const toFetch: Array<[number, string]> = [];
+  for (const [n, sha] of shaByNumber) {
+    if (sha) {
+      toFetch.push([n, sha]);
+    } else {
+      // A proven-absent PR (404 on the fallback) — a resolved `null`, cached like any other
+      // resolved answer, unlike the failed-read `null`s below.
+      checks[n] = null;
+      forgejoChecksCache.set(checksCacheKey(repoRoot, http.apiBase, n), { at: now, glyph: null });
+    }
+  }
+
+  const failedNumbers: number[] = [];
+  for (let i = 0; i < toFetch.length; i += FJ_CHECKS_CONCURRENCY) {
+    const chunk = toFetch.slice(i, i + FJ_CHECKS_CONCURRENCY);
+    const results = await Promise.all(
+      chunk.map(async ([n, sha]) => ({ n, status: await fetchForgejoCombinedStatus(http, owner, repo, sha) })),
+    );
+    for (const { n, status } of results) {
+      if (!status.ok) {
+        // Deliberately NOT written into `checks` yet — the "did anything resolve at all" gate
+        // below needs to tell a failed read apart from a resolved `null`.
+        failedNumbers.push(n);
+        continue;
+      }
+      let glyph: 'passing' | 'failing' | 'pending' | null;
+      try {
+        glyph = combinedStatusToChecks(status.value);
+      } catch {
+        glyph = null; // a malformed-but-syntactically-valid body degrades this ONE glyph, same as `pullRowToStatus` above
+      }
+      checks[n] = glyph;
+      forgejoChecksCache.set(checksCacheKey(repoRoot, http.apiBase, n), { at: now, glyph });
+    }
+  }
+
+  if (Object.keys(checks).length === 0) {
+    // Nothing resolved at all — every miss's status read failed and none were a proven-absent PR
+    // (see this function's own doc comment above). A `checks` map with every value forced to
+    // `null` would be indistinguishable from a real "no CI anywhere" reading, so this reports the
+    // read itself failed instead.
+    return { available: false, reason: 'checks status could not be read from the forge' };
+  }
+  evictOldest(forgejoChecksCache, FORGEJO_CHECKS_CACHE_MAX);
+  // `ForgeChecksResult`'s `available:true` branch carries no `reason` field — unlike
+  // `ForgeListResult` (`githubDataSchema` is flat, a `reason` is legal at `available:true` there),
+  // `ForgeChecksResult` mirrors `githubChecksDataSchema`'s discriminated union, whose `true` branch
+  // has never carried one (`packages/contract/src/github.ts:65`). A per-item failed read here
+  // collapses to a `null` glyph with no separate signal — the SAME degrade `fetchPrChecks`/
+  // `fetchCommitChecks` (`github.ts`) already apply to their own per-chunk failures, for the
+  // identical reason: a batched, best-effort read where losing one item's badge is expected and
+  // cheap, unlike `/github`'s own list composition, which has a `reason` field to spend on it.
+  for (const n of failedNumbers) checks[n] = null; // never cached — see the loop above
+  return { available: true, checks };
+}
+
 export function createForgejoDriver(ctx: ForgejoDriverCtx, deps?: ForgejoHttpDeps): ForgeDriver {
   const { repoRoot, owner, repo, settings } = ctx;
   const http = createForgejoHttp(settings.apiUrl, deps);
@@ -1596,6 +1774,8 @@ export function createForgejoDriver(ctx: ForgejoDriverCtx, deps?: ForgejoHttpDep
 
     listComments: (kind: 'issue' | 'pr', number: number, opts?: { refresh?: boolean }) =>
       forgejoListComments(repoRoot, http, owner, repo, webUrl, kind, number, opts),
+
+    listChecks: (numbers: number[]) => forgejoListChecks(repoRoot, http, owner, repo, numbers),
 
     viewUrl: (kind: ForgeRefKind, ref: string | number): string => forgejoViewUrl(webUrl, owner, repo, kind, ref),
   };

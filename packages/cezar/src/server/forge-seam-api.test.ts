@@ -5,8 +5,8 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RunStore } from '../runs/store.ts';
 import type { RunManager } from '../workflows/run.ts';
-import type { ForgeCommentsData } from './forge/types.ts';
-import { fetchGithub } from './github.ts';
+import type { ForgeChecksResult, ForgeCommentsData } from './forge/types.ts';
+import { fetchGithub, fetchGithubChecks } from './github.ts';
 import type { ForgePrDiffResult, GithubData, GithubItem } from './github.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { createApp } from './server.ts';
@@ -14,9 +14,8 @@ import { createApp } from './server.ts';
 /**
  * Route-level coverage for the shared forge seam (`resolveForgeOrGithub`, `forge/index.ts`) that
  * the `/api/v1/github*` route family is repointed at, one route at a time. Covers
- * `GET /github/prs/:number/changes`, `GET /github` and `GET /github/comments/:kind/:number` so
- * far — the remaining sibling route (`/github/checks`) grows its own `describe` block here as it
- * is repointed too.
+ * `GET /github/prs/:number/changes`, `GET /github`, `GET /github/comments/:kind/:number` and
+ * `GET /github/checks` — every route in the family now goes through the seam.
  */
 
 /** A self-hosted remote + repo-config `forge` declaration — the only way a config can name a
@@ -396,5 +395,90 @@ describe('the forge seam — GET /github/comments/:kind/:number', () => {
     expect(body.available).toBe(false);
     expect(body.reason).toBeTruthy();
     expect(fetchMock).toHaveBeenCalled();
+  });
+});
+
+describe('the forge seam — GET /github/checks', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  const previousDryRun = process.env.CEZ_DRY_RUN;
+
+  beforeEach(() => {
+    delete process.env.CEZ_DRY_RUN;
+  });
+
+  afterEach(() => {
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+    vi.unstubAllGlobals();
+    if (previousDryRun === undefined) delete process.env.CEZ_DRY_RUN;
+    else process.env.CEZ_DRY_RUN = previousDryRun;
+  });
+
+  it('routes a Forgejo repo through the seam and maps the glyphs with the Forgejo driver', async () => {
+    ({ repoRoot, store } = initForgejoRepo());
+    const sha = 'a'.repeat(40);
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/repos/acme/demo/pulls?state=open')) {
+        return Promise.resolve(
+          jsonResponse(
+            [
+              {
+                number: 5,
+                title: 'add x',
+                html_url: 'http://forge.internal/acme/demo/pulls/5',
+                created_at: '2026-08-09T10:00:00Z',
+                head: { ref: 'feat/x', sha },
+              },
+            ],
+            { headers: { 'x-total-count': '1' } },
+          ),
+        );
+      }
+      if (s.endsWith(`/repos/acme/demo/commits/${sha}/status`)) {
+        return Promise.resolve(jsonResponse({ statuses: [{ status: 'success' }] }));
+      }
+      throw new Error(`unexpected url ${s}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const app = createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test' });
+    const res = await apiRequest(app, '/api/v1/github/checks?prs=5');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ForgeChecksResult;
+    expect(body.available).toBe(true);
+    // A glyph sourced from `commits/{sha}/status` (not a gh graphql call) proves the request went
+    // through the Forgejo driver, not a GitHub fallback.
+    if (body.available) expect(body.checks[5]).toBe('passing');
+    expect(fetchMock).toHaveBeenCalled();
+  });
+
+  it('degrades to available:false with a non-empty reason when the Forgejo transport is unreachable', async () => {
+    ({ repoRoot, store } = initForgejoRepo());
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const app = createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test' });
+    const res = await apiRequest(app, '/api/v1/github/checks?prs=5');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ForgeChecksResult;
+    expect(body.available).toBe(false);
+    if (!body.available) expect(body.reason).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalled();
+  });
+
+  it('falls back to the GitHub driver for a repo resolveForge cannot place (no remote, dry-run) — payload unchanged', async () => {
+    process.env.CEZ_DRY_RUN = '1';
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-forge-seam-noremote-'));
+    mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    const expected = await fetchGithubChecks(repoRoot, [128, 124]);
+
+    const app = createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test' });
+    const res = await apiRequest(app, '/api/v1/github/checks?prs=128,124');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ForgeChecksResult;
+    expect(body).toEqual(expected);
   });
 });

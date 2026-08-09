@@ -148,7 +148,7 @@ import { isLoopbackHostHeader, normalizeHostname, resolveCapabilities } from './
 import { createSocketHub, type SocketHub, type WsUpgradeVerdict } from './ws.ts';
 import { browseDirectory, isInsideBrowseRoot, isLexicallyInsideBrowseRoot, resolveBrowseRoot } from './fs-browse.ts';
 import { parseRemote, resolveForge, resolveForgeOrGithub, type ForgeAvailability } from './forge/index.ts';
-import { fetchGithubChecks, GithubPrNotFoundError, GH_CHECKS_MAX } from './github.ts';
+import { GithubPrNotFoundError, GH_CHECKS_MAX } from './github.ts';
 import { ensureLaunchKey } from './launch-key.ts';
 import { openInTerminal } from './open-in-terminal.ts';
 import { agentCliRunner, detectOpenTargets, openFileInDefaultApp, openInApp } from './open-in-app.ts';
@@ -4779,7 +4779,10 @@ export function createApp(deps: ServerDeps) {
         if (!Number.isInteger(n) || n <= 0 || String(n) !== part) return c.json({ error: 'invalid prs query' }, 400);
         numbers.push(n);
       }
-      return c.json(await fetchGithubChecks(repoRoot, numbers));
+      const [repoInfo, forgeSettings] = await Promise.all([getRepoInfo(repoRoot), readForgeSettings(repoRoot)]);
+      const forge = resolveForgeOrGithub(repoRoot, repoInfo, forgeSettings);
+      if (!forge.listChecks) return c.json({ available: false as const, reason: 'checks are unavailable for this forge' });
+      return c.json(await forge.listChecks(numbers));
     })
 
     .get(

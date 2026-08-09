@@ -209,6 +209,14 @@ export type ForgePrStatusResult =
   | { available: true; status: ForgePrStatus | null }
   | { available: false; reason: string };
 
+/** Result of `listChecks` — a discriminated union (same precedent as `ForgePrStatusResult`/
+ *  `ForgePrDiffResult`), mirroring `githubChecksDataSchema` (`packages/contract/src/github.ts:65`,
+ *  itself a `z.discriminatedUnion('available', …)`) rather than `ForgeListResult`'s flat shape:
+ *  there is no bigger payload this composes into, so nothing needs spreadable meta fields. */
+export type ForgeChecksResult =
+  | { available: true; checks: Record<number, 'passing' | 'failing' | 'pending' | null> }
+  | { available: false; reason: string };
+
 export type ForgeMergeMethod = 'merge' | 'squash' | 'rebase';
 
 export interface ForgePrCheck {
@@ -323,6 +331,8 @@ export interface ForgeDriver {
    *  simply never sets `ForgeCommentsData.events`, which the contract already treats as a
    *  comments-only degradation, not a defect. */
   listComments?(kind: 'issue' | 'pr', number: number, opts?: { refresh?: boolean }): Promise<ForgeCommentsData>;
+  /** Batched CI-status glyphs for the given PR numbers (lazy hydration for on-screen rows, #664). */
+  listChecks?(numbers: number[]): Promise<ForgeChecksResult>;
   /** Web URL for a ref on the forge, or null when the remote isn't parseable. */
   viewUrl(kind: ForgeRefKind, ref: string | number): string | null;
 }
