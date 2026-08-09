@@ -1025,6 +1025,22 @@ describe('listComments', () => {
     expect(result?.reason).toBeTruthy();
   });
 
+  it('every review row parses but is missing id/html_url and there are no comments at all — a structural gap degrades to available:false, not a silent []', async () => {
+    // `forgejoReviewSchema` keeps `id`/`html_url` `.nullish()`, so a row missing either PARSES fine
+    // (unlike the parse-failure case above) yet `mapForgejoReview` still returns `null` for it — a
+    // schema-drift signal, not the legitimate empty-body content filter (which requires a row that
+    // DID carry id/html_url). Must not read as a real empty thread.
+    const reviews = [reviewRow({ id: null })];
+    const fetchMock = vi.fn().mockImplementation(threadFetch([], reviews));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listComments?.('pr', 7);
+
+    expect(result?.available).toBe(false);
+    expect(result?.comments).toEqual([]);
+    expect(result?.reason).toBeTruthy();
+  });
+
   it('a thread with a partial stream drift (reason set) is never cached — a second call without refresh:true still refetches', async () => {
     const rows = [commentRow({ id: 1 })];
     const reviews = ['not-an-object'];

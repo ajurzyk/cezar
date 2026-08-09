@@ -1572,7 +1572,7 @@ async function forgejoListComments(
 
     let reviewsStoppedShort = false;
     let reviewsRawCount = 0;
-    let parsedReviewsCount = 0;
+    let reviewsStructurallyValidCount = 0;
     if (kind === 'pr') {
       const reviewsPage = await http.paginate((p, l) => `${repoPrefix}/pulls/${number}/reviews?page=${p}&limit=${l}`, {
         want: FJ_THREAD_ENTRY_CAP,
@@ -1586,7 +1586,15 @@ async function forgejoListComments(
         } catch {
           continue; // unparseable row — not the whole walk (same per-row policy as everywhere else)
         }
-        parsedReviewsCount++;
+        if (parsed.id == null || parsed.html_url == null) {
+          // A structural gap, not a content filter: `forgejoReviewSchema` keeps both `.nullish()`
+          // for `computeReviewDecision`'s older fixtures, so a row can PARSE fine and still lack
+          // what a `ForgeComment` requires. `mapForgejoReview` would also return `null` here, but
+          // for a reason this gate must count as schema drift below, distinct from its legitimate
+          // empty-body content filter (which only ever fires on a row that DOES carry id/html_url).
+          continue;
+        }
+        reviewsStructurallyValidCount++;
         // Same per-row policy as the comments loop above — a non-absolute `html_url` must drop
         // only this row, not the whole thread.
         let mapped: ForgeComment | null;
@@ -1598,18 +1606,20 @@ async function forgejoListComments(
         if (mapped) collected.push(mapped);
       }
     }
-    // Distinct from a null `mapForgejoReview` return: THAT can be a legitimate content filter (an
-    // empty-body COMMENT/PENDING review), never a schema mismatch on its own. Only "every row
-    // failed to even PARSE" signals a schema drift on the reviews side.
-    const reviewsUnmappable = reviewsRawCount > 0 && parsedReviewsCount === 0;
+    // Distinct from a null `mapForgejoReview` return on a structurally valid row: THAT can be a
+    // legitimate content filter (an empty-body COMMENT/PENDING/REQUEST_REVIEW review), never a
+    // schema mismatch on its own. Only "every row failed to even parse, or parsed but without the
+    // id/html_url a `ForgeComment` requires" signals a schema drift on the reviews side.
+    const reviewsUnmappable = reviewsRawCount > 0 && reviewsStructurallyValidCount === 0;
 
     // The schema-drift gate degrades to `available:false` only when a stream actually drifted
     // (`commentsUnmappable` or `reviewsUnmappable` — rows arrived but none of them mapped/parsed)
-    // AND the thread's merged result is empty. `parsedReviewsCount` alone is NOT "signal" for this
-    // gate — a review row that parsed fine but was then legitimately content-filtered away (empty-
-    // body COMMENT/PENDING/REQUEST_REVIEW, `mapForgejoReview`'s own filter) never lands in
-    // `collected`, so checking `collected.length` (not `parsedReviewsCount`) is what keeps that
-    // legitimate filter from masking a genuine drift on the comments side (regression fixed here —
+    // AND the thread's merged result is empty. `reviewsStructurallyValidCount` alone is NOT
+    // "signal" for this gate — a review row that parsed fine, carried id/html_url, but was then
+    // legitimately content-filtered away (empty-body COMMENT/PENDING/REQUEST_REVIEW,
+    // `mapForgejoReview`'s own filter) never lands in `collected`, so checking `collected.length`
+    // (not `reviewsStructurallyValidCount`) is what keeps that legitimate filter from masking a
+    // genuine drift on the comments side (regression fixed here —
     // a comments-side drift next to an all-filtered reviews page must NOT read as a quiet
     // `{available:true, comments:[]}`). A drift on one stream next to a healthy other stream that
     // still produced comments stays visible (`collected.length > 0`) with a `reason` below.
