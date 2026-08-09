@@ -574,6 +574,73 @@ describe('createGithubDriver — list availability', () => {
   });
 });
 
+/** `createGithubDriver('...').prStatus` — thin adapter over `gh pr view`, same rationale as the
+ *  list-availability describe above: only the adapter's own three-way split (proven "no PR" vs
+ *  availability failure vs a real match) is this describe's job. */
+describe('createGithubDriver — prStatus', () => {
+  beforeEach(() => {
+    vi.stubEnv('CEZ_DRY_RUN', '');
+    execFileMock.mockReset();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('CEZ_DRY_RUN=1 short-circuits to a proven "no PR" without shelling out to gh', async () => {
+    vi.stubEnv('CEZ_DRY_RUN', '1');
+    const driver = createGithubDriver('/repo/pr-status-dry-run', null);
+
+    await expect(driver.prStatus('feat/x')).resolves.toEqual({ available: true, status: null });
+    expect(execFileMock).not.toHaveBeenCalled();
+  });
+
+  it('a "no pull requests found" gh error is a proven "no PR", not an availability failure', async () => {
+    execFileMock.mockImplementation((...args: unknown[]) => {
+      const cb = args[args.length - 1] as (e: unknown, r: unknown) => void;
+      cb(new Error('no pull requests found for branch "feat/x"'), null);
+    });
+    const driver = createGithubDriver('/repo/pr-status-no-pr', null);
+
+    await expect(driver.prStatus('feat/x')).resolves.toEqual({ available: true, status: null });
+  });
+
+  it('reports available:false with a gh-CLI hint on ENOENT, never a silent status:null', async () => {
+    execFileMock.mockImplementation((...args: unknown[]) => {
+      const cb = args[args.length - 1] as (e: unknown, r: unknown) => void;
+      cb(new Error('spawn gh ENOENT'), null);
+    });
+    const driver = createGithubDriver('/repo/pr-status-enoent', null);
+
+    await expect(driver.prStatus('feat/x')).resolves.toEqual({
+      available: false,
+      reason: 'gh CLI not found — install it and run `gh auth login`',
+    });
+  });
+
+  it('a happy pr view carries number/url/state/isDraft/checks', async () => {
+    execFileMock.mockImplementation((...args: unknown[]) => {
+      const cb = args[args.length - 1] as (e: unknown, r: unknown) => void;
+      cb(null, {
+        stdout: JSON.stringify({
+          number: 12,
+          url: 'https://github.com/owner/repo/pull/12',
+          state: 'OPEN',
+          isDraft: false,
+          statusCheckRollup: [{ conclusion: 'SUCCESS' }],
+        }),
+        stderr: '',
+      });
+    });
+    const driver = createGithubDriver('/repo/pr-status-happy', null);
+
+    await expect(driver.prStatus('feat/x')).resolves.toEqual({
+      available: true,
+      status: { number: 12, url: 'https://github.com/owner/repo/pull/12', state: 'open', isDraft: false, checks: 'passing' },
+    });
+  });
+});
+
 describe('fetchGithubComments per-project cache isolation (step 2.6)', () => {
   beforeEach(() => {
     vi.stubEnv('CEZ_DRY_RUN', '');

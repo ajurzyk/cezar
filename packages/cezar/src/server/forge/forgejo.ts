@@ -52,6 +52,7 @@ import type {
   ForgePrDiffResult,
   ForgePrMergeStateResult,
   ForgePrStatus,
+  ForgePrStatusResult,
   ForgeRefKind,
   ForgeSettings,
 } from './types.ts';
@@ -134,11 +135,11 @@ const LIST_CACHE_MAX = 50;
 
 interface PrStatusCacheEntry {
   at: number;
-  data: ForgePrStatus | null;
-  /** This entry's own TTL — `CACHE_MS` (60s) for a resolved answer (a found PR, or a PROVEN "no
-   *  PR"), `PR_STATUS_UNRESOLVED_CACHE_MS` (much shorter) for a `FORGEJO_PR_STATUS_UNRESOLVED_PERSISTENT`
-   *  read (`data` is `null`, but it means "don't know", not "proven no PR" — see that symbol's own
-   *  doc comment). Per-entry rather than a single module constant so the two flavors can share one
+  data: ForgePrStatusResult;
+  /** This entry's own TTL — `CACHE_MS` (60s) for a resolved answer (`available:true`, a found PR or
+   *  a PROVEN "no PR"), `PR_STATUS_UNRESOLVED_CACHE_MS` (much shorter) for the one `available:false`
+   *  flavor worth caching at all (a persistent read — see `ForgejoPrStatusResolution`'s own doc
+   *  comment). Per-entry rather than a single module constant so the two flavors can share one
    *  cache/read path without a second lookup table. */
   ttlMs: number;
 }
@@ -147,7 +148,7 @@ interface PrStatusCacheEntry {
  *  can never answer for a different branch in the same project. */
 const prStatusCache = new Map<string, PrStatusCacheEntry>();
 const PR_STATUS_CACHE_MAX = 50;
-/** TTL for a `FORGEJO_PR_STATUS_UNRESOLVED_PERSISTENT` read — short enough that a repo whose walk
+/** TTL for a `persistent` unresolved `ForgejoPrStatusResolution` read — short enough that a repo whose walk
  *  hits its own page/row ceiling self-heals quickly if the underlying data ever changes (a PR
  *  closes, history shrinks), long enough to absorb rapid repeat calls for the same branch (multiple
  *  UI panels, a user refreshing) without repeating the full, expensive walk every time. Deliberately
@@ -512,41 +513,35 @@ async function pullRowToStatus(
   };
 }
 
-/** Distinguishes "this read taught us nothing" from a genuine, proven "no PR" answer — every place
- *  `resolveForgejoPrStatus` below cannot tell "no PR exists" apart from "the read that would have
- *  proven it failed" returns this instead of `null`: a page-1 throw (nothing collected), a later
- *  page failing (`stoppedShort`, rows kept but the walk unproven — the fallback below could shadow a
- *  match on the unread remainder), an unresolvable default branch (the fallback could not even be
- *  attempted), a non-404 failure on the fallback lookup itself, and a matched row that failed to
- *  RENDER (`pullRowToStatus` throwing on an already-proven match). `forgejoPrStatus` below reads this
- *  to skip `prStatusCache.set` for exactly these cases — the SAME reasoning `listForgejo`'s own
- *  `catch` already applies (that function's `catch` never touches `listCache` either): a transient
- *  forge outage must not pin "no PR" onto a branch for the next 60s. A module-level `Symbol` (not a
- *  discriminated union) so this one, narrow "don't cache this" signal never has to be threaded
- *  through `resolveForgejoPrStatus`'s one remaining ordinary `null`: a fallback lookup that 404s,
- *  the API's own proven "no PR for this base/head pair" answer. */
-const FORGEJO_PR_STATUS_UNRESOLVED = Symbol('forgejo-pr-status-unresolved');
-
-/** Same "don't know" contract as `FORGEJO_PR_STATUS_UNRESOLVED` above — `forgejoPrStatus` below
- *  still returns `null` to its own caller either way — but distinguishes ONE specific route to
- *  UNRESOLVED that is a PERSISTENT trait of the repo/branch rather than a one-off hiccup: the
- *  primary `pulls?state=all` walk hitting its own fixed ceiling (`ForgejoPage.stopReason:'limit'`
- *  — ran out of pages/rows before it could prove "no match", not because a request failed or the
- *  time budget ran out). A repo whose open+closed PR history is larger than that walk's own
- *  ceiling hits this on EVERY call, forever, so `forgejoPrStatus` caches this flavor under a short
- *  negative TTL (`PR_STATUS_UNRESOLVED_CACHE_MS`) instead of repeating the full, expensive walk on
- *  every single call — a real, measured cost against an already-loaded instance.
+/** Distinguishes a resolved answer (a real PR, or a PROVEN "no PR") from an UNRESOLVED read — every
+ *  place `resolveForgejoPrStatus` below cannot tell "no PR exists" apart from "the read that would
+ *  have proven it failed" returns `{ kind: 'unresolved', ... }` instead of a resolved `null`: a
+ *  page-1 throw (nothing collected), a later page failing (`stoppedShort`, rows kept but the walk
+ *  unproven — the fallback below could shadow a match on the unread remainder), an unparseable row
+ *  (this driver never learned whether it was the match), an unresolvable default branch (the
+ *  fallback could not even be attempted), a non-404 failure on the fallback lookup itself, and a
+ *  matched row that failed to RENDER (`pullRowToStatus` throwing on an already-proven match).
+ *  `forgejoPrStatus` below reads this to skip `prStatusCache.set` for exactly these cases — the SAME
+ *  reasoning `listForgejo`'s own `catch` already applies (that function's `catch` never touches
+ *  `listCache` either): a transient forge outage must not pin "no PR" onto a branch for the next
+ *  `CACHE_MS`.
  *
- *  This must NEVER be returned for a `stoppedShort` caused by `'budget'` or `'error'` (both are
- *  one-off, plausibly transient, and must keep retrying on every call, uncached, exactly like
- *  `FORGEJO_PR_STATUS_UNRESOLVED`), nor for ANY of the other UNRESOLVED routes below (a page-1
- *  throw, an unparseable row, a failed default-branch lookup, a non-404 fallback failure, a matched
- *  row that failed to render) — none of those are a stable trait of the repo, and caching them even
- *  briefly would risk exactly the false "no PR" the negative-TTL cache must never produce. Caching
- *  the ANSWER "I don't know" briefly is safe; caching "there is no PR" ever, from an unproven read,
- *  is the defect this whole UNRESOLVED mechanism exists to prevent — the short TTL narrows the
- *  window this trades away completeness for, it does not remove the invariant. */
-const FORGEJO_PR_STATUS_UNRESOLVED_PERSISTENT = Symbol('forgejo-pr-status-unresolved-persistent');
+ *  `persistent: true` marks the ONE unresolved route that is a stable trait of the repo/branch
+ *  rather than a one-off hiccup: the primary `pulls?state=all` walk hitting its own fixed ceiling
+ *  (`ForgejoPage.stopReason:'limit'` — ran out of pages/rows before it could prove "no match", not
+ *  because a request failed or the time budget ran out). A repo whose open+closed PR history is
+ *  larger than that walk's own ceiling hits this on EVERY call, forever, so `forgejoPrStatus` caches
+ *  THIS flavor under a short negative TTL (`PR_STATUS_UNRESOLVED_CACHE_MS`) instead of repeating the
+ *  full, expensive walk on every single call — a real, measured cost against an already-loaded
+ *  instance. Every OTHER unresolved route above is `persistent: false` and must never be cached,
+ *  even briefly: none of them are a stable trait of the repo, and caching them would risk exactly
+ *  the false "no PR" this whole mechanism exists to prevent. Caching the ANSWER "I don't know"
+ *  briefly is safe; caching "there is no PR" ever, from an unproven read, is the defect this whole
+ *  mechanism exists to prevent — the short TTL narrows the window this trades away completeness
+ *  for, it does not remove the invariant. */
+type ForgejoPrStatusResolution =
+  | { kind: 'resolved'; status: ForgePrStatus | null }
+  | { kind: 'unresolved'; persistent: boolean; reason: string };
 
 /**
  * Walks `repos/{o}/{r}/pulls?state=all` (NOT the `GET pulls/{base}/{head}` shortcut as the primary
@@ -576,7 +571,7 @@ async function resolveForgejoPrStatus(
   repo: string,
   webUrl: string,
   branch: string,
-): Promise<ForgePrStatus | null | typeof FORGEJO_PR_STATUS_UNRESOLVED | typeof FORGEJO_PR_STATUS_UNRESOLVED_PERSISTENT> {
+): Promise<ForgejoPrStatusResolution> {
   const repoPrefix = repoPath(owner, repo);
 
   let page: ForgejoPage;
@@ -584,13 +579,12 @@ async function resolveForgejoPrStatus(
     page = await http.paginate((p, l) => `${repoPrefix}/pulls?state=all&page=${p}&limit=${l}`, {
       want: FJ_MAX_LIST_LIMIT,
     });
-  } catch {
+  } catch (err) {
     // Page 1 is the only page `paginate` can fail on without having collected anything (a later
     // page's failure keeps what was gathered and marks `stoppedShort`, see forgejo-http.ts) — either
     // way there is nothing here proving completeness, so the fallback below must not run. Unlike
-    // every OTHER `null` this function returns, this one is UNRESOLVED, not a proven "no PR" —
-    // see `FORGEJO_PR_STATUS_UNRESOLVED`'s own doc comment.
-    return FORGEJO_PR_STATUS_UNRESOLVED;
+    // every OTHER unresolved route, this one carries the raw transport error as its reason.
+    return { kind: 'unresolved', persistent: false, reason: describeError(err) };
   }
 
   let openMatch: ForgejoPull | null = null;
@@ -623,13 +617,13 @@ async function resolveForgejoPrStatus(
     // non-absolute `html_url` — a read must never throw past this function. The `/pulls/{base}/{head}`
     // fallback just below needs the SAME protection for the SAME reason; both `try`s must `await`
     // the `pullRowToStatus` call, not just wrap it, or the rejection skips the `catch` entirely.
-    // UNRESOLVED, never a proven `null`: `found` means the PR's EXISTENCE is already proven by this
+    // UNRESOLVED, never a resolved `null`: `found` means the PR's EXISTENCE is already proven by this
     // walk — the throw only means it could not be fully rendered, so caching this as "no PR" would
     // pin a wrong answer onto a branch that plainly has one.
     try {
-      return await pullRowToStatus(http, owner, repo, webUrl, found);
+      return { kind: 'resolved', status: await pullRowToStatus(http, owner, repo, webUrl, found) };
     } catch {
-      return FORGEJO_PR_STATUS_UNRESOLVED;
+      return { kind: 'unresolved', persistent: false, reason: 'the matched pull request could not be fully read' };
     }
   }
   // walk unproven (a later page errored/hit budget/hit the page cap) — the fallback below could
@@ -639,36 +633,41 @@ async function resolveForgejoPrStatus(
   if (page.stoppedShort) {
     // A deterministic ceiling hit (`stopReason:'limit'` — the walk always needs more pages/rows
     // than its own fixed budget allows) is a PERSISTENT trait of this repo/branch, unlike a one-off
-    // 'budget'/'error' stop — see `FORGEJO_PR_STATUS_UNRESOLVED_PERSISTENT`'s own doc comment for
-    // why only that one flavor is worth a short negative cache.
-    return page.stopReason === 'limit' ? FORGEJO_PR_STATUS_UNRESOLVED_PERSISTENT : FORGEJO_PR_STATUS_UNRESOLVED;
+    // 'budget'/'error' stop — see `ForgejoPrStatusResolution`'s own doc comment for why only that
+    // one flavor is worth a short negative cache.
+    return page.stopReason === 'limit'
+      ? { kind: 'unresolved', persistent: true, reason: 'the pull request history is larger than the search budget' }
+      : { kind: 'unresolved', persistent: false, reason: 'the pull request search did not finish' };
   }
   // A row this schema could not parse can never be checked against `branch` — the walk otherwise
   // LOOKS complete (short page, matching X-Total-Count), but this driver cannot rule out that the
   // skipped row was the match, so this must stay UNRESOLVED too, never a proven "no PR". A one-off
-  // malformed row (not a repo-wide trait), so this always uses the transient symbol, never the
-  // persistent one.
-  if (unparseableRowSeen) return FORGEJO_PR_STATUS_UNRESOLVED;
+  // malformed row (not a repo-wide trait), so this is never `persistent`.
+  if (unparseableRowSeen) {
+    return { kind: 'unresolved', persistent: false, reason: 'a pull request row could not be parsed' };
+  }
 
   const base = await resolveDefaultBranch(repoRoot, http, owner, repo);
   // `resolveDefaultBranch` collapses BOTH "the repo GET failed" and "resolveRepository never learned
   // a default_branch" to `null` — there is no way to tell those apart here, but neither is a proven
   // "no PR": the fallback simply could not be attempted, so this is UNRESOLVED too.
-  if (!base) return FORGEJO_PR_STATUS_UNRESOLVED;
+  if (!base) {
+    return { kind: 'unresolved', persistent: false, reason: 'the repository default branch could not be resolved' };
+  }
   try {
     const raw = await http.getJson(`${repoPrefix}/pulls/${encodeRefSegments(base)}/${encodeRefSegments(branch)}`);
     // `await` here is load-bearing: without it, this `try` returns the pending promise itself and
     // resolves/rejects OUTSIDE this frame, so a `pullRowToStatus` rejection (a non-absolute
-    // `html_url`, see the comment above) skips this `catch` entirely instead of degrading to `null`.
-    return await pullRowToStatus(http, owner, repo, webUrl, forgejoPullSchema.parse(raw));
+    // `html_url`, see the comment above) skips this `catch` entirely instead of degrading correctly.
+    return { kind: 'resolved', status: await pullRowToStatus(http, owner, repo, webUrl, forgejoPullSchema.parse(raw)) };
   } catch (err) {
     // A 404 here is the API's own proven answer: no PR exists for this exact base/head pair — a
     // genuine "no PR", safe to cache. Any OTHER failure (network, 5xx, a malformed body that fails
     // `forgejoPullSchema.parse`, or `pullRowToStatus`'s own degrade path above) means this read
     // taught us nothing, so it must stay UNRESOLVED rather than pin a "no PR" reading onto a branch
     // that might genuinely have one.
-    if (err instanceof ForgejoHttpError && err.status === 404) return null;
-    return FORGEJO_PR_STATUS_UNRESOLVED;
+    if (err instanceof ForgejoHttpError && err.status === 404) return { kind: 'resolved', status: null };
+    return { kind: 'unresolved', persistent: false, reason: describeError(err) };
   }
 }
 
@@ -679,29 +678,29 @@ async function forgejoPrStatus(
   repo: string,
   webUrl: string,
   branch: string,
-): Promise<ForgePrStatus | null> {
-  if (process.env.CEZ_DRY_RUN === '1') return null;
+): Promise<ForgePrStatusResult> {
+  if (process.env.CEZ_DRY_RUN === '1') return { available: true, status: null };
   const key = prStatusCacheKey(repoRoot, http.apiBase, branch);
   const hit = prStatusCache.get(key);
   if (hit && Date.now() - hit.at < hit.ttlMs) return hit.data;
-  const data = await resolveForgejoPrStatus(repoRoot, http, owner, repo, webUrl, branch);
-  // A transient UNRESOLVED read (the primary walk itself failed for a one-off reason) must never
-  // poison the cache with "no PR" — same reasoning `listForgejo`'s own `catch` already applies to
-  // `listCache`. Not cached at all: the next call retries from scratch.
-  if (data === FORGEJO_PR_STATUS_UNRESOLVED) return null;
-  // A PERSISTENT UNRESOLVED read (the walk hit its own fixed ceiling, a repo/branch trait — see
-  // `FORGEJO_PR_STATUS_UNRESOLVED_PERSISTENT`'s own doc comment) still answers `null` to THIS
-  // caller, but is worth a SHORT negative cache so rapid repeat calls don't each re-pay the full,
-  // expensive walk. Never the 60s `CACHE_MS` used for proven answers below — this is "don't know",
-  // not "no PR", and must self-heal quickly.
-  if (data === FORGEJO_PR_STATUS_UNRESOLVED_PERSISTENT) {
-    prStatusCache.set(key, { at: Date.now(), data: null, ttlMs: PR_STATUS_UNRESOLVED_CACHE_MS });
-    evictOldest(prStatusCache, PR_STATUS_CACHE_MAX);
-    return null;
+  const resolution = await resolveForgejoPrStatus(repoRoot, http, owner, repo, webUrl, branch);
+  if (resolution.kind === 'unresolved') {
+    const result: ForgePrStatusResult = { available: false, reason: resolution.reason };
+    // Only the PERSISTENT flavor (the walk's own deterministic ceiling — a repo/branch trait) is
+    // worth a SHORT negative cache so rapid repeat calls don't each re-pay the full, expensive walk.
+    // Never the 60s `CACHE_MS` used for resolved answers below — this is "don't know", not "no PR",
+    // and must self-heal quickly. Every other unresolved reason is a one-off, plausibly transient
+    // read and must never be cached — the next call retries from scratch.
+    if (resolution.persistent) {
+      prStatusCache.set(key, { at: Date.now(), data: result, ttlMs: PR_STATUS_UNRESOLVED_CACHE_MS });
+      evictOldest(prStatusCache, PR_STATUS_CACHE_MAX);
+    }
+    return result;
   }
-  prStatusCache.set(key, { at: Date.now(), data, ttlMs: CACHE_MS });
+  const result: ForgePrStatusResult = { available: true, status: resolution.status };
+  prStatusCache.set(key, { at: Date.now(), data: result, ttlMs: CACHE_MS });
   evictOldest(prStatusCache, PR_STATUS_CACHE_MAX);
-  return data;
+  return result;
 }
 
 /** `GET /repos/{o}/{r}/branches/{ref}` — every field here is readable anonymously (measured); the
