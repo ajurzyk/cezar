@@ -1802,6 +1802,17 @@ async function forgejoListChecks(
       checks[n] = glyph;
       forgejoChecksCache.set(checksCacheKey(repoRoot, http.apiBase, n), { at: now, glyph });
     }
+    // A chunk where EVERY read failed is the same "transport is unhealthy" signal the per-number
+    // fallback loop above already acts on (a lone flaky read is expected and cheap — see this
+    // function's own doc comment — but a whole batch failing together is not). Serializing every
+    // remaining chunk against a hung forge (up to `FJ_TIMEOUT_MS` per number) would multiply the
+    // wait for nothing, so this stops here: every number this stage hasn't visited yet folds into
+    // `failedNumbers` (unresolved) without another round-trip, same "never fetched" treatment the
+    // fallback loop's own salvage-then-break gives its own leftovers.
+    if (results.every((r) => !r.status.ok)) {
+      for (const [n] of toFetch.slice(i + FJ_CHECKS_CONCURRENCY)) failedNumbers.push(n);
+      break;
+    }
   }
 
   if (Object.keys(checks).length === 0) {

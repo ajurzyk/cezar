@@ -1375,6 +1375,44 @@ describe('listChecks', () => {
     expect(result).toEqual({ available: true, checks: { 1: 'passing', 2: null } });
   });
 
+  it('a status-read chunk that fails ENTIRELY aborts the remaining chunks — a hung forge must not serialize every leftover number', async () => {
+    // 17 numbers, all resolved from the open-PR walk (no per-number fallback needed) so the ONLY
+    // status-read requests below are the chunked combined-status reads this test is about.
+    // FJ_CHECKS_CONCURRENCY=8 splits them into chunk1=[1..8] (all succeed), chunk2=[9..16] (all
+    // fail — a hung/unhealthy forge), chunk3=[17] (must never be requested once chunk2 proves the
+    // transport unhealthy — same "stop serializing once a whole batch fails" instinct as the
+    // per-number fallback loop above, just applied to the status-read stage).
+    const numbers = Array.from({ length: 17 }, (_, i) => i + 1);
+    const shaOf = (n: number) => `sha-${n}`;
+    const openRows = numbers.map((n) => openRow(n, shaOf(n)));
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/pulls?state=open')) return Promise.resolve(jsonResponse(openRows, { headers: { 'x-total-count': String(numbers.length) } }));
+      for (const n of numbers) {
+        if (s.endsWith(`/commits/${shaOf(n)}/status`)) {
+          if (n <= 8) return Promise.resolve(jsonResponse({ statuses: [{ status: 'success' }] }));
+          if (n <= 16) return Promise.reject(new TypeError('fetch failed'));
+          throw new Error(`chunk3 must never be requested (number ${n})`);
+        }
+      }
+      throw new Error(`unexpected url ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listChecks?.(numbers);
+
+    // chunk1 resolved (passing), chunk2 all degraded to `null`, chunk3's number 17 also folds to
+    // `null` — but WITHOUT ever being requested (the mock throws if it is).
+    expect(result?.available).toBe(true);
+    if (result?.available) {
+      for (let n = 1; n <= 8; n++) expect(result.checks[n]).toBe('passing');
+      for (let n = 9; n <= 17; n++) expect(result.checks[n]).toBeNull();
+    }
+    // 1 list walk + 8 chunk1 status reads + 8 chunk2 status reads = 17 — chunk3 never fires.
+    expect(fetchMock).toHaveBeenCalledTimes(17);
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).endsWith(`/commits/${shaOf(17)}/status`))).toBe(false);
+  });
+
   it('CEZ_DRY_RUN=1 short-circuits to an available empty map without calling fetch', async () => {
     process.env.CEZ_DRY_RUN = '1';
     const fetchMock = vi.fn();
