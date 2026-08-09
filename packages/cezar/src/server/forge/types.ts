@@ -197,6 +197,18 @@ export interface ForgePrStatus {
   checks: 'passing' | 'failing' | 'pending' | null;
 }
 
+/** Result of `prStatus` — a discriminated union (precedent: `ForgePrDiffResult`,
+ *  `ForgePrMergeStateResult` below), unlike `ForgeListResult`'s flat shape: there is no
+ *  `GithubData`-style route composing this back into a bigger payload, so nothing needs the meta
+ *  fields spreadable. `status: null` at `available:true` is a proven "no PR for this
+ *  branch" — the driver actually read enough to know. `available:false` means the read that would
+ *  have proven either answer failed (forge down, bad token, transport error, or the driver's own
+ *  search walk running out of budget before it could prove "no match") — the caller (Create PR →
+ *  View PR flip) must not treat that the same as a genuinely absent PR. */
+export type ForgePrStatusResult =
+  | { available: true; status: ForgePrStatus | null }
+  | { available: false; reason: string };
+
 export type ForgeMergeMethod = 'merge' | 'squash' | 'rebase';
 
 export interface ForgePrCheck {
@@ -299,8 +311,9 @@ export interface ForgeDriver {
   listPRs(opts?: ForgeListOptions): Promise<ForgeListResult>;
   /** Draft-PR creation for the review gate (spec 009). Never throws. */
   createPR(input: DraftPrInput): Promise<DraftPrOutcome>;
-  /** The branch's open/merged PR, or null when none (or the forge is down). */
-  prStatus(branch: string): Promise<ForgePrStatus | null>;
+  /** The branch's open/merged PR, `status: null` when none — see `ForgePrStatusResult`'s own doc
+   *  comment for the availability split. */
+  prStatus(branch: string): Promise<ForgePrStatusResult>;
   prMergeState?(number: number, opts?: { refresh?: boolean }): Promise<ForgePrMergeStateResult>;
   mergePR?(number: number, input: ForgeMergeInput): Promise<ForgeMergeResult>;
   /** Bounded, read-only file changes for a pull request. */

@@ -1879,22 +1879,33 @@ export function createGithubDriver(repoRoot: string, repoRef: GithubRepoRef | nu
 
     createPR: (input) => createDraftPr(input),
 
-    // Null covers everything from "no PR yet" to "gh missing" — the callers
-    // (Create PR → View PR flip) treat all of it as "nothing to link".
+    // `status: null` at `available:true` is a proven "no PR" — gh's own "no pull requests
+    // found for branch …" error on a clean repo proves it, same as a plain "nothing to link" the
+    // callers (Create PR → View PR flip) used to see. Anything else that fails the read (gh missing,
+    // network, an unparseable response) is a genuine availability failure and must not be silently
+    // folded into the same "no PR" answer.
     prStatus: async (branch) => {
-      if (process.env.CEZ_DRY_RUN === '1') return null;
+      if (process.env.CEZ_DRY_RUN === '1') return { available: true, status: null };
       try {
         const out = await gh(repoRoot, ['pr', 'view', branch, '--json', 'number,url,state,isDraft,statusCheckRollup']);
         const pr = ghPrViewSchema.parse(JSON.parse(out));
         return {
-          number: pr.number,
-          url: pr.url,
-          state: GH_PR_STATES[pr.state.toUpperCase()] ?? 'open',
-          isDraft: pr.isDraft,
-          checks: rollupToChecks(pr.statusCheckRollup) ?? null,
+          available: true,
+          status: {
+            number: pr.number,
+            url: pr.url,
+            state: GH_PR_STATES[pr.state.toUpperCase()] ?? 'open',
+            isDraft: pr.isDraft,
+            checks: rollupToChecks(pr.statusCheckRollup) ?? null,
+          },
         };
-      } catch {
-        return null;
+      } catch (error) {
+        const message = firstLine(error instanceof Error ? error.message : String(error));
+        if (/no pull requests? found/i.test(message)) return { available: true, status: null };
+        if (/ENOENT/.test(message)) {
+          return { available: false, reason: 'gh CLI not found — install it and run `gh auth login`' };
+        }
+        return { available: false, reason: message };
       }
     },
 
