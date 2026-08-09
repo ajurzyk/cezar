@@ -84,7 +84,13 @@ import {
   pushCurrentBranch,
   readWorktreePath,
 } from './git-changes.ts';
-import { gatedSkillsRepos, loadConfig, resolveWorktreeRetention, type CezConfig } from '../config.ts';
+import {
+  gatedSkillsRepos,
+  loadConfig,
+  readForgeSettings,
+  resolveWorktreeRetention,
+  type CezConfig,
+} from '../config.ts';
 import { findConfigFile } from '../agent-config/catalog.ts';
 import { readConfigFile, statConfigPath, writeConfigFile } from '../agent-config/files.ts';
 import { readAgentModelDefaults } from '../agent-config/models.ts';
@@ -1482,9 +1488,11 @@ export function createApp(deps: ServerDeps) {
     ]);
     // Additive fields only below — the pre-forge shape is the most
     // externally-depended-on JSON in the app (BACKWARD_COMPATIBILITY.md §2).
-    // `config.forge`, when the repo declares one, wins over the host table — but for
-    // `kind: 'forgejo'` `resolveForge` still returns null (no driver yet), so this route keeps
-    // sending `forge: null` unchanged until a driver exists.
+    // `config.forge`, when the repo declares one, fills the gap the host table leaves — it never
+    // overrides a host the table recognizes. Since the Forgejo driver shipped, a `kind: 'forgejo'`
+    // declared for a host the table can't reveal resolves to a real driver, so this route reports
+    // `{kind:'forgejo', available:…}` for those repos rather than the `forge: null` it used to send.
+    // `config` is already loaded above for other fields, so no extra read here.
     const forge = resolveForge(repo, config.forge);
     const caps = capabilities();
     return {
@@ -3207,7 +3215,8 @@ export function createApp(deps: ServerDeps) {
   const automationsRoutes = new Hono<ProjectApiEnv>()
     .get('/automations', async (c) => {
       const { root, automationStore } = c.get('project');
-      const forge = resolveForge(await getRepoInfo(root), (await loadConfig(root)).forge);
+      const [repoInfo, forgeSettings] = await Promise.all([getRepoInfo(root), readForgeSettings(root)]);
+      const forge = resolveForge(repoInfo, forgeSettings);
       // Annotated, so the two branches are ONE shape rather than a union of two: the fallback
       // literal always carries `reason`, the cached answer only sometimes does, and the route
       // type is what `contract/src/automations.ts` has to describe.
@@ -4137,6 +4146,18 @@ export function createApp(deps: ServerDeps) {
           400,
         );
       }
+      // `createDraftPr` is GitHub-only (it ends in `gh pr create`) and this route does NOT resolve
+      // a driver — but `resolveForge` now answers with a real Forgejo driver, so the cockpit's
+      // Create PR button is enabled for those repos. Letting the click through would push the
+      // branch (`createDraftPr` pushes BEFORE it creates) and only then fail, leaving the remote
+      // ahead with no rollback. Refuse before the mutation instead. Wiring this route through
+      // `resolveForge` — the Forgejo driver's own `createPR` is implemented and tested — is the
+      // later change that removes this gate. `git-actions.ts`'s `createPrAction` mirrors it so the
+      // button is disabled rather than the click discovering the 409.
+      const forge = resolveForge(await getRepoInfo(repoRoot), (await loadConfig(repoRoot)).forge);
+      if (forge && forge.kind !== 'github') {
+        return c.json({ error: 'Create PR is not supported for this forge yet', manual: `git merge ${run.branch}` }, 409);
+      }
       const outcome = await createDraftPr({
         repoRoot,
         run,
@@ -4742,7 +4763,11 @@ export function createApp(deps: ServerDeps) {
       async (c) => {
         const { root: repoRoot } = c.get('project');
         const parsed = { data: c.req.valid('param') };
-        const forge = resolveForge(await getRepoInfo(repoRoot), (await loadConfig(repoRoot)).forge);
+        // Parallel, not nested awaits: `getRepoInfo` spawns git and the config read hits the
+        // disk, they don't depend on each other, and the cockpit polls this route while a PR
+        // page is open.
+        const [repoInfo, forgeSettings] = await Promise.all([getRepoInfo(repoRoot), readForgeSettings(repoRoot)]);
+        const forge = resolveForge(repoInfo, forgeSettings);
         if (!forge?.prMergeState) return c.json({ available: false, reason: 'GitHub merge state is unavailable' });
         return c.json(await forge.prMergeState(parsed.data.number, { refresh: c.req.valid('query').refresh === '1' }));
       },
@@ -4756,7 +4781,8 @@ export function createApp(deps: ServerDeps) {
         const { root: repoRoot } = c.get('project');
         const parsedNumber = { data: c.req.valid('param') };
         const body = { data: c.req.valid('json') };
-        const forge = resolveForge(await getRepoInfo(repoRoot), (await loadConfig(repoRoot)).forge);
+        const [repoInfo, forgeSettings] = await Promise.all([getRepoInfo(repoRoot), readForgeSettings(repoRoot)]);
+        const forge = resolveForge(repoInfo, forgeSettings);
         if (!forge?.mergePR) return c.json({ error: 'GitHub merge is unavailable' }, 409);
         const result = await forge.mergePR(parsedNumber.data.number, body.data);
         if (result.merged) return c.json(result);

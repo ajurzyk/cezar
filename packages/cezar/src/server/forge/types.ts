@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import type { RunRecord } from '../../runs/store.ts';
 
 /**
@@ -17,18 +18,30 @@ import type { RunRecord } from '../../runs/store.ts';
 export const FORGE_KINDS = ['github', 'forgejo'] as const;
 export type ForgeKind = (typeof FORGE_KINDS)[number];
 
-/** Canonical shape of the `forge` key in `.ai/cezar/config.json` (repo-config-driven forge
- *  recognition): a self-hosted forge has three independent addresses — the git remote, the REST
- *  API as reachable from the cezar process (e.g. a docker-network hostname), and the web link
- *  base for a human — and none of them can be derived from the others, which is why
- *  `apiUrl`/`webUrl` are separate fields rather than one URL. Lives here (not in `config.ts`)
- *  because `types.ts` is a leaf: its only import (`RunRecord`, line 1) is type-only, so
- *  `config.ts` can pull `FORGE_KINDS` in without creating an import cycle. */
-export interface ForgeSettings {
-  kind: ForgeKind;
-  apiUrl: string;
-  webUrl: string;
-}
+/**
+ * Canonical shape of the `forge` key in `.ai/cezar/config.json`, declared ONCE here as a zod
+ * object: `config.ts` composes this schema instead of re-declaring the fields, so adding or
+ * retyping a field cannot drift between the parser and the type the drivers consume.
+ *
+ * A self-hosted forge has three independent addresses — the git remote, the REST API as
+ * reachable from the cezar process (e.g. a docker-network hostname), and the web link base for
+ * a human — and none of them can be derived from the others, which is why `apiUrl`/`webUrl` are
+ * separate fields rather than one URL.
+ *
+ * Lives here (not in `config.ts`) because `types.ts` is a leaf: its only other import
+ * (`RunRecord`) is type-only, so `config.ts` can pull this in without creating an import cycle.
+ */
+export const forgeSettingsSchema = z.object({
+  kind: z.enum(FORGE_KINDS),
+  // `.url()` alone accepts any scheme a `new URL()` parses — `javascript:`, `file:`, `data:`
+  // included. Both fields become driver-facing addresses (a REST base and a link base), so pin
+  // them to http/https rather than let a resource-owned config carry a scheme no consumer of
+  // this key was ever meant to receive.
+  apiUrl: z.string().url().refine((value) => /^https?:\/\//i.test(value)),
+  webUrl: z.string().url().refine((value) => /^https?:\/\//i.test(value)),
+});
+
+export type ForgeSettings = z.infer<typeof forgeSettingsSchema>;
 
 /** Availability probe result — mirrors the tab's quiet degradation contract:
  *  no CLI, no remote, offline all land on `available:false` + a human hint. */
