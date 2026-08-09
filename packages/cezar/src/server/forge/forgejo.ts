@@ -460,8 +460,9 @@ function forgejoViewUrl(webUrl: string, owner: string, repo: string, kind: Forge
  * not reach must report `available:false` + a `reason`, never an empty list standing in for an
  * unreported failure — the ambiguity `fetchGithub`'s equivalent (`github.ts`) never had, because a
  * `gh` failure there always had somewhere to put a reason. `repo`/`syncedAt`/`labelColors` mirror
- * `githubDataSchema`'s own optional meta fields, so `/api/github`'s route (a later package) can
- * compose one `GithubData`-shaped response from `listIssues`+`listPRs` without reshaping either.
+ * `githubDataSchema`'s own optional meta fields, so the `/api/github` route (`server.ts`'s
+ * `githubRoutes.get('/github', ...)`) composes one `GithubData`-shaped response from
+ * `listIssues`+`listPRs` without reshaping either.
  */
 async function listForgejo(
   listKind: 'issues' | 'prs',
@@ -1508,13 +1509,22 @@ async function forgejoPrDiff(
  * that fails its schema is dropped individually (the per-row policy `listForgejo` and
  * `resolveForgejoPrStatus` already apply to their own walks), never the whole thread.
  *
- * A raw response that is NON-EMPTY but maps to ZERO rows degrades to `available:false` — a
- * genuinely comment-less thread and a Forgejo response whose shape drifted out from under this
- * driver's schemas must never collapse to the same `{available:true, comments:[]}`. This is
- * distinct from `mapForgejoReview`'s own content-based drops (an empty-body COMMENT/PENDING review
- * carries no signal, which is a legitimate zero, not a schema mismatch) — the shape-mismatch check
- * only fires when a row failed to PARSE at all (tracked separately from the content-filter drops
- * below).
+ * A stream (comments or reviews) that received rows but mapped/parsed NONE of them signals a
+ * schema drift on THAT stream (`commentsUnmappable` / `reviewsUnmappable` below). A drift on one
+ * stream alone must not blank a thread whose OTHER stream still produced comments — same "don't
+ * blank what already worked" instinct as the rest of this driver, so the thread stays visible with
+ * a `reason` as long as the MERGED result carries something. Only when the merged result across
+ * BOTH streams comes back genuinely empty does a drift get to degrade the whole response to
+ * `available:false` — a genuinely comment-less thread and a Forgejo response whose shape drifted
+ * out from under this driver's schemas must never collapse to the same `{available:true,
+ * comments:[]}`. This is distinct from `mapForgejoReview`'s own content-based drops (an empty-body
+ * COMMENT/PENDING review carries no signal, which is a legitimate zero, not a schema mismatch): a
+ * review row that PARSED but was then content-filtered away never counts as "unmappable" on its
+ * own, so a thread whose reviews are entirely (legitimate) empty-body filters and whose comments
+ * are genuinely absent still reads as a real empty thread, `available:true`. It only stops being
+ * legitimate once the OTHER stream (or this same one) shows an actual schema drift AND the merged
+ * result is empty — that combination is what degrades. A payload carrying a partial-drift `reason`
+ * is never cached (below), same as the fully-degraded case, since the drift may be transient.
  */
 async function forgejoListComments(
   repoRoot: string,
@@ -1593,16 +1603,17 @@ async function forgejoListComments(
     // failed to even PARSE" signals a schema drift on the reviews side.
     const reviewsUnmappable = reviewsRawCount > 0 && parsedReviewsCount === 0;
 
-    // The schema-drift gate ("a non-empty raw response that maps to zero rows degrades to
-    // available:false") is evaluated for the THREAD AS A WHOLE, not per stream: a thread with
-    // SOME signal from EITHER stream (a mapped comment, or a review row that at least parsed
-    // its schema) stays visible even when the OTHER stream's raw response drifted out from under
-    // its own schema — same "don't blank what already worked" instinct as the quiet-degrade
-    // contract elsewhere in this driver. Only a non-empty thread that produced literally nothing
-    // anywhere degrades.
-    const threadHasRawRows = commentsPage.rows.length > 0 || reviewsRawCount > 0;
-    const threadHasMappedSignal = mappedCommentsCount > 0 || parsedReviewsCount > 0;
-    if (threadHasRawRows && !threadHasMappedSignal) {
+    // The schema-drift gate degrades to `available:false` only when a stream actually drifted
+    // (`commentsUnmappable` or `reviewsUnmappable` — rows arrived but none of them mapped/parsed)
+    // AND the thread's merged result is empty. `parsedReviewsCount` alone is NOT "signal" for this
+    // gate — a review row that parsed fine but was then legitimately content-filtered away (empty-
+    // body COMMENT/PENDING/REQUEST_REVIEW, `mapForgejoReview`'s own filter) never lands in
+    // `collected`, so checking `collected.length` (not `parsedReviewsCount`) is what keeps that
+    // legitimate filter from masking a genuine drift on the comments side (regression fixed here —
+    // a comments-side drift next to an all-filtered reviews page must NOT read as a quiet
+    // `{available:true, comments:[]}`). A drift on one stream next to a healthy other stream that
+    // still produced comments stays visible (`collected.length > 0`) with a `reason` below.
+    if ((commentsUnmappable || reviewsUnmappable) && collected.length === 0) {
       // Deliberately NOT cached, same reasoning `listForgejo`'s own catch gives: a response shape
       // that just drifted is exactly the kind of thing that must not pin a failure for the TTL.
       return { available: false, reason: 'the comment thread response did not match the expected shape', comments: [] };
@@ -1625,8 +1636,13 @@ async function forgejoListComments(
         : undefined;
 
     const data: ForgeCommentsData = { available: true, comments, ...(truncated ? { truncated: true } : {}), ...(reason ? { reason } : {}) };
-    forgejoCommentsCache.set(key, { at: Date.now(), data });
-    evictOldest(forgejoCommentsCache, FORGEJO_COMMENTS_CACHE_MAX);
+    // A partial-stream drift (`reason` set) is never cached — same instinct as the `available:false`
+    // branch above: pinning a drifted read for the full TTL would keep re-serving a degraded thread
+    // even after the forge recovers. Only a fully clean read (no `reason`) is worth memoizing.
+    if (!reason) {
+      forgejoCommentsCache.set(key, { at: Date.now(), data });
+      evictOldest(forgejoCommentsCache, FORGEJO_COMMENTS_CACHE_MAX);
+    }
     return data;
   } catch (err) {
     // A transport failure (network, non-404 HTTP) on either walk — page 1 of `paginate` rethrows
@@ -1710,9 +1726,17 @@ async function forgejoListChecks(
   // into `null` below, alongside `failedNumbers`, same as a failed combined-status read), never
   // aborting numbers the open-PR walk or the cache already resolved. The response as a whole still
   // degrades to `available:false` if NOTHING resolves (the gate below), same as before.
+  //
+  // A non-404 failure additionally means the fallback TRANSPORT itself is unhealthy (network,
+  // timeout, 5xx) — issuing one more `GET pulls/{n}` per remaining miss would serialize up to
+  // `misses.length` more `FJ_TIMEOUT_MS` waits (up to `GH_CHECKS_MAX` = 100) for a single call, with
+  // no retry budget. So the first non-404 stops the fallback loop outright: every miss from that
+  // point on is resolved from `openShaByNumber` if the walk already covered it (never re-fetched —
+  // same "numbers the walk resolved never disappear" guarantee as above) and otherwise folded into
+  // `failedNumbers` without another network round-trip.
   const shaByNumber = new Map<number, string | null>();
   const failedNumbers: number[] = [];
-  for (const n of misses) {
+  for (const [i, n] of misses.entries()) {
     const sha = openShaByNumber.get(n);
     if (sha) {
       shaByNumber.set(n, sha);
@@ -1726,7 +1750,12 @@ async function forgejoListChecks(
         shaByNumber.set(n, null);
         continue;
       }
-      failedNumbers.push(n);
+      for (const remaining of misses.slice(i)) {
+        const walkedSha = openShaByNumber.get(remaining);
+        if (walkedSha) shaByNumber.set(remaining, walkedSha);
+        else failedNumbers.push(remaining);
+      }
+      break;
     }
   }
 
