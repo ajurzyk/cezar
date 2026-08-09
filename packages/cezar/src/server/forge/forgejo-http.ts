@@ -161,7 +161,14 @@ export function messageFromBody(json: unknown, text: string): string {
   return line ? line.trim() : '';
 }
 
-async function describeErrorBody(res: Response): Promise<{ text: string; message: string }> {
+/**
+ * `hasToken` is threaded in rather than read here because this function is module-level while the
+ * token lives in `createForgejoHttp`'s closure — and BOTH status-specific rules below need it. It is
+ * passed as the already-evaluated boolean, not the `hasToken` function, so the answer is the one
+ * that was true for THIS request (the token is re-read from the environment per request, see
+ * `currentToken`) rather than whatever it happens to be by the time the error is described.
+ */
+async function describeErrorBody(res: Response, hasToken: boolean): Promise<{ text: string; message: string }> {
   const text = await res.text().catch(() => '');
   // The live instance answers a bad path with `404 page not found\n` as `text/plain`, but a real
   // API error is `{"message":…,"url":…,"errors":[]}` — read the text FIRST, then try to parse it,
@@ -172,18 +179,41 @@ async function describeErrorBody(res: Response): Promise<{ text: string; message
   } catch {
     // not JSON — messageFromBody falls back to the text-derived message
   }
+
+  // An auth failure's body is DISCARDED, never merely filtered. Measured against the live instance
+  // (15.0.3+gitea-1.22.0, 2026-08-09): Forgejo echoes the credential it just rejected straight back
+  // in `message` — `{"message":"access token does not exist [sha: <the token you sent>]"}` — and
+  // this string is contract-bound for humans, not for debugging: `forgejo.ts`'s `describeError`
+  // hands it on as `ForgeAvailability.reason`, which the cockpit renders and the server logs. A
+  // regex stripping the observed `[sha: …]` shape would be the weaker fix: that is the only shape
+  // anyone has SEEN, and nothing stops the next version from wrapping the secret differently. The
+  // status code plus our own hint carry everything a user can act on anyway. (The raw body survives
+  // on `ForgejoHttpError#bodyText` for debugging; no code path renders or logs that field.)
+  if (res.status === 401 || res.status === 403) {
+    // Which hint depends on whether a token was actually sent — "set CEZ_FORGEJO_TOKEN" is a lie
+    // when it is already set and the server is telling us it is wrong or insufficient.
+    const hint = hasToken ? 'CEZ_FORGEJO_TOKEN was rejected by Forgejo' : 'set CEZ_FORGEJO_TOKEN to authenticate';
+    return { text, message: `HTTP ${res.status} — ${hint}` };
+  }
+
   // `messageFromBody` returns '' when the body carried nothing usable — this function's own default
   // is the status code, not `firstLine`'s generic 'request failed'.
   let message = messageFromBody(parsed, text) || `HTTP ${res.status}`;
-  if (res.status === 401 || res.status === 403) {
-    message = `${message} — set CEZ_FORGEJO_TOKEN to authenticate`;
+
+  // Also measured live: a PRIVATE repo answers an ANONYMOUS request with 404, not 401, and the body
+  // ("The target couldn't be found.") is byte-identical to a repo that genuinely does not exist. So
+  // without a token the 404 is ambiguous, and the token hint is most needed exactly where it never
+  // used to fire. Gated on `hasToken` for the same reason the 401 hint is: once a token IS in play a
+  // 404 really does mean "no such repo", and suggesting the token there would start lying.
+  if (res.status === 404 && !hasToken) {
+    message = `${message} — or the repository is private: set CEZ_FORGEJO_TOKEN to authenticate`;
   }
   return { text, message };
 }
 
-async function throwIfError(res: Response): Promise<void> {
+async function throwIfError(res: Response, hasToken: boolean): Promise<void> {
   if (res.status >= 200 && res.status < 300) return;
-  const { text, message } = await describeErrorBody(res);
+  const { text, message } = await describeErrorBody(res, hasToken);
   throw new ForgejoHttpError(res.status, text, message);
 }
 
@@ -232,7 +262,7 @@ export function createForgejoHttp(apiUrl: string, deps: ForgejoHttpDeps = {}): F
 
   async function getJson(path: string, opts: { timeoutMs?: number } = {}): Promise<unknown> {
     const res = await doRequest('GET', path, { headers: { Accept: 'application/json' }, timeoutMs: opts.timeoutMs });
-    await throwIfError(res);
+    await throwIfError(res, hasToken());
     const text = await res.text();
     return text ? JSON.parse(text) : null;
   }
@@ -240,7 +270,7 @@ export function createForgejoHttp(apiUrl: string, deps: ForgejoHttpDeps = {}): F
   async function getText(path: string, opts: { accept?: string; timeoutMs?: number } = {}): Promise<string> {
     const headers: Record<string, string> = opts.accept ? { Accept: opts.accept } : {};
     const res = await doRequest('GET', path, { headers, timeoutMs: opts.timeoutMs });
-    await throwIfError(res);
+    await throwIfError(res, hasToken());
     return res.text();
   }
 
@@ -267,7 +297,7 @@ export function createForgejoHttp(apiUrl: string, deps: ForgejoHttpDeps = {}): F
 
   async function fetchPageRows(path: string): Promise<{ rows: unknown[]; total: number | null }> {
     const res = await doRequest('GET', path, { headers: { Accept: 'application/json' } });
-    await throwIfError(res);
+    await throwIfError(res, hasToken());
     const text = await res.text();
     const parsed: unknown = text ? JSON.parse(text) : [];
     if (!Array.isArray(parsed)) {
