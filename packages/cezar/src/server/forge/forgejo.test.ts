@@ -1038,6 +1038,40 @@ describe('listComments', () => {
     expect(result?.reason).toBeTruthy();
   });
 
+  it('more than FJ_THREAD_ENTRY_CAP (200) comment rows truncates the thread to 200, truncated:true', async () => {
+    const rows = Array.from({ length: 201 }, (_, i) => commentRow({ id: i + 1 }));
+    const fetchMock = vi.fn().mockImplementation(threadFetch(rows));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listComments?.('issue', 7);
+
+    expect(result?.available).toBe(true);
+    expect(result?.comments).toHaveLength(200);
+    expect(result?.truncated).toBe(true);
+  });
+
+  it('the reviews walk stopping short (a page-2 failure) truncates the thread even with few rows', async () => {
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/issues/7/comments')) return Promise.resolve(jsonResponse([], { headers: { 'x-total-count': '0' } }));
+      if (s.includes('/pulls/7/reviews')) {
+        const page = new URL(s).searchParams.get('page');
+        // Page 1 comes back as a FULL page (50 rows, no total-count) so the walk does not treat it
+        // as a natural end and tries page 2 — which fails, tripping `stoppedShort` via the 'error'
+        // stop reason (forgejo-http.ts's `paginate`, page !== 1 branch).
+        if (page === '1') return Promise.resolve(jsonResponse(Array.from({ length: 50 }, (_, i) => reviewRow({ id: i + 1 })), { status: 200 }));
+        return Promise.resolve(jsonResponse({ message: 'boom' }, { status: 500 }));
+      }
+      throw new Error(`unexpected url ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listComments?.('pr', 7);
+
+    expect(result?.available).toBe(true);
+    expect(result?.truncated).toBe(true);
+  });
+
   it('caches for 60s; refresh:true bypasses the cache', async () => {
     const fetchMock = vi.fn().mockImplementation(threadFetch([commentRow()]));
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
