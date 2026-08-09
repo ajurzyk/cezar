@@ -126,6 +126,15 @@ export function resolveForge(repoInfo: RepoInfo | null, forge?: ForgeSettings): 
   return null;
 }
 
+/** Rodzina tras /api/v1/github* odpowiadała przez gh dla KAŻDEGO repo, zanim powstał szew:
+ *  brak remote'a, remote spoza tablicy i CEZ_DRY_RUN lądowały w degradacjach/mockach fetchGithub*.
+ *  Trasy tej rodziny dostają więc fallback na sterownik GitHuba (repoRef null) zamiast gate'owania
+ *  na null — to zachowuje te payloady bajt w bajt. Wyłącznie kontrakt rodziny tras; health,
+ *  automations i createPR dalej używają resolveForge wprost. */
+export function resolveForgeOrGithub(repoRoot: string, repoInfo: RepoInfo | null, forge?: ForgeSettings): ForgeDriver {
+  return resolveForge(repoInfo, forge) ?? createGithubDriver(repoRoot, null);
+}
+
 export type {
   ForgeDriver,
   ForgeAvailability,
