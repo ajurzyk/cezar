@@ -981,6 +981,21 @@ describe('listComments', () => {
     expect(result?.reason).toBeTruthy();
   });
 
+  it('when reviews map fine but every comment row fails its schema, the thread stays visible with a reason — the same thread-wide gate, symmetric direction', async () => {
+    // Missing `id` fails `forgejoCommentSchema` entirely (it has no `.nullish()` there) — a genuine
+    // schema drift, same class as the reviews-side test above, mirrored to the comments stream.
+    const rows = [{ body: 'no id field at all', html_url: 'http://forgejo:3000/x', created_at: '2026-08-09T10:00:00Z' }];
+    const reviews = [reviewRow({ id: 10 })];
+    const fetchMock = vi.fn().mockImplementation(threadFetch(rows, reviews));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listComments?.('pr', 7);
+
+    expect(result?.available).toBe(true);
+    expect(result?.comments).toEqual([expect.objectContaining({ id: 10, kind: 'review' })]);
+    expect(result?.reason).toBeTruthy();
+  });
+
   it('a transport failure resolves available:false with a reason, NEVER a silent []', async () => {
     const fetchMock = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
