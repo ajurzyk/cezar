@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join, sep } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -145,6 +145,30 @@ describe('GET /api/v1/health — forge + capabilities', () => {
 
   it('reports forge:null for a non-GitHub remote', async () => {
     initRepo('git@gitlab.com:acme/demo.git');
+    const body = await health();
+    expect(body.forge).toBeNull();
+  });
+
+  it('reports the GitHub forge for a self-hosted remote when the repo config declares kind:github', async () => {
+    initRepo('ssh://git@forge.internal:2222/acme/demo.git');
+    mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
+    writeFileSync(
+      join(repoRoot, '.ai/cezar', 'config.json'),
+      JSON.stringify({ forge: { kind: 'github', apiUrl: 'https://api.github.com', webUrl: 'https://github.com' } }),
+      'utf8',
+    );
+    const body = await health();
+    expect(body.forge).toEqual({ kind: 'github', available: true });
+  });
+
+  it('reports forge:null for a github.com remote when the repo config declares kind:forgejo', async () => {
+    initRepo('https://github.com/acme/demo.git');
+    mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
+    writeFileSync(
+      join(repoRoot, '.ai/cezar', 'config.json'),
+      JSON.stringify({ forge: { kind: 'forgejo', apiUrl: 'http://forgejo:3000', webUrl: 'https://forge.example.com' } }),
+      'utf8',
+    );
     const body = await health();
     expect(body.forge).toBeNull();
   });
