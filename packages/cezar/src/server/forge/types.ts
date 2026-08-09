@@ -177,9 +177,9 @@ export interface ForgeListOptions {
 export interface ForgeListResult {
   available: boolean;
   /** Human-readable hint. Present on failure; the field itself is legal at `available:true` too
-   *  (`githubDataSchema`'s own doc: "never an error — a hint"), which a future `/api/github` route
-   *  composing `listIssues`+`listPRs` can use to surface "one of the two lists failed" without
-   *  gating the whole payload on it. */
+   *  (`githubDataSchema`'s own doc: "never an error — a hint"), which the `/api/github` route
+   *  (`server.ts`'s `githubRoutes.get('/github', ...)`), composing `listIssues`+`listPRs`, uses to
+   *  surface "one of the two lists failed" without gating the whole payload on it. */
   reason?: string;
   items: ForgeItem[];
   /** owner/name, when known. */

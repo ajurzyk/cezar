@@ -381,12 +381,17 @@ export const GH_MAX_LIMIT = 1000;
 /** Coalesces concurrent `fetchGithub` calls for the same `repoRoot` + capped `limit` into ONE `gh`
  *  walk — `createGithubDriver.listIssues`/`listPRs` compose from two separate calls
  *  into this function, and a caller (the `/api/github` route) that awaits both in parallel on a
- *  cold cache would otherwise pay for `repo view`+`issue list`+`pr list` TWICE. Keyed identically
- *  to `listCache`'s own lookup (`repoRoot`+`capped`), registered only after the cache is confirmed
- *  missed (a hit never reaches this map), `finally` removes the entry so the NEXT cold call starts
- *  its own fresh walk rather than replaying a stale promise — mirrors `mergeInflight`'s own
- *  register/`finally`-release shape below (`:1579`), a `Set`-based mutex for a different job
- *  (rejecting a second concurrent merge) than this `Map`'s (sharing one in-flight answer). */
+ *  cold cache would otherwise pay for `repo view`+`issue list`+`pr list` TWICE. Keyed by
+ *  `repoRoot`+`capped` (`repoRoot\0capped`, below) — NOT the same key `listCache` uses. `listCache`
+ *  keys by `repoRoot` ALONE and compares `limit` against `capped` INSIDE the found entry (a cached
+ *  superset request serves a smaller one without a second `gh` walk, see above); this map has no
+ *  such superset check, so two concurrent calls for the same `repoRoot` with DIFFERENT `capped`
+ *  values never share an in-flight promise here — each spawns its own walk. Registered only after
+ *  the cache is confirmed missed (a hit never reaches this map), `finally` removes the entry so the
+ *  NEXT cold call starts its own fresh walk rather than replaying a stale promise — mirrors
+ *  `mergeInflight`'s own register/`finally`-release shape below (`:1579`), a `Set`-based mutex for a
+ *  different job (rejecting a second concurrent merge) than this `Map`'s (sharing one in-flight
+ *  answer). */
 const listInflight = new Map<string, Promise<GithubData>>();
 
 export async function fetchGithub(repoRoot: string, refresh = false, limit = 30): Promise<GithubData> {
