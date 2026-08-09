@@ -47,9 +47,12 @@ function jsonResponse(body: unknown, init: { status?: number; headers?: Record<s
   });
 }
 
-describe('the forge seam — GET /github/prs/:number/changes', () => {
-  let repoRoot: string;
-  let store: RunStore;
+/** Registers the `beforeEach`/`afterEach` every describe block below needs: reset `CEZ_DRY_RUN`
+ *  before each test, flush/remove the throwaway repo and unstub `fetch` after. `get` reads via a
+ *  closure rather than taking `repoRoot`/`store` directly — each describe block's own `let`
+ *  bindings are reassigned per test (`initForgejoRepo()`, or the no-remote dry-run setup), and
+ *  `afterEach` must see whichever assignment the JUST-FINISHED test made. */
+function registerForgeSeamLifecycle(get: () => { repoRoot: string; store: RunStore }): void {
   const previousDryRun = process.env.CEZ_DRY_RUN;
 
   beforeEach(() => {
@@ -57,12 +60,19 @@ describe('the forge seam — GET /github/prs/:number/changes', () => {
   });
 
   afterEach(() => {
+    const { repoRoot, store } = get();
     store.flush();
     rmSync(repoRoot, { recursive: true, force: true });
     vi.unstubAllGlobals();
     if (previousDryRun === undefined) delete process.env.CEZ_DRY_RUN;
     else process.env.CEZ_DRY_RUN = previousDryRun;
   });
+}
+
+describe('the forge seam — GET /github/prs/:number/changes', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  registerForgeSeamLifecycle(() => ({ repoRoot, store }));
 
   it('routes a Forgejo repo through resolveForge and maps the changes with the Forgejo driver', async () => {
     ({ repoRoot, store } = initForgejoRepo());
@@ -156,19 +166,7 @@ describe('the forge seam — GET /github/prs/:number/changes', () => {
 describe('the forge seam — GET /github', () => {
   let repoRoot: string;
   let store: RunStore;
-  const previousDryRun = process.env.CEZ_DRY_RUN;
-
-  beforeEach(() => {
-    delete process.env.CEZ_DRY_RUN;
-  });
-
-  afterEach(() => {
-    store.flush();
-    rmSync(repoRoot, { recursive: true, force: true });
-    vi.unstubAllGlobals();
-    if (previousDryRun === undefined) delete process.env.CEZ_DRY_RUN;
-    else process.env.CEZ_DRY_RUN = previousDryRun;
-  });
+  registerForgeSeamLifecycle(() => ({ repoRoot, store }));
 
   /** Drops the fields `mockGithub()` (`forge/github.ts`) recomputes from `Date.now()` on every
    *  call. The composed route awaits `listIssues`+`listPRs` in parallel; under `CEZ_DRY_RUN` each
@@ -332,19 +330,7 @@ describe('the forge seam — GET /github', () => {
 describe('the forge seam — GET /github/comments/:kind/:number', () => {
   let repoRoot: string;
   let store: RunStore;
-  const previousDryRun = process.env.CEZ_DRY_RUN;
-
-  beforeEach(() => {
-    delete process.env.CEZ_DRY_RUN;
-  });
-
-  afterEach(() => {
-    store.flush();
-    rmSync(repoRoot, { recursive: true, force: true });
-    vi.unstubAllGlobals();
-    if (previousDryRun === undefined) delete process.env.CEZ_DRY_RUN;
-    else process.env.CEZ_DRY_RUN = previousDryRun;
-  });
+  registerForgeSeamLifecycle(() => ({ repoRoot, store }));
 
   it('routes a Forgejo repo through the seam and maps the thread with the Forgejo driver', async () => {
     ({ repoRoot, store } = initForgejoRepo());
@@ -401,19 +387,7 @@ describe('the forge seam — GET /github/comments/:kind/:number', () => {
 describe('the forge seam — GET /github/checks', () => {
   let repoRoot: string;
   let store: RunStore;
-  const previousDryRun = process.env.CEZ_DRY_RUN;
-
-  beforeEach(() => {
-    delete process.env.CEZ_DRY_RUN;
-  });
-
-  afterEach(() => {
-    store.flush();
-    rmSync(repoRoot, { recursive: true, force: true });
-    vi.unstubAllGlobals();
-    if (previousDryRun === undefined) delete process.env.CEZ_DRY_RUN;
-    else process.env.CEZ_DRY_RUN = previousDryRun;
-  });
+  registerForgeSeamLifecycle(() => ({ repoRoot, store }));
 
   it('routes a Forgejo repo through the seam and maps the glyphs with the Forgejo driver', async () => {
     ({ repoRoot, store } = initForgejoRepo());
