@@ -2067,13 +2067,15 @@ describe('mergePR', () => {
     expect(result && result.merged && 'mergeCommitSha' in result).toBe(false);
   });
 
-  it('a successful merge evicts listCache, prStatusCache, mergeStateCache, and prDiffCache for the whole project', async () => {
+  it('a successful merge evicts every PROJECT_CACHES cache — listCache, prStatusCache, mergeStateCache, prDiffCache, forgejoCommentsCache, forgejoChecksCache — for the whole project', async () => {
     // PR #42 is deliberately a DIFFERENT pull than the one merged below — proves the eviction is
     // project-wide (keyed on repoRoot+apiBase), not scoped to the merged PR's own number.
     const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
       const s = String(url);
       if (s.includes('/issues?')) return Promise.resolve(jsonResponse([], { headers: { 'x-total-count': '0' } }));
+      if (s.includes('/issues/42/comments')) return Promise.resolve(jsonResponse([], { headers: { 'x-total-count': '0' } }));
       if (s.includes('/pulls?state=all')) return Promise.resolve(jsonResponse([], { headers: { 'x-total-count': '0' } }));
+      if (s.includes('/pulls?state=open')) return Promise.resolve(jsonResponse([], { headers: { 'x-total-count': '0' } }));
       if (s.includes('/pulls/main/')) return Promise.resolve(jsonResponse({ message: 'not found' }, { status: 404 }));
       if (s.includes('/pulls/42/files')) return Promise.resolve(jsonResponse([], { headers: { 'x-total-count': '0' } }));
       if (s.endsWith('/pulls/42.diff')) return Promise.resolve(new Response('', { status: 200, headers: { 'content-type': 'text/plain' } }));
@@ -2092,23 +2094,31 @@ describe('mergePR', () => {
     await driver.prStatus('feat/x');
     await driver.prMergeState?.(42);
     await driver.prDiff?.(42);
+    await driver.listComments?.('pr', 42);
+    await driver.listChecks?.([42]);
 
     const callCount = (pathIncludes: string) => fetchMock.mock.calls.filter((c) => String(c[0]).includes(pathIncludes)).length;
     const issuesBefore = callCount('/issues?');
     const prStatusBefore = callCount('/pulls?state=all');
     const pull42Before = callCount('/pulls/42');
     const diff42FilesBefore = callCount('/pulls/42/files');
+    const comments42Before = callCount('/issues/42/comments');
+    const checksWalkBefore = callCount('/pulls?state=open');
 
     // Warm caches must be free right now — proves they really were cached before the merge.
     await driver.listIssues();
     await driver.prStatus('feat/x');
     await driver.prMergeState?.(42);
     await driver.prDiff?.(42);
+    await driver.listComments?.('pr', 42);
+    await driver.listChecks?.([42]);
     expect(callCount('/issues?')).toBe(issuesBefore);
     expect(callCount('/pulls?state=all')).toBe(prStatusBefore);
     // `/pulls/42` itself is always re-read by `prDiff` (it needs the current `headSha` to build its
     // cache key) — only the `/files` walk this warm assertion actually cares about must stay flat.
     expect(callCount('/pulls/42/files')).toBe(diff42FilesBefore);
+    expect(callCount('/issues/42/comments')).toBe(comments42Before);
+    expect(callCount('/pulls?state=open')).toBe(checksWalkBefore);
 
     await driver.mergePR?.(9, { method: 'merge', expectedHeadSha: 'a'.repeat(40) });
 
@@ -2116,10 +2126,14 @@ describe('mergePR', () => {
     await driver.prStatus('feat/x');
     await driver.prMergeState?.(42);
     await driver.prDiff?.(42);
+    await driver.listComments?.('pr', 42);
+    await driver.listChecks?.([42]);
     expect(callCount('/issues?')).toBeGreaterThan(issuesBefore);
     expect(callCount('/pulls?state=all')).toBeGreaterThan(prStatusBefore);
     expect(callCount('/pulls/42')).toBeGreaterThan(pull42Before);
     expect(callCount('/pulls/42/files')).toBeGreaterThan(diff42FilesBefore);
+    expect(callCount('/issues/42/comments')).toBeGreaterThan(comments42Before);
+    expect(callCount('/pulls?state=open')).toBeGreaterThan(checksWalkBefore);
   });
 });
 
