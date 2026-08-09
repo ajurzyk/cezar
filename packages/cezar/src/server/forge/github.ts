@@ -389,7 +389,7 @@ export const GH_MAX_LIMIT = 1000;
  *  values never share an in-flight promise here — each spawns its own walk. Registered only after
  *  the cache is confirmed missed (a hit never reaches this map), `finally` removes the entry so the
  *  NEXT cold call starts its own fresh walk rather than replaying a stale promise — mirrors
- *  `mergeInflight`'s own register/`finally`-release shape below (`:1579`), a `Set`-based mutex for a
+ *  `mergeInflight`'s own register/`finally`-release shape further below, a `Set`-based mutex for a
  *  different job (rejecting a second concurrent merge) than this `Map`'s (sharing one in-flight
  *  answer). */
 const listInflight = new Map<string, Promise<GithubData>>();
