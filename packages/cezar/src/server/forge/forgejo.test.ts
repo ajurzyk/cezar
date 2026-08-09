@@ -940,30 +940,11 @@ describe('listComments', () => {
     expect(result?.comments).toEqual([]);
   });
 
-  it('drops empty-body COMMENT/PENDING/REQUEST_REVIEW reviews, keeps a non-empty unrecognized state', async () => {
-    const reviews = [
-      reviewRow({ id: 1, state: 'COMMENT', body: '' }),
-      reviewRow({ id: 2, state: 'PENDING', body: '   ' }),
-      reviewRow({ id: 3, state: 'REQUEST_REVIEW', body: '' }),
-      reviewRow({ id: 4, state: 'SOME_FUTURE_STATE', body: 'still here' }),
-    ];
-    const fetchMock = vi.fn().mockImplementation(threadFetch([], reviews));
-    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
-
-    const result = await driver.listComments?.('pr', 7);
-
-    expect(result?.available).toBe(true);
-    expect(result?.comments).toEqual([expect.objectContaining({ id: 4, reviewState: undefined })]);
-  });
-
-  it('dismissed:true maps to reviewState "dismissed" regardless of state', async () => {
-    const fetchMock = vi.fn().mockImplementation(threadFetch([], [reviewRow({ id: 5, state: 'APPROVED', dismissed: true })]));
-    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
-
-    const result = await driver.listComments?.('pr', 7);
-
-    expect(result?.comments).toEqual([expect.objectContaining({ reviewState: 'dismissed' })]);
-  });
+  // Content-filter rules for review rows (empty-body COMMENT/PENDING/REQUEST_REVIEW drops,
+  // dismissed:true -> 'dismissed', an unrecognized state keeping the row) are unit-tested directly
+  // against `mapForgejoReview` in `forgejo-map.test.ts` — no need to re-prove them here through an
+  // HTTP-mocked driver. The 'pr happy path' test above already proves the driver actually WIRES
+  // `mapForgejoReview` into the merged thread (kind/reviewState survive end to end).
 
   it('a comment row with a non-absolute html_url is dropped, not the whole thread (rebaseToWebUrl cannot parse it)', async () => {
     const rows = [commentRow({ id: 1 }), commentRow({ id: 2, html_url: 'not-a-url' })];
