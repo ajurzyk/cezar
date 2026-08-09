@@ -147,8 +147,8 @@ import { agentHomePaths, expandTilde } from '../paths.ts';
 import { isLoopbackHostHeader, normalizeHostname, resolveCapabilities } from './capabilities.ts';
 import { createSocketHub, type SocketHub, type WsUpgradeVerdict } from './ws.ts';
 import { browseDirectory, isInsideBrowseRoot, isLexicallyInsideBrowseRoot, resolveBrowseRoot } from './fs-browse.ts';
-import { parseRemote, resolveForge, type ForgeAvailability } from './forge/index.ts';
-import { fetchGithub, fetchGithubChecks, fetchGithubComments, fetchGithubPrDiff, GithubPrNotFoundError, GH_CHECKS_MAX } from './github.ts';
+import { parseRemote, resolveForge, resolveForgeOrGithub, type ForgeAvailability } from './forge/index.ts';
+import { fetchGithub, fetchGithubChecks, fetchGithubComments, GithubPrNotFoundError, GH_CHECKS_MAX } from './github.ts';
 import { ensureLaunchKey } from './launch-key.ts';
 import { openInTerminal } from './open-in-terminal.ts';
 import { agentCliRunner, detectOpenTargets, openFileInDefaultApp, openInApp } from './open-in-app.ts';
@@ -4808,10 +4808,11 @@ export function createApp(deps: ServerDeps) {
       async (c) => {
         const { root: repoRoot } = c.get('project');
         const parsed = { data: c.req.valid('param') };
+        const [repoInfo, forgeSettings] = await Promise.all([getRepoInfo(repoRoot), readForgeSettings(repoRoot)]);
+        const forge = resolveForgeOrGithub(repoRoot, repoInfo, forgeSettings);
+        if (!forge.prDiff) return c.json({ available: false as const, reason: 'PR changes are unavailable for this forge' });
         try {
-          return c.json(
-            await fetchGithubPrDiff(repoRoot, parsed.data.number, c.req.valid('query').refresh === '1'),
-          );
+          return c.json(await forge.prDiff(parsed.data.number, { refresh: c.req.valid('query').refresh === '1' }));
         } catch (err) {
           if (err instanceof GithubPrNotFoundError) return c.json({ error: err.message }, 404);
           throw err;
