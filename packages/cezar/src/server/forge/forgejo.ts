@@ -1541,7 +1541,16 @@ async function forgejoListComments(
     const collected: ForgeComment[] = [];
     let mappedCommentsCount = 0;
     for (const row of commentsPage.rows) {
-      const mapped = mapForgejoComment(row, webUrl);
+      // Per-row, not per-thread: a row whose `html_url` is not absolute makes `rebaseToWebUrl`
+      // throw a `TypeError` — that must cost this ONE row, not degrade the whole thread to
+      // `available:false`, same per-row policy `listForgejo` already applies to its own walk
+      // (`:510`).
+      let mapped: ForgeComment | null;
+      try {
+        mapped = mapForgejoComment(row, webUrl);
+      } catch {
+        continue;
+      }
       if (mapped) {
         collected.push(mapped);
         mappedCommentsCount++;
@@ -1552,13 +1561,14 @@ async function forgejoListComments(
     const commentsUnmappable = commentsPage.rows.length > 0 && mappedCommentsCount === 0;
 
     let reviewsStoppedShort = false;
-    let reviewsUnmappable = false;
+    let reviewsRawCount = 0;
+    let parsedReviewsCount = 0;
     if (kind === 'pr') {
       const reviewsPage = await http.paginate((p, l) => `${repoPrefix}/pulls/${number}/reviews?page=${p}&limit=${l}`, {
         want: FJ_THREAD_ENTRY_CAP,
       });
       reviewsStoppedShort = reviewsPage.stoppedShort;
-      let parsedReviewsCount = 0;
+      reviewsRawCount = reviewsPage.rows.length;
       for (const row of reviewsPage.rows) {
         let parsed;
         try {
@@ -1567,16 +1577,30 @@ async function forgejoListComments(
           continue; // unparseable row — not the whole walk (same per-row policy as everywhere else)
         }
         parsedReviewsCount++;
-        const mapped = mapForgejoReview(parsed, webUrl);
+        // Same per-row policy as the comments loop above — a non-absolute `html_url` must drop
+        // only this row, not the whole thread.
+        let mapped: ForgeComment | null;
+        try {
+          mapped = mapForgejoReview(parsed, webUrl);
+        } catch {
+          continue;
+        }
         if (mapped) collected.push(mapped);
       }
-      // Distinct from a null `mapForgejoReview` return: THAT can be a legitimate content filter
-      // (an empty-body COMMENT/PENDING review), never a schema mismatch on its own. Only "every row
-      // failed to even PARSE" signals a schema drift on the reviews side.
-      reviewsUnmappable = reviewsPage.rows.length > 0 && parsedReviewsCount === 0;
     }
+    // Distinct from a null `mapForgejoReview` return: THAT can be a legitimate content filter (an
+    // empty-body COMMENT/PENDING review), never a schema mismatch on its own. Only "every row
+    // failed to even PARSE" signals a schema drift on the reviews side.
+    const reviewsUnmappable = reviewsRawCount > 0 && parsedReviewsCount === 0;
 
-    if (commentsUnmappable || reviewsUnmappable) {
+    // Q2's schema-drift gate ("a non-empty raw response that maps to zero rows degrades to
+    // available:false") is evaluated for the THREAD AS A WHOLE, not per stream (D6): a thread with
+    // SOME signal from EITHER stream (a mapped comment, or a review row that at least parsed
+    // its schema) stays visible even when the OTHER stream's raw response drifted out from under
+    // its own schema. Only a non-empty thread that produced literally nothing anywhere degrades.
+    const threadHasRawRows = commentsPage.rows.length > 0 || reviewsRawCount > 0;
+    const threadHasMappedSignal = mappedCommentsCount > 0 || parsedReviewsCount > 0;
+    if (threadHasRawRows && !threadHasMappedSignal) {
       // Deliberately NOT cached, same reasoning `listForgejo`'s own catch gives: a response shape
       // that just drifted is exactly the kind of thing that must not pin a failure for the TTL.
       return { available: false, reason: 'the comment thread response did not match the expected shape', comments: [] };
@@ -1587,7 +1611,18 @@ async function forgejoListComments(
     const comments = cappedByLength ? collected.slice(0, FJ_THREAD_ENTRY_CAP) : collected;
     const truncated = cappedByLength || commentsPage.stoppedShort || reviewsStoppedShort;
 
-    const data: ForgeCommentsData = { available: true, comments, ...(truncated ? { truncated: true } : {}) };
+    // The thread is visible past this point. When exactly one stream individually drifted while
+    // the OTHER stream carried the whole thread's signal, surface that in `reason` rather than
+    // gating the payload on it — `ForgeCommentsData.reason` is legal at `available:true` (mirrors
+    // `ForgeListResult`'s own doc: "never an error — a hint"), unlike `ForgeChecksResult`'s
+    // `available:true` branch, which carries no such field at all.
+    const reason = commentsUnmappable
+      ? 'the comment stream response did not match the expected shape — showing reviews only'
+      : reviewsUnmappable
+        ? 'the review stream response did not match the expected shape — showing comments only'
+        : undefined;
+
+    const data: ForgeCommentsData = { available: true, comments, ...(truncated ? { truncated: true } : {}), ...(reason ? { reason } : {}) };
     forgejoCommentsCache.set(key, { at: Date.now(), data });
     evictOldest(forgejoCommentsCache, FORGEJO_COMMENTS_CACHE_MAX);
     return data;
@@ -1669,10 +1704,12 @@ async function forgejoListChecks(
   // A number the open-PR walk didn't cover (closed/merged, or beyond its own page budget) needs
   // its own `GET pulls/{n}`. A 404 there is the API's own proven answer ("no such PR") — a genuine
   // `null` glyph, not a transport failure. Any OTHER failure means this read taught the driver
-  // nothing, and unlike a single failed combined-status read below there is no larger batch of
-  // OTHER resolved numbers to fall back on for just this one missing sha — it aborts the whole
-  // response, same policy `resolveForgejoPrStatus`'s own fallback throw applies.
+  // nothing about THIS number's sha — it degrades only THIS number to a failed-read glyph (folded
+  // into `null` below, alongside `failedNumbers`, same as a failed combined-status read), never
+  // aborting numbers the open-PR walk or the cache already resolved. The response as a whole still
+  // degrades to `available:false` if NOTHING resolves (the gate below), same as before.
   const shaByNumber = new Map<number, string | null>();
+  const failedNumbers: number[] = [];
   for (const n of misses) {
     const sha = openShaByNumber.get(n);
     if (sha) {
@@ -1687,7 +1724,7 @@ async function forgejoListChecks(
         shaByNumber.set(n, null);
         continue;
       }
-      return { available: false, reason: describeError(err) };
+      failedNumbers.push(n);
     }
   }
 
@@ -1703,7 +1740,6 @@ async function forgejoListChecks(
     }
   }
 
-  const failedNumbers: number[] = [];
   for (let i = 0; i < toFetch.length; i += FJ_CHECKS_CONCURRENCY) {
     const chunk = toFetch.slice(i, i + FJ_CHECKS_CONCURRENCY);
     const results = await Promise.all(
