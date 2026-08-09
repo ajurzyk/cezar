@@ -599,8 +599,9 @@ instance. The *wiring* is now complete for reads: health, the merge route,
 the issues/PR tab's listing (`GET /github`), the comment/review thread
 (`GET /github/comments/:kind/:number`), CI checks (`GET /github/checks`) and
 the PR-diff view (`GET /github/prs/:number/changes`) all resolve through
-`resolveForge`/`resolveForgeOrGithub` (see `server.ts`), so a Forgejo repo
-gets the same data a GitHub repo does on every one of those routes.
+`resolveForge`/`resolveForgeOrGithub` (see `server.ts`), so a Forgejo repo is
+served by the same seam a GitHub repo is on every one of those routes — with
+the one payload difference named below.
 
 Two gaps remain. The first: draft-PR creation (`POST /runs/:id/pr`, `server.ts:4135` →
 `pr.ts` → `forge/github.ts`) still calls the GitHub-only `createDraftPr`
