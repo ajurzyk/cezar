@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -162,6 +163,46 @@ describe('GitHub automation API', () => {
       automationId: created.id,
       revision: 1,
       deleted: true,
+    });
+  });
+
+  // #698: `GET /api/v1/automations` resolves its GitHub availability through the same
+  // `resolveForge(repoInfo, config.forge)` call the health route makes — a repo config
+  // declaring `kind: 'github'` on a non-github.com remote must flip `available` from
+  // false to true, the same way it does on `/api/v1/health`.
+  describe('forge availability wiring', () => {
+    const savedDryRun = process.env.CEZ_DRY_RUN;
+
+    beforeEach(() => {
+      process.env.CEZ_DRY_RUN = '1';
+      execFileSync('git', ['init', '-b', 'main'], { cwd: root });
+      execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: root });
+      execFileSync('git', ['config', 'user.name', 'Test'], { cwd: root });
+      execFileSync('git', ['commit', '--allow-empty', '-m', 'init'], { cwd: root });
+      execFileSync('git', ['remote', 'add', 'origin', 'ssh://git@forge.internal:2222/acme/demo.git'], { cwd: root });
+    });
+
+    afterEach(() => {
+      if (savedDryRun === undefined) delete process.env.CEZ_DRY_RUN;
+      else process.env.CEZ_DRY_RUN = savedDryRun;
+    });
+
+    it('reports GitHub unavailable for a non-GitHub remote with no repo config', async () => {
+      const response = await apiRequest(app(), '/api/v1/automations');
+      expect(await response.json()).toMatchObject({
+        available: false,
+        reason: 'No GitHub remote is configured',
+      });
+    });
+
+    it('reports GitHub available for the same remote once the repo config declares kind:github', async () => {
+      writeFileSync(
+        join(root, '.ai/cezar', 'config.json'),
+        JSON.stringify({ forge: { kind: 'github', apiUrl: 'https://api.github.com', webUrl: 'https://github.com' } }),
+        'utf8',
+      );
+      const response = await apiRequest(app(), '/api/v1/automations');
+      expect(await response.json()).toMatchObject({ available: true });
     });
   });
 });

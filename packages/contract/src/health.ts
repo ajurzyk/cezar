@@ -22,7 +22,13 @@ export const backendCheckSchema = z.object({
 export type BackendCheck = z.infer<typeof backendCheckSchema>;
 
 export const forgeInfoSchema = z.object({
-  kind: z.literal('github'),
+  /** The forge kind a `ForgeDriver` reports (`ForgeDriver.kind: ForgeKind`, service-side). The
+   *  enum tracks the service's `FORGE_KINDS` list even though this server never puts `'forgejo'`
+   *  on the wire yet — `resolveForge` returns `null` for it, so `forge` is `null` on this route
+   *  until a Forgejo driver exists — because `contract-parity.test.ts` asserts the ROUTE'S type is
+   *  mutually assignable with this schema, and the route's type already carries the wider
+   *  `ForgeKind`. */
+  kind: z.enum(['github', 'forgejo']),
   /**
    * Whether the forge is reachable — **absent until the availability probe has warmed**.
    *

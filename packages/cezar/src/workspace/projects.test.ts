@@ -182,6 +182,20 @@ describe('workspace projects', () => {
       expect(entry).toMatchObject({ status: 'ok', forge: 'github' });
     });
 
+    it('classifies a self-hosted remote as forgejo when the repo config declares it', async () => {
+      const root = makeRepo('forgejo-repo');
+      execFileSync('git', ['remote', 'add', 'origin', 'ssh://git@forge.internal:2222/acme/demo.git'], { cwd: root });
+      mkdirSync(join(root, '.ai/cezar'), { recursive: true });
+      writeFileSync(
+        join(root, '.ai/cezar', 'config.json'),
+        JSON.stringify({ forge: { kind: 'forgejo', apiUrl: 'http://forgejo:3000', webUrl: 'http://forge.internal:8929' } }),
+        'utf8',
+      );
+      await registerProject(root);
+      const [entry] = await listProjects();
+      expect(entry).toMatchObject({ status: 'ok', forge: 'forgejo' });
+    });
+
     it('omits forge for a non-github remote and for a remote-less repo', async () => {
       const gitlab = makeRepo('lab');
       execFileSync('git', ['remote', 'add', 'origin', 'git@gitlab.com:acme/lab.git'], { cwd: gitlab });
