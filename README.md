@@ -602,7 +602,7 @@ the PR-diff view (`GET /github/prs/:number/changes`) all resolve through
 `resolveForge`/`resolveForgeOrGithub` (see `server.ts`), so a Forgejo repo
 gets the same data a GitHub repo does on every one of those routes.
 
-One gap remains: draft-PR creation (`POST /runs/:id/pr`, `server.ts:4135` →
+Two gaps remain. The first: draft-PR creation (`POST /runs/:id/pr`, `server.ts:4135` →
 `pr.ts` → `forge/github.ts`) still calls the GitHub-only `createDraftPr`
 directly instead of resolving a driver. Wiring it through `resolveForge`
 would push the branch before creating the PR, and the Forgejo driver's own
@@ -614,7 +614,17 @@ forge yet'`) before any push happens, and the "Create PR" button
 click discover the 409. Until this route is wired, open the PR by hand in
 Forgejo's own web UI.
 
-Closing this routing gap is later work. See the automations caveat below
+The second: the comment/review thread has no timeline-events axis for a
+Forgejo repo. GitHub's timeline API (joins, label changes, renames, and the
+rest of the non-comment events `mergeThread` folds in) has no Forgejo
+equivalent, so `events` is always absent on a Forgejo thread and the response
+degrades to comments-only — reviews and comments merged chronologically, no
+timeline entries at all. The contract already treats a response with no
+`events` as this comments-only degrade rather than a defect, so this is a
+deliberate scope line, not an oversight — but it does mean a Forgejo thread
+reads thinner than a GitHub one for the same PR.
+
+Closing these gaps is later work. See the automations caveat below
 for a further, unrelated gap in the same vein.
 
 **The key fills a gap; it never overrides.** cezar asks its host table first
