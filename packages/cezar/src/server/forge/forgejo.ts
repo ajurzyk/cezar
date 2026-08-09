@@ -420,11 +420,11 @@ async function listForgejo(
   if (process.env.CEZ_DRY_RUN === '1') return { available: true, items: [] };
   const limit = Math.min(Math.max(opts?.limit ?? 30, 1), FJ_MAX_LIST_LIMIT);
   const key = listCacheKey(repoRoot, http.apiBase, listKind);
-  const repo_ = `${owner}/${repo}`;
+  const repoHandle = `${owner}/${repo}`;
   if (!opts?.refresh) {
     const hit = listCache.get(key);
     if (hit && Date.now() - hit.at < CACHE_MS && hit.limit >= limit) {
-      return { available: true, items: hit.items.slice(0, limit), repo: repo_, syncedAt: hit.syncedAt, labelColors: hit.labelColors };
+      return { available: true, items: hit.items.slice(0, limit), repo: repoHandle, syncedAt: hit.syncedAt, labelColors: hit.labelColors };
     }
   }
 
@@ -465,7 +465,7 @@ async function listForgejo(
     const syncedAt = new Date().toISOString();
     listCache.set(key, { at: Date.now(), limit, items, labelColors, syncedAt });
     evictOldest(listCache, LIST_CACHE_MAX);
-    return { available: true, items: items.slice(0, limit), repo: repo_, syncedAt, labelColors };
+    return { available: true, items: items.slice(0, limit), repo: repoHandle, syncedAt, labelColors };
   } catch (err) {
     // Never throw from a read — an HTTP failure or a timeout degrades to `available:false` + a
     // reason here (previously a silent `[]`, indistinguishable from "no items"). (A malformed
