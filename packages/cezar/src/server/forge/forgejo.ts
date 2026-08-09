@@ -1593,11 +1593,13 @@ async function forgejoListComments(
     // failed to even PARSE" signals a schema drift on the reviews side.
     const reviewsUnmappable = reviewsRawCount > 0 && parsedReviewsCount === 0;
 
-    // Q2's schema-drift gate ("a non-empty raw response that maps to zero rows degrades to
-    // available:false") is evaluated for the THREAD AS A WHOLE, not per stream (D6): a thread with
+    // The schema-drift gate ("a non-empty raw response that maps to zero rows degrades to
+    // available:false") is evaluated for the THREAD AS A WHOLE, not per stream: a thread with
     // SOME signal from EITHER stream (a mapped comment, or a review row that at least parsed
     // its schema) stays visible even when the OTHER stream's raw response drifted out from under
-    // its own schema. Only a non-empty thread that produced literally nothing anywhere degrades.
+    // its own schema — same "don't blank what already worked" instinct as the quiet-degrade
+    // contract elsewhere in this driver. Only a non-empty thread that produced literally nothing
+    // anywhere degrades.
     const threadHasRawRows = commentsPage.rows.length > 0 || reviewsRawCount > 0;
     const threadHasMappedSignal = mappedCommentsCount > 0 || parsedReviewsCount > 0;
     if (threadHasRawRows && !threadHasMappedSignal) {

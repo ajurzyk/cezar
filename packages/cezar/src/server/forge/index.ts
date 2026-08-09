@@ -126,11 +126,11 @@ export function resolveForge(repoInfo: RepoInfo | null, forge?: ForgeSettings): 
   return null;
 }
 
-/** Rodzina tras /api/v1/github* odpowiadała przez gh dla KAŻDEGO repo, zanim powstał szew:
- *  brak remote'a, remote spoza tablicy i CEZ_DRY_RUN lądowały w degradacjach/mockach fetchGithub*.
- *  Trasy tej rodziny dostają więc fallback na sterownik GitHuba (repoRef null) zamiast gate'owania
- *  na null — to zachowuje te payloady bajt w bajt. Wyłącznie kontrakt rodziny tras; health,
- *  automations i createPR dalej używają resolveForge wprost. */
+/** The `/api/v1/github*` route family answered via `gh` for EVERY repo before this seam existed:
+ *  no remote, a remote outside the host table, and `CEZ_DRY_RUN` all landed in `fetchGithub*`'s own
+ *  degrade paths/mocks. So this family's routes get a fallback to the GitHub driver (`repoRef null`)
+ *  instead of gating on `null` — that keeps those payloads byte-for-byte unchanged. Scoped to this
+ *  route family only; health, automations and `createPR` keep calling `resolveForge` directly. */
 export function resolveForgeOrGithub(repoRoot: string, repoInfo: RepoInfo | null, forge?: ForgeSettings): ForgeDriver {
   return resolveForge(repoInfo, forge) ?? createGithubDriver(repoRoot, null);
 }

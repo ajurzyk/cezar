@@ -923,9 +923,9 @@ describe('listComments', () => {
   });
 
   it('a thread whose reviews were all legitimately content-filtered (not schema-broken) stays available:true, empty', async () => {
-    // Distinguishes Q2's schema-drift gate from P9's content filter: every row here PARSES fine
-    // (`forgejoReviewSchema` never throws on these) and is dropped only because it carries no
-    // signal — a real "no comments" thread, not a "the response shape drifted" one.
+    // Distinguishes the thread's schema-drift gate from a legitimate content filter: every row
+    // here PARSES fine (`forgejoReviewSchema` never throws on these) and is dropped only because
+    // it carries no signal — a real "no comments" thread, not a "the response shape drifted" one.
     const reviews = [
       reviewRow({ id: 1, state: 'COMMENT', body: '' }),
       reviewRow({ id: 2, state: 'PENDING', body: '' }),

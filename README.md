@@ -595,23 +595,26 @@ checks, eligibility) and merge itself (same mutex, optimistic-concurrency
 preflight and status-code mapping the driver applies everywhere else — never a
 GitHub-only shortcut), and the PR-diff view (files + patches, joined from
 `/pulls/{n}/files` and a parsed `/pulls/{n}.diff`) — talks to a real Forgejo
-instance. What is still incremental is the *wiring*, not the driver: health and
-the merge route already call into it (see `server.ts:1511`, `:4747`, `:4761`),
-but several other routes are not wired to `resolveForge` yet and call
-GitHub-only code paths directly instead, so a Forgejo repo gets none of what
-the driver above can already do there:
-- the issues/PR tab's listing and the PR-diff view see no data at all
-  (`server.ts` calls the GitHub-only listing/diff code paths directly);
-- draft-PR creation (`POST /runs/:id/pr`, `server.ts:4126` → `pr.ts` →
-  `forge/github.ts`) is the same gap with a sharper edge: the web UI's
-  "Create PR" button is gated only on `forge.available` (`git-actions.ts`),
-  not on `forge.kind`, so it renders enabled for a Forgejo repo. Clicking it
-  commits the working tree and **pushes the branch to the Forgejo remote
-  successfully** before the GitHub-only `gh pr create` step fails — the push
-  is not rolled back. Until this route is wired, open the PR by hand in
-  Forgejo's own web UI once the branch has been pushed.
+instance. The *wiring* is now complete for reads: health, the merge route,
+the issues/PR tab's listing (`GET /github`), the comment/review thread
+(`GET /github/comments/:kind/:number`), CI checks (`GET /github/checks`) and
+the PR-diff view (`GET /github/prs/:number/changes`) all resolve through
+`resolveForge`/`resolveForgeOrGithub` (see `server.ts`), so a Forgejo repo
+gets the same data a GitHub repo does on every one of those routes.
 
-Closing these routing gaps is later work. See the automations caveat below
+One gap remains: draft-PR creation (`POST /runs/:id/pr`, `server.ts:4135` →
+`pr.ts` → `forge/github.ts`) still calls the GitHub-only `createDraftPr`
+directly instead of resolving a driver. Wiring it through `resolveForge`
+would push the branch before creating the PR, and the Forgejo driver's own
+`createPR` isn't wired in here yet — so both the route and the web UI guard
+against that rather than letting a Forgejo repo hit it: the server checks
+`forge.kind` and refuses with a 409 (`'Create PR is not supported for this
+forge yet'`) before any push happens, and the "Create PR" button
+(`git-actions.ts`) is disabled for the same reason rather than letting the
+click discover the 409. Until this route is wired, open the PR by hand in
+Forgejo's own web UI.
+
+Closing this routing gap is later work. See the automations caveat below
 for a further, unrelated gap in the same vein.
 
 **The key fills a gap; it never overrides.** cezar asks its host table first

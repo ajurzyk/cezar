@@ -890,8 +890,8 @@ describe('mapForgejoComment', () => {
 });
 
 describe('mapForgejoReview', () => {
-  // `id`/`body`/`html_url` are the P1 extension to `forgejoReviewSchema` — parsed through the real
-  // schema (not hand-typed) so a schema/mapper drift shows up here, not just in `forgejo.ts`.
+  // `id`/`body`/`html_url` extend `forgejoReviewSchema` — parsed through the real schema (not
+  // hand-typed) so a schema/mapper drift shows up here, not just in `forgejo.ts`.
   function review(overrides: Record<string, unknown> = {}) {
     return forgejoReviewSchema.parse({
       id: 10,
