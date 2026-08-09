@@ -173,9 +173,14 @@ describe('GitHub automation API', () => {
   });
 
   // #698: `GET /api/v1/automations` resolves its GitHub availability through the same
-  // `resolveForge(repoInfo, config.forge)` call the health route makes — a repo config
-  // declaring `kind: 'github'` on a non-github.com remote must flip `available` from
-  // false to true, the same way it does on `/api/v1/health`.
+  // `resolveForge(repoInfo, config.forge)` call the health route makes. A repo config cannot
+  // name GitHub (the driver is hardwired to github.com), so this route's answer for a
+  // self-hosted remote stays `available: false` whatever the config says.
+  //
+  // That is also what keeps this route honest: poller registration (`server.ts`, the two
+  // `automationProjects.set` guards) and the manual check still require `host === 'github.com'`,
+  // so a route that DID honour a config-named GitHub here would advertise automations the
+  // scheduler could never run.
   describe('forge availability wiring', () => {
     const savedDryRun = process.env.CEZ_DRY_RUN;
 
@@ -201,14 +206,17 @@ describe('GitHub automation API', () => {
       });
     });
 
-    it('reports GitHub available for the same remote once the repo config declares kind:github', async () => {
+    it('keeps GitHub unavailable for the same remote when the repo config declares kind:github', async () => {
       writeFileSync(
         join(root, '.ai/cezar', 'config.json'),
         JSON.stringify({ forge: { kind: 'github', apiUrl: 'https://api.github.com', webUrl: 'https://github.com' } }),
         'utf8',
       );
       const response = await apiRequest(app(), '/api/v1/automations');
-      expect(await response.json()).toMatchObject({ available: true });
+      expect(await response.json()).toMatchObject({
+        available: false,
+        reason: 'No GitHub remote is configured',
+      });
     });
   });
 });

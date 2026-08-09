@@ -448,6 +448,7 @@ Useful environment variables:
 | `CEZ_HIDE_COST=1` | Hide backend-reported monetary cost throughout the browser cockpit while leaving raw input/output token counts visible. Only the exact value `1` enables it; telemetry and API payloads are unchanged, and a restart is required after changing it. |
 | `CEZ_HIDE_TOKEN_METRICS=1` | Legacy master switch that hides both token usage and cost. It takes precedence over the two independent flags; only the exact value `1` enables it, payloads are unchanged, and a restart is required. |
 | `GITHUB_TOKEN` | Fallback for GitHub reads/PRs when `gh` isn't authenticated. |
+| `CEZ_FORGEJO_TOKEN` | Auth for the Forgejo driver's own REST calls (repos declaring `forge.kind:"forgejo"`, see [Configuration](#configuration-optional)). Optional — public repos work without it. Sent only when the request's resolved target shares `forge.apiUrl`'s origin; redirects are rejected, never followed. The PR-branch push itself uses your normal git credentials, not this token. |
 | `CEZ_ENV_PASSTHROUGH=A,B` | Forward these extra host env vars to spawned agents. By default agents get a least-privilege env (safe shell/toolchain vars + the backend's own auth + `GITHUB_TOKEN` + `CEZ_*`), not your full environment — use this to add a var an agent needs. |
 | `CEZ_AGENT_ENV_FULL=1` | Escape hatch: give spawned agents the full host environment (pre-hardening behavior). Off by default; only set it if you understand that this hands every host secret to the agent process. |
 | `CEZ_AGENT_TMPDIR=0` | Stop giving each task its own temp directory and hand agents the host `TMPDIR` again (pre-#785 behavior). On by default: every run gets `TMPDIR`/`TEMP`/`TMP` pointing at `.ai/cezar/tmp/<task-id>`, created and write-probed before the agent spawns and reaped when the run ends, so concurrent tasks stop sharing one directory and a task refuses to start rather than run against a temp directory that silently swallows its shell output (see Troubleshooting below). Only an exact `0` disables it, and it disables the whole thing — the pre-spawn check included, so this stays an escape hatch you can actually take. |
@@ -609,28 +610,61 @@ never blocks startup):
   "modelsLocked": true,      // optional: native per-runner model is fixed/read-only; runner stays selectable
   "plannerModel": "sonnet",  // model the "Plan first" button uses to draft chains
   "baseBranch": "develop",   // branch worktrees fork from + PRs target (also settable in the Git tab)
-  "forge": {                 // optional: declare a self-hosted forge, or override the host table
-    "kind": "forgejo",       // "github" (the host table already recognizes github.com without this block) · "forgejo"
+  "forge": {                 // optional: declare a self-hosted forge the remote URL can't reveal
+    "kind": "forgejo",       // "forgejo" · "github" is accepted but inert (see below)
     "apiUrl": "http://forgejo:3000",       // REST API as reachable from the cezar process (e.g. docker network)
     "webUrl": "https://forge.example.com"  // link base for humans; git remote itself may be a third address (ssh)
   }
 }
 ```
 
-The `forge` key currently enables recognition only (`forge: "forgejo"` on
-`GET /api/v1/projects`); the issues/PR tab for Forgejo ships in a later release.
-An explicit `"kind": "github"` here always wins over the host table, even on a
-remote whose host isn't `github.com` — but it has no working use case today:
-on `github.com` the host table already returns `'github'` without this block,
-so the override is a no-op there, and on every other host it is not a working
-GitHub Enterprise integration: the driver's links (`packages/cezar/src/server/forge/github.ts`)
-hardcode `https://github.com/<owner>/<repo>`, so a GitHub Enterprise remote
-gets links built from its own `owner/repo` and pointed at github.com anyway —
-someone else's repository, or none at all. `kind: "github"` exists in the
-schema only because `kind` is required whenever the `forge` key is present;
-the sensible value to actually set today is `"forgejo"`. Parametrizing the
-driver's own host is a later stage; `apiUrl`/`webUrl` are ignored for
-`kind: "github"` regardless.
+Declaring `"kind": "forgejo"` now wires up a real REST driver
+(`packages/cezar/src/server/forge/forgejo.ts`, behind `resolveForge`) instead of
+recognition-only, and the driver itself is complete: every method of the
+`ForgeDriver` interface — health/availability, issue and PR listing, PR status,
+draft-PR creation, the merge-state probe (mergeability, review decision,
+checks, eligibility) and merge itself (same mutex, optimistic-concurrency
+preflight and status-code mapping the driver applies everywhere else — never a
+GitHub-only shortcut), and the PR-diff view (files + patches, joined from
+`/pulls/{n}/files` and a parsed `/pulls/{n}.diff`) — talks to a real Forgejo
+instance. What is still incremental is the *wiring*, not the driver: health and
+the merge route already call into it (see `server.ts:1511`, `:4747`, `:4761`),
+but several other routes are not wired to `resolveForge` yet and call
+GitHub-only code paths directly instead, so a Forgejo repo gets none of what
+the driver above can already do there:
+- the issues/PR tab's listing and the PR-diff view see no data at all
+  (`server.ts` calls the GitHub-only listing/diff code paths directly);
+- draft-PR creation (`POST /runs/:id/pr`, `server.ts:4126` → `pr.ts` →
+  `forge/github.ts`) is the same gap with a sharper edge: the web UI's
+  "Create PR" button is gated only on `forge.available` (`git-actions.ts`),
+  not on `forge.kind`, so it renders enabled for a Forgejo repo. Clicking it
+  commits the working tree and **pushes the branch to the Forgejo remote
+  successfully** before the GitHub-only `gh pr create` step fails — the push
+  is not rolled back. Until this route is wired, open the PR by hand in
+  Forgejo's own web UI once the branch has been pushed.
+
+Closing these routing gaps is later work. See the automations caveat below
+for a further, unrelated gap in the same vein.
+
+**The key fills a gap; it never overrides.** cezar asks its host table first
+(`github.com` → the GitHub driver) and consults `forge.kind` only for a host
+the table doesn't recognize. So declaring `kind: "forgejo"` next to a
+`github.com` remote changes nothing — the repo keeps the GitHub driver, the
+only one of the two that can actually talk to that remote. Setting this key
+can never cost a repo a capability it already had.
+
+`kind: "github"` is accepted by the schema but **inert everywhere**. On
+`github.com` the host table has already answered without it. On any other host
+cezar deliberately ignores it, because the GitHub driver is hardwired to
+github.com: it shells out to `gh` with no `--hostname` and its links
+(`packages/cezar/src/server/forge/github.ts`) hardcode
+`https://github.com/<owner>/<repo>`. Honoring the declaration would take the
+`owner/repo` parsed from your self-hosted remote and aim every call — listing,
+PR status, and `merge` — at a same-named repository on github.com. It remains
+in the schema only because `kind` is required whenever the `forge` key is
+present; the value to actually set is `"forgejo"`. Parametrizing the driver's
+own host (real GitHub Enterprise support) is a later stage; `apiUrl`/`webUrl`
+are ignored for `kind: "github"` regardless.
 All three keys — `kind`, `apiUrl`, `webUrl` — are required together: an object
 missing any one of them, or carrying an invalid value (unknown `kind`, or a
 URL that isn't `http(s)`), degrades the *entire* `forge` key to unset, same as
@@ -640,15 +674,85 @@ The `forge` key is read only from the repo's own `.ai/cezar/config.json` — it
 has no `~/.cezar/config.json` machine-wide counterpart (unlike `modelsLocked`
 below), so it must be repeated in every registered repo pointing at the same
 forge instance. To confirm a `forge` key was accepted, check that project's
-entry on `GET /api/v1/projects`: `forge: "forgejo"` (or `"github"`) means it
-parsed; a missing field means either it degraded silently — recheck `kind`,
-`apiUrl` and `webUrl` for typos — or the repo has no parsable `origin` remote
-(a local path, or no `origin` at all).
+entry on `GET /api/v1/projects`: `forge: "forgejo"` means it parsed; a missing
+field means either it degraded silently — recheck `kind`, `apiUrl` and `webUrl`
+for typos — or the repo has no parsable `origin` remote (a local path, or no
+`origin` at all). A `forge: "github"` there always comes from the host table,
+never from your config.
+
 Known limitation: the automations tab's own availability check honors
 `config.forge`, but the automation poller and its manual "check now" action
-still hardcode `host === 'github.com'` — a project whose config declares
-`kind: "github"` on a self-hosted remote shows `available: true` there, yet
-the poller never starts its schedule and the manual "check now" action fails.
+still hardcode `host === 'github.com'` — a project that resolves to Forgejo
+through its config shows `available: true` there (the Forgejo driver now
+answers that probe for real), yet the poller never starts its schedule and the
+manual "check now" action fails. Closing that gap is later work; today the
+tab's availability badge is ahead of what automations can actually do for a
+Forgejo repo.
+
+Known limitations of the Forgejo merge-state driver
+(`packages/cezar/src/server/forge/forgejo-map.ts`/`forgejo.ts`), each a
+deliberate, accepted trade-off rather than a bug:
+- A repository whose ONLY enabled merge policy is fast-forward-only
+  (`allow_fast_forward_only_merge`, with every other `allow_*_merge` flag off)
+  reports zero usable merge methods. `fast-forward-only` IS a real, selectable
+  Forgejo merge style — its merge API accepts it as a `Do` value exactly like
+  `merge`/`squash`/`rebase` are — the gap is on cezar's own side: its
+  `ForgeMergeMethod` type has no value representing it, so there is nothing
+  for `mergeMethodsFromRepository` to map the flag onto. The merge box shows
+  this as "no merge method enabled that cezar supports", not a generic "could
+  not confirm" — that specific repository configuration is the most common
+  reason a Forgejo repo would ever land there.
+- Draft-PR creation ("WIP:" title prefix on `POST .../pulls`) relies on the
+  target instance's own `WORK_IN_PROGRESS_PREFIXES` `app.ini` setting
+  recognizing that exact prefix. cezar cannot read or override that
+  server-side config, and does not verify the created PR's own `draft` field
+  in the response to catch a mismatch — an instance that has customized this
+  setting away from its documented default could silently publish a
+  ready-for-review-looking PR instead of a draft one.
+- cezar reconstructs GitHub's `reviewDecision` from Forgejo's raw
+  `GET /pulls/{n}/reviews` rows: per reviewer, the LATEST review row (by
+  `submitted_at`) is treated as that reviewer's standing verdict, including a
+  plain `COMMENT` — so a reviewer who `APPROVED` and later left an unrelated
+  `COMMENT` has their approval dropped from cezar's count, and the merge box
+  can show "a required review is missing" for a PR Forgejo's own UI still
+  counts as approved. This is intentional (fail closed rather than risk a
+  false "approved"), not verified against a live instance's own counting
+  rules, and applies only to the SAME reviewer's own later comment — a
+  different reviewer's `COMMENT` never touches anyone else's approval.
+
+Trust model for the `forge` key: `.ai/cezar/config.json` is a **code-trusted**
+surface, same as `systemPrompt` (sent to every agent run) and `skillsRepos`
+(cloned and executed as prompts, `skills-remote.ts`) — anyone who can edit a
+repo's config can already run code as you. `forge.apiUrl`/`forge.webUrl`
+therefore don't raise that file's trust level; they are just two more
+addresses it can point at. `CEZ_FORGEJO_TOKEN` itself is scoped by the driver,
+not by this file: it is attached only to the Forgejo driver's own HTTP
+requests, and only when the request's resolved target shares `apiOrigin` —
+the origin derived *from* `apiUrl` itself (`forgejo-http.ts:192`, gated at
+`:221`), not some independently trusted value. That means the gate does NOT protect the token
+from `apiUrl`'s own host: whatever host `apiUrl` names receives the token,
+same as pointing any other tool at an API endpoint always does — this is
+the same "code-trusted" reasoning as `systemPrompt` and `skillsRepos` above,
+applied to `apiUrl` specifically. The schema accepts plain `http://` for
+`apiUrl` as well as `https://` (`config.ts:131`) — nothing in the driver
+upgrades the scheme — so an `http://` value sends `CEZ_FORGEJO_TOKEN` over
+the wire in cleartext to every network hop between the cezar process and
+that host. Use `https://` unless `apiUrl` is a container-internal or
+loopback address the token never actually leaves (the docker-network
+example above is such a case). What the gate DOES protect against is a
+leak to a DIFFERENT host than the one `apiUrl` names: `redirect: 'manual'`
+means a 3xx response is treated as a failure rather than followed, so no
+hop ever carries the Authorization header to a redirect target; and the
+same-origin check keeps a cross-origin URL that shows up elsewhere in a
+Forgejo response (a third-party CI `target_url`, for instance) from ever
+being mistaken for an API target and sent the token. The variable is also
+**not** forwarded to spawned agent processes: `buildChildEnv` forwards
+cezar's `CEZ_*` namespace as configuration, but denies the credential-shaped
+names in it (`agent-env.ts`), and no agent tool speaks the Forgejo REST API
+anyway. `GITHUB_TOKEN` is the deliberate contrast — it IS forwarded, through
+a curated allowlist, because the agent's own `gh` cannot work without it.
+Either way the value is scrubbed from the on-disk NDJSON transcript by name
+(`secret-redaction.ts`).
 
 Put the same `"modelsLocked": true` key in `~/.cezar/config.json` to apply it
 to every registered project. When the key is absent or `false` in both config

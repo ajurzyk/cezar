@@ -1,7 +1,7 @@
 import { realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, join, resolve, sep } from 'node:path';
-import { loadConfig } from '../config.ts';
+import { readForgeSettings } from '../config.ts';
 import { forgeKindOfRemote, type ForgeKind } from '../server/forge/index.ts';
 import { getRepoInfo } from '../server/git.ts';
 import {
@@ -159,14 +159,14 @@ export interface ProjectListEntry extends WorkspaceProject {
   status: ProjectStatus;
   /** Current branch when cheaply available (omitted e.g. on an unborn HEAD). */
   branch?: string;
-  /** Which forge the root's remote belongs to (#698) — classified from the remote URL against
-   *  the host table, or from the root's own `.ai/cezar/config.json` `forge` key, which WINS over
-   *  the host table whenever it's set (not merely a fallback for a host the table can't reveal):
-   *  a `github.com` remote paired with a repo config `kind: 'forgejo'` classifies as `'forgejo'`.
-   *  The config's `forge` key is skipped when the remote doesn't parse into `{host, owner, repo}`,
-   *  even though it's declared. No `gh` probe either way. Omitted when neither source names a
-   *  forge. The sidebar gates each project group's GitHub tab on this, instead of on the boot
-   *  folder's health-level forge answer. */
+  /** Which forge the root's remote belongs to (#698) — the host table first, then the root's own
+   *  `.ai/cezar/config.json` `forge` key for a host the table cannot reveal. The config fills that
+   *  gap only: a `github.com` remote keeps `'github'` even when the repo declares
+   *  `kind: 'forgejo'`, and a declared `kind: 'github'` is inert everywhere (the GitHub driver is
+   *  hardwired to github.com — see `classifyForgeKind`). The config's `forge` key is skipped when
+   *  the remote doesn't parse into `{host, owner, repo}`, even though it's declared. No `gh` probe
+   *  either way. Omitted when neither source names a forge. The sidebar gates each project group's
+   *  GitHub tab on this, instead of on the boot folder's health-level forge answer. */
   forge?: ForgeKind;
 }
 
@@ -203,13 +203,13 @@ async function computeProbe(root: string): Promise<RootProbe> {
   // on e.g. an unborn HEAD), and a repo without either is still status ok.
   // The repo's own config is read too — a self-hosted forge (e.g. Forgejo) is
   // recognizable ONLY from an explicit repo declaration, never from the
-  // remote URL alone. `loadConfig` (not a raw key read) so a malformed value
-  // degrades per-key through the same zod boundary every other config read
-  // uses, at the cost of two extra small JSON reads per probe (the repo config
-  // and `loadWorkspaceConfig`'s agent defaults it folds in) — coalesced by
-  // the TTL cache below like everything else `computeProbe` does.
-  const [info, config] = await Promise.all([getRepoInfo(root), loadConfig(root)]);
-  const forge = forgeKindOfRemote(info?.remote, config.forge);
+  // remote URL alone. `readForgeSettings`, not `loadConfig`: this runs once
+  // per registered project on every list refresh, and `loadConfig` would add
+  // the machine-wide `~/.cezar/config.json` read (plus its corruption warning)
+  // to each one, for a key that config never contributes to. Same zod
+  // boundary, so a malformed value still degrades to unset.
+  const [info, forgeSettings] = await Promise.all([getRepoInfo(root), readForgeSettings(root)]);
+  const forge = forgeKindOfRemote(info?.remote, forgeSettings);
   return {
     status: 'ok',
     ...(info?.branch ? { branch: info.branch } : {}),
