@@ -1256,6 +1256,34 @@ describe('listChecks', () => {
     expect(fetchMock.mock.calls.some((call) => String(call[0]).endsWith('/pulls/11'))).toBe(false);
   });
 
+  it('a non-404 fallback failure salvages a LATER miss the open-PR walk already resolved, before the break — not just the one already visited', async () => {
+    // `numbers` = [9, 10]: 9 is visited FIRST by the per-number fallback loop and fails non-404
+    // (triggering the salvage-then-break path), while 10 was never individually visited yet but
+    // IS already in `openShaByNumber` from the walk. The salvage loop must still pick 10 up from
+    // the walk instead of leaving it stranded in `misses` (which the old code did, since a plain
+    // `failedNumbers.push(remaining)` for every leftover miss also passes every OTHER test here —
+    // they only ever break on the LAST miss, where there is nothing left to salvage).
+    const sha10 = 'b'.repeat(40);
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      if (s.includes('/pulls?state=open')) return Promise.resolve(jsonResponse([openRow(10, sha10)], { headers: { 'x-total-count': '1' } }));
+      if (s.endsWith('/pulls/9')) return Promise.resolve(jsonResponse({ message: 'internal error' }, { status: 500 }));
+      if (s.endsWith(`/commits/${sha10}/status`)) return Promise.resolve(jsonResponse({ statuses: [{ status: 'success' }] }));
+      throw new Error(`unexpected url ${s}`);
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const result = await driver.listChecks?.([9, 10]);
+
+    // 10 survives (salvaged from the walk, its status still read); 9 degrades to `null` — the
+    // failed fallback costs only the number it was actually for.
+    expect(result).toEqual({ available: true, checks: { 9: null, 10: 'passing' } });
+    // 1 list walk + 1 failed fallback (`/pulls/9`) + 1 status read for 10 — number 10 is never
+    // re-fetched via its own `GET pulls/10` once the walk already resolved it.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).endsWith('/pulls/10'))).toBe(false);
+  });
+
   it('a 401 on the open-PR walk reports a CEZ_FORGEJO_TOKEN hint without echoing the rejected token', async () => {
     const token = 'nie-ma-takiego-tokenu-0000000000000000000';
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ message: `access token does not exist [sha: ${token}]` }, { status: 401 }));
