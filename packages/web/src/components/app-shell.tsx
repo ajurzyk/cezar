@@ -9,7 +9,7 @@ import {
 } from 'lucide-react'
 import * as React from 'react'
 import type { ReactNode } from 'react'
-import { Link as RouterLink, useLocation } from 'react-router'
+import { Link as RouterLink, matchPath, useLocation } from 'react-router'
 
 import { AddProjectDialog } from '@/components/add-project-dialog'
 import { CloneProjectDialog } from '@/components/clone-project-dialog'
@@ -117,6 +117,11 @@ export function useSidebarNavigate(): (() => void) | undefined {
   return React.useContext(SidebarNavigateContext)
 }
 
+/** The main transcript owns cached/tail arrival; every other routed surface uses shell-top. */
+export function routeOwnsScrollArrival(pathname: string): boolean {
+  return matchPath({ path: '/tasks/:id', end: true }, stripProjectPrefix(pathname)) !== null
+}
+
 /**
  * The cockpit's app shell: a fixed sidebar plus a single scrolling main region.
  *
@@ -163,6 +168,7 @@ export function AppShell({
   const current = activeNavItem(areaPathname)
   const [menuOpen, setMenuOpen] = React.useState(false)
   const mainRef = React.useRef<HTMLElement>(null)
+  const routeOwnsArrival = routeOwnsScrollArrival(pathname)
   // The desktop column's width (#788). Read once, lazily, from `localStorage` — it is a
   // browser-local preference like the theme, so there is nothing to fetch and nothing to wait
   // for, and the first paint is already the user's width rather than a default that jumps.
@@ -177,13 +183,15 @@ export function AppShell({
 
   // The scroller PERSISTS across routes (it is the shell's, not the view's), so without this
   // a deep scroll on one page carries into the next — most visibly on mobile, where Tasks or
-  // GitHub opened mid-list. Layout effect: the reset lands before the new view paints. Routes
-  // that own their arrival position (the task thread's cached-restore / stick-to-bottom) set
-  // it later, in their own effects once their content ref lands, so they still win.
+  // GitHub opened mid-list. Layout effect: the reset lands before the new view paints. The main
+  // task transcript is the exception: its own layout effect restores the cached offset or live
+  // tail before paint, so a competing shell reset would expose the exact top-to-tail jump it is
+  // responsible for preventing.
   React.useLayoutEffect(() => {
+    if (routeOwnsArrival) return
     const main = mainRef.current
     if (main) main.scrollTop = 0
-  }, [pathname])
+  }, [pathname, routeOwnsArrival])
 
   // Close on route change. Without this the drawer survives the navigation it triggered and sits
   // on top of the view the user just asked for — and back/forward and the ⌘K palette (Step 4.3)

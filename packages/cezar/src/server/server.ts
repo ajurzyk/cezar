@@ -68,8 +68,20 @@ import { getTeamSkillsCached, refreshTeamSkills, waitForTeamSkills } from '../sk
 import { appendHandoffHeartbeat, handoffProgressExcerpt, readHandoff } from '../handoff.ts';
 import { markStarted, onTodosChanged, readTodos, removeTodo, todoTaskText, type TodoItem } from '../todos.ts';
 import type { RunEvent, RunRecord, RunStatus, RunStore } from '../runs/store.ts';
+import {
+  HistoryCursorError,
+  deriveRunContextEvents,
+  readEventsAfterLiveCursor,
+  readRunHistoryPage,
+  validateLiveCursor,
+} from '../runs/event-history.ts';
 import { readRunIndexFromDisk } from '../runs/run-index.ts';
 import { isV2WireEventType } from '../runs/ui-event-sink.ts';
+import {
+  runEventsQuerySchema,
+  runHistoryQuerySchema,
+  runIdParamSchema,
+} from '@open-mercato/cezar-contract';
 import type { RunManager } from '../workflows/run.ts';
 import { removeWorktree, worktreeDiff, worktreeDiffStat, worktreeSizeBytes } from '../git-worktree.ts';
 import { isReclaimable, reclaimWorktrees } from '../runs/retention.ts';
@@ -3556,6 +3568,36 @@ export function createApp(deps: ServerDeps) {
       return run ? c.json(withUsage(run)) : c.json({ error: 'not found' }, 404);
     })
 
+    .get(
+      '/runs/:id/history',
+      paramZodValidator(runIdParamSchema),
+      queryZodValidator(runHistoryQuerySchema),
+      async (c) => {
+        const { store, dataDir } = c.get('project');
+        const { id } = c.req.valid('param');
+        if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
+        try {
+          return c.json(
+            await readRunHistoryPage(join(dataDir, 'runs', `${id}.ndjson`), c.req.valid('query').cursor),
+          );
+        } catch (error) {
+          if (error instanceof HistoryCursorError) return c.json({ error: error.message }, error.status);
+          throw error;
+        }
+      },
+    )
+
+    .get(
+      '/runs/:id/history-context',
+      paramZodValidator(runIdParamSchema),
+      async (c) => {
+        const { store, dataDir } = c.get('project');
+        const { id } = c.req.valid('param');
+        if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
+        return c.json(await deriveRunContextEvents(join(dataDir, 'runs', `${id}.ndjson`)));
+      },
+    )
+
     // Editable titles (#389). The UI displays `titleSummary ?? title`, so a
     // user edit sets BOTH: `title` (the record's own name — the raw task stops
     // being it the moment the user renames the run) and `titleSummary` (what
@@ -4444,13 +4486,32 @@ export function createApp(deps: ServerDeps) {
 
   // ---- chained family: SSE streams (project-scoped) ----
   const sseRoutes = new Hono<ProjectApiEnv>()
-    .get('/runs/:id/events', (c) => {
-      const { store } = c.get('project');
-      const id = c.req.param('id');
+    .get(
+      '/runs/:id/events',
+      paramZodValidator(runIdParamSchema),
+      queryZodValidator(runEventsQuerySchema),
+      async (c) => {
+      const { store, dataDir } = c.get('project');
+      const { id } = c.req.valid('param');
       if (!store.getRun(id)) return c.json({ error: 'not found' }, 404);
+      const query = c.req.valid('query');
+      const eventsPath = join(dataDir, 'runs', `${id}.ndjson`);
+      if (query.cursor) {
+        try {
+          await validateLiveCursor(eventsPath, query.cursor);
+        } catch (error) {
+          if (error instanceof HistoryCursorError) return c.json({ error: error.message }, error.status);
+          throw error;
+        }
+      }
+      const lastEventId = Number.parseInt(c.req.header('Last-Event-ID') ?? '', 10);
+      const requestedAfter = Math.max(
+        query.afterSeq ?? 0,
+        Number.isSafeInteger(lastEventId) && lastEventId >= 0 ? lastEventId : 0,
+      );
       return streamSSENoBuffer(c, async (stream) => {
         let replaying = true;
-        let maxSeq = 0;
+        let maxSeq = requestedAfter;
         const buffered: RunEvent[] = [];
         // One endpoint, two SSE event names: v1 lines stay `run-event` (the name
         // the legacy UI listened to — its default branch JSON-dumped unknown
@@ -4461,6 +4522,7 @@ export function createApp(deps: ServerDeps) {
         // EventSource ignores names it has no listener for.
         const writeEvent = (event: RunEvent) =>
           stream.writeSSE({
+            id: String(event.seq),
             event: isV2WireEventType(event.type) ? 'ui-event' : 'run-event',
             data: JSON.stringify(event),
           });
@@ -4480,9 +4542,14 @@ export function createApp(deps: ServerDeps) {
           store.off('run', onRun);
         });
 
-        for (const event of store.readEvents(id)) {
-          maxSeq = Math.max(maxSeq, event.seq);
+        const replay = query.cursor
+          ? await readEventsAfterLiveCursor(eventsPath, query.cursor)
+          : { events: store.readEvents(id), boundarySeq: 0 };
+        maxSeq = Math.max(maxSeq, replay.boundarySeq);
+        for (const event of replay.events) {
+          if (event.seq <= maxSeq) continue;
           await writeEvent(event);
+          maxSeq = event.seq;
         }
         replaying = false;
         for (const event of buffered) {
@@ -4496,7 +4563,8 @@ export function createApp(deps: ServerDeps) {
           await stream.sleep(15_000);
         }
       });
-    })
+    },
+    )
 
     // Global SSE: run-summary updates for the list view + inbox changes.
     // Scoped `/p/:projectId/events` carries that project's stream in today's

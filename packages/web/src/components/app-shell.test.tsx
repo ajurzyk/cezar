@@ -1,9 +1,9 @@
 import { cleanup, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { ReactNode } from 'react'
-import { MemoryRouter, useLocation } from 'react-router'
+import { Link as RouterLink, MemoryRouter, useLocation } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { AppShell, type AppShellProps } from './app-shell'
+import { AppShell, routeOwnsScrollArrival, type AppShellProps } from './app-shell'
 import { NAV_ITEMS } from './nav-items'
 import { ThemeProvider } from './theme-provider'
 
@@ -65,6 +65,40 @@ describe('AppShell', () => {
     fireEvent.click(within(nav()).getByRole('link', { name: 'GitHub' }))
     expect(screen.getByTestId('location').textContent).toBe('/github')
     expect(main.scrollTop).toBe(0)
+  })
+
+  it('leaves task-to-task arrival to the destination transcript owner (#761)', () => {
+    renderShell(
+      '/tasks/source',
+      {},
+      <RouterLink to="/tasks/destination">Switch task</RouterLink>,
+    )
+    const main = screen.getByRole('main')
+    main.scrollTop = 640
+
+    fireEvent.click(within(main).getByRole('link', { name: 'Switch task' }))
+
+    expect(screen.getByTestId('location').textContent).toBe('/tasks/destination')
+    expect(main.scrollTop).toBe(640)
+  })
+
+  it('restores the generic top reset when leaving a task thread (#761)', () => {
+    renderShell('/tasks/source')
+    const main = screen.getByRole('main')
+    main.scrollTop = 640
+
+    fireEvent.click(within(nav()).getByRole('link', { name: 'GitHub' }))
+
+    expect(screen.getByTestId('location').textContent).toBe('/github')
+    expect(main.scrollTop).toBe(0)
+  })
+
+  it('grants scroll ownership only to exact scoped and unscoped main task routes', () => {
+    expect(routeOwnsScrollArrival('/tasks/run-1')).toBe(true)
+    expect(routeOwnsScrollArrival('/p/cezar/tasks/run-1')).toBe(true)
+    expect(routeOwnsScrollArrival('/tasks/run-1/changes')).toBe(false)
+    expect(routeOwnsScrollArrival('/p/cezar/tasks/run-1/files')).toBe(false)
+    expect(routeOwnsScrollArrival('/tasks')).toBe(false)
   })
 
   it('renders the whole nav as real router links', () => {
