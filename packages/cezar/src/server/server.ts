@@ -25,12 +25,13 @@ import { streamSSE } from 'hono/streaming';
 import { jsonZodValidator, paramZodValidator, queryZodValidator } from './validators.ts';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { z } from 'zod';
-import type {
-  GroupResponse,
-  GroupVariant,
-  PickVariantResponse,
-  RunIndexEntry,
-  RunsIndexResponse,
+import {
+  setWorkspaceUiStateInputSchema,
+  type GroupResponse,
+  type GroupVariant,
+  type PickVariantResponse,
+  type RunIndexEntry,
+  type RunsIndexResponse,
 } from '@open-mercato/cezar-contract';
 // A contract VALUE, like `workspaceUiStateSchema` in workspace/migrations.ts — the request
 // schema this route validates with is the same one the client compiles against.
@@ -657,68 +658,6 @@ const appearanceSchema = z.object({
   width: z.enum(['narrow', 'wide']).optional(),
 });
 
-const providerAuthDismissalsSchema = z
-  .object({
-    claude: z.string().min(1).max(128).optional(),
-    codex: z.string().min(1).max(128).optional(),
-    opencode: z.string().min(1).max(128).optional(),
-  })
-  .strict();
-
-/** Global GUI state (`~/.cezar/ui-state.json`, step 2.7) — the workspace twin
- *  of `uiStateSchema` below, sharing its `.passthrough()` + key-cap + shallow
- *  merge-on-write semantics via `parseUiStateBody`. Known keys are the
- *  cross-project prefs from the spec's Data Model; everything project-scoped
- *  (githubView, prompt templates, dismissed banners…) stays per-repo. */
-const workspaceUiStateSchema = z
-  .object({
-    appearance: appearanceSchema.optional(),
-    notifications: z.object({ enabled: z.boolean().optional() }).passthrough().optional(),
-    dismissedProviderAuthFailures: providerAuthDismissalsSchema.optional(),
-    // LEGACY, like `sidebar` below: both moved into the browser's own
-    // localStorage (packages/web/src/lib/{last-location,sidebar-collapse}.ts),
-    // because one workspace-wide answer meant the last client to navigate — a
-    // phone, a second window — decided where every other client's next launch
-    // landed, and whose sidebar groups were shut. Kept named and bounded here
-    // so a cockpit from before that change still round-trips and validates.
-    lastLocation: z
-      .object({
-        projectId: z.string().min(1).max(64),
-        pathname: z.string().min(1).max(2048).startsWith('/p/'),
-        search: z.string().max(4096).startsWith('?').optional(),
-        hash: z.string().max(2048).startsWith('#').optional(),
-      })
-      .strict()
-      .optional(),
-    // Sidebar per-project collapse map, keyed by project id (slug ≤ 64 chars).
-    // Entry-capped like `skillUsage`: the map is written straight to a file the
-    // cockpit GETs on every load, so it must stay bounded on every axis.
-    sidebar: z
-      .object({
-        collapsed: z
-          .record(z.string().min(1).max(64), z.boolean())
-          .refine((map) => Object.keys(map).length <= UI_STATE_MAX_KEYS, {
-            message: `sidebar.collapsed must have at most ${UI_STATE_MAX_KEYS} entries`,
-          })
-          .optional(),
-      })
-      .passthrough()
-      .optional(),
-    // The user's curated selection of default (vendor) skills — `open-mercato/skills` — so the
-    // catalog is no longer forced in full. GLOBAL (here, not per-repo) because "which skills I
-    // want" describes the person, not a checkout, and must not depend on where cezar was launched
-    // (multi-project workspace). Tri-state, enforced in `discoverSkills`: an ABSENT key means "not
-    // curated" and every default skill still shows (opt-out default — no silent break on upgrade);
-    // a PRESENT array (even `[]`) shows only those names. Bounded like the `skillUsage` map: the
-    // file is GET/PUT wholesale, so an unbounded array is an unbounded write. Names match
-    // `lastTask.ref` (`.min(1).max(200)`). The client PUTs the whole array (shallow top-level merge).
-    importedSkills: z
-      .array(z.string().min(1).max(200))
-      .max(SKILL_USAGE_MAX_ENTRIES)
-      .optional(),
-  })
-  .passthrough();
-
 const uiStateSchema = z
   .object({
     lastTask: z
@@ -939,7 +878,6 @@ function capUiStateKeys(data: unknown, ctx: z.RefinementCtx): void {
 // generic wrapper leaves the schema type unresolved where `jsonBody` needs it, and Hono answers
 // that by dropping the whole PUT from the route schema rather than erroring — both ui-state PUTs
 // silently vanished from `AppType`. Concrete consts keep them visible to `hc`.
-const workspaceUiStateBody = workspaceUiStateSchema.superRefine(capUiStateKeys);
 const uiStateBody = uiStateSchema.superRefine(capUiStateKeys);
 
 /**
@@ -2938,7 +2876,7 @@ export function createApp(deps: ServerDeps) {
     // chain's type accumulation alone. Method-agnostic here, which the GET does not mind.
     .use('/workspace/ui-state', bodyLimit({ maxSize: UI_STATE_BODY_LIMIT }))
 
-    .put('/workspace/ui-state', jsonZodValidator(workspaceUiStateBody), async (c) => {
+    .put('/workspace/ui-state', jsonZodValidator(setWorkspaceUiStateInputSchema), async (c) => {
       const parsed = { data: c.req.valid('json') };
       try {
         return c.json(

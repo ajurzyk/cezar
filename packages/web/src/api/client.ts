@@ -86,6 +86,7 @@ import type {
   SetConfigResponse,
   SetAgentConfigInput,
   SetWorkspaceConfigInput,
+  SetWorkspaceUiStateInput,
   ImportableSkill,
   Skill,
   StartTodoResponse,
@@ -1475,9 +1476,15 @@ export async function getWorkspaceUiState(opts?: ReadOptions): Promise<Workspace
 
 /** Shallow top-level merge server-side, same as its per-repo twin — send whole top-level
  *  objects (`{ sidebar: {...} }`), never a nested leaf alone. Answers the merged state. */
-export async function putWorkspaceUiState(patch: WorkspaceUiState): Promise<WorkspaceUiState> {
+export async function putWorkspaceUiState(
+  patch: SetWorkspaceUiStateInput,
+  opts: { keepalive?: boolean } = {},
+): Promise<WorkspaceUiState> {
   return unwrap(
-    await cez.api.v1.workspace['ui-state'].$put({ json: patch }),
+    await cez.api.v1.workspace['ui-state'].$put(
+      { json: patch },
+      { init: { keepalive: opts.keepalive } },
+    ),
     '/workspace/ui-state',
   )
 }

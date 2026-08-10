@@ -114,10 +114,16 @@ export type SetWorkspaceConfigInput = z.infer<typeof setWorkspaceConfigInputSche
 
 // ---- GUI prefs — the two open bags ----------------------------------------------------------
 
-/** Settings → Appearance: accent + density. ONE shape for both ui-state files. */
+/** Settings → Appearance: accent + density + reading width. ONE shape for both ui-state files. */
 const appearanceSchema = z.object({
   accent: z.enum(['lime', 'violet']).optional(),
   density: z.enum(['comfortable', 'compact', 'ultra']).optional(),
+  width: z.enum(['narrow', 'wide']).optional(),
+});
+
+const taskTableUiStateSchema = z.looseObject({
+  /** Explicit user choices only. Missing ids keep the registry-owned default. */
+  expandedColumns: z.record(z.string(), z.boolean()).optional(),
 });
 
 /**
@@ -216,6 +222,8 @@ export const workspaceUiStateSchema = z.looseObject({
   /** Settings → Notifications, GLOBAL since step 3.5 — one answer for the whole workspace, since
    *  the delivering browser is one browser whichever project you are looking at. */
   notifications: z.looseObject({ enabled: z.boolean().optional() }).optional(),
+  /** Desktop Tasks-table density, shared across every project in this workspace. */
+  taskTable: taskTableUiStateSchema.optional(),
   /** LEGACY, exactly like `sidebar` above — the last settled project-scoped page, restored when
    *  entering at the exact bare root. The shape is unchanged and still accepted, but the current
    *  cockpit keeps it in localStorage (`packages/web/src/lib/last-location.ts`): stored here, the
@@ -227,6 +235,59 @@ export const workspaceUiStateSchema = z.looseObject({
   importedSkills: z.array(z.string()).optional(),
 });
 export type WorkspaceUiState = z.infer<typeof workspaceUiStateSchema>;
+
+const WORKSPACE_UI_STATE_MAX_KEYS = 200;
+const TASK_TABLE_MAX_COLUMNS = 50;
+
+/**
+ * `PUT /api/v1/workspace/ui-state` body. The response remains an open, tolerant bag so data from
+ * a newer cockpit survives an older server; this write-side schema adds bounded known fields so
+ * the current cockpit cannot grow the user-owned file without limit.
+ */
+export const setWorkspaceUiStateInputSchema = z
+  .looseObject({
+    ...workspaceUiStateSchema.shape,
+    sidebar: z
+      .looseObject({
+        collapsed: z
+          .record(z.string().min(1).max(64), z.boolean())
+          .refine((map) => Object.keys(map).length <= WORKSPACE_UI_STATE_MAX_KEYS, {
+            message: `sidebar.collapsed must have at most ${WORKSPACE_UI_STATE_MAX_KEYS} entries`,
+          })
+          .optional(),
+      })
+      .optional(),
+    dismissedProviderAuthFailures: z
+      .strictObject({
+        claude: z.string().min(1).max(128).optional(),
+        codex: z.string().min(1).max(128).optional(),
+        opencode: z.string().min(1).max(128).optional(),
+      })
+      .optional(),
+    importedSkills: z
+      .array(z.string().min(1).max(200))
+      .max(WORKSPACE_UI_STATE_MAX_KEYS)
+      .optional(),
+    taskTable: taskTableUiStateSchema
+      .extend({
+        expandedColumns: z
+          .record(z.string().min(1).max(64), z.boolean())
+          .refine((map) => Object.keys(map).length <= TASK_TABLE_MAX_COLUMNS, {
+            message: `taskTable.expandedColumns must have at most ${TASK_TABLE_MAX_COLUMNS} entries`,
+          })
+          .optional(),
+      })
+      .optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (Object.keys(data).length > WORKSPACE_UI_STATE_MAX_KEYS) {
+      ctx.addIssue({
+        code: 'custom',
+        message: `ui-state has too many keys (max ${WORKSPACE_UI_STATE_MAX_KEYS})`,
+      });
+    }
+  });
+export type SetWorkspaceUiStateInput = z.infer<typeof setWorkspaceUiStateInputSchema>;
 
 // ---- per-repo agent knobs (`GET/PUT /api/v1/config`) ----------------------------------------
 
