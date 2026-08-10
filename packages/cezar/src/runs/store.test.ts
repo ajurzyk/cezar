@@ -1279,3 +1279,91 @@ describe('RunStore — read receipts (#unread-done-items)', () => {
     expect(store.getRun(archived)?.seenAt).toBeUndefined();
   });
 });
+
+describe('RunStore — the legacy `claude-cli` runner id (#547)', () => {
+  let dataDir: string;
+
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), 'cez-store-'));
+  });
+
+  afterEach(() => {
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it('loads a record carrying `claude-cli` and folds it to `claude`', () => {
+    writeFileSync(
+      join(dataDir, 'runs.json'),
+      JSON.stringify([
+        {
+          ...LEGACY_RUN,
+          runner: 'claude-cli',
+          steps: [
+            {
+              id: 'task',
+              name: 'Do the task',
+              kind: 'agent',
+              status: 'done',
+              iterations: 1,
+              tokensUsed: 0,
+              sessionId: 'sess-1',
+              backend: 'claude-cli',
+            },
+          ],
+        },
+      ]),
+      'utf8',
+    );
+
+    const run = RunStore.open(dataDir).getRun('legacy-1');
+    // Parsed, not dropped — and normalized, so no consumer sees a fourth runner id.
+    expect(run?.runner).toBe('claude');
+    expect(run?.steps[0]?.backend).toBe('claude');
+  });
+
+  it('does not let one `claude-cli` record evict the rest of runs.json', () => {
+    // The regression this guards: the loader `safeParse`s the WHOLE array, so before #547 a
+    // single record carrying the legacy id took every other run in the file down with it —
+    // the exact failure mode BACKWARD_COMPATIBILITY.md §3 warns about.
+    writeFileSync(
+      join(dataDir, 'runs.json'),
+      JSON.stringify([
+        { ...LEGACY_RUN, id: 'legacy-cli', runner: 'claude-cli' },
+        { ...LEGACY_RUN, id: 'modern', runner: 'codex' },
+      ]),
+      'utf8',
+    );
+
+    const store = RunStore.open(dataDir);
+    expect(store.getRun('legacy-cli')?.runner).toBe('claude');
+    expect(store.getRun('modern')?.runner).toBe('codex');
+  });
+
+  it('rewrites the folded id on the next save, so the narrowing is one-way', () => {
+    writeFileSync(
+      join(dataDir, 'runs.json'),
+      JSON.stringify([{ ...LEGACY_RUN, runner: 'claude-cli' }]),
+      'utf8',
+    );
+
+    const store = RunStore.open(dataDir);
+    store.updateRun('legacy-1', { title: 'touched' });
+    store.flush();
+
+    // The index is re-serialized from the PARSED records, so `claude-cli` is gone from disk.
+    const onDisk = readFileSync(join(dataDir, 'runs.json'), 'utf8');
+    expect(onDisk).not.toContain('claude-cli');
+    expect(JSON.parse(onDisk)[0].runner).toBe('claude');
+  });
+
+  it('still rejects a runner id that is not a legacy spelling of a real backend', () => {
+    // Widening the READ side is not an invitation to accept anything: an unknown id is still
+    // a parse failure, which is what keeps the enum meaningful.
+    writeFileSync(
+      join(dataDir, 'runs.json'),
+      JSON.stringify([{ ...LEGACY_RUN, runner: 'gemini' }]),
+      'utf8',
+    );
+    expect(RunStore.open(dataDir).getRun('legacy-1')).toBeUndefined();
+  });
+});

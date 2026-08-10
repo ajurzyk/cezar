@@ -28,6 +28,30 @@ export type StepStatus =
 
 const usageCounterSchema = z.number().finite().nonnegative();
 
+/**
+ * A runner id as it may appear in a PERSISTED record, normalized to the three
+ * ids the rest of cezar speaks (#547).
+ *
+ * `claude-cli` is the legacy spelling of `claude` — still a member of
+ * `AgentBackend` and still accepted by `createRunner`, and named by
+ * `BACKWARD_COMPATIBILITY.md` §3 as an id `runs.json` keeps parseable. The enum
+ * here did not accept it, so that promise was false: the loader `safeParse`s the
+ * WHOLE array, so one record carrying it would have dropped every run in the
+ * file — the exact failure mode §3 exists to warn about.
+ *
+ * Parse-and-fold rather than widen: the legacy id is accepted on the way in and
+ * collapsed to `claude`, so no consumer, wire type or contract schema ever sees
+ * a fourth runner. The narrowing is one-way and permanent (the index is
+ * re-serialized from the parsed records), which is what "old run records
+ * normalise identically to `claude`" in `core/model-identity.ts` has always
+ * claimed. Use ONLY for read-back of stored state — request bodies, settings and
+ * workflow step defs stay the three selectable ids (`RunnerId`), because nothing
+ * should be able to ASK for the legacy spelling.
+ */
+const storedRunnerSchema = z
+  .enum(['claude', 'codex', 'opencode', 'claude-cli'])
+  .transform((id) => (id === 'claude-cli' ? ('claude' as const) : id));
+
 const stepStateSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -47,8 +71,9 @@ const stepStateSchema = z.object({
   error: z.string().optional(),
   /** Latest backend-owned session id, used for same-backend Continue. */
   sessionId: z.string().optional(),
-  /** Backend that owns `sessionId`. Optional so pre-affinity runs.json files still parse. */
-  backend: z.enum(['claude', 'codex', 'opencode']).optional(),
+  /** Backend that owns `sessionId`. Optional so pre-affinity runs.json files still parse;
+   *  `storedRunnerSchema` so a legacy `claude-cli` folds to `claude` instead of failing (#547). */
+  backend: storedRunnerSchema.optional(),
   /** Agent profile (account) this step actually spawned under — `default`, or a stored profile
    *  id (spec 2026-07-29-agent-profiles). Recorded rather than re-derived because a session id
    *  only means something inside the config dir that created it: `sessionId` and `profileId` are
@@ -117,8 +142,9 @@ export const runRecordSchema = z.object({
    *  whenever it says something `model` does not — so this is no longer a
    *  write-only field whose next reader has to guess whether it is load-bearing. */
   modelIdentity: z.string().optional(),
-  /** Agent backend this run used — drives "open in CLI" resume command. */
-  runner: z.enum(['claude', 'codex', 'opencode']).optional(),
+  /** Agent backend this run used — drives "open in CLI" resume command. `storedRunnerSchema`
+   *  so a legacy `claude-cli` record folds to `claude` instead of failing the whole index (#547). */
+  runner: storedRunnerSchema.optional(),
   /** Per-task agent-account override from the composer (spec 2026-07-29-agent-profiles), applying
    *  to steps that run on `runner`. Steps on a DIFFERENT backend still resolve from the project's
    *  own selection — an override for Claude says nothing about which Codex account a mixed

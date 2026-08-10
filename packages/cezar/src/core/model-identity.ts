@@ -76,7 +76,11 @@ interface BackendModelMap {
 /**
  * Per-backend mapping table — the one place #387 extends for the `pi` runner.
  * `claude-cli` is the legacy id kept so old run records normalise identically
- * to `claude`.
+ * to `claude`. That is now true end to end: `storedRunnerSchema`
+ * (`runs/store.ts`) parses the legacy spelling out of `runs.json` and folds it
+ * to `claude` (#547), so the entry below is what a record carrying it maps
+ * through on the way in — not, as the comment used to imply, a mapping for a
+ * value the store could never load.
  */
 export const BACKEND_MODEL_MAP: Readonly<Record<AgentBackend, BackendModelMap>> = {
   // Claude Code supports custom/gateway model ids such as DeepSeek via an
