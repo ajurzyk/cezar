@@ -1278,6 +1278,37 @@ describe('RunStore — read receipts (#unread-done-items)', () => {
     expect(store.getRun(active)?.seenAt).toBeDefined();
     expect(store.getRun(archived)?.seenAt).toBeUndefined();
   });
+
+  it('markAllRead skips a run waiting out a usage limit, exactly as the cockpit rule does (#803)', () => {
+    // The drift this pins: `isUnread()` (web/src/lib/read-state.ts) gained an `isScheduledResume`
+    // exclusion with the auto-resume work — a `failed` run with a pending `autoResumeAt` is not a
+    // done item, so it wears no marker and the nav badge does not count it — and this sweep never
+    // gained the matching clause. The user-visible symptom: "Mark all read" silently stamped a
+    // task the UI never presented as unread, and reported a count larger than the badge showed.
+    const store = RunStore.open(dataDir);
+    const scheduled = finishedRun(store, 'failed');
+    store.updateRun(scheduled, { autoResumeAt: '2026-08-03T18:41:48.000Z', autoResumeAttempts: 1 });
+    const ordinary = finishedRun(store, 'done');
+
+    // The count is the badge's number: one, not two.
+    expect(store.markAllRead()).toBe(1);
+    expect(store.getRun(ordinary)?.seenAt).toBeDefined();
+    expect(store.getRun(scheduled)?.seenAt).toBeUndefined();
+  });
+
+  it('markAllRead stamps the same run once its resume is no longer pending (#803)', () => {
+    // The exclusion is about the APPOINTMENT, not the failure: clear the schedule and the run is
+    // an ordinary unread `failed` done item again. Without this, the clause above would be
+    // indistinguishable from "never stamp a failed run", which is a different (wrong) rule.
+    const store = RunStore.open(dataDir);
+    const id = finishedRun(store, 'failed');
+    store.updateRun(id, { autoResumeAt: '2026-08-03T18:41:48.000Z' });
+    expect(store.markAllRead()).toBe(0);
+
+    store.updateRun(id, { autoResumeAt: undefined });
+    expect(store.markAllRead()).toBe(1);
+    expect(store.getRun(id)?.seenAt).toBeDefined();
+  });
 });
 
 describe('RunStore — the legacy `claude-cli` runner id (#547)', () => {

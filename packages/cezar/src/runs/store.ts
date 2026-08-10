@@ -739,11 +739,28 @@ export class RunStore extends EventEmitter {
 
   /** Bulk mark-read: stamp every currently-unread finished run; returns the count.
    *  "Unread" here is the same rule the cockpit paints (`isUnread` in read-state.ts),
-   *  clause for clause: a `done` or `failed` run that finished and has not been seen
-   *  since. Cancelled runs are never unread — you stopped them yourself — and archived
-   *  ones never are either, since archiving is a stronger "done with this" than reading;
-   *  both are skipped, as are runs already read. Keeping the two rules identical is what
-   *  makes the returned count the number the cockpit's unread badge was showing. */
+   *  clause for clause:
+   *   - a `done` or `failed` run that finished and has not been seen since;
+   *   - cancelled runs are never unread — you stopped them yourself;
+   *   - archived ones never are either, since archiving is a stronger "done with this"
+   *     than reading;
+   *   - and a `failed` run with a pending `autoResumeAt` is not a done item AT ALL
+   *     (`isScheduledResume`, spec 2026-08-03-auto-resume-after-usage-limit): it has an
+   *     appointment to pick the work back up, so there is no outcome to have missed.
+   *
+   *  Keeping the two rules identical is what makes the returned count the number the
+   *  cockpit's unread badge was showing. The `autoResumeAt` clause is the one that drifted
+   *  (#803): `isUnread` gained it with auto-resume and this sweep did not, so a task waiting
+   *  out a usage limit was uncounted by the badge but stamped read by the sweep — and this
+   *  comment asserted an invariant the code no longer held.
+   *
+   *  This rule lives in two languages of the same repo, which is why it has now drifted
+   *  once. The cockpit cannot import it (`packages/web` does not depend on the service, and
+   *  should not), so a single definition would have to move to `packages/contract` — the one
+   *  package both sides already import. Worth doing; deliberately not done here, because
+   *  widening the contract package's remit from "shapes" to "behavior" is a design change
+   *  that deserves its own review rather than riding along in a bug fix. Until then: EDIT
+   *  BOTH, and the case-table tests on either side are what catch you if you don't. */
   markAllRead(): number {
     const now = new Date().toISOString();
     let count = 0;
@@ -751,6 +768,7 @@ export class RunStore extends EventEmitter {
       const unread =
         !run.archived &&
         (run.status === 'done' || run.status === 'failed') &&
+        !(run.status === 'failed' && run.autoResumeAt !== undefined) &&
         run.finishedAt !== undefined &&
         (run.seenAt === undefined || run.seenAt < run.finishedAt);
       if (!unread) continue;
