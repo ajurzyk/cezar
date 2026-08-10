@@ -415,10 +415,12 @@ describe('picker data flows', () => {
     // …the model reset to auto and the presets are codex's now.
     expect((document.querySelector('[data-slot="model-pill"]') as HTMLElement).textContent).toContain('auto')
     fireEvent.pointerDown(document.querySelector('[data-slot="model-pill"]') as HTMLElement)
-    options = await screen.findAllByRole('menuitemradio')
-    const labels = options.map((o) => o.textContent ?? '')
-    expect(labels.some((l) => l.includes('gpt-future'))).toBe(true)
-    expect(labels.some((l) => l.includes('opus'))).toBe(false)
+    // codex's catalog is fetched for the runner now SELECTED (#794), so it lands after the switch.
+    await waitFor(() => {
+      const labels = screen.getAllByRole('menuitemradio').map((o) => o.textContent ?? '')
+      expect(labels.some((l) => l.includes('gpt-future'))).toBe(true)
+      expect(labels.some((l) => l.includes('opus'))).toBe(false)
+    })
   })
 
   it('excludes disconnected providers from the runner choices even when health detects them', async () => {
