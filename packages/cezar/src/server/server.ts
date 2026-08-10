@@ -239,6 +239,10 @@ export interface ServerDeps {
   /** Hand a local FILE (or folder) to the OS default app. Injected so the account-file open route
    *  is testable without actually launching an editor. */
   openFile?: typeof openFileInDefaultApp;
+  /** Hand a folder to a detected app by target id — editor, file manager, or `terminal`, which
+   *  reaches `openInTerminal`. Injected for the same reason as the two above: a test that reaches
+   *  this for real opens a window on the developer's machine (#820). */
+  openApp?: typeof openInApp;
   /** Process-wide Open Mercato skills update detector. Injected in tests and
    * shared by every workspace route/project; createApp owns the default. */
   skillsUpdate?: SkillsUpdateService;
@@ -1082,6 +1086,7 @@ export function createApp(deps: ServerDeps) {
   };
   const openTerminal = deps.openTerminal ?? openInTerminal;
   const openFile = deps.openFile ?? openFileInDefaultApp;
+  const openApp = deps.openApp ?? openInApp;
   const skillsUpdate = deps.skillsUpdate ?? new SkillsUpdateService();
 
   // ---- workspace boot-project identity (multi-project spec) ----------------
@@ -2182,7 +2187,7 @@ export function createApp(deps: ServerDeps) {
         }
         const opened = target === undefined
           ? await openFile(path)
-          : await openInApp(target, path);
+          : await openApp(target, path);
         if (!opened) return c.json({ error: `could not open ${basename(path)}`, path }, 409);
         return c.json({ opened: true as const, path });
       },
@@ -3856,7 +3861,7 @@ export function createApp(deps: ServerDeps) {
       if (fallback === null) {
         return c.json({ error: 'this account\'s folder cannot be used in a terminal command' }, 409);
       }
-      const opened = await openInTerminal(cwd, command, account.env);
+      const opened = await openTerminal(cwd, command, account.env);
       if (!opened) {
         return c.json({ error: 'no terminal emulator found', command: fallback }, 409);
       }
@@ -3924,7 +3929,7 @@ export function createApp(deps: ServerDeps) {
           );
         }
         const filePath = join(run.worktreePath, result.path);
-        const opened = await openFileInDefaultApp(filePath);
+        const opened = await openFile(filePath);
         if (!opened) return c.json({ error: `could not open ${result.path}`, path: filePath }, 409);
         return c.json({ opened: true, path: filePath });
       }
@@ -3964,14 +3969,14 @@ export function createApp(deps: ServerDeps) {
         if (fallback === null) {
           return c.json({ error: 'this account\'s folder cannot be used in a terminal command' }, 409);
         }
-        const opened = await openInTerminal(dir, command, account.env);
+        const opened = await openTerminal(dir, command, account.env);
         if (!opened) {
           return c.json({ error: 'no terminal emulator found', command: fallback }, 409);
         }
         return c.json({ opened: true, path: dir, command });
       }
 
-      const opened = await openInApp(target, dir);
+      const opened = await openApp(target, dir);
       if (!opened) return c.json({ error: `could not open ${target}`, path: dir }, 409);
       return c.json({ opened: true, path: dir });
     })
@@ -4333,7 +4338,7 @@ export function createApp(deps: ServerDeps) {
       if (!detectOpenTargets().some((candidate) => candidate.id === target)) {
         return c.json({ error: `no such app on this machine: ${target}` }, 400);
       }
-      const opened = await openInApp(target, root);
+      const opened = await openApp(target, root);
       if (!opened) return c.json({ error: `could not open ${target}`, path: root }, 409);
       return c.json({ opened: true as const, path: root });
     });
