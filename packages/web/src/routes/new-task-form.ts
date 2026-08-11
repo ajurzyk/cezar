@@ -46,6 +46,7 @@ export const RUNNERS: readonly RunnerOption[] = [
   { id: 'claude', label: 'claude', desc: 'Claude Code CLI' },
   { id: 'codex', label: 'codex', desc: 'OpenAI Codex (app-server)' },
   { id: 'opencode', label: 'opencode', desc: 'OpenCode (serve)' },
+  { id: 'pi', label: 'pi', desc: 'pi CLI (provider/model)' },
 ]
 
 export interface ModelPreset {
@@ -76,7 +77,25 @@ export const MODELS_BY_RUNNER: Record<Runner, readonly ModelPreset[]> = {
   opencode: [
     { id: '', label: 'auto', desc: 'Use your OpenCode default model' },
   ],
+  // pi selects a model with the same `provider/model` convention as opencode.
+  pi: [
+    { id: '', label: 'auto', desc: 'Use your pi default model' },
+    { id: 'anthropic/claude-opus-4-8', label: 'claude-opus-4.8', desc: 'via Anthropic' },
+    { id: 'anthropic/claude-sonnet-5', label: 'claude-sonnet-5', desc: 'via Anthropic' },
+    { id: 'openai/gpt-5.1', label: 'gpt-5.1', desc: 'via OpenAI' },
+  ],
 }
+
+/** Runners that pick with the canonical `provider/model` convention and span every provider the
+ *  host has configured, so an id they list is never EXCLUSIVE to them: pi offers
+ *  `openai/gpt-5.1` as a preset and OpenCode serves the very same model from the very same
+ *  provider. Their presets are therefore skipped when judging another runner's id.
+ *
+ *  This is the cockpit's half of the rule the server states structurally — a runner with no
+ *  default provider cannot be contradicted, which is why `KNOWN_PRESETS_BY_RUNNER.pi` is empty
+ *  in `packages/cezar/src/core/model-presets.ts`. Without it, adding pi's presets here would
+ *  silently strip a pinned OpenCode model from the OpenCode picker. */
+const PROVIDER_SPANNING_RUNNERS: readonly Runner[] = ['opencode', 'pi']
 
 /** Keep recognized presets from another backend out of a runner's custom-model escape hatch
  * (#480).
@@ -85,7 +104,9 @@ export function modelConflictsWithRunner(model: string, runner: Runner): boolean
   if (!model || MODELS_BY_RUNNER[runner].some((preset) => preset.id === model)) return false
   return Object.entries(MODELS_BY_RUNNER).some(
     ([other, presets]) =>
-      other !== runner && presets.some((preset) => preset.id !== '' && preset.id === model),
+      other !== runner &&
+      !PROVIDER_SPANNING_RUNNERS.includes(other as Runner) &&
+      presets.some((preset) => preset.id !== '' && preset.id === model),
   )
 }
 
