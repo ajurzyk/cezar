@@ -2569,6 +2569,36 @@ describe('forge naming', () => {
     expect(promptValue()).not.toContain(RENAMED)
   })
 
+  // The drag payload is a PROMPT — `githubTaskPrompt`, the same text the hand-off box sends — so it
+  // carries the same obligation not to name the wrong forge, on a path that has no gate and no
+  // later correction: once the text lands in the composer, nothing re-reads the registry. A row
+  // dragged before the answer arrives would hand `/new` "Fix GitHub issue #142" about a Forgejo
+  // issue. The row stays clickable throughout; only the secondary gesture waits.
+  it('does not offer a drag payload before the registry has named the forge', async () => {
+    let releaseRegistry!: () => void
+    const registryArrived = new Promise<void>((resolve) => { releaseRegistry = resolve })
+    stubFetch(forgejoStubs({
+      'GET /api/v1/projects': async () => {
+        await registryArrived
+        return jsonResponse(REGISTRY)
+      },
+    }))
+    renderAt('/p/orakton/github/issues/142')
+
+    const firstRow = () => document.querySelector('[data-slot="gh-row"]')!
+    await waitFor(() => expect(document.querySelector('[data-slot="gh-row"]')).not.toBeNull())
+    expect(firstRow().getAttribute('draggable')).toBe('false')
+    // The tooltip promises the gesture, so it must not outlive it.
+    expect(firstRow().getAttribute('title')).toBeNull()
+
+    await act(async () => {
+      releaseRegistry()
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(firstRow().getAttribute('draggable')).toBe('true'))
+    expect(firstRow().getAttribute('title')).toContain('Drag into the composer')
+  })
+
   // A disabled control with no explanation is indistinguishable from a broken one, and this wait
   // is invisible: nothing else on the panel moves while the registry is in flight. The explanation
   // has to be RENDERED — a `title` on the disabled <Button> is unreachable, because the shared

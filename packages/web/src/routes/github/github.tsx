@@ -446,6 +446,7 @@ export function GithubRoute({ view, changes = false }: { view: GithubView; chang
                 queued={queued.has(item.url)}
                 checks={item.kind === 'pr' ? checksMap?.[item.number] ?? item.checks : item.checks}
                 forgeKind={forgeKind}
+                forgeSettled={forgeSettled}
               />
             ))}
           </ul>
@@ -515,6 +516,7 @@ function GithubRow({
   queued,
   checks,
   forgeKind,
+  forgeSettled = true,
 }: {
   item: GithubItem
   view: GithubView
@@ -528,6 +530,11 @@ function GithubRow({
    *  yet, and the hook subscribes to two queries plus the router — up to a thousand extra
    *  observers to build one drag payload, from an answer the route already holds. */
   forgeKind?: ForgeKind
+  /** Whether `forgeKind` is an ANSWER yet. The payload below is a prompt, not a label, so the
+   *  "absent reads as GitHub" default is not available to it: dragged early, a Forgejo row would
+   *  carry "Fix GitHub issue #N" into the composer, where nothing re-reads the registry to correct
+   *  it. A prop for the same reason `forgeKind` is one — the hook would subscribe once per row. */
+  forgeSettled?: boolean
 }) {
   const Icon = item.kind === 'issue' ? CircleDotIcon : GitPullRequestIcon
   const queryClient = useQueryClient()
@@ -557,14 +564,18 @@ function GithubRow({
     <li>
       <Link
         to={`${view === 'issues' ? '/github/issues' : '/github/prs'}/${item.number}`}
-        draggable
+        // An EXPLICIT false, not an omitted attribute: an <a> is draggable by default, so leaving
+        // it off would let the browser drag the bare URL rather than withhold the gesture. And the
+        // tooltip promises the payload, so it waits with it — a promise the row cannot keep for the
+        // moment the forge is unnamed is worse than no promise.
+        draggable={forgeSettled}
         onDragStart={onDragStart}
         onMouseEnter={prefetchThread}
         onFocus={prefetchThread}
         data-slot="gh-row"
         data-number={item.number}
         aria-current={active ? 'page' : undefined}
-        title="Drag into the composer to prefill a task"
+        title={forgeSettled ? 'Drag into the composer to prefill a task' : undefined}
         className={cn(
           'flex flex-col gap-1 rounded-md px-2.5 py-2 transition-colors hover:bg-muted',
           active && 'bg-muted',
