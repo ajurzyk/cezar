@@ -70,11 +70,16 @@ describe('forgeHint', () => {
     expect(hint).not.toContain('CEZ_FORGEJO_TOKEN')
   })
 
-  it('points Forgejo at its config block, and at the token only where it is really needed', () => {
+  // `kind: 'forgejo'` is only ever read from a `forge` block that already passed
+  // `forgeSettingsSchema` — `classifyForgeKind` (server/forge/index.ts) reaches that kind no other
+  // way, because `FORGE_HOSTS` holds github.com alone. So this reader HAS the block, and telling
+  // them to declare one is the single instruction they cannot act on.
+  it('tells a Forgejo user what can still be wrong, not to declare what they already have', () => {
     const hint = forgeHintText('forgejo')
-    expect(hint).toContain('.ai/cezar/config.json')
     expect(hint).toContain('CEZ_FORGEJO_TOKEN')
+    expect(hint).toContain('apiUrl')
     expect(hint).not.toContain('gh auth login')
+    expect(hint).not.toContain('needs a forge block')
     // The token is OPTIONAL: `forgejo-http.ts` supports an anonymous request in full, and the
     // server's own token hints fire only on 401/403 and on a 404 with no token. An empty state
     // that opens with "the tab needs a token" sends a public-instance user down a blind alley —
@@ -83,24 +88,32 @@ describe('forgeHint', () => {
     expect(hint).toContain('private')
   })
 
-  // A hint that names a SUBSET of what the parser demands is worse than no hint: `forgeSettings
-  // Schema` (server/forge/types.ts) requires `kind`, `apiUrl` AND `webUrl`, and a `forge` key
-  // missing any of them is dropped silently — so a user who follows the hint verbatim lands back
-  // on this very empty state with nothing new to read.
-  it('names every field the forge config actually requires', () => {
-    const hint = forgeHintText('forgejo')
-    for (const field of ['kind', 'apiUrl', 'webUrl']) expect(hint).toContain(field)
+  // The no-kind case is NOT "probably GitHub" here, whatever `forgeLabel` calls it. A repo whose
+  // remote is self-hosted and whose `forge` block is missing or half-written resolves to no driver
+  // at all — `forge: null`, kind undefined — and it is the ONLY audience that still needs to be
+  // told a block exists. Sending it to `gh auth login` is advice for someone else's outage.
+  it('names both ways in when no kind is known', () => {
+    const hint = forgeHintText(undefined)
+    expect(hint).toContain('gh auth login')
+    expect(hint).toContain('.ai/cezar/config.json')
   })
 
-  it('falls back to the GitHub hint when no kind is known', () => {
-    expect(forgeHint(undefined)).toEqual(forgeHint('github'))
+  // A hint that names a SUBSET of what the parser demands is worse than no hint: `forgeSettings
+  // Schema` (server/forge/types.ts) requires `kind`, `apiUrl` AND `webUrl`, and a `forge` key
+  // missing any of them is dropped silently — which is precisely how a user lands on the NO-KIND
+  // hint, so that is where the field list has to be.
+  it('lists every field the config block needs, where a broken block lands', () => {
+    const hint = forgeHintText(undefined)
+    for (const field of ['kind', 'apiUrl', 'webUrl']) expect(hint).toContain(field)
   })
 
   it('keeps the command names monospaced', () => {
     expect(forgeHint('github').filter((part) => part.mono).map((part) => part.text))
       .toEqual(['gh', 'gh auth login'])
     expect(forgeHint('forgejo').filter((part) => part.mono).map((part) => part.text))
-      .toEqual(['forge', 'kind', 'apiUrl', 'webUrl', '.ai/cezar/config.json', 'CEZ_FORGEJO_TOKEN'])
+      .toEqual(['apiUrl', 'CEZ_FORGEJO_TOKEN', 'forge', '.ai/cezar/config.json'])
+    expect(forgeHint(undefined).filter((part) => part.mono).map((part) => part.text))
+      .toEqual(['gh', 'gh auth login', 'forge', 'kind', 'apiUrl', 'webUrl', '.ai/cezar/config.json'])
   })
 })
 

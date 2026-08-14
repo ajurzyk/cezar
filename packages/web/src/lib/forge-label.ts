@@ -59,31 +59,64 @@ export type ForgeHintSegment = { text: string; mono?: true }
  * What the forge tab NEEDS, for the empty state — never why it is currently unavailable. The
  * reason stays with the server's own `reason` (Stage 3 made it a sensible sentence for Forgejo);
  * duplicating it here would give the user two answers that can disagree.
+ *
+ * Each branch talks to the audience that can actually reach it, and that split is NOT the label's.
+ * A kind of `forgejo` is only ever read from a `forge` block that already passed
+ * `forgeSettingsSchema` — `classifyForgeKind` (server/forge/index.ts) has no other route to it,
+ * since `FORGE_HOSTS` holds github.com alone — so a Forgejo reader HAS the block, and "declare a
+ * forge block" is the one instruction they cannot act on. The reader who needs that sentence
+ * arrives with NO kind: a self-hosted remote whose block is missing, or missing one field, is
+ * dropped silently by `readForgeSettings` and resolves to no driver at all. So the no-kind branch
+ * carries both ways in.
+ *
+ * That is a deliberate exception to the "absent reads as GitHub" default, and the only one here:
+ * this branch is ADVICE, not a name. `forgeLabel(undefined)` still says GitHub, and the tab is
+ * still titled "GitHub is unavailable here" above this text.
  */
 export function forgeHint(kind?: ForgeKind): ForgeHintSegment[] {
   if (kind === 'forgejo') {
     return [
-      // The `forge` block comes FIRST because it is the only thing actually required. The token is
-      // optional: `forgejo-http.ts` (`currentToken`) supports an anonymous request in full, and the
-      // server's own token hints fire only on 401/403 and on a 404 with no token. Opening with the
-      // token sent a public-instance user hunting for one when their outage was something else
-      // entirely — a wrong `apiUrl`, an unreachable host — and no token would have fixed it.
-      { text: 'The tab needs a ' },
+      // What can still be wrong once the block validates: the instance answering, and the token.
+      // The token is optional: `forgejo-http.ts` (`currentToken`) supports an anonymous request in
+      // full, and the server's own token hints fire only on 401/403 and on a 404 with no token.
+      // Opening with the token sent a public-instance user hunting for one when their outage was
+      // something else entirely — a wrong `apiUrl`, an unreachable host — and no token would have
+      // fixed it.
+      { text: 'The tab needs the instance at your ' },
+      { text: 'apiUrl', mono: true },
+      { text: ' to answer, and a private repository also needs a token in ' },
+      { text: 'CEZ_FORGEJO_TOKEN', mono: true },
+      { text: '. The ' },
+      { text: 'forge', mono: true },
+      { text: ' block in ' },
+      { text: '.ai/cezar/config.json', mono: true },
+      // Said out loud so the reader does not go hunting through their config for a typo that
+      // cannot be there: the word "Forgejo" on this screen is itself proof the block parsed.
+      { text: ' already validated — it is where this tab learned to call itself Forgejo.' },
+      { text: ' Everything else in cezar works without it.' },
+    ]
+  }
+  if (kind === undefined) {
+    return [
+      { text: 'The tab needs a forge cezar can reach: a GitHub remote with the ' },
+      { text: 'gh', mono: true },
+      { text: ' CLI, logged in (' },
+      { text: 'gh auth login', mono: true },
+      { text: '), or — on any other host — a ' },
       { text: 'forge', mono: true },
       // Every field `forgeSettingsSchema` demands, not just the interesting one: a `forge` key
-      // missing any of the three fails validation and is dropped SILENTLY, which leaves the user
-      // back on this empty state having done exactly what it told them to.
-      { text: ' block — ' },
+      // missing any of the three fails validation and is dropped SILENTLY, which is exactly how a
+      // reader ends up here rather than on the Forgejo branch.
+      { text: ' block with ' },
       { text: 'kind', mono: true },
       { text: ', ' },
       { text: 'apiUrl', mono: true },
       { text: ' and ' },
       { text: 'webUrl', mono: true },
-      { text: ' — declared in the repo’s ' },
+      { text: ' in the repo’s ' },
       { text: '.ai/cezar/config.json', mono: true },
-      { text: '. A private repository also needs a token in ' },
-      { text: 'CEZ_FORGEJO_TOKEN', mono: true },
-      { text: '. Everything else in cezar works without it.' },
+      { text: '. A block missing any of the three is dropped without a word.' },
+      { text: ' Everything else in cezar works without it.' },
     ]
   }
   return [
