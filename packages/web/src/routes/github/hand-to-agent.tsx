@@ -188,11 +188,24 @@ export function HandToAgent({
   const promptRefValue = useRef(prompt)
   promptRefValue.current = prompt
   const autoAppliedRef = useRef('')
+  // What last ran this effect. `base` is a dependency because a forge correction (the one-shot
+  // above) must rewrite the stale forge name inside text auto-apply itself seeded — but a run
+  // triggered THAT way is a run the user never asked for, and the two cases part company below.
+  const lastAutoTextRef = useRef(autoText)
   useEffect(() => {
     // Reads/writes go through refs, never a setState updater: StrictMode double-invokes those in
     // dev, which would double-apply the ref bookkeeping (the composer's #double-paste hazard).
     // `base` is passed so the PRE-FILLED reference still reads as "untouched" and auto-applied
     // template text stacks below it instead of wiping it (#524).
+    const autoChanged = lastAutoTextRef.current !== autoText
+    lastAutoTextRef.current = autoText
+    // An empty box reads as "free" to `resolveAutoApply` — clearing it by hand deliberately opts
+    // back in. That door belongs to a SKILL CHANGE: the user clicked something and sees the
+    // result. A `base` correction (the registry answered after the mount — `setBase` above) is
+    // not their move, and re-seeding on it refills the prompt they just deleted to write their
+    // own, mid-keystroke. The correction effect already declines to touch a box that is not
+    // exactly `base`; without this guard, this effect undid that decision one tick later.
+    if (!autoChanged && promptRefValue.current === '') return
     const autoApplied = resolveAutoApply(
       promptRefValue.current,
       autoAppliedRef.current,

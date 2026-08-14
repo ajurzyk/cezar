@@ -2374,6 +2374,31 @@ describe('forge naming', () => {
     expect(promptValue()).toBe('rebase this onto develop')
   })
 
+  // Clearing the box by hand re-opens auto-apply (`resolveAutoApply`'s "empty means untouched")
+  // — but that door belongs to a SKILL CHANGE, something the user clicked and can see the result
+  // of. The registry answering after the mount is neither: re-seeding on it would refill, under
+  // the fingers of someone who just selected-all-and-deleted to write their own instruction, the
+  // very prompt they deleted.
+  it('leaves an emptied prompt empty when the registry answers late', async () => {
+    let releaseRegistry!: () => void
+    const registryArrived = new Promise<void>((resolve) => { releaseRegistry = resolve })
+    stubFetch(forgejoStubs({
+      'GET /api/v1/projects': async () => {
+        await registryArrived
+        return jsonResponse(REGISTRY)
+      },
+    }))
+    renderAt('/p/orakton/github/issues/142')
+
+    await waitFor(() => expect(promptValue()).toContain('Fix GitHub issue #142'))
+    fireEvent.change(promptField(), { target: { value: '' } })
+    await act(async () => {
+      releaseRegistry()
+      await Promise.resolve()
+    })
+    expect(promptValue()).toBe('')
+  })
+
   // Automations are GitHub-only in fact, not just in name: the poller shells out to the `gh` CLI
   // and never goes through `resolveForge`, which is why `visibleNavItems` withholds the item from
   // a forge it cannot reach. The tab's own cross-link is the same offer and must follow the same
