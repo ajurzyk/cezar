@@ -196,7 +196,22 @@ describe('visibleNavItems', () => {
       .not.toContain('Automations')
     expect(labelsOf({ forge: true, automations: true, forgeKind: 'github' }))
       .toContain('Automations')
+    // Static callers (a registry entry's own `forge`) have nothing left to settle, so an absent
+    // flag still reads as an answer.
     expect(labelsOf({ forge: true, automations: true })).toContain('Automations')
+  })
+
+  // An unsettled `undefined` is not "GitHub", it is "nobody has said yet" — and the cost of the two
+  // readings is not symmetric. Naming an unnamed tab "GitHub" is the documented default and is
+  // reversible on the next render; OFFERING automations for it hands a Forgejo user a composer
+  // whose poller (`gh`, never `resolveForge`) can never fire what they build there.
+  it('withholds Automations until the kind is an answer', () => {
+    expect(labelsOf({ forge: true, automations: true, forgeSettled: false }))
+      .not.toContain('Automations')
+    expect(labelsOf({ forge: true, automations: true, forgeKind: 'github', forgeSettled: false }))
+      .not.toContain('Automations')
+    // The forge item itself is unaffected — the LABEL default is the non-regression contract.
+    expect(labelsOf({ forge: true, automations: true, forgeSettled: false })).toContain('GitHub')
   })
 
   it('never invents an item — the result is always a subset of NAV_ITEMS, in order', () => {

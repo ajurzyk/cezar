@@ -2555,6 +2555,34 @@ describe('forge naming', () => {
     expect(screen.queryByRole('link', { name: 'Set up automations' })).toBeNull()
   })
 
+  // The same offer, in the window before the registry answers. `forgeKind` is undefined for every
+  // project then — including the Forgejo one — so a link gated on the LABEL's "absent means GitHub"
+  // default renders, and a user who takes it builds an automation the `gh` poller can never fire.
+  // Naming a tab is reversible on the next render; an automation left behind is not.
+  it('withholds the automations shortcut until the registry has named the forge', async () => {
+    let releaseRegistry!: () => void
+    const registryArrived = new Promise<void>((resolve) => { releaseRegistry = resolve })
+    stubFetch(forgejoStubs({
+      'GET /api/v1/health': automationsOn,
+      'GET /api/v1/projects': async () => {
+        await registryArrived
+        return jsonResponse(REGISTRY)
+      },
+    }))
+    renderAt('/p/orakton/github')
+
+    // The tab itself is on screen — only the offer is withheld.
+    await waitFor(() => expect(document.querySelector('[data-slot="gh-header"]')).not.toBeNull())
+    expect(screen.queryByRole('link', { name: 'Set up automations' })).toBeNull()
+
+    await act(async () => {
+      releaseRegistry()
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Forgejo'))
+    expect(screen.queryByRole('link', { name: 'Set up automations' })).toBeNull()
+  })
+
   it('keeps the automations shortcut on a GitHub project', async () => {
     stubFetch({
       'GET /api/v1/projects': () => jsonResponse({

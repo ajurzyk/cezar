@@ -4,7 +4,7 @@ import { useHealth, useProjects, useRuns, useRunsIndex, useSkills, useUiState } 
 import { scopeTo, useActiveProjectId, useNavigate } from '@/lib/project-router'
 import type { ProjectListEntry, RunIndexEntry, RunRecord } from '@open-mercato/cezar-api-client'
 import { visibleNavItems } from '@/components/nav-items'
-import { useForgeKind } from '@/lib/use-forge-kind'
+import { useForgeKindStatus } from '@/lib/use-forge-kind'
 import { StatusDot } from '@/components/status-dot'
 import { NEXT_THEME } from '@/components/theme-toggle'
 import { useTheme } from '@/components/theme-provider'
@@ -322,7 +322,7 @@ function PaletteContent({ close }: { close: () => void }) {
   // plain repo, a group can offer a Forgejo project its tab while ⌘K withholds the row entirely.
   // Closing that gap needs a per-project availability answer from the server — the registry probe
   // classifies remotes and never probes a driver — so it is not a matter of one more prop here.
-  const forgeKind = useForgeKind()
+  const { kind: forgeKind, settled: forgeSettled } = useForgeKindStatus()
   const now = Date.now()
 
   // Same threshold as the sidebar's grouped nav (`app-shell-container.tsx`): with one registered
@@ -433,6 +433,10 @@ function PaletteContent({ close }: { close: () => void }) {
           {visibleNavItems({
             forge: health.data?.forge?.available === true,
             forgeKind,
+            // The Views row for Automations waits for the kind to be an answer, exactly as the
+            // sidebar's does — the palette and the flat nav render from one function so they
+            // cannot disagree about what is on offer.
+            forgeSettled,
             inbox: health.data?.capabilities.followups === true,
             automations: health.data?.capabilities.automations === true,
           }).map((item) => {

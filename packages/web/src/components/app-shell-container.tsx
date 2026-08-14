@@ -10,7 +10,7 @@ import { ProviderBannerContainer } from '@/components/provider-banner-container'
 import { ProjectGroups } from '@/components/project-groups'
 import { TaskQuickListContainer } from '@/components/task-quick-list'
 import { ToolsMenu } from '@/components/tools-menu'
-import { useForgeKind } from '@/lib/use-forge-kind'
+import { useForgeKindStatus } from '@/lib/use-forge-kind'
 import { useDocumentTitle } from '@/lib/use-document-title'
 import { useActiveProjectId } from '@/lib/project-router'
 import { unreadDoneCount } from '@/lib/read-state'
@@ -67,7 +67,10 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
   // Which forge the flat nav's tab is named after. The hook prefers the URL project's own
   // registry entry and falls back to health — in single-project mode, where the flat nav lives,
   // those are the same folder.
-  const forgeKind = useForgeKind()
+  //
+  // `settled` rides along for the Automations gate alone — see `automationsPollable`. The nav must
+  // not offer a page the poller cannot reach in the window before the registry has answered.
+  const { kind: forgeKind, settled: forgeSettled } = useForgeKindStatus()
   const todos = useTodos(inboxAvailable)
   // One query in the shell feeds every rendering of the active project's navigation (desktop,
   // mobile drawer, and grouped sidebar). Routes reuse this TanStack Query cache entry.
@@ -139,6 +142,8 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
         // `ProjectGroups` names those tabs per project from each registry entry's own `forge` —
         // and there the top bar is this prop's sole reader.
         forgeKind={forgeKind}
+        // Whether that kind is an ANSWER — the Automations item is withheld until it is.
+        forgeSettled={forgeSettled}
         // Hidden unless health reports the opt-in inbox (#471) — same honesty rule as above:
         // the nav must not offer an Inbox this server will never fill.
         inboxAvailable={inboxAvailable}

@@ -91,6 +91,11 @@ export type AppShellProps = {
    *  the pre-Stage-4 "GitHub" (spec 2026-08-14-forgejo-forge-support §"Stage 4"), which is why
    *  the shell renders unchanged for every caller that does not pass it. */
   forgeKind?: ForgeKind
+  /** Whether `forgeKind` is an ANSWER yet (`useForgeKindStatus().settled`). Only the Automations
+   *  gate reads it: a kind nobody has named yet is not the same as GitHub when the question is
+   *  what to OFFER — see `automationsPollable`. Defaults to true, so a presentational render with
+   *  a static kind behaves exactly as it always did. */
+  forgeSettled?: boolean
   /** Inbox gating (#471): `false` drops the Inbox nav item and its badge — the global inbox is
    *  opt-in via `CEZ_FOLLOWUPS=1`. Defaults to shown for the same reason as `forgeAvailable`. */
   inboxAvailable?: boolean
@@ -159,6 +164,7 @@ export function AppShell({
   toolsMenu,
   forgeAvailable = true,
   forgeKind,
+  forgeSettled = true,
   inboxAvailable = true,
   automationsAvailable = true,
   singleProject = false,
@@ -222,6 +228,7 @@ export function AppShell({
     items: visibleNavItems({
       forge: forgeAvailable,
       forgeKind,
+      forgeSettled,
       inbox: inboxAvailable,
       automations: automationsAvailable,
     }),

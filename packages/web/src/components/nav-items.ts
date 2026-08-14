@@ -66,6 +66,12 @@ export type NavAvailability = {
    *  the poller cannot reach. Absent means "not said yet", which reads as GitHub throughout
    *  (`forgeLabel`), so a surface that never passes it behaves exactly as it did before. */
   forgeKind?: ForgeKind
+  /** Has the AUTHORITY for this surface answered with that kind (`useForgeKindStatus().settled`)?
+   *  Absent means yes — a caller passing a registry entry's own `forge` has nothing left to wait
+   *  for. The hook-driven surfaces (the flat nav, the ⌘K palette, the forge tab's own cross-link)
+   *  pass the real flag, because for them `forgeKind` starts out undefined for a reason that is not
+   *  "GitHub". Only the automations offer reads it — see `automationsPollable`. */
+  forgeSettled?: boolean
   /** `capabilities.followups` — the opt-in global inbox (#471). */
   inbox?: boolean
   /** `capabilities.automations` — the opt-in GitHub automations (#801). */
@@ -90,16 +96,23 @@ function forgeItem(item: NavItem, kind: ForgeKind | undefined): NavItem {
  * gates do not: the poller (`src/automations/github-poller.ts`) shells out to the `gh` CLI and
  * never goes through `resolveForge`, so it has nothing to say about a Forgejo remote.
  *
- * An unknown kind reads as pollable, the pre-Stage-4 default — the same "absent means GitHub"
- * rule `forgeLabel` follows, so a surface that never learns the kind behaves as it always did.
+ * An unknown kind reads as pollable, the pre-Stage-4 default — the same "absent means GitHub" rule
+ * `forgeLabel` follows — but ONLY once that unknown is an answer. Naming an unnamed tab "GitHub" is
+ * reversible on the next render; an offer taken in that window is not. While the registry is in
+ * flight `forgeKind` is undefined on every surface, including a Forgejo project's, and reading that
+ * as GitHub renders the nav item and the tab's cross-link long enough to click through and build an
+ * automation nothing will ever poll. So this gate fails CLOSED on silence and opens on the answer,
+ * which is the opposite of what the label does — deliberately, because they are not the same
+ * decision. `forgeSettled` defaults to true: a caller passing a registry entry's own `forge` has
+ * already got its answer.
  *
  * Exported because the offer is made in more than one place: the nav (here) AND the forge tab's
  * own cross-link into `/automations/new` (`routes/github/github.tsx`). Two spellings of this
  * condition would eventually disagree, and the disagreement would hand a Forgejo user an
  * automation that can never fire.
  */
-export function automationsPollable(forgeKind?: ForgeKind): boolean {
-  return forgeKind === undefined || forgeKind === 'github'
+export function automationsPollable(forgeKind?: ForgeKind, forgeSettled = true): boolean {
+  return forgeSettled && (forgeKind === undefined || forgeKind === 'github')
 }
 
 /**
@@ -120,12 +133,13 @@ export function automationsPollable(forgeKind?: ForgeKind): boolean {
 export function visibleNavItems({
   forge = false,
   forgeKind,
+  forgeSettled = true,
   inbox = false,
   automations = false,
 }: NavAvailability = {}): NavItem[] {
   // Offering a tab that cannot work is worse than withholding one that could — see
   // `automationsPollable`.
-  const pollable = automationsPollable(forgeKind)
+  const pollable = automationsPollable(forgeKind, forgeSettled)
   return NAV_ITEMS
     .filter((item) =>
       (item.forge ? forge : true)

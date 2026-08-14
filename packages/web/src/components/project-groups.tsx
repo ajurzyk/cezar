@@ -273,7 +273,12 @@ function ProjectGroup({
                 the gate used to read `=== 'github'`, which
                 is why a Forgejo project's tab vanished from the grouped sidebar — the shape a
                 workspace takes as soon as it holds a second project. `forgeKind` then names the
-                tab after that forge and keeps Automations out of it (`visibleNavItems`). */}
+                tab after that forge and keeps Automations out of it (`visibleNavItems`).
+
+                No `forgeSettled` here on purpose: this kind is the registry entry's OWN `forge`,
+                and the entry only exists because the registry answered — there is nothing left to
+                settle, so the default (true) is the truth. The hook-driven surfaces (flat nav, ⌘K)
+                pass the real flag, because their kind starts undefined for a reason. */}
             {visibleNavItems({
               forge: project.forge != null,
               forgeKind: project.forge,

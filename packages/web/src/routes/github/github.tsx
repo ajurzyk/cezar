@@ -55,7 +55,7 @@ import { shortAge } from '@/lib/format'
 import { forgeChecksUrl, forgeHint, forgeIcon, forgeLabel, type ForgeKind } from '@/lib/forge-label'
 import { githubTaskPrompt } from '@/lib/github-task'
 import { orderSkillsByUsage } from '@/lib/skills'
-import { useForgeKind } from '@/lib/use-forge-kind'
+import { useForgeKind, useForgeKindStatus } from '@/lib/use-forge-kind'
 import { cn, isHttpUrl } from '@/lib/utils'
 
 import { Markdown } from '../task-thread/markdown'
@@ -131,7 +131,11 @@ export function GithubRoute({ view, changes = false }: { view: GithubView; chang
   // What to CALL the forge on this screen (spec 2026-08-14-forgejo-forge-support §"Stage 4").
   // The route, the endpoints and the payload are forge-agnostic already — only the words the
   // user reads were hardcoded to one forge.
-  const forgeKind = useForgeKind()
+  //
+  // `settled` rides along for the automations offer alone: naming this screen from an unsettled
+  // kind is the documented default, but OFFERING a page the poller cannot reach is not (see
+  // `automationsPollable`).
+  const { kind: forgeKind, settled: forgeSettled } = useForgeKindStatus()
   const forge = forgeLabel(forgeKind)
   // And what to MARK it with, from the same module — a mark chosen here would be a second
   // spelling of the nav item's decision, free to drift from it.
@@ -139,7 +143,7 @@ export function GithubRoute({ view, changes = false }: { view: GithubView; chang
   // ONE decision, not two: the header renders it both as the link's presence and as which element
   // carries `ml-auto`. Split across two conditions, a Forgejo project with the automations
   // capability on satisfied the wider one and withheld the link — leaving the class on nobody.
-  const showAutomations = automationsAvailable && automationsPollable(forgeKind)
+  const showAutomations = automationsAvailable && automationsPollable(forgeKind, forgeSettled)
   const gh = list.data
 
   // Lazy checks glyphs for the on-screen PR window (#664). Hooks must run before the early
