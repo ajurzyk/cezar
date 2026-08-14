@@ -250,6 +250,30 @@ describe('composeGithubTask', () => {
     expect(task).not.toContain('GitHub')
   })
 
+  // The other direction of the same rewrite: silence is not an answer of "GitHub". The box's draft
+  // is stored per item URL (`hand-to-agent.tsx`), so it outlives a page refresh — reopen a Forgejo
+  // item and hit ⌘Enter while `/api/v1/projects` is still in flight and `forge` arrives
+  // `undefined` (the run body passes `kind`, not `settled`). Rewriting the block to
+  // `forgeLabel(undefined)` would turn a correct "Fix Forgejo issue #142" into the false
+  // "Fix GitHub issue #142" — the very instruction this rewrite exists to remove.
+  it('keeps the seeded block verbatim while no forge has been named', () => {
+    const it142 = item()
+    const seeded = githubTaskRef(it142, 'forgejo')
+    const task = composeGithubTask(it142, [], `${seeded}\n\nand add tests`, undefined)
+    expect(task).toBe(`${seeded}\n\nand add tests`)
+    expect(task).not.toContain('GitHub issue')
+  })
+
+  // The token shield covers this path too: a matched block is OURS whether or not we rewrite it,
+  // so a `{{url}}` embedded in the item's own title must not be substituted inside it.
+  it('still shields the seeded block from token substitution when no forge has been named', () => {
+    const tokenTitle = item({ title: 'Support {{url}} in prompt templates' })
+    const seeded = githubTaskRef(tokenTitle, 'forgejo')
+    expect(composeGithubTask(tokenTitle, [], `${seeded}\n\nUse {{url}} please.`, undefined)).toBe(
+      `${seeded}\n\nUse ${tokenTitle.url} please.`,
+    )
+  })
+
   it('puts the user instruction LAST, after the context', () => {
     const task = composeGithubTask(item(), [], 'Only triage.')
     expect(task.indexOf('#142')).toBeLessThan(task.indexOf('Only triage.'))

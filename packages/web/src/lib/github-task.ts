@@ -136,8 +136,15 @@ export function composeGithubTask(
   const seeded = FORGE_KINDS
     .map((kind) => githubTaskRef(item, kind))
     .find((candidate) => raw.startsWith(candidate))
+  //
+  // Replaced only when something has actually NAMED a forge. `forgeLabel(undefined)` is "GitHub",
+  // so an unconditional rewrite runs the correction backwards for the case it was written for: the
+  // draft is stored per item URL, so it survives a page refresh, and a ⌘Enter fired before the
+  // registry answers arrives here with `forge` undefined (the run body passes the kind, not
+  // `settled`). Silence is not an answer — the seeded block then stands as it was written.
   const custom = seeded
-    ? ref + applyItemTokens(raw.slice(seeded.length), item)
+    // Either way the matched block is OURS, so the token shield covers both branches.
+    ? (forge === undefined ? seeded : ref) + applyItemTokens(raw.slice(seeded.length), item)
     : applyItemTokens(raw, item)
   const task = mentionsItem(custom, item) ? custom : `${ref}\n\n${custom}`
   return skillNames.length ? task + skillsHint(skillNames) : task
