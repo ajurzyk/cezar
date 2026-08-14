@@ -183,6 +183,38 @@ describe('useForgeKindStatus', () => {
     await waitFor(() => expect(result.current).toEqual({ kind: 'forgejo', settled: true }))
   })
 
+  // The live instance's shape: the boot folder has no forge at all, and health says so long
+  // before the registry loads. Health is only ever a PLACEHOLDER for a scoped project — treating
+  // its silence as the final answer would spend the hand-off box's single correction before the
+  // registry gets to say the project is on Forgejo.
+  it('stays unsettled while only health has spoken about the boot project', async () => {
+    let releaseRegistry!: () => void
+    const registryArrived = new Promise<void>((resolve) => { releaseRegistry = resolve })
+    fetchMock.mockImplementation(async (input) => {
+      const url = String(input instanceof Request ? input.url : input)
+      const json = (body: unknown) =>
+        new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      if (url.includes('/api/v1/health')) return json(health(null))
+      if (url.includes('/api/v1/projects')) {
+        await registryArrived
+        return json(projects([project({ forge: 'forgejo' })]))
+      }
+      return new Response('not found', { status: 404 })
+    })
+    const { result } = renderHook(
+      () => ({ status: useForgeKindStatus(), health: useHealth().data }),
+      { wrapper: wrapper('/p/cezar/github') },
+    )
+
+    await waitFor(() => expect(result.current.health).toBeDefined())
+    expect(result.current.status).toEqual({ kind: undefined, settled: false })
+    releaseRegistry()
+    await waitFor(() => expect(result.current.status).toEqual({ kind: 'forgejo', settled: true }))
+  })
+
   // A registry that has answered and names no forge for this project IS an answer: the screen
   // keeps the "GitHub" default, and nothing may correct it later.
   it('settles on a registry entry that names no forge', async () => {

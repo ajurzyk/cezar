@@ -55,15 +55,16 @@ export function useForgeKindStatus(): ForgeKindStatus {
   // A LOADED entry is the whole truth, including its silence: a registry project with no `forge`
   // has none, and borrowing the boot folder's kind there would be inventing one.
   if (entry) return { kind: entry.forge, settled: true }
-  // Health is workspace-level (`project-scope.ts` WORKSPACE_LEVEL): the server always builds it
-  // from `bootRoot`, so it describes the boot folder and no other project — the same guard
-  // `useProjectRepoBase` puts in front of repo links, for the same reason. Without it, while the
-  // registry is in flight — or after it failed, which the `?? []` above tolerates on purpose — a
-  // scoped Forgejo project wears the boot project's GitHub name across the heading, the refresh
-  // tooltip, the "open on …" links, the empty-state hint and the hand-off prompt.
-  if (projectId === null || projectId === health.data?.bootProject) {
-    return { kind: health.data?.forge?.kind, settled: health.data !== undefined }
-  }
-  // A scoped project the registry has answered about without listing it: nothing more is coming.
-  return { kind: undefined, settled: registry !== undefined }
+  // Unscoped — single-project mode, where the routes mount without a `/p/<id>` and the boot
+  // folder IS the only project. Health is the authority here, not a stand-in.
+  if (projectId === null) return { kind: health.data?.forge?.kind, settled: health.data !== undefined }
+  // Scoped: the REGISTRY is the authority, so nothing is settled until it has answered. Health is
+  // workspace-level (`project-scope.ts` WORKSPACE_LEVEL) — the server always builds it from
+  // `bootRoot` — so it may stand in for the boot project alone, the same guard
+  // `useProjectRepoBase` puts in front of repo links. Without that guard, while the registry is
+  // in flight (or after it failed, which the `?? []` above tolerates on purpose) a scoped Forgejo
+  // project wears the boot project's GitHub name across the heading, the refresh tooltip, the
+  // "open on …" links, the empty-state hint and the hand-off prompt.
+  const placeholder = projectId === health.data?.bootProject ? health.data?.forge?.kind : undefined
+  return { kind: placeholder, settled: registry !== undefined }
 }

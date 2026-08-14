@@ -32,7 +32,7 @@ import { toast } from '@/components/ui/toaster'
 import { PromptTemplateMenu } from '@/components/prompt-template-menu'
 import { SkillPreviewDialog } from '@/components/skill-detail'
 import { githubRunBody, githubTaskRef } from '@/lib/github-task'
-import { useForgeKind } from '@/lib/use-forge-kind'
+import { useForgeKindStatus } from '@/lib/use-forge-kind'
 import {
   autoApplyText,
   insertTemplate,
@@ -118,7 +118,8 @@ export function HandToAgent({
   // title that differs between the two payloads would otherwise leave `prompt !== base`, which
   // reads as "user-owned": the pre-fill would be persisted as a draft and auto-apply would stop.
   // The forge the item lives on, so the prompt handed to the agent names it correctly (Stage 4).
-  const forgeKind = useForgeKind()
+  // `settled` — not "a kind is defined" — is what the one-shot correction below keys on.
+  const { kind: forgeKind, settled: forgeSettled } = useForgeKindStatus()
   const [base, setBase] = useState(() => githubTaskRef(item, forgeKind))
   // The route remounts this component per item (key={item.url}); the DRAFT — not plain component
   // state (#408) — restores whatever was typed for THIS item, so switching away and back (or a
@@ -129,10 +130,15 @@ export function HandToAgent({
   // a cold deep link it can answer after this component has already mounted and pre-filled. Left
   // alone, a Forgejo item would carry "Fix GitHub issue #N" to the agent for the rest of the
   // mount — a false instruction, not a stale label. A late TITLE still must not do this (that is
-  // what the rule exists for), hence the ref: exactly one correction, when a kind first arrives.
-  const kindSettled = useRef(forgeKind !== undefined)
+  // what the rule exists for), hence the ref: exactly one correction, when the answer arrives.
+  //
+  // The latch reads `forgeSettled`, never `forgeKind !== undefined`. A kind that is merely
+  // present is not an answer about THIS project — health stands in for the boot folder until the
+  // registry speaks — and latching on the stand-in spends the single correction before the
+  // authority has answered, leaving a Forgejo item pre-filled as GitHub for the whole mount.
+  const kindSettled = useRef(forgeSettled)
   useEffect(() => {
-    if (kindSettled.current || forgeKind === undefined) return
+    if (kindSettled.current || !forgeSettled) return
     kindSettled.current = true
     const corrected = githubTaskRef(item, forgeKind)
     if (corrected === base) return
@@ -140,7 +146,7 @@ export function HandToAgent({
     // reaches the agent, through the ref block `composeGithubTask` attaches to their text.
     setPrompt((typed) => (typed === base ? corrected : typed))
     setBase(corrected)
-  }, [forgeKind, item, base])
+  }, [forgeKind, forgeSettled, item, base])
   const resolved = useResolvedEngine(engine)
   const promptRef = useRef<HTMLTextAreaElement>(null)
   useEffect(() => {

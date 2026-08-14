@@ -2305,6 +2305,35 @@ describe('forge naming', () => {
     await waitFor(() => expect(promptValue()).toContain('Fix Forgejo issue #142'))
   })
 
+  // The same late registry, but where health has a forge of its own to offer: the URL project IS
+  // the boot folder, so health stands in for it until the registry — the authority — answers.
+  // A correction latched on "some kind arrived" is spent on that stand-in, and the box then keeps
+  // telling the agent to "fix GitHub issue #142" about a Forgejo issue. `mentionsItem` matches
+  // the stale text, so `composeGithubTask` hands it over verbatim: a false instruction.
+  it('corrects the prompt when the registry contradicts the forge health offered', async () => {
+    let releaseRegistry!: () => void
+    const registryArrived = new Promise<void>((resolve) => { releaseRegistry = resolve })
+    stubFetch(forgejoStubs({
+      'GET /api/v1/health': () => jsonResponse({
+        ...health(['claude']),
+        bootProject: 'orakton',
+        forge: { kind: 'github' as const, available: true },
+      }),
+      'GET /api/v1/projects': async () => {
+        await registryArrived
+        return jsonResponse({ ...REGISTRY, bootProject: 'orakton' })
+      },
+    }))
+    renderAt('/p/orakton/github/issues/142')
+
+    await waitFor(() => expect(promptValue()).toContain('Fix GitHub issue #142'))
+    await act(async () => {
+      releaseRegistry()
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(promptValue()).toContain('Fix Forgejo issue #142'))
+  })
+
   it('leaves a prompt the user has edited alone when the registry answers late', async () => {
     let releaseRegistry!: () => void
     const registryArrived = new Promise<void>((resolve) => { releaseRegistry = resolve })
