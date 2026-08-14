@@ -124,9 +124,26 @@ the routes and the server are unchanged.
   survives into the run record. The prompt box therefore holds its run until the forge is known,
   and corrects a seeded prompt exactly once if the answer arrives late.
 
-Two places legitimately branch on the kind rather than merely naming it, and both are recorded
-here so a third forge knows where to look: `forgeIcon` (lucide ships no Forgejo mark, and an
-octocat beside the word "Forgejo" is the mismatch this stage removes) and `automationsPollable`.
+Four places legitimately branch on the kind rather than merely naming it, and all four are recorded
+here so a third forge knows where to look:
+
+- `forgeIcon` — lucide ships no Forgejo mark, and an octocat beside the word "Forgejo" is the
+  mismatch this stage removes.
+- `forgeChecksUrl` — the only one that changes a URL rather than a word. GitHub keeps checks on a
+  `<pr>/checks` tab; Forgejo has no such route at all (its CI status is a box on the pull request
+  page), so the badge aims at the PR itself. A third forge that 404s on `/checks` needs a row here
+  or the badge hands its users a dead link.
+- `automationsPollable` — the poller shells out to `gh` and never goes through `resolveForge`, so a
+  visible tab that can never fire is worse than an absent one. It fails CLOSED while the kind is
+  unsettled: naming an unnamed tab "GitHub" is undone by the next render, but an offer taken in
+  that window leaves behind an automation nothing will ever poll.
+- `forgeHint` — the empty state's advice, and the one branch whose split is NOT the label's. A kind
+  of `forgejo` proves a valid `forge` block exists (`classifyForgeKind` reaches it no other way, so
+  the block passed `forgeSettingsSchema`), which means the reader who still needs to be told to
+  declare one arrives with NO kind: a self-hosted remote whose block is missing, or missing one
+  field, is dropped silently by `readForgeSettings`. The no-kind hint therefore names both ways in,
+  and `tools-menu.tsx`'s `forgeNote` reads `repo.remote` to tell that reader apart from one who
+  simply has no remote at all.
 
 ## Open questions
 
