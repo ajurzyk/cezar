@@ -136,7 +136,6 @@ export function composeGithubTask(
   const seeded = FORGE_KINDS
     .map((kind) => githubTaskRef(item, kind))
     .find((candidate) => raw.startsWith(candidate))
-  //
   // Replaced only when something has actually NAMED a forge. `forgeLabel(undefined)` is "GitHub",
   // so an unconditional rewrite runs the correction backwards for the case it was written for: the
   // draft is stored per item URL, so it survives a page refresh, and a ⌘Enter fired before the
