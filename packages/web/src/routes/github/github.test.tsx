@@ -2399,6 +2399,42 @@ describe('forge naming', () => {
     expect(promptValue()).toBe('')
   })
 
+  // The ref block is the ONLY thing carrying attribution on a non-GitHub forge, and for a prompt
+  // the user wrote from scratch it is built fresh at submit time (`composeGithubTask` — nothing
+  // in the box matches `mentionsItem`). Fired before the registry answers it would be built from
+  // `forge === undefined`, i.e. "Fix GitHub issue #142" about a Forgejo issue. That is an
+  // instruction handed to an agent, not a label on a screen.
+  it('does not start a run before the forge is known', async () => {
+    let releaseRegistry!: () => void
+    const registryArrived = new Promise<void>((resolve) => { releaseRegistry = resolve })
+    const sent = stubFetch(forgejoStubs({
+      'GET /api/v1/projects': async () => {
+        await registryArrived
+        return jsonResponse(REGISTRY)
+      },
+    }))
+    renderAt('/p/orakton/github/issues/142')
+
+    await waitFor(() => expect(promptValue()).toContain('Fix GitHub issue #142'))
+    fireEvent.change(promptField(), { target: { value: 'rebase this onto develop' } })
+    const runButton = () => document.querySelector<HTMLButtonElement>('[data-action="gh-run"]')!
+    expect(runButton().hasAttribute('disabled')).toBe(true)
+    fireEvent.keyDown(promptField(), { key: 'Enter', metaKey: true })
+    const posts = () => sent.filter((request) => request.method === 'POST' && request.path === '/api/v1/runs')
+    expect(posts()).toHaveLength(0)
+
+    await act(async () => {
+      releaseRegistry()
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(runButton().hasAttribute('disabled')).toBe(false))
+    fireEvent.keyDown(promptField(), { key: 'Enter', metaKey: true })
+    await waitFor(() => expect(posts()).toHaveLength(1))
+    expect(posts()[0]!.body).toMatchObject({
+      task: expect.stringContaining('Fix Forgejo issue #142') as unknown as string,
+    })
+  })
+
   // Automations are GitHub-only in fact, not just in name: the poller shells out to the `gh` CLI
   // and never goes through `resolveForge`, which is why `visibleNavItems` withholds the item from
   // a forge it cannot reach. The tab's own cross-link is the same offer and must follow the same

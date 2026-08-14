@@ -13,7 +13,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { Link } from '@/lib/project-router'
 
 import { createRun, putUiState } from '@/api/client'
-import { queryKeys, useUiState } from '@/api/queries'
+import { queryKeys, useProjects, useUiState } from '@/api/queries'
 import type { GithubItem, Skill, WorkflowDef } from '@open-mercato/cezar-api-client'
 import { EnginePills, engineBody, useResolvedEngine, type EnginePick } from '@/components/engine-pills'
 import { chipClass } from '@/components/picker-pill'
@@ -263,6 +263,21 @@ export function HandToAgent({
     onError: (error) => toast(error.message, { tone: 'danger' }),
   })
 
+  // Until something has named the forge, `composeGithubTask` receives `forge === undefined` and
+  // prepends "Fix GitHub issue #N" to a prompt the user wrote FROM SCRATCH — about an item that
+  // may live on Forgejo. That is the one path where the ref block is built fresh at submit time
+  // (a box still carrying the seeded block is covered by `github-task.ts`'s `seeded` rewrite), so
+  // the start waits for the registry the same way it already waits for provider status
+  // (`canRun`). `isPending` is terminal — a FAILED registry releases the button too.
+  //
+  // The registry, deliberately NOT `forgeSettled`: on an unscoped surface that flag also waits on
+  // `/api/v1/health`, and a run must never depend on health (the #401 ordering test holds a
+  // hanging `/api/v1/health` and still expects the button live). The registry is the authority
+  // for every scoped surface — where a non-GitHub forge is actually reachable — so waiting on it
+  // closes the race without borrowing health's failure modes.
+  const registryPending = useProjects().isPending
+  const canStart = !start.isPending && resolved.canRun && !registryPending
+
   const submitShortcut = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     const shouldSubmit =
       isSubmitShortcut({
@@ -276,7 +291,7 @@ export function HandToAgent({
       }) && (event.metaKey || event.ctrlKey) // multi-line box: bare Enter inserts a newline
     if (!shouldSubmit) return
     event.preventDefault()
-    if (!start.isPending && resolved.canRun) start.mutate()
+    if (canStart) start.mutate()
   }
 
   const toggleSkill = (name: string) =>
@@ -363,7 +378,7 @@ export function HandToAgent({
         <Button
           variant="contrast"
           data-action="gh-run"
-          disabled={start.isPending || !resolved.canRun}
+          disabled={!canStart}
           onClick={() => start.mutate()}
         >
           <PlayIcon aria-hidden="true" className="size-3.5" />
