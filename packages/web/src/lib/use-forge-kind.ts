@@ -35,6 +35,10 @@ export type ForgeKindStatus = {
    * One consumer needs the distinction — the hand-off box's one-shot prompt correction
    * (`routes/github/hand-to-agent.tsx`), which must fire when the answer arrives and never on a
    * value that merely happens to be non-undefined.
+   *
+   * A FAILED query counts as an answer: nothing better is coming, so the surface settles on what
+   * it has (the pre-Stage-4 "GitHub" default). The same box also HOLDS its run until this flag is
+   * true, and a flag that a dead `/api/v1/projects` pinned to false forever would hold it forever.
    */
   settled: boolean
 }
@@ -57,7 +61,12 @@ export function useForgeKindStatus(): ForgeKindStatus {
   if (entry) return { kind: entry.forge, settled: true }
   // Unscoped — single-project mode, where the routes mount without a `/p/<id>` and the boot
   // folder IS the only project. Health is the authority here, not a stand-in.
-  if (projectId === null) return { kind: health.data?.forge?.kind, settled: health.data !== undefined }
+  //
+  // `!isPending`, not `data !== undefined`: a query ends in success OR error, and an error is an
+  // answer — nothing better is coming. Keyed on the data alone, a dead `/api/v1/health` left this
+  // false forever, which for the consumer that WAITS on it (the hand-off box holds its run until
+  // the forge has a name) means waiting forever.
+  if (projectId === null) return { kind: health.data?.forge?.kind, settled: !health.isPending }
   // Scoped: the REGISTRY is the authority, so nothing is settled until it has answered. Health is
   // workspace-level (`project-scope.ts` WORKSPACE_LEVEL) — the server always builds it from
   // `bootRoot` — so it may stand in for the boot project alone, the same guard
@@ -66,5 +75,8 @@ export function useForgeKindStatus(): ForgeKindStatus {
   // project wears the boot project's GitHub name across the heading, the refresh tooltip, the
   // "open on …" links, the empty-state hint and the hand-off prompt.
   const placeholder = projectId === health.data?.bootProject ? health.data?.forge?.kind : undefined
-  return { kind: placeholder, settled: registry !== undefined }
+  // BOTH sources have to have spoken: the registry is the authority, and health is what decides
+  // whether the placeholder above was even allowed to be borrowed (is this the boot folder?).
+  // Terminal either way — see the `!isPending` note above.
+  return { kind: placeholder, settled: !projects.isPending && !health.isPending }
 }

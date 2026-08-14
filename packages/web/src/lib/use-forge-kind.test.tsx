@@ -225,4 +225,23 @@ describe('useForgeKindStatus', () => {
     const { result } = renderHook(() => useForgeKindStatus(), { wrapper: wrapper('/p/cezar-lab/github') })
     await waitFor(() => expect(result.current).toEqual({ kind: undefined, settled: true }))
   })
+
+  // A failed query is an answer too: nothing better is coming. Left as "unsettled", a consumer
+  // that WAITS on this flag — the hand-off box holds its run until the forge has a name — would
+  // wait forever, and the box's one-shot prompt correction would never fire at all.
+  it('settles when the registry query fails outright', async () => {
+    fetchMock.mockImplementation(async (input) => {
+      const url = String(input instanceof Request ? input.url : input)
+      if (url.includes('/api/v1/health')) {
+        return new Response(JSON.stringify(health(null)), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+      return new Response('boom', { status: 500 })
+    })
+    const { result } = renderHook(() => useForgeKindStatus(), { wrapper: wrapper('/p/orakton/github') })
+    await waitFor(() => expect(result.current.settled).toBe(true), { timeout: 5000 })
+    expect(result.current.kind).toBeUndefined()
+  })
 })
