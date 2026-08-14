@@ -87,21 +87,6 @@ function forgeItem(item: NavItem, kind: ForgeKind | undefined): NavItem {
 }
 
 /**
- * The nav items a surface should actually render: a gated item drops out — nav item AND tab —
- * unless the health payload says its feature is there. The forge-gated GitHub item needs the
- * forge driver (spec §"GitHub tab (forge tab)"); the Inbox item needs `capabilities.followups`,
- * which is off unless `CEZ_FOLLOWUPS=1` (#471); the Automations item needs a forge AND
- * `capabilities.automations`, which is off unless `CEZ_AUTOMATIONS=1` (#801).
- *
- * Gates are ANDed per item, never ORed, which is what lets one item carry two of them: an
- * automations opt-in on a repo with no GitHub remote still has nothing to poll.
- *
- * Everything defaults to absent while health is still unknown, on the shell's honesty rule: the
- * nav must not claim a tab exists before the server has said so (the Tools menu's forge note
- * explains the GitHub absence). Both the sidebar and the ⌘K palette's Views group render through
- * this, so the two can never disagree.
- */
-/**
  * Can the automations poller talk to this forge at all? Automations carry a condition the other
  * gates do not: the poller (`src/automations/github-poller.ts`) shells out to the `gh` CLI and
  * never goes through `resolveForge`, so it has nothing to say about a Forgejo remote.
@@ -118,6 +103,21 @@ export function automationsPollable(forgeKind?: ForgeKind): boolean {
   return forgeKind === undefined || forgeKind === 'github'
 }
 
+/**
+ * The nav items a surface should actually render: a gated item drops out — nav item AND tab —
+ * unless the health payload says its feature is there. The forge-gated GitHub item needs the
+ * forge driver (spec §"GitHub tab (forge tab)"); the Inbox item needs `capabilities.followups`,
+ * which is off unless `CEZ_FOLLOWUPS=1` (#471); the Automations item needs a forge AND
+ * `capabilities.automations`, which is off unless `CEZ_AUTOMATIONS=1` (#801).
+ *
+ * Gates are ANDed per item, never ORed, which is what lets one item carry two of them: an
+ * automations opt-in on a repo with no GitHub remote still has nothing to poll.
+ *
+ * Everything defaults to absent while health is still unknown, on the shell's honesty rule: the
+ * nav must not claim a tab exists before the server has said so (the Tools menu's forge note
+ * explains the GitHub absence). Both the sidebar and the ⌘K palette's Views group render through
+ * this, so the two can never disagree.
+ */
 export function visibleNavItems({
   forge = false,
   forgeKind,
