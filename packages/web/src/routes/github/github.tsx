@@ -696,7 +696,9 @@ function GithubDetail({
   /** Resolved checks glyph — the lazily-hydrated value overrides the list's `null` (#664). */
   checks?: GithubItem['checks']
 }) {
-  const forgeKind = useForgeKind()
+  // `settled` rides along for the checks badge alone: naming this pane from an unsettled kind is
+  // the documented default, but `forgeChecksUrl` turns that kind into a URL — see `ChecksBadge`.
+  const { kind: forgeKind, settled: forgeSettled } = useForgeKindStatus()
   const forge = forgeLabel(forgeKind)
   const kindWord = item.kind === 'pr' ? 'pull request' : 'issue'
   const hasDiffStat = item.kind === 'pr' && Boolean(item.additions || item.deletions)
@@ -762,7 +764,7 @@ function GithubDetail({
           {item.labels.map((label) => (
             <LabelChip key={label} label={label} color={colors[label]} />
           ))}
-          {checks ? <ChecksBadge checks={checks} url={item.url} forgeKind={forgeKind} /> : null}
+          {checks ? <ChecksBadge checks={checks} url={item.url} forgeKind={forgeKind} forgeSettled={forgeSettled} /> : null}
         </div>
       ) : null}
 
@@ -1505,11 +1507,16 @@ function CommentCount({ count }: { count: number }) {
  *  The kind has to reach this deep because the two forges disagree on the route, not just on the
  *  name — see `forgeChecksUrl`. A PROP rather than `useForgeKind()` here, matching `GithubRow`:
  *  the detail pane already holds the answer. */
-function ChecksBadge({ checks, url, forgeKind }: { checks: Checks; url?: string; forgeKind?: ForgeKind }) {
+function ChecksBadge({ checks, url, forgeKind, forgeSettled = true }: { checks: Checks; url?: string; forgeKind?: ForgeKind; forgeSettled?: boolean }) {
   const className = cn('text-[11px] font-medium', CHECKS_TONE[checks], url && 'hover:underline')
   const label = `${CHECKS_GLYPH[checks]} checks ${checks}`
 
-  if (!url) {
+  // No url, or no answer yet about the forge: the glyph alone. `forgeChecksUrl` is the one place a
+  // kind becomes a URL instead of a word, and the two forges do not share the route — GitHub has
+  // `<pr>/checks`, Forgejo 404s on it — so the "absent reads as GitHub" default would hand a
+  // Forgejo user a dead link in the window before the registry answers. The STATUS is not in doubt
+  // there, so it still renders; only the link waits.
+  if (!url || !forgeSettled) {
     return (
       <span data-slot="gh-checks" data-checks={checks} className={className}>
         {label}

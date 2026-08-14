@@ -2294,10 +2294,42 @@ describe('forge naming', () => {
     }))
     renderAt('/p/orakton/github/prs/137')
 
-    await waitFor(() => expect(document.querySelector('[data-slot="gh-checks"]')).not.toBeNull())
+    // Waits for the ANCHOR, not merely for the element: the badge renders its glyph as a plain
+    // span until the registry has named the forge (see the next test), so waiting on the slot
+    // alone would sample the intermediate state.
+    await waitFor(() => expect(document.querySelector('[data-slot="gh-checks"]')?.tagName).toBe('A'))
     const checks = document.querySelector('[data-slot="gh-checks"]')
-    expect(checks?.tagName).toBe('A')
     expect(checks?.getAttribute('href')).toBe(pull)
+  })
+
+  // The checks badge is the one branch that turns the kind into a URL rather than a word, so the
+  // "absent reads as GitHub" default is not available to it: `<pr>/checks` does not exist on
+  // Forgejo. While the registry is in flight the kind is undefined for every project, so the badge
+  // keeps its glyph and drops the link — the same fail-closed rule the automations offer follows.
+  it('does not link the checks badge before the registry has named the forge', async () => {
+    let releaseRegistry!: () => void
+    const registryArrived = new Promise<void>((resolve) => { releaseRegistry = resolve })
+    const pull = 'https://forge.example/acme/demo/pulls/137'
+    stubFetch(forgejoStubs({
+      'GET /api/v1/github?limit=1000': () =>
+        jsonResponse({ ...GITHUB, prs: [{ ...PR_137, url: pull }] }),
+      'GET /api/v1/projects': async () => {
+        await registryArrived
+        return jsonResponse(REGISTRY)
+      },
+    }))
+    renderAt('/p/orakton/github/prs/137')
+
+    // The glyph is still there — only the link waits.
+    await waitFor(() => expect(document.querySelector('[data-slot="gh-checks"]')).not.toBeNull())
+    expect(document.querySelector('[data-slot="gh-checks"]')!.tagName).toBe('SPAN')
+
+    await act(async () => {
+      releaseRegistry()
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(document.querySelector('[data-slot="gh-checks"]')!.tagName).toBe('A'))
+    expect(document.querySelector('[data-slot="gh-checks"]')!.getAttribute('href')).toBe(pull)
   })
 
   // The pre-fill is captured ONCE per mount (#524's snapshot rule), and the registry that names
