@@ -215,6 +215,21 @@ describe('forgeNote', () => {
     expect(forgeNote(HEALTH)).toContain('No GitHub remote detected')
   })
 
+  // The one new failure mode Stage 4 introduces: a repo that HAS a remote, on a host the table
+  // cannot reveal, whose `forge` block is missing or half-written. `readForgeSettings` drops it
+  // silently, `resolveForge` answers null — and this popover is the only place in the whole UI
+  // that says anything at all about the absent tab. "No GitHub remote detected" is a wrong
+  // diagnosis there: they have a remote.
+  it('tells a remote with no forge block apart from no remote at all', () => {
+    const note = forgeNote({
+      ...HEALTH,
+      repo: { root: '/home/me/orakton', branch: 'main', remote: 'git@forge.example:acme/demo.git' },
+    })
+    expect(note).not.toContain('No GitHub remote detected')
+    expect(note).toContain('.ai/cezar/config.json')
+    expect(note).toContain('forge tab is hidden')
+  })
+
   it('renders in the open menu when the forge is absent, and not when it works', async () => {
     const { unmount } = renderMenu(HEALTH)
     let menu = await openMenu()
