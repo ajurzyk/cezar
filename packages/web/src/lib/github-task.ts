@@ -127,11 +127,17 @@ export function composeGithubTask(
   // been seeded with a different kind than the one known now — a draft stored before the registry
   // answered (`hand-to-agent.tsx` persists the box per item) — and matching the current spelling
   // alone would send that draft down the plain branch, which is the very case this guards.
+  //
+  // A matched block is REPLACED by the one for the kind known now, never re-emitted verbatim.
+  // This is the last place the correction can happen for a box the user extended rather than
+  // replaced: `hand-to-agent.tsx` leaves touched text alone by design, and `mentionsItem` below
+  // matches the stale block, so nothing else would prepend the corrected ref. Keeping the seeded
+  // spelling would tell the agent to "fix GitHub issue #142" about a Forgejo issue.
   const seeded = FORGE_KINDS
     .map((kind) => githubTaskRef(item, kind))
     .find((candidate) => raw.startsWith(candidate))
   const custom = seeded
-    ? seeded + applyItemTokens(raw.slice(seeded.length), item)
+    ? ref + applyItemTokens(raw.slice(seeded.length), item)
     : applyItemTokens(raw, item)
   const task = mentionsItem(custom, item) ? custom : `${ref}\n\n${custom}`
   return skillNames.length ? task + skillsHint(skillNames) : task

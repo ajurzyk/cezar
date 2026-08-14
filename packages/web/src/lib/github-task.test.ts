@@ -231,8 +231,23 @@ describe('composeGithubTask', () => {
     const tokenTitle = item({ title: 'Support {{url}} in prompt templates' })
     const seeded = githubTaskRef(tokenTitle, 'github')
     expect(composeGithubTask(tokenTitle, [], `${seeded}\n\nUse {{url}} please.`, 'forgejo')).toBe(
-      `${seeded}\n\nUse ${tokenTitle.url} please.`,
+      `${githubTaskRef(tokenTitle, 'forgejo')}\n\nUse ${tokenTitle.url} please.`,
     )
+  })
+
+  // Recognizing the stale block is only half the job: it must also be REPLACED. The box is
+  // pre-filled, so extending it is the normal edit — a cold deep link to a Forgejo issue seeds
+  // "Fix GitHub issue #142" before the registry answers, the user appends a sentence, and
+  // `hand-to-agent.tsx` then leaves their touched text alone by design. `mentionsItem` matches
+  // (the URL is right there), so nothing prepends the corrected ref. Re-emitting the seeded
+  // block verbatim would hand the agent "Fix GitHub issue #142" about a Forgejo issue — the
+  // false instruction this stage exists to remove.
+  it('rewrites a stale forge name in the seeded ref block the user extended', () => {
+    const it142 = item()
+    const seeded = githubTaskRef(it142, 'github')
+    const task = composeGithubTask(it142, [], `${seeded}\n\nand add tests`, 'forgejo')
+    expect(task).toBe(`${githubTaskRef(it142, 'forgejo')}\n\nand add tests`)
+    expect(task).not.toContain('GitHub')
   })
 
   it('puts the user instruction LAST, after the context', () => {

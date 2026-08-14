@@ -143,7 +143,9 @@ export function HandToAgent({
     const corrected = githubTaskRef(item, forgeKind)
     if (corrected === base) return
     // Only an UNTOUCHED box is re-seeded. What the user typed is theirs; the forge name still
-    // reaches the agent, through the ref block `composeGithubTask` attaches to their text.
+    // reaches the agent, through `composeGithubTask` — which attaches the ref block to text that
+    // lacks one AND rewrites a stale spelling in text that opens with the seeded block, the case
+    // this branch leaves behind when the user extends the pre-fill instead of replacing it.
     setPrompt((typed) => (typed === base ? corrected : typed))
     setBase(corrected)
   }, [forgeKind, forgeSettled, item, base])
