@@ -2254,7 +2254,7 @@ describe('forge naming', () => {
     expect(route.textContent).not.toContain('GitHub')
   })
 
-  it('tells a Forgejo user what the tab needs — its token, not the gh CLI', async () => {
+  it('tells a Forgejo user what the tab needs — its config block, not the gh CLI', async () => {
     stubFetch(forgejoStubs({
       'GET /api/v1/github?limit=1000': () =>
         jsonResponse({ available: false, reason: 'CEZ_FORGEJO_TOKEN is not set', issues: [], prs: [] }),

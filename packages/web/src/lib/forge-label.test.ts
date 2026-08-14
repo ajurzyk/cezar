@@ -40,11 +40,17 @@ describe('forgeHint', () => {
     expect(hint).not.toContain('CEZ_FORGEJO_TOKEN')
   })
 
-  it('points Forgejo at its token and API URL, never at gh', () => {
+  it('points Forgejo at its config block, and at the token only where it is really needed', () => {
     const hint = forgeHintText('forgejo')
-    expect(hint).toContain('CEZ_FORGEJO_TOKEN')
     expect(hint).toContain('.ai/cezar/config.json')
+    expect(hint).toContain('CEZ_FORGEJO_TOKEN')
     expect(hint).not.toContain('gh auth login')
+    // The token is OPTIONAL: `forgejo-http.ts` supports an anonymous request in full, and the
+    // server's own token hints fire only on 401/403 and on a 404 with no token. An empty state
+    // that opens with "the tab needs a token" sends a public-instance user down a blind alley —
+    // their outage is a wrong `apiUrl` or an unreachable host, and no token will fix it.
+    expect(hint).not.toMatch(/^The tab needs a Forgejo token/)
+    expect(hint).toContain('private')
   })
 
   // A hint that names a SUBSET of what the parser demands is worse than no hint: `forgeSettings
@@ -64,7 +70,7 @@ describe('forgeHint', () => {
     expect(forgeHint('github').filter((part) => part.mono).map((part) => part.text))
       .toEqual(['gh', 'gh auth login'])
     expect(forgeHint('forgejo').filter((part) => part.mono).map((part) => part.text))
-      .toEqual(['CEZ_FORGEJO_TOKEN', 'forge', 'kind', 'apiUrl', 'webUrl', '.ai/cezar/config.json'])
+      .toEqual(['forge', 'kind', 'apiUrl', 'webUrl', '.ai/cezar/config.json', 'CEZ_FORGEJO_TOKEN'])
   })
 })
 

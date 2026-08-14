@@ -40,13 +40,16 @@ export type ForgeHintSegment = { text: string; mono?: true }
 export function forgeHint(kind?: ForgeKind): ForgeHintSegment[] {
   if (kind === 'forgejo') {
     return [
-      { text: 'The tab needs a Forgejo token in ' },
-      { text: 'CEZ_FORGEJO_TOKEN', mono: true },
+      // The `forge` block comes FIRST because it is the only thing actually required. The token is
+      // optional: `forgejo-http.ts` (`currentToken`) supports an anonymous request in full, and the
+      // server's own token hints fire only on 401/403 and on a 404 with no token. Opening with the
+      // token sent a public-instance user hunting for one when their outage was something else
+      // entirely — a wrong `apiUrl`, an unreachable host — and no token would have fixed it.
+      { text: 'The tab needs a ' },
+      { text: 'forge', mono: true },
       // Every field `forgeSettingsSchema` demands, not just the interesting one: a `forge` key
       // missing any of the three fails validation and is dropped SILENTLY, which leaves the user
       // back on this empty state having done exactly what it told them to.
-      { text: ' and a ' },
-      { text: 'forge', mono: true },
       { text: ' block — ' },
       { text: 'kind', mono: true },
       { text: ', ' },
@@ -55,6 +58,8 @@ export function forgeHint(kind?: ForgeKind): ForgeHintSegment[] {
       { text: 'webUrl', mono: true },
       { text: ' — declared in the repo’s ' },
       { text: '.ai/cezar/config.json', mono: true },
+      { text: '. A private repository also needs a token in ' },
+      { text: 'CEZ_FORGEJO_TOKEN', mono: true },
       { text: '. Everything else in cezar works without it.' },
     ]
   }
