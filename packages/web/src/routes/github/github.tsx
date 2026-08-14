@@ -53,7 +53,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Skeleton } from '@/components/ui/skeleton'
 import { toast } from '@/components/ui/toaster'
 import { shortAge } from '@/lib/format'
-import { forgeHint, forgeLabel } from '@/lib/forge-label'
+import { forgeHint, forgeLabel, type ForgeKind } from '@/lib/forge-label'
 import { githubTaskPrompt } from '@/lib/github-task'
 import { orderSkillsByUsage } from '@/lib/skills'
 import { useForgeKind } from '@/lib/use-forge-kind'
@@ -438,6 +438,7 @@ export function GithubRoute({ view, changes = false }: { view: GithubView; chang
                 active={selected?.url === item.url}
                 queued={queued.has(item.url)}
                 checks={item.kind === 'pr' ? checksMap?.[item.number] ?? item.checks : item.checks}
+                forgeKind={forgeKind}
               />
             ))}
           </ul>
@@ -506,6 +507,7 @@ function GithubRow({
   active,
   queued,
   checks,
+  forgeKind,
 }: {
   item: GithubItem
   view: GithubView
@@ -514,10 +516,13 @@ function GithubRow({
   queued: boolean
   /** Resolved checks glyph — the lazily-hydrated value overrides the list's `null` (#664). */
   checks?: GithubItem['checks']
+  /** The forge the drag payload must name, since that payload is a prompt for an agent (Stage 4).
+   *  A PROP, not `useForgeKind()` here: the list runs to `LIST_LIMIT` rows with no virtualization
+   *  yet, and the hook subscribes to two queries plus the router — up to a thousand extra
+   *  observers to build one drag payload, from an answer the route already holds. */
+  forgeKind?: ForgeKind
 }) {
   const Icon = item.kind === 'issue' ? CircleDotIcon : GitPullRequestIcon
-  // The drag payload is a prompt for an agent, so it must name the item's real forge (Stage 4).
-  const forgeKind = useForgeKind()
   const queryClient = useQueryClient()
 
   // Warm the thread on hover/focus (#664) so opening the row is usually instant — best-effort,
