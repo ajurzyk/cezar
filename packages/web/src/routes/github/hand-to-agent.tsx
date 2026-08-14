@@ -31,7 +31,8 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { toast } from '@/components/ui/toaster'
 import { PromptTemplateMenu } from '@/components/prompt-template-menu'
 import { SkillPreviewDialog } from '@/components/skill-detail'
-import { githubRunBody, githubTaskRef } from '@/lib/github-task'
+import { forgeLabel } from '@/lib/forge-label'
+import { applyItemTokens, githubRunBody, githubTaskRef, mentionsItem } from '@/lib/github-task'
 import { useForgeKindStatus } from '@/lib/use-forge-kind'
 import {
   autoApplyText,
@@ -130,19 +131,27 @@ export function HandToAgent({
   // comes from the project registry, a DIFFERENT query from the list that produced `item`, so on
   // a cold deep link it can answer after this component has already mounted and pre-filled. Left
   // alone, a Forgejo item would carry "Fix GitHub issue #N" to the agent for the rest of the
-  // mount — a false instruction, not a stale label. A late TITLE still must not do this (that is
-  // what the rule exists for), hence the ref: exactly one correction, when the answer arrives.
+  // mount — a false instruction, not a stale label. Exactly one correction, when the answer
+  // arrives, hence the ref.
   //
   // The latch reads `forgeSettled`, never `forgeKind !== undefined`. A kind that is merely
   // present is not an answer about THIS project — health stands in for the boot folder until the
   // registry speaks — and latching on the stand-in spends the single correction before the
   // authority has answered, leaving a Forgejo item pre-filled as GitHub for the whole mount.
   const kindSettled = useRef(forgeSettled)
+  const kindAtMount = useRef(forgeKind)
   useEffect(() => {
     if (kindSettled.current || !forgeSettled) return
     kindSettled.current = true
+    // The FORGE is what this exception is spelled for, so the FORGE is what it compares — never
+    // the whole ref block. `item` outlives the payload it arrived in (the refresh button replaces
+    // the list, and this component is keyed by `item.url`, not by title), so a ref rebuilt from
+    // the current item also differs when only the TITLE has moved — and re-seeding on that breaks
+    // the capture-once rule above for a reason the correction was never about. Comparing the
+    // LABELS, not the kinds: `undefined` and `github` spell the same word, so a settle between
+    // them changes no text and must not spend the correction either.
+    if (forgeLabel(forgeKind) === forgeLabel(kindAtMount.current)) return
     const corrected = githubTaskRef(item, forgeKind)
-    if (corrected === base) return
     // Only an UNTOUCHED box is re-seeded. What the user typed is theirs; the forge name still
     // reaches the agent, through `composeGithubTask` — which attaches the ref block to text that
     // lacks one AND rewrites a stale spelling in text that opens with the seeded block, the case
@@ -266,18 +275,32 @@ export function HandToAgent({
 
   // Until something has named the forge, `composeGithubTask` receives `forge === undefined` and
   // prepends "Fix GitHub issue #N" to a prompt the user wrote FROM SCRATCH — about an item that
-  // may live on Forgejo. That is the one path where the ref block is built fresh at submit time
-  // (a box still carrying the seeded block is covered by `github-task.ts`'s `seeded` rewrite), so
-  // the start waits for the registry the same way it already waits for provider status
-  // (`canRun`). `isPending` is terminal — a FAILED registry releases the button too.
+  // may live on Forgejo. That is the one path where the ref block is built FRESH at submit time;
+  // a box still carrying the seeded block takes `github-task.ts`'s `seeded` rewrite instead and
+  // sends the user the words they are reading. So the start waits for the forge the same way it
+  // already waits for provider status (`canRun`) — with two gates, because the authority differs
+  // by surface and so does the price of waiting on it:
   //
-  // The registry, deliberately NOT `forgeSettled`: on an unscoped surface that flag also waits on
-  // `/api/v1/health`, and a run must never depend on health (the #401 ordering test holds a
-  // hanging `/api/v1/health` and still expects the button live). The registry is the authority
-  // for every scoped surface — where a non-GitHub forge is actually reachable — so waiting on it
-  // closes the race without borrowing health's failure modes.
+  //  - the REGISTRY, always. It is the authority for every SCOPED project, and `isPending` is
+  //    terminal, so a failed registry releases the button too.
+  //  - `forgeSettled`, on the fresh-ref path alone. The unscoped single-project routes have no
+  //    `/p/<id>` to look up, so there the registry says nothing and `useForgeKindStatus` takes the
+  //    kind from `/api/v1/health` — a workspace whose only project is on Forgejo is exactly the
+  //    deployment Stage 4 is for, and the registry gate is already open there while nothing has
+  //    named the forge. Waiting on this flag borrows health's failure modes, so only the path
+  //    that would otherwise state a falsehood pays: the #652 ordering test holds `/api/v1/health`
+  //    open forever and still expects a live Run button, and it clicks with the pre-fill intact.
+  //
+  // What that leaves: an untouched box submitted before health has answered on a single-project
+  // Forgejo workspace carries the seeded GitHub spelling. That is the pre-Stage-4 default on a
+  // surface nothing has named yet (spec 2026-08-14-forgejo-forge-support §"Stage 4"), sitting in
+  // the box for the user to read before they send it — not a fresh claim composed behind them.
   const registryPending = useProjects().isPending
-  const canStart = !start.isPending && resolved.canRun && !registryPending
+  // Token substitution first: `{{url}}` is the user's way of placing the reference themselves,
+  // and `composeGithubTask` decides on the SUBSTITUTED text (`applyItemTokens`, then `mentionsItem`).
+  const composesFreshRef = !mentionsItem(applyItemTokens(prompt, item), item)
+  const canStart =
+    !start.isPending && resolved.canRun && !registryPending && (forgeSettled || !composesFreshRef)
 
   const submitShortcut = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     const shouldSubmit =

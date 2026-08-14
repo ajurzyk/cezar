@@ -2436,6 +2436,107 @@ describe('forge naming', () => {
     })
   })
 
+  // Single-project mode is the other half of that gate, and the registry does not cover it: the
+  // routes mount UNSCOPED there (`/github/…`, no `/p/<id>`), so `useForgeKindStatus` takes the
+  // kind from `/api/v1/health` and the registry has nothing to say. A workspace whose only
+  // project sits on Forgejo is exactly the deployment Stage 4 exists for, and a gate that waits
+  // on the registry alone is already open there while nothing has named the forge.
+  it('holds a from-scratch prompt until health names the forge in single-project mode', async () => {
+    let releaseHealth!: () => void
+    const healthArrived = new Promise<void>((resolve) => { releaseHealth = resolve })
+    const sent = stubFetch({
+      'GET /api/v1/health': async () => {
+        await healthArrived
+        return jsonResponse({ ...health(['claude']), forge: { kind: 'forgejo' as const, available: true } })
+      },
+    })
+    renderAt('/github/issues/142')
+
+    await waitFor(() => expect(promptValue()).toContain('Fix GitHub issue #142'))
+    fireEvent.change(promptField(), { target: { value: 'rebase this onto develop' } })
+    const runButton = () => document.querySelector<HTMLButtonElement>('[data-action="gh-run"]')!
+    expect(runButton().hasAttribute('disabled')).toBe(true)
+    fireEvent.keyDown(promptField(), { key: 'Enter', metaKey: true })
+    const posts = () => sent.filter((request) => request.method === 'POST' && request.path === '/api/v1/runs')
+    expect(posts()).toHaveLength(0)
+
+    await act(async () => {
+      releaseHealth()
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(runButton().hasAttribute('disabled')).toBe(false))
+    fireEvent.keyDown(promptField(), { key: 'Enter', metaKey: true })
+    await waitFor(() => expect(posts()).toHaveLength(1))
+    expect(posts()[0]!.body).toMatchObject({
+      task: expect.stringContaining('Fix Forgejo issue #142') as unknown as string,
+    })
+  })
+
+  // The other side of the same gate. A box still carrying the pre-fill composes nothing new at
+  // submit time — what it sends is the block the user is reading — so it must not start waiting
+  // on health, whose ordering test (#652) holds `/api/v1/health` open forever and still expects
+  // a live Run button. Only a prompt with no reference of its own builds a ref block fresh, and
+  // only that one waits.
+  it('starts an untouched box without waiting on health', async () => {
+    const sent = stubFetch({ 'GET /api/v1/health': () => new Promise<Response>(() => {}) })
+    renderAt('/github/issues/142')
+
+    await waitFor(() => expect(promptValue()).toContain('Fix GitHub issue #142'))
+    await waitForAgentRunEnabled()
+    fireEvent.keyDown(promptField(), { key: 'Enter', metaKey: true })
+    await waitFor(() =>
+      expect(sent.some((request) => request.method === 'POST' && request.path === '/api/v1/runs')).toBe(true))
+  })
+
+  // The one-shot correction is the single exception to #524's capture-once rule, and it is spelled
+  // for the FORGE alone. A mounted box outlives the list that produced its item — the refresh
+  // button replaces the whole list, and the component is keyed by `item.url`, not by title — so a
+  // correction keyed on "the ref block differs" also fires on a late TITLE, re-seeding the box for
+  // a reason that has nothing to do with the forge.
+  it('leaves the box alone when a late list changes only the title', async () => {
+    let releaseRegistry!: () => void
+    const registryArrived = new Promise<void>((resolve) => { releaseRegistry = resolve })
+    const RENAMED = 'Login form drops session on reload'
+    let listCalls = 0
+    const list = () => {
+      listCalls += 1
+      return jsonResponse(
+        listCalls === 1 ? GITHUB : { ...GITHUB, issues: [{ ...ISSUE_142, title: RENAMED }, ISSUE_139] },
+      )
+    }
+    stubFetch({
+      'GET /api/v1/projects': async () => {
+        await registryArrived
+        return jsonResponse({
+          ...REGISTRY,
+          projects: [{ ...REGISTRY.projects[0]!, id: 'demo', name: 'demo', forge: 'github' as const }],
+        })
+      },
+      'GET /api/v1/github?limit=1000': list,
+      'GET /api/v1/github?limit=1000&refresh=1': list,
+    })
+    renderAt('/p/demo/github/issues/142')
+
+    await waitFor(() => expect(promptValue()).toContain(ISSUE_142.title))
+    fireEvent.click(document.querySelector('[data-slot="gh-refresh"]')!)
+    // The detail really did take the new title — otherwise the box assertion below would pass for
+    // the wrong reason.
+    expect(await screen.findByRole('heading', { level: 2, name: RENAMED })).not.toBeNull()
+
+    await act(async () => {
+      releaseRegistry()
+      await Promise.resolve()
+    })
+    // The Run button is held until the registry answers, so its release is the proof that the
+    // correction effect has had its render — without it this asserts on a box the answer has not
+    // reached yet, and passes for a reason that has nothing to do with the rule under test.
+    await waitFor(() =>
+      expect(document.querySelector<HTMLButtonElement>('[data-action="gh-run"]')!.hasAttribute('disabled'))
+        .toBe(false))
+    expect(promptValue()).toContain(ISSUE_142.title)
+    expect(promptValue()).not.toContain(RENAMED)
+  })
+
   // Automations are GitHub-only in fact, not just in name: the poller shells out to the `gh` CLI
   // and never goes through `resolveForge`, which is why `visibleNavItems` withholds the item from
   // a forge it cannot reach. The tab's own cross-link is the same offer and must follow the same
