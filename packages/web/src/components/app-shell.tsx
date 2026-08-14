@@ -166,7 +166,9 @@ export function AppShell({
   // (multi-project spec, step 3.2) so `/p/cezar/git/commits` still lights Git.
   const areaPathname = stripProjectPrefix(pathname)
   const activeTo = activeNavPath(areaPathname)
-  const current = activeNavItem(areaPathname)
+  // The kind rides along: the mobile bar's title must be the same word the sidebar item and the
+  // view's heading use for this tab.
+  const current = activeNavItem(areaPathname, forgeKind)
   const [menuOpen, setMenuOpen] = React.useState(false)
   const mainRef = React.useRef<HTMLElement>(null)
   // The desktop column's width (#788). Read once, lazily, from `localStorage` — it is a

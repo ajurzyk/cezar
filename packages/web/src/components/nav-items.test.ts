@@ -57,6 +57,19 @@ describe('activeNavItem', () => {
     expect(activeNavItem('/skills')?.label).toBe('Skills')
   })
 
+  // The mobile top bar titles itself from this, on the same screen whose sidebar item and <h1>
+  // are named by `visibleNavItems` — so this has to answer with the same name.
+  it('names the forge item after the forge that answered', () => {
+    expect(activeNavItem('/github', 'forgejo')?.label).toBe('Forgejo')
+    expect(activeNavItem('/github', 'github')?.label).toBe('GitHub')
+    expect(activeNavItem('/github')?.label).toBe('GitHub')
+  })
+
+  it('leaves every other item alone', () => {
+    expect(activeNavItem('/skills', 'forgejo')?.label).toBe('Skills')
+    expect(activeNavItem('/automations', 'forgejo')?.label).toBe('Automations')
+  })
+
   it('returns null off-nav', () => {
     expect(activeNavItem('/new')).toBeNull()
   })

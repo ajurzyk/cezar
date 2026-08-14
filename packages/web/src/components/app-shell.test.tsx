@@ -388,6 +388,15 @@ describe('AppShell', () => {
       expect(within(bar).getByText('Skills')).toBeTruthy()
     })
 
+    // The bar sits on the same screen as the sidebar item, the view's own <h1> and every "open
+    // on …" link. Titling it from the raw nav table made it say "GitHub" while all of those
+    // said "Forgejo" — the mismatch Stage 4 exists to remove.
+    it('titles the mobile bar after the forge that answered', () => {
+      renderShell('/github', { forgeKind: 'forgejo' })
+      const bar = document.querySelector('[data-slot="mobile-top-bar"]') as HTMLElement
+      expect(within(bar).getByText('Forgejo')).toBeTruthy()
+    })
+
   })
 
   /** The resizable desktop column (#788, option C). jsdom has no layout engine, so these assert

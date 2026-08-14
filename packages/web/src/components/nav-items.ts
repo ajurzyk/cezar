@@ -149,8 +149,20 @@ export function activeNavPath(pathname: string): string | null {
   return best?.to ?? null
 }
 
-/** The nav item that owns `pathname` — the mobile top bar titles itself from this. */
-export function activeNavItem(pathname: string): NavItem | null {
+/**
+ * The nav item that owns `pathname` — the mobile top bar titles itself from this.
+ *
+ * `forgeKind` names the forge item exactly as `visibleNavItems` does, because the bar shares its
+ * screen with the sidebar item and the view's own `<h1>`: a title reading "GitHub" beside a
+ * heading reading "Forgejo" is the mismatch Stage 4 removes.
+ *
+ * Gating is deliberately NOT applied here. A route reached while its tab is hidden still needs a
+ * title, so this answers from the whole table — the availability question belongs to
+ * `visibleNavItems`, which decides what is offered, not to what a URL is called.
+ */
+export function activeNavItem(pathname: string, forgeKind?: ForgeKind): NavItem | null {
   const to = activeNavPath(pathname)
-  return NAV_ITEMS.find((item) => item.to === to) ?? null
+  const item = NAV_ITEMS.find((candidate) => candidate.to === to) ?? null
+  if (item === null || !item.forge || item.automations) return item
+  return forgeItem(item, forgeKind)
 }
