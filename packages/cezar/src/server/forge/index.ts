@@ -103,6 +103,28 @@ export function forgeKindOfRemote(remote: string | undefined, forge?: ForgeSetti
   return classifyForgeKind(parsed.host, forge);
 }
 
+/**
+ * A remote's web root — `https://github.com/owner/repo` — or null for anything not on a known
+ * forge host.
+ *
+ * Built from the PARSED remote, never by string-editing the raw one, and that is the point: a
+ * remote may carry credentials (`https://user:token@github.com/o/r.git`), and this is a value the
+ * cockpit renders and links to. Rebuilding it from `{host, owner, repo}` leaves nothing to leak.
+ *
+ * Gated on the HOST TABLE alone, unlike `forgeKindOfRemote` next to it: a repo-config forge names
+ * a kind, never a web root this could rebuild (`forge.webUrl` is the driver's business), so a
+ * Forgejo project answers `null` here and the surfaces that link by number degrade to plain text
+ * for it — the pre-Forgejo behaviour, not a wrong link.
+ */
+export function forgeWebRoot(remote: string | undefined): string | null {
+  // `FORGE_HOSTS.has(...)`, not `host in FORGE_HOSTS`: the table is a Map (see its comment), and
+  // `in` against a Map asks about the Map's OWN properties — never its entries — so every host
+  // would answer "unknown" and this would return null for github.com too.
+  const parsed = remote ? parseRemote(remote) : null;
+  if (!parsed || !FORGE_HOSTS.has(parsed.host)) return null;
+  return `https://${parsed.host}/${parsed.owner}/${parsed.repo}`;
+}
+
 /** Remote host (or, for a host the table can't reveal, a repo-config `ForgeSettings`) → driver |
  *  null. GitLab lands here later as one more host-table case. */
 export function resolveForge(repoInfo: RepoInfo | null, forge?: ForgeSettings): ForgeDriver | null {

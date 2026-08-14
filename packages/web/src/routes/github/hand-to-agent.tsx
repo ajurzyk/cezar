@@ -15,7 +15,7 @@ import { Link } from '@/lib/project-router'
 import { createRun, putUiState } from '@/api/client'
 import { queryKeys, useProjects, useUiState } from '@/api/queries'
 import type { GithubItem, Skill, WorkflowDef } from '@open-mercato/cezar-api-client'
-import { EnginePills, engineBody, useResolvedEngine, type EnginePick } from '@/components/engine-pills'
+import { EnginePills, engineRunBody, useResolvedEngine, type EnginePick } from '@/components/engine-pills'
 import { chipClass } from '@/components/picker-pill'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
@@ -232,7 +232,7 @@ export function HandToAgent({
     mutationFn: async () => {
       if (!resolved.canRun) return null
       return createRun(
-        githubRunBody(item, workflow, validSkills, prompt, engineBody(resolved), forgeKind),
+        githubRunBody(item, workflow, validSkills, prompt, engineRunBody(resolved), forgeKind),
       )
     },
     onSuccess: (created) => {
@@ -347,10 +347,14 @@ export function HandToAgent({
           selected={validSkills}
           onToggle={toggleSkill}
         />
+        {/* `accounts`: this hand-off posts to `/api/v1/runs`, which takes `agentProfile` — so
+            the runner pill may offer the agent's logins as rows (spec 2026-07-29-agent-profiles).
+            The Inbox card deliberately does not; its endpoint has no such field yet. */}
         <EnginePills
           pick={engine}
           onChange={onEngineChange}
           disabled={start.isPending || !resolved.canRun}
+          accounts
         />
         {!resolved.providerPending && !resolved.canRun ? (
           <span
