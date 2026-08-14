@@ -196,6 +196,40 @@ describe('forgeNote', () => {
     expect(note).toContain('GitHub tab is hidden')
   })
 
+  // Stage 4 (spec 2026-08-14-forgejo-forge-support): an unreachable Forgejo is not an
+  // unreachable GitHub, and the note that explains the
+  // missing tab must name the forge the server actually tried.
+  it('names Forgejo when that is the forge that failed', () => {
+    const note = forgeNote({
+      ...HEALTH,
+      forge: { kind: 'forgejo', available: false, reason: 'CEZ_FORGEJO_TOKEN is not set' },
+    })
+    expect(note).toContain('Forgejo is unreachable')
+    expect(note).toContain('Forgejo tab is hidden')
+    expect(note).not.toContain('GitHub')
+  })
+
+  // A null forge has no kind to read, and "no GitHub remote" is still the honest reading: the
+  // forge-less case IS a repo whose remote parsed to nothing the cockpit recognizes.
+  it('keeps the GitHub wording when there is no forge at all', () => {
+    expect(forgeNote(HEALTH)).toContain('No GitHub remote detected')
+  })
+
+  // The one new failure mode Stage 4 introduces: a repo that HAS a remote, on a host the table
+  // cannot reveal, whose `forge` block is missing or half-written. `readForgeSettings` drops it
+  // silently, `resolveForge` answers null — and this popover is the only place in the whole UI
+  // that says anything at all about the absent tab. "No GitHub remote detected" is a wrong
+  // diagnosis there: they have a remote.
+  it('tells a remote with no forge block apart from no remote at all', () => {
+    const note = forgeNote({
+      ...HEALTH,
+      repo: { root: '/home/me/demo', branch: 'main', remote: 'git@forge.example:acme/demo.git' },
+    })
+    expect(note).not.toContain('No GitHub remote detected')
+    expect(note).toContain('.ai/cezar/config.json')
+    expect(note).toContain('forge tab is hidden')
+  })
+
   it('renders in the open menu when the forge is absent, and not when it works', async () => {
     const { unmount } = renderMenu(HEALTH)
     let menu = await openMenu()

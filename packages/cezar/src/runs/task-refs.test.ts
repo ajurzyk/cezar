@@ -12,6 +12,19 @@ describe('extractTaskRefs', () => {
     });
   });
 
+  // Stage 4 (spec 2026-08-14-forgejo-forge-support): the forge tab now names the forge the item
+  // actually lives on. The templates it emits
+  // are still the templates this extractor has to read — and on Forgejo the WORDED tier is the
+  // only one that can fire, since tier 1 matches github.com URLs alone.
+  it('reads the Forgejo spelling of those same templates', () => {
+    expect(extractTaskRefs('Address Forgejo pull request #12: seam it\n\nhttp://forge.internal:3000/acme/demo/pulls/12')).toEqual({
+      prNumber: 12,
+    });
+    expect(extractTaskRefs('Fix Forgejo issue #24: avatars 404\n\nhttp://forge.internal:3000/acme/demo/issues/24')).toEqual({
+      issueNumber: 24,
+    });
+  });
+
   it('URLs are the strongest signal and set the kind', () => {
     expect(extractTaskRefs('see https://github.com/open-mercato/cezar/pull/441 please')).toEqual({ prNumber: 441 });
     expect(extractTaskRefs('see https://github.com/o-m/repo.name/issues/12')).toEqual({ issueNumber: 12 });

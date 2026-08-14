@@ -265,11 +265,23 @@ function ProjectGroup({
         >
           <nav aria-label={`${project.name} navigation`}>
             {/* Forge-gated per PROJECT (#698): the entry's own remote decides whether THIS
-                group offers a GitHub tab — the boot folder's health-level forge answer says
-                nothing about the other projects in the workspace. Whether `gh` itself works
-                still surfaces inside the tab as its availability hint. */}
+                group offers a forge tab — the boot folder's health-level forge answer says
+                nothing about the other projects in the workspace. Whether the forge itself
+                answers still surfaces inside the tab as its availability hint.
+
+                ANY forge, not just GitHub (spec 2026-08-14-forgejo-forge-support §"Stage 4"):
+                the gate used to read `=== 'github'`, which
+                is why a Forgejo project's tab vanished from the grouped sidebar — the shape a
+                workspace takes as soon as it holds a second project. `forgeKind` then names the
+                tab after that forge and keeps Automations out of it (`visibleNavItems`).
+
+                No `forgeSettled` here on purpose: this kind is the registry entry's OWN `forge`,
+                and the entry only exists because the registry answered — there is nothing left to
+                settle, so the default (true) is the truth. The hook-driven surfaces (flat nav, ⌘K)
+                pass the real flag, because their kind starts undefined for a reason. */}
             {visibleNavItems({
-              forge: project.forge === 'github',
+              forge: project.forge != null,
+              forgeKind: project.forge,
               inbox: inboxAvailable,
               automations: automationsAvailable,
             }).map((item) => {

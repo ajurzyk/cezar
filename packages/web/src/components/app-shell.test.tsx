@@ -102,6 +102,19 @@ describe('AppShell', () => {
     expect(links).toHaveLength(NAV_ITEMS.filter((item) => !item.forge).length)
   })
 
+  // Stage 4 (spec 2026-08-14-forgejo-forge-support): the flat nav (single-project mode) names
+  // the tab after the forge health reported.
+  it('names the forge item after the forge health reported', () => {
+    renderShell('/', { forgeAvailable: true, forgeKind: 'forgejo' })
+    expect(within(nav()).getByRole('link', { name: 'Forgejo' }).getAttribute('href')).toBe('/github')
+    expect(within(nav()).queryByRole('link', { name: 'GitHub' })).toBeNull()
+  })
+
+  it('still says GitHub when no kind is passed — the shell alone renders as it always did', () => {
+    renderShell('/', { forgeAvailable: true })
+    expect(within(nav()).getByRole('link', { name: 'GitHub' }).getAttribute('href')).toBe('/github')
+  })
+
   // #801: same degradation for the opt-in automations capability — the item disappears, it does
   // not render disabled. The two gates on that item are independent: a forge alone is not enough.
   it('drops the Automations item when the capability is off', () => {
@@ -374,6 +387,15 @@ describe('AppShell', () => {
       renderShell('/skills')
       const bar = document.querySelector('[data-slot="mobile-top-bar"]') as HTMLElement
       expect(within(bar).getByText('Skills')).toBeTruthy()
+    })
+
+    // The bar sits on the same screen as the sidebar item, the view's own <h1> and every "open
+    // on …" link. Titling it from the raw nav table made it say "GitHub" while all of those
+    // said "Forgejo" — the mismatch Stage 4 exists to remove.
+    it('titles the mobile bar after the forge that answered', () => {
+      renderShell('/github', { forgeKind: 'forgejo' })
+      const bar = document.querySelector('[data-slot="mobile-top-bar"]') as HTMLElement
+      expect(within(bar).getByText('Forgejo')).toBeTruthy()
     })
 
   })

@@ -36,7 +36,7 @@ import type {
 import { CenteredState } from '@/components/centered-state'
 import { Diff, type DiffFileChange } from '@/components/diff'
 import type { EnginePick } from '@/components/engine-pills'
-import { GithubIcon } from '@/components/icons'
+import { automationsPollable } from '@/components/nav-items'
 import { TabLink } from '@/components/tab-link'
 import { Button } from '@/components/ui/button'
 import {
@@ -52,8 +52,10 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Skeleton } from '@/components/ui/skeleton'
 import { toast } from '@/components/ui/toaster'
 import { shortAge } from '@/lib/format'
+import { forgeChecksUrl, forgeHint, forgeIcon, forgeLabel, type ForgeKind } from '@/lib/forge-label'
 import { githubTaskPrompt } from '@/lib/github-task'
 import { orderSkillsByUsage } from '@/lib/skills'
+import { useForgeKind, useForgeKindStatus } from '@/lib/use-forge-kind'
 import { cn, isHttpUrl } from '@/lib/utils'
 
 import { Markdown } from '../task-thread/markdown'
@@ -121,7 +123,27 @@ export function GithubRoute({ view, changes = false }: { view: GithubView; chang
   // says the feature does — otherwise this tab would advertise a page that only says "off".
   // `capabilities?.` because this tab renders against minimal health payloads too; absent is
   // fail-closed, which is the honest answer while the server has not spoken.
+  //
+  // The capability alone is not enough: the link is gated on `automationsPollable` too, the same
+  // condition `visibleNavItems` puts on the nav item. The poller only speaks `gh`, so on a
+  // Forgejo project this shortcut would lead somewhere that can never run.
   const automationsAvailable = useHealth().data?.capabilities?.automations === true
+  // What to CALL the forge on this screen (spec 2026-08-14-forgejo-forge-support §"Stage 4").
+  // The route, the endpoints and the payload are forge-agnostic already — only the words the
+  // user reads were hardcoded to one forge.
+  //
+  // `settled` rides along for the automations offer alone: naming this screen from an unsettled
+  // kind is the documented default, but OFFERING a page the poller cannot reach is not (see
+  // `automationsPollable`).
+  const { kind: forgeKind, settled: forgeSettled } = useForgeKindStatus()
+  const forge = forgeLabel(forgeKind)
+  // And what to MARK it with, from the same module — a mark chosen here would be a second
+  // spelling of the nav item's decision, free to drift from it.
+  const ForgeMark = forgeIcon(forgeKind)
+  // ONE decision, not two: the header renders it both as the link's presence and as which element
+  // carries `ml-auto`. Split across two conditions, a Forgejo project with the automations
+  // capability on satisfied the wider one and withheld the link — leaving the class on nobody.
+  const showAutomations = automationsAvailable && automationsPollable(forgeKind, forgeSettled)
   const gh = list.data
 
   // Lazy checks glyphs for the on-screen PR window (#664). Hooks must run before the early
@@ -260,7 +282,7 @@ export function GithubRoute({ view, changes = false }: { view: GithubView; chang
           <CenteredState
             icon={<TriangleAlertIcon />}
             tone="danger"
-            title="Could not load GitHub"
+            title={`Could not load ${forge}`}
             subtitle={list.error.message}
           />
         </div>
@@ -276,9 +298,9 @@ export function GithubRoute({ view, changes = false }: { view: GithubView; chang
     return (
       <div data-route="github" className="flex min-h-full flex-col">
         <CenteredState
-          icon={<GithubIcon />}
+          icon={<ForgeMark />}
           tone="neutral"
-          title="GitHub is unavailable here"
+          title={`${forge} is unavailable here`}
           subtitle={gh.reason ?? 'unknown reason'}
           actions={
             <Button
@@ -292,9 +314,11 @@ export function GithubRoute({ view, changes = false }: { view: GithubView; chang
           }
         >
           <p className="text-xs leading-relaxed text-soft-foreground">
-            The tab needs the <span className="font-mono">gh</span> CLI, logged in (
-            <span className="font-mono">gh auth login</span>), and a repo with a GitHub remote.
-            Everything else in cezar works without it.
+            {/* Per forge: the gh CLI means nothing to a Forgejo remote, and a token env var
+                means nothing to GitHub. `forgeHint` keeps the two in one place. */}
+            {forgeHint(forgeKind).map((part, index) => (
+              <span key={index} className={part.mono ? 'font-mono' : undefined}>{part.text}</span>
+            ))}
           </p>
         </CenteredState>
       </div>
@@ -335,13 +359,13 @@ export function GithubRoute({ view, changes = false }: { view: GithubView; chang
       >
         <header data-slot="gh-header" className="sticky top-0 z-10 border-b border-border bg-background/95 px-4 pt-3 backdrop-blur">
           <div className="flex min-w-0 items-center gap-2.5">
-            <h1 className="text-lg font-semibold">GitHub</h1>
+            <h1 className="text-lg font-semibold">{forge}</h1>
             {gh.repo ? (
               <span data-slot="gh-repo" className="min-w-0 truncate font-mono text-[11px] text-soft-foreground">
                 {gh.repo}
               </span>
             ) : null}
-            {automationsAvailable ? (
+            {showAutomations ? (
               <Link
                 to="/automations/new"
                 className="ml-auto shrink-0 text-[10px] font-medium text-primary hover:underline"
@@ -352,14 +376,16 @@ export function GithubRoute({ view, changes = false }: { view: GithubView; chang
             <button
               type="button"
               data-slot="gh-refresh"
-              title="Refresh from GitHub"
+              title={`Refresh from ${forge}`}
               disabled={refresh.isPending}
               onClick={() => refresh.mutate()}
               // The automations link owns the `ml-auto` that pushes this cluster right; with the
-              // link gated away this button inherits it, so the header does not re-flow.
+              // link gated away this button inherits it, so the header does not re-flow. Both read
+              // `showAutomations`, never one gate each — that split is what collapsed this chip
+              // left on a Forgejo project with the automations capability on.
               className={cn(
                 'flex shrink-0 items-center gap-1 rounded-full border border-border px-1.5 py-px text-[10px] font-medium text-soft-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-55',
-                !automationsAvailable && 'ml-auto',
+                !showAutomations && 'ml-auto',
               )}
             >
               <RefreshCwIcon
@@ -419,6 +445,8 @@ export function GithubRoute({ view, changes = false }: { view: GithubView; chang
                 active={selected?.url === item.url}
                 queued={queued.has(item.url)}
                 checks={item.kind === 'pr' ? checksMap?.[item.number] ?? item.checks : item.checks}
+                forgeKind={forgeKind}
+                forgeSettled={forgeSettled}
               />
             ))}
           </ul>
@@ -487,6 +515,8 @@ function GithubRow({
   active,
   queued,
   checks,
+  forgeKind,
+  forgeSettled = true,
 }: {
   item: GithubItem
   view: GithubView
@@ -495,6 +525,16 @@ function GithubRow({
   queued: boolean
   /** Resolved checks glyph — the lazily-hydrated value overrides the list's `null` (#664). */
   checks?: GithubItem['checks']
+  /** The forge the drag payload must name, since that payload is a prompt for an agent (Stage 4).
+   *  A PROP, not `useForgeKind()` here: the list runs to `LIST_LIMIT` rows with no virtualization
+   *  yet, and the hook subscribes to two queries plus the router — up to a thousand extra
+   *  observers to build one drag payload, from an answer the route already holds. */
+  forgeKind?: ForgeKind
+  /** Whether `forgeKind` is an ANSWER yet. The payload below is a prompt, not a label, so the
+   *  "absent reads as GitHub" default is not available to it: dragged early, a Forgejo row would
+   *  carry "Fix GitHub issue #N" into the composer, where nothing re-reads the registry to correct
+   *  it. A prop for the same reason `forgeKind` is one — the hook would subscribe once per row. */
+  forgeSettled?: boolean
 }) {
   const Icon = item.kind === 'issue' ? CircleDotIcon : GitPullRequestIcon
   const queryClient = useQueryClient()
@@ -513,7 +553,7 @@ function GithubRow({
   // issue" uses (legacy parity); a textarea accepts the text/plain payload natively.
   const onDragStart = (event: DragEvent) => {
     try {
-      event.dataTransfer.setData('text/plain', githubTaskPrompt(item))
+      event.dataTransfer.setData('text/plain', githubTaskPrompt(item, [], forgeKind))
       event.dataTransfer.effectAllowed = 'copy'
     } catch {
       // older engines — the drag just won't carry the prompt
@@ -524,14 +564,18 @@ function GithubRow({
     <li>
       <Link
         to={`${view === 'issues' ? '/github/issues' : '/github/prs'}/${item.number}`}
-        draggable
+        // An EXPLICIT false, not an omitted attribute: an <a> is draggable by default, so leaving
+        // it off would let the browser drag the bare URL rather than withhold the gesture. And the
+        // tooltip promises the payload, so it waits with it — a promise the row cannot keep for the
+        // moment the forge is unnamed is worse than no promise.
+        draggable={forgeSettled}
         onDragStart={onDragStart}
         onMouseEnter={prefetchThread}
         onFocus={prefetchThread}
         data-slot="gh-row"
         data-number={item.number}
         aria-current={active ? 'page' : undefined}
-        title="Drag into the composer to prefill a task"
+        title={forgeSettled ? 'Drag into the composer to prefill a task' : undefined}
         className={cn(
           'flex flex-col gap-1 rounded-md px-2.5 py-2 transition-colors hover:bg-muted',
           active && 'bg-muted',
@@ -663,6 +707,10 @@ function GithubDetail({
   /** Resolved checks glyph — the lazily-hydrated value overrides the list's `null` (#664). */
   checks?: GithubItem['checks']
 }) {
+  // `settled` rides along for the checks badge alone: naming this pane from an unsettled kind is
+  // the documented default, but `forgeChecksUrl` turns that kind into a URL — see `ChecksBadge`.
+  const { kind: forgeKind, settled: forgeSettled } = useForgeKindStatus()
+  const forge = forgeLabel(forgeKind)
   const kindWord = item.kind === 'pr' ? 'pull request' : 'issue'
   const hasDiffStat = item.kind === 'pr' && Boolean(item.additions || item.deletions)
   return (
@@ -703,12 +751,12 @@ function GithubDetail({
             data-slot="gh-open-link"
             className="inline-flex items-center gap-0.5 text-muted-foreground hover:text-foreground hover:underline"
           >
-            open on GitHub
+            open on {forge}
             <ExternalLinkIcon aria-hidden="true" className="size-2.5" />
           </a>
         ) : (
           <span data-slot="gh-open-link" className="text-muted-foreground">
-            open on GitHub
+            open on {forge}
           </span>
         )}
       </p>
@@ -727,7 +775,7 @@ function GithubDetail({
           {item.labels.map((label) => (
             <LabelChip key={label} label={label} color={colors[label]} />
           ))}
-          {checks ? <ChecksBadge checks={checks} url={item.url} /> : null}
+          {checks ? <ChecksBadge checks={checks} url={item.url} forgeKind={forgeKind} forgeSettled={forgeSettled} /> : null}
         </div>
       ) : null}
 
@@ -767,6 +815,7 @@ function MergeRequirementIcon({ state }: { state: MergeRequirementState }) {
 }
 
 function GithubMergeBox({ number }: { number: number }) {
+  const forge = forgeLabel(useForgeKind())
   const queryClient = useQueryClient()
   const mergeState = useQuery({
     queryKey: queryKeys.githubMergeState(number),
@@ -816,7 +865,7 @@ function GithubMergeBox({ number }: { number: number }) {
       <section data-slot="gh-merge-unavailable" className="mt-6 rounded-lg border border-border bg-card p-4 text-sm">
         <p className="font-medium">Merge status unavailable</p>
         <p className="mt-1 text-xs text-soft-foreground">
-          {mergeState.data?.available === false ? mergeState.data.reason : 'GitHub could not load merge requirements.'}
+          {mergeState.data?.available === false ? mergeState.data.reason : `${forge} could not load merge requirements.`}
         </p>
       </section>
     )
@@ -894,7 +943,7 @@ function GithubMergeBox({ number }: { number: number }) {
               />
               <span>
                 <span className="block font-medium">Merge without waiting for requirements</span>
-                <span className="mt-0.5 block text-soft-foreground">GitHub will allow this only if your permissions can bypass the repository rules.</span>
+                <span className="mt-0.5 block text-soft-foreground">{forge} will allow this only if your permissions can bypass the repository rules.</span>
               </span>
             </label>
           ) : null}
@@ -920,8 +969,8 @@ function GithubMergeBox({ number }: { number: number }) {
           <DialogHeader>
             <DialogTitle>{selectedMethod ? mergeLabels[selectedMethod] : 'Merge'} pull request #{number}?</DialogTitle>
             <DialogDescription>
-              This will merge “{state.title}” into {state.baseRef}. GitHub will re-check the exact reviewed head before changing the repository.
-              {overrideRules && state.canOverride ? ' You are asking GitHub to bypass unmet repository requirements; GitHub may refuse if your permissions do not allow it.' : ''}
+              This will merge “{state.title}” into {state.baseRef}. {forge} will re-check the exact reviewed head before changing the repository.
+              {overrideRules && state.canOverride ? ` You are asking ${forge} to bypass unmet repository requirements; ${forge} may refuse if your permissions do not allow it.` : ''}
             </DialogDescription>
           </DialogHeader>
           {merge.error ? <p className="text-sm text-danger">{merge.error.message}</p> : null}
@@ -938,6 +987,7 @@ function GithubMergeBox({ number }: { number: number }) {
 }
 
 function GithubPrChanges({ item }: { item: GithubItem }) {
+  const forge = forgeLabel(useForgeKind())
   const queryClient = useQueryClient()
   const query = useGithubPrChanges(item.number)
   const [filter, setFilter] = useState('')
@@ -982,7 +1032,7 @@ function GithubPrChanges({ item }: { item: GithubItem }) {
         <span className="font-mono text-muted-foreground" title={data.headSha}>head {data.headSha.slice(0, 8)}</span>
         <Button type="button" variant="outline" size="sm" className="ml-auto min-h-11" onClick={() => void refresh()}>Refresh</Button>
       </div>
-      {data.truncated ? <p role="status" className="mt-3 rounded-md border border-warning/40 bg-warning/10 p-3 text-xs">{data.reason ?? 'This response is incomplete.'} {fallback ? <a href={fallback} target="_blank" rel="noopener noreferrer" className="underline">Open all files on GitHub</a> : null}</p> : null}
+      {data.truncated ? <p role="status" className="mt-3 rounded-md border border-warning/40 bg-warning/10 p-3 text-xs">{data.reason ?? 'This response is incomplete.'} {fallback ? <a href={fallback} target="_blank" rel="noopener noreferrer" className="underline">Open all files on {forge}</a> : null}</p> : null}
       <div className="mt-4 grid min-w-0 gap-4 lg:grid-cols-[240px_minmax(0,1fr)]">
         <aside className="min-w-0">
           <input aria-label="Filter changed files" value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter files…" className="min-h-11 w-full rounded-md border border-input bg-background px-3 text-sm" />
@@ -1011,9 +1061,10 @@ function GithubPrChanges({ item }: { item: GithubItem }) {
 /** The conversation thread (#499): comments (+ PR review summaries) rendered under the body, each
  *  body through the shared `Markdown` component so images and code fences render exactly as the
  *  issue body does. Lazy — only fetched while this detail view is mounted. Everything degrades:
- *  loading → skeleton, unreachable → one-line reason + "open on GitHub", empty → nothing (the
- *  count badge already said there were none). */
+ *  loading → skeleton, unreachable → one-line reason + "open on …" (the forge that answered),
+ *  empty → nothing (the count badge already said there were none). */
 function GithubThread({ item, colors }: { item: GithubItem; colors: Record<string, string> }) {
+  const forge = forgeLabel(useForgeKind())
   const thread = useGithubComments(item.kind, item.number)
   const data = thread.data
 
@@ -1066,7 +1117,7 @@ function GithubThread({ item, colors }: { item: GithubItem; colors: Record<strin
           rel="noopener noreferrer"
           className="inline-flex items-center gap-0.5 text-muted-foreground hover:text-foreground hover:underline"
         >
-          open on GitHub
+          open on {forge}
           <ExternalLinkIcon aria-hidden="true" className="size-2.5" />
         </a>
       </section>
@@ -1093,14 +1144,15 @@ function GithubThread({ item, colors }: { item: GithubItem; colors: Record<strin
       <ul className="flex flex-col gap-5">
         {groupCommitRuns(entries).map((grouped) =>
           grouped.group === 'commits' ? (
-            <CommitGroup key={grouped.commits[0]!.id} commits={grouped.commits} colors={colors} />
+            <CommitGroup key={grouped.commits[0]!.id} commits={grouped.commits} colors={colors} forge={forge} />
           ) : grouped.entry.row === 'comment' ? (
             <ThreadEntry
               key={`${grouped.entry.comment.kind}-${grouped.entry.comment.id}`}
               comment={grouped.entry.comment}
+              forge={forge}
             />
           ) : (
-            <EventRow key={grouped.entry.event.id} event={grouped.entry.event} colors={colors} />
+            <EventRow key={grouped.entry.event.id} event={grouped.entry.event} colors={colors} forge={forge} />
           ),
         )}
       </ul>
@@ -1112,7 +1164,7 @@ function GithubThread({ item, colors }: { item: GithubItem; colors: Record<strin
           data-slot="gh-thread-truncated"
           className="mt-4 inline-flex items-center gap-0.5 text-xs text-soft-foreground hover:text-foreground hover:underline"
         >
-          thread truncated — open on GitHub
+          thread truncated — open on {forge}
           <ExternalLinkIcon aria-hidden="true" className="size-2.5" />
         </a>
       ) : null}
@@ -1177,7 +1229,7 @@ export function groupCommitRuns(entries: ThreadRow[]): GroupedRow[] {
 
 /** A collapsed run of consecutive commits — `{actor} added {n} commits`, expanding to the
  *  individual rows, each of which keeps its own message and CI glyph. */
-function CommitGroup({ commits, colors }: { commits: GithubTimelineEvent[]; colors: Record<string, string> }) {
+function CommitGroup({ commits, colors, forge }: { commits: GithubTimelineEvent[]; colors: Record<string, string>; forge: string }) {
   const [open, setOpen] = useState(false)
   const actor = commits[0]?.actor ?? '?'
 
@@ -1197,7 +1249,7 @@ function CommitGroup({ commits, colors }: { commits: GithubTimelineEvent[]; colo
           </button>
         </li>
         {commits.map((commit) => (
-          <EventRow key={commit.id} event={commit} colors={colors} />
+          <EventRow key={commit.id} event={commit} colors={colors} forge={forge} />
         ))}
       </>
     )
@@ -1241,8 +1293,12 @@ const EVENT_GLYPH: Record<GithubTimelineEventKind, string> = {
  * One timeline event — deliberately NOT a `ThreadEntry`: single line, muted, no card, no avatar
  * block, so events read as connective tissue between comments rather than competing with them.
  * Mirrors github.com's density.
+ *
+ * `forge` arrives as a PROP, not from `useForgeKind()` here: a busy PR's thread runs to hundreds
+ * of rows, and that hook subscribes to `useProjects`, `useHealth` and `useLocation` — three
+ * observers per row, for one `aria-label`. The same rule `GithubRow` follows for its `forgeKind`.
  */
-function EventRow({ event, colors }: { event: GithubTimelineEvent; colors: Record<string, string> }) {
+function EventRow({ event, colors, forge }: { event: GithubTimelineEvent; colors: Record<string, string>; forge: string }) {
   return (
     <li
       data-slot="gh-event-row"
@@ -1263,7 +1319,7 @@ function EventRow({ event, colors }: { event: GithubTimelineEvent; colors: Recor
           href={event.url}
           target="_blank"
           rel="noopener noreferrer"
-          aria-label={`open ${event.kind} on GitHub`}
+          aria-label={`open ${event.kind} on ${forge}`}
           className="ml-auto shrink-0 text-muted-foreground hover:text-foreground"
         >
           <ExternalLinkIcon aria-hidden="true" className="size-2.5" />
@@ -1362,8 +1418,10 @@ const REVIEW_CHIP: Record<NonNullable<GithubComment['reviewState']>, { label: st
 }
 
 /** One thread entry: avatar (letter fallback), author, age, an optional review-state chip, and the
- *  body via the shared `Markdown` component (images/code fences render as in the issue body). */
-function ThreadEntry({ comment }: { comment: GithubComment }) {
+ *  body via the shared `Markdown` component (images/code fences render as in the issue body).
+ *
+ *  `forge` is a prop for the same reason `EventRow`'s is — see the note there. */
+function ThreadEntry({ comment, forge }: { comment: GithubComment; forge: string }) {
   const chip = comment.reviewState ? REVIEW_CHIP[comment.reviewState] : null
   return (
     <li data-slot="gh-thread-entry" data-kind={comment.kind} className="min-w-0">
@@ -1384,7 +1442,7 @@ function ThreadEntry({ comment }: { comment: GithubComment }) {
           href={comment.url}
           target="_blank"
           rel="noopener noreferrer"
-          aria-label="open comment on GitHub"
+          aria-label={`open comment on ${forge}`}
           className="ml-auto shrink-0 text-muted-foreground hover:text-foreground"
         >
           <ExternalLinkIcon aria-hidden="true" className="size-2.5" />
@@ -1454,13 +1512,22 @@ function CommentCount({ count }: { count: number }) {
   )
 }
 
-/** The checks badge — the legacy tab's three phrases, tinted by outcome. Links out
- *  to the PR's checks tab on GitHub (issue #415) when a URL is available. */
-function ChecksBadge({ checks, url }: { checks: Checks; url?: string }) {
+/** The checks badge — the legacy tab's three phrases, tinted by outcome. Links out to wherever
+ *  the forge actually shows CI for this PR (issue #415) when a URL is available.
+ *
+ *  The kind has to reach this deep because the two forges disagree on the route, not just on the
+ *  name — see `forgeChecksUrl`. A PROP rather than `useForgeKind()` here, matching `GithubRow`:
+ *  the detail pane already holds the answer. */
+function ChecksBadge({ checks, url, forgeKind, forgeSettled = true }: { checks: Checks; url?: string; forgeKind?: ForgeKind; forgeSettled?: boolean }) {
   const className = cn('text-[11px] font-medium', CHECKS_TONE[checks], url && 'hover:underline')
   const label = `${CHECKS_GLYPH[checks]} checks ${checks}`
 
-  if (!url) {
+  // No url, or no answer yet about the forge: the glyph alone. `forgeChecksUrl` is the one place a
+  // kind becomes a URL instead of a word, and the two forges do not share the route — GitHub has
+  // `<pr>/checks`, Forgejo 404s on it — so the "absent reads as GitHub" default would hand a
+  // Forgejo user a dead link in the window before the registry answers. The STATUS is not in doubt
+  // there, so it still renders; only the link waits.
+  if (!url || !forgeSettled) {
     return (
       <span data-slot="gh-checks" data-checks={checks} className={className}>
         {label}
@@ -1470,7 +1537,7 @@ function ChecksBadge({ checks, url }: { checks: Checks; url?: string }) {
 
   return (
     <a
-      href={`${url}/checks`}
+      href={forgeChecksUrl(url, forgeKind)}
       target="_blank"
       rel="noopener noreferrer"
       data-slot="gh-checks"

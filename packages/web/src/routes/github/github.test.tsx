@@ -2202,3 +2202,517 @@ describe('groupCommitRuns', () => {
     expect(groupCommitRuns([])).toEqual([])
   })
 })
+
+/**
+ * Stage 4 (spec 2026-08-14-forgejo-forge-support): the screen is named after the forge that
+ * actually answered, not after the file it
+ * lives in. The route, the endpoints and the fixtures are unchanged — `/api/v1/github*` keeps
+ * serving both forges (BACKWARD_COMPATIBILITY.md §2); only what the user reads changes.
+ *
+ * The kind comes from the project in the URL, never from `/api/v1/health`: health is global and
+ * describes the boot folder, which on a real multi-project workspace is a different repo.
+ */
+describe('forge naming', () => {
+  const REGISTRY = {
+    projects: [{
+      id: 'acme',
+      name: 'acme',
+      root: '/srv/dev/demo',
+      addedAt: '2026-08-01T00:00:00.000Z',
+      lastOpenedAt: '2026-08-08T00:00:00.000Z',
+      source: 'local' as const,
+      status: 'ok' as const,
+      forge: 'forgejo' as const,
+    }],
+    bootProject: 'cezar-lab',
+    projectsDir: '/srv/dev',
+  }
+
+  const forgejoStubs = (over: Record<string, () => Response | Promise<Response>> = {}) => ({
+    'GET /api/v1/projects': () => jsonResponse(REGISTRY),
+    // The boot folder has no forge at all — exactly the live instance's shape, and the case a
+    // health-driven label would get wrong.
+    'GET /api/v1/health': () => jsonResponse(health(['claude'])),
+    ...over,
+  })
+
+  it('titles the screen and its controls after Forgejo', async () => {
+    stubFetch(forgejoStubs())
+    renderAt('/p/acme/github/issues/142')
+
+    await waitFor(() => expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Forgejo'))
+    expect(document.querySelector('[data-slot="gh-refresh"]')?.getAttribute('title'))
+      .toBe('Refresh from Forgejo')
+    await waitFor(() => expect(screen.getAllByText('open on Forgejo').length).toBeGreaterThan(0))
+  })
+
+  it('says nothing about GitHub anywhere on a Forgejo screen', async () => {
+    stubFetch(forgejoStubs())
+    renderAt('/p/acme/github/issues/142')
+
+    await waitFor(() => expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Forgejo'))
+    const route = document.querySelector('[data-route="github"]') as HTMLElement
+    expect(route.textContent).not.toContain('GitHub')
+  })
+
+  it('tells a Forgejo user what the tab needs — its config block, not the gh CLI', async () => {
+    stubFetch(forgejoStubs({
+      'GET /api/v1/github?limit=1000': () =>
+        jsonResponse({ available: false, reason: 'CEZ_FORGEJO_TOKEN is not set', issues: [], prs: [] }),
+      'GET /api/v1/github': () =>
+        jsonResponse({ available: false, reason: 'CEZ_FORGEJO_TOKEN is not set', issues: [], prs: [] }),
+    }))
+    renderAt('/p/acme/github')
+
+    await waitFor(() => expect(screen.getByText('Forgejo is unavailable here')).toBeTruthy())
+    const route = document.querySelector('[data-route="github"]') as HTMLElement
+    expect(route.textContent).toContain('CEZ_FORGEJO_TOKEN')
+    expect(route.textContent).not.toContain('gh auth login')
+    // The server's own reason is still what explains the outage — the hint only says what is needed.
+    expect(route.textContent).toContain('CEZ_FORGEJO_TOKEN is not set')
+  })
+
+  // The hand-off box is not a label — it is the text an agent receives. Telling it to "fix
+  // GitHub issue #142" about a Forgejo issue would be a false instruction, not a cosmetic slip.
+  it('hands the agent a prompt that names Forgejo', async () => {
+    stubFetch(forgejoStubs())
+    renderAt('/p/acme/github/issues/142')
+
+    await waitFor(() => expect(promptValue()).toContain('Fix Forgejo issue #142'))
+    expect(promptValue()).not.toContain('GitHub')
+  })
+
+  // The checks badge is the one outbound link on this screen that is not a bare `item.url` — it
+  // appends a route. GitHub has `<pr>/checks`; Forgejo has no such page at all. And the Forgejo
+  // driver really does populate the glyph (it serves `GET /github/checks`), so the badge renders
+  // there — without this branch it hands the user a 404.
+  it('points the checks badge at the Forgejo pull request, not at a /checks route', async () => {
+    const pull = 'https://forge.example/acme/demo/pulls/137'
+    stubFetch(forgejoStubs({
+      'GET /api/v1/github?limit=1000': () =>
+        jsonResponse({ ...GITHUB, prs: [{ ...PR_137, url: pull }] }),
+    }))
+    renderAt('/p/acme/github/prs/137')
+
+    // Waits for the ANCHOR, not merely for the element: the badge renders its glyph as a plain
+    // span until the registry has named the forge (see the next test), so waiting on the slot
+    // alone would sample the intermediate state.
+    await waitFor(() => expect(document.querySelector('[data-slot="gh-checks"]')?.tagName).toBe('A'))
+    const checks = document.querySelector('[data-slot="gh-checks"]')
+    expect(checks?.getAttribute('href')).toBe(pull)
+  })
+
+  // The checks badge is the one branch that turns the kind into a URL rather than a word, so the
+  // "absent reads as GitHub" default is not available to it: `<pr>/checks` does not exist on
+  // Forgejo. While the registry is in flight the kind is undefined for every project, so the badge
+  // keeps its glyph and drops the link — the same fail-closed rule the automations offer follows.
+  it('does not link the checks badge before the registry has named the forge', async () => {
+    let releaseRegistry!: () => void
+    const registryArrived = new Promise<void>((resolve) => { releaseRegistry = resolve })
+    const pull = 'https://forge.example/acme/demo/pulls/137'
+    stubFetch(forgejoStubs({
+      'GET /api/v1/github?limit=1000': () =>
+        jsonResponse({ ...GITHUB, prs: [{ ...PR_137, url: pull }] }),
+      'GET /api/v1/projects': async () => {
+        await registryArrived
+        return jsonResponse(REGISTRY)
+      },
+    }))
+    renderAt('/p/acme/github/prs/137')
+
+    // The glyph is still there — only the link waits.
+    await waitFor(() => expect(document.querySelector('[data-slot="gh-checks"]')).not.toBeNull())
+    expect(document.querySelector('[data-slot="gh-checks"]')!.tagName).toBe('SPAN')
+
+    await act(async () => {
+      releaseRegistry()
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(document.querySelector('[data-slot="gh-checks"]')!.tagName).toBe('A'))
+    expect(document.querySelector('[data-slot="gh-checks"]')!.getAttribute('href')).toBe(pull)
+  })
+
+  // The pre-fill is captured ONCE per mount (#524's snapshot rule), and the registry that names
+  // the forge is a different query from the list that produced the item — so on a cold deep link
+  // it can answer second. The box must still end up naming the right forge; a prompt frozen at
+  // the wrong one is a false instruction that survives until the user notices.
+  it('corrects the prompt when the registry answers after the item list', async () => {
+    let releaseRegistry!: () => void
+    const registryArrived = new Promise<void>((resolve) => { releaseRegistry = resolve })
+    stubFetch(forgejoStubs({
+      'GET /api/v1/projects': async () => {
+        await registryArrived
+        return jsonResponse(REGISTRY)
+      },
+    }))
+    renderAt('/p/acme/github/issues/142')
+
+    // The box exists before the registry has said anything — and reads as GitHub, the default.
+    await waitFor(() => expect(promptValue()).toContain('Fix GitHub issue #142'))
+    await act(async () => {
+      releaseRegistry()
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(promptValue()).toContain('Fix Forgejo issue #142'))
+  })
+
+  // The same late registry, but where health has a forge of its own to offer: the URL project IS
+  // the boot folder, so health stands in for it until the registry — the authority — answers.
+  // A correction latched on "some kind arrived" is spent on that stand-in, and the box then keeps
+  // telling the agent to "fix GitHub issue #142" about a Forgejo issue. `mentionsItem` matches
+  // the stale text, so `composeGithubTask` hands it over verbatim: a false instruction.
+  it('corrects the prompt when the registry contradicts the forge health offered', async () => {
+    let releaseRegistry!: () => void
+    const registryArrived = new Promise<void>((resolve) => { releaseRegistry = resolve })
+    stubFetch(forgejoStubs({
+      'GET /api/v1/health': () => jsonResponse({
+        ...health(['claude']),
+        bootProject: 'acme',
+        forge: { kind: 'github' as const, available: true },
+      }),
+      'GET /api/v1/projects': async () => {
+        await registryArrived
+        return jsonResponse({ ...REGISTRY, bootProject: 'acme' })
+      },
+    }))
+    renderAt('/p/acme/github/issues/142')
+
+    await waitFor(() => expect(promptValue()).toContain('Fix GitHub issue #142'))
+    await act(async () => {
+      releaseRegistry()
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(promptValue()).toContain('Fix Forgejo issue #142'))
+  })
+
+  it('leaves a prompt the user has edited alone when the registry answers late', async () => {
+    let releaseRegistry!: () => void
+    const registryArrived = new Promise<void>((resolve) => { releaseRegistry = resolve })
+    stubFetch(forgejoStubs({
+      'GET /api/v1/projects': async () => {
+        await registryArrived
+        return jsonResponse(REGISTRY)
+      },
+    }))
+    renderAt('/p/acme/github/issues/142')
+
+    await waitFor(() => expect(promptValue()).toContain('Fix GitHub issue #142'))
+    fireEvent.change(promptField(), { target: { value: 'rebase this onto develop' } })
+    await act(async () => {
+      releaseRegistry()
+      await Promise.resolve()
+    })
+    // Their words are theirs. The forge name reaches the agent through the ref block the run
+    // body attaches, not by rewriting what they typed.
+    expect(promptValue()).toBe('rebase this onto develop')
+  })
+
+  // Clearing the box by hand re-opens auto-apply (`resolveAutoApply`'s "empty means untouched")
+  // — but that door belongs to a SKILL CHANGE, something the user clicked and can see the result
+  // of. The registry answering after the mount is neither: re-seeding on it would refill, under
+  // the fingers of someone who just selected-all-and-deleted to write their own instruction, the
+  // very prompt they deleted.
+  it('leaves an emptied prompt empty when the registry answers late', async () => {
+    let releaseRegistry!: () => void
+    const registryArrived = new Promise<void>((resolve) => { releaseRegistry = resolve })
+    stubFetch(forgejoStubs({
+      'GET /api/v1/projects': async () => {
+        await registryArrived
+        return jsonResponse(REGISTRY)
+      },
+    }))
+    renderAt('/p/acme/github/issues/142')
+
+    await waitFor(() => expect(promptValue()).toContain('Fix GitHub issue #142'))
+    fireEvent.change(promptField(), { target: { value: '' } })
+    await act(async () => {
+      releaseRegistry()
+      await Promise.resolve()
+    })
+    expect(promptValue()).toBe('')
+  })
+
+  // The ref block is the ONLY thing carrying attribution on a non-GitHub forge, and for a prompt
+  // the user wrote from scratch it is built fresh at submit time (`composeGithubTask` — nothing
+  // in the box matches `mentionsItem`). Fired before the registry answers it would be built from
+  // `forge === undefined`, i.e. "Fix GitHub issue #142" about a Forgejo issue. That is an
+  // instruction handed to an agent, not a label on a screen.
+  it('does not start a run before the forge is known', async () => {
+    let releaseRegistry!: () => void
+    const registryArrived = new Promise<void>((resolve) => { releaseRegistry = resolve })
+    const sent = stubFetch(forgejoStubs({
+      'GET /api/v1/projects': async () => {
+        await registryArrived
+        return jsonResponse(REGISTRY)
+      },
+    }))
+    renderAt('/p/acme/github/issues/142')
+
+    await waitFor(() => expect(promptValue()).toContain('Fix GitHub issue #142'))
+    fireEvent.change(promptField(), { target: { value: 'rebase this onto develop' } })
+    const runButton = () => document.querySelector<HTMLButtonElement>('[data-action="gh-run"]')!
+    expect(runButton().hasAttribute('disabled')).toBe(true)
+    fireEvent.keyDown(promptField(), { key: 'Enter', metaKey: true })
+    const posts = () => sent.filter((request) => request.method === 'POST' && request.path === '/api/v1/runs')
+    expect(posts()).toHaveLength(0)
+
+    await act(async () => {
+      releaseRegistry()
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(runButton().hasAttribute('disabled')).toBe(false))
+    fireEvent.keyDown(promptField(), { key: 'Enter', metaKey: true })
+    await waitFor(() => expect(posts()).toHaveLength(1))
+    expect(posts()[0]!.body).toMatchObject({
+      task: expect.stringContaining('Fix Forgejo issue #142') as unknown as string,
+    })
+  })
+
+  // Single-project mode is the other half of that gate, and the registry does not cover it: the
+  // routes mount UNSCOPED there (`/github/…`, no `/p/<id>`), so `useForgeKindStatus` takes the
+  // kind from `/api/v1/health` and the registry has nothing to say. A workspace whose only
+  // project sits on Forgejo is exactly the deployment Stage 4 exists for, and a gate that waits
+  // on the registry alone is already open there while nothing has named the forge.
+  it('holds a from-scratch prompt until health names the forge in single-project mode', async () => {
+    let releaseHealth!: () => void
+    const healthArrived = new Promise<void>((resolve) => { releaseHealth = resolve })
+    const sent = stubFetch({
+      'GET /api/v1/health': async () => {
+        await healthArrived
+        return jsonResponse({ ...health(['claude']), forge: { kind: 'forgejo' as const, available: true } })
+      },
+    })
+    renderAt('/github/issues/142')
+
+    await waitFor(() => expect(promptValue()).toContain('Fix GitHub issue #142'))
+    fireEvent.change(promptField(), { target: { value: 'rebase this onto develop' } })
+    const runButton = () => document.querySelector<HTMLButtonElement>('[data-action="gh-run"]')!
+    expect(runButton().hasAttribute('disabled')).toBe(true)
+    fireEvent.keyDown(promptField(), { key: 'Enter', metaKey: true })
+    const posts = () => sent.filter((request) => request.method === 'POST' && request.path === '/api/v1/runs')
+    expect(posts()).toHaveLength(0)
+
+    await act(async () => {
+      releaseHealth()
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(runButton().hasAttribute('disabled')).toBe(false))
+    fireEvent.keyDown(promptField(), { key: 'Enter', metaKey: true })
+    await waitFor(() => expect(posts()).toHaveLength(1))
+    expect(posts()[0]!.body).toMatchObject({
+      task: expect.stringContaining('Fix Forgejo issue #142') as unknown as string,
+    })
+  })
+
+  // The other side of the same gate. A box still carrying the pre-fill composes nothing new at
+  // submit time — what it sends is the block the user is reading — so it must not start waiting
+  // on health, whose ordering test (#652) holds `/api/v1/health` open forever and still expects
+  // a live Run button. Only a prompt with no reference of its own builds a ref block fresh, and
+  // only that one waits.
+  it('starts an untouched box without waiting on health', async () => {
+    const sent = stubFetch({ 'GET /api/v1/health': () => new Promise<Response>(() => {}) })
+    renderAt('/github/issues/142')
+
+    await waitFor(() => expect(promptValue()).toContain('Fix GitHub issue #142'))
+    await waitForAgentRunEnabled()
+    fireEvent.keyDown(promptField(), { key: 'Enter', metaKey: true })
+    await waitFor(() =>
+      expect(sent.some((request) => request.method === 'POST' && request.path === '/api/v1/runs')).toBe(true))
+  })
+
+  // The one-shot correction is the single exception to #524's capture-once rule, and it is spelled
+  // for the FORGE alone. A mounted box outlives the list that produced its item — the refresh
+  // button replaces the whole list, and the component is keyed by `item.url`, not by title — so a
+  // correction keyed on "the ref block differs" also fires on a late TITLE, re-seeding the box for
+  // a reason that has nothing to do with the forge.
+  it('leaves the box alone when a late list changes only the title', async () => {
+    let releaseRegistry!: () => void
+    const registryArrived = new Promise<void>((resolve) => { releaseRegistry = resolve })
+    const RENAMED = 'Login form drops session on reload'
+    let listCalls = 0
+    const list = () => {
+      listCalls += 1
+      return jsonResponse(
+        listCalls === 1 ? GITHUB : { ...GITHUB, issues: [{ ...ISSUE_142, title: RENAMED }, ISSUE_139] },
+      )
+    }
+    stubFetch({
+      'GET /api/v1/projects': async () => {
+        await registryArrived
+        return jsonResponse({
+          ...REGISTRY,
+          projects: [{ ...REGISTRY.projects[0]!, id: 'demo', name: 'demo', forge: 'github' as const }],
+        })
+      },
+      'GET /api/v1/github?limit=1000': list,
+      'GET /api/v1/github?limit=1000&refresh=1': list,
+    })
+    renderAt('/p/demo/github/issues/142')
+
+    await waitFor(() => expect(promptValue()).toContain(ISSUE_142.title))
+    fireEvent.click(document.querySelector('[data-slot="gh-refresh"]')!)
+    // The detail really did take the new title — otherwise the box assertion below would pass for
+    // the wrong reason.
+    expect(await screen.findByRole('heading', { level: 2, name: RENAMED })).not.toBeNull()
+
+    await act(async () => {
+      releaseRegistry()
+      await Promise.resolve()
+    })
+    // The Run button is held until the registry answers, so its release is the proof that the
+    // correction effect has had its render — without it this asserts on a box the answer has not
+    // reached yet, and passes for a reason that has nothing to do with the rule under test.
+    await waitFor(() =>
+      expect(document.querySelector<HTMLButtonElement>('[data-action="gh-run"]')!.hasAttribute('disabled'))
+        .toBe(false))
+    expect(promptValue()).toContain(ISSUE_142.title)
+    expect(promptValue()).not.toContain(RENAMED)
+  })
+
+  // The drag payload is a PROMPT — `githubTaskPrompt`, the same text the hand-off box sends — so it
+  // carries the same obligation not to name the wrong forge, on a path that has no gate and no
+  // later correction: once the text lands in the composer, nothing re-reads the registry. A row
+  // dragged before the answer arrives would hand `/new` "Fix GitHub issue #142" about a Forgejo
+  // issue. The row stays clickable throughout; only the secondary gesture waits.
+  it('does not offer a drag payload before the registry has named the forge', async () => {
+    let releaseRegistry!: () => void
+    const registryArrived = new Promise<void>((resolve) => { releaseRegistry = resolve })
+    stubFetch(forgejoStubs({
+      'GET /api/v1/projects': async () => {
+        await registryArrived
+        return jsonResponse(REGISTRY)
+      },
+    }))
+    renderAt('/p/acme/github/issues/142')
+
+    const firstRow = () => document.querySelector('[data-slot="gh-row"]')!
+    await waitFor(() => expect(document.querySelector('[data-slot="gh-row"]')).not.toBeNull())
+    expect(firstRow().getAttribute('draggable')).toBe('false')
+    // The tooltip promises the gesture, so it must not outlive it.
+    expect(firstRow().getAttribute('title')).toBeNull()
+
+    await act(async () => {
+      releaseRegistry()
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(firstRow().getAttribute('draggable')).toBe('true'))
+    expect(firstRow().getAttribute('title')).toContain('Drag into the composer')
+  })
+
+  // A disabled control with no explanation is indistinguishable from a broken one, and this wait
+  // is invisible: nothing else on the panel moves while the registry is in flight. The explanation
+  // has to be RENDERED — a `title` on the disabled <Button> is unreachable, because the shared
+  // button class carries `disabled:pointer-events-none` (ui/button.tsx), so no hover ever lands on
+  // it while it is held, and browsers suppress `title` on disabled controls anyway.
+  it('says why the run is held while the forge is unknown', async () => {
+    let releaseRegistry!: () => void
+    const registryArrived = new Promise<void>((resolve) => { releaseRegistry = resolve })
+    stubFetch(forgejoStubs({
+      'GET /api/v1/projects': async () => {
+        await registryArrived
+        return jsonResponse(REGISTRY)
+      },
+    }))
+    renderAt('/p/acme/github/issues/142')
+
+    await waitFor(() => expect(promptValue()).toContain('Fix GitHub issue #142'))
+    const gate = () => document.querySelector('[data-slot="gh-forge-gate"]')
+    expect(gate()?.textContent).toContain('forge')
+
+    await act(async () => {
+      releaseRegistry()
+      await Promise.resolve()
+    })
+    // Once it can run there is nothing left to explain.
+    const runButton = () => document.querySelector<HTMLButtonElement>('[data-action="gh-run"]')!
+    await waitFor(() => expect(runButton().hasAttribute('disabled')).toBe(false))
+    expect(gate()).toBeNull()
+  })
+
+  // Automations are GitHub-only in fact, not just in name: the poller shells out to the `gh` CLI
+  // and never goes through `resolveForge`, which is why `visibleNavItems` withholds the item from
+  // a forge it cannot reach. The tab's own cross-link is the same offer and must follow the same
+  // rule — otherwise the sidebar and the ⌘K palette hide Automations on a Forgejo project while
+  // this header walks the user into building one that can never fire.
+  const automationsOn = () => jsonResponse({
+    ...health(['claude']),
+    capabilities: { ...health(['claude']).capabilities, automations: true },
+  })
+
+  it('withholds the automations shortcut from a forge the poller cannot reach', async () => {
+    stubFetch(forgejoStubs({ 'GET /api/v1/health': automationsOn }))
+    renderAt('/p/acme/github')
+
+    await waitFor(() => expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Forgejo'))
+    expect(screen.queryByRole('link', { name: 'Set up automations' })).toBeNull()
+  })
+
+  // The same offer, in the window before the registry answers. `forgeKind` is undefined for every
+  // project then — including the Forgejo one — so a link gated on the LABEL's "absent means GitHub"
+  // default renders, and a user who takes it builds an automation the `gh` poller can never fire.
+  // Naming a tab is reversible on the next render; an automation left behind is not.
+  it('withholds the automations shortcut until the registry has named the forge', async () => {
+    let releaseRegistry!: () => void
+    const registryArrived = new Promise<void>((resolve) => { releaseRegistry = resolve })
+    stubFetch(forgejoStubs({
+      'GET /api/v1/health': automationsOn,
+      'GET /api/v1/projects': async () => {
+        await registryArrived
+        return jsonResponse(REGISTRY)
+      },
+    }))
+    renderAt('/p/acme/github')
+
+    // The tab itself is on screen — only the offer is withheld.
+    await waitFor(() => expect(document.querySelector('[data-slot="gh-header"]')).not.toBeNull())
+    expect(screen.queryByRole('link', { name: 'Set up automations' })).toBeNull()
+
+    await act(async () => {
+      releaseRegistry()
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Forgejo'))
+    expect(screen.queryByRole('link', { name: 'Set up automations' })).toBeNull()
+  })
+
+  it('keeps the automations shortcut on a GitHub project', async () => {
+    stubFetch({
+      'GET /api/v1/projects': () => jsonResponse({
+        ...REGISTRY,
+        projects: [{ ...REGISTRY.projects[0]!, id: 'demo', name: 'demo', forge: 'github' as const }],
+      }),
+      'GET /api/v1/health': automationsOn,
+    })
+    renderAt('/p/demo/github')
+
+    expect(await screen.findByRole('link', { name: 'Set up automations' })).not.toBeNull()
+  })
+
+  // The link and the refresh chip's `ml-auto` are ONE decision rendered in two places: the link
+  // owns the class that pushes the cluster right, so whoever withholds the link must hand the
+  // class on. Gating the link on `automationsPollable` while the class stayed on the older, wider
+  // `automationsAvailable` left a Forgejo project with `CEZ_AUTOMATIONS=1` carrying neither — the
+  // chip collapses left against the repo slug, which is the re-flow the header comment forbids.
+  it('keeps the refresh chip right-aligned when automations are on but the forge cannot be polled', async () => {
+    stubFetch(forgejoStubs({ 'GET /api/v1/health': automationsOn }))
+    renderAt('/p/acme/github')
+
+    await waitFor(() => expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Forgejo'))
+    expect(screen.queryByRole('link', { name: 'Set up automations' })).toBeNull()
+    expect(document.querySelector('[data-slot="gh-refresh"]')?.className).toContain('ml-auto')
+  })
+
+  it('keeps every GitHub label when the project is on GitHub', async () => {
+    stubFetch({
+      'GET /api/v1/projects': () => jsonResponse({
+        ...REGISTRY,
+        projects: [{ ...REGISTRY.projects[0]!, id: 'demo', name: 'demo', forge: 'github' as const }],
+      }),
+    })
+    renderAt('/p/demo/github/issues/142')
+
+    await waitFor(() => expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('GitHub'))
+    expect(document.querySelector('[data-slot="gh-refresh"]')?.getAttribute('title'))
+      .toBe('Refresh from GitHub')
+  })
+})

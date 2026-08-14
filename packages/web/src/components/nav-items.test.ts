@@ -57,6 +57,19 @@ describe('activeNavItem', () => {
     expect(activeNavItem('/skills')?.label).toBe('Skills')
   })
 
+  // The mobile top bar titles itself from this, on the same screen whose sidebar item and <h1>
+  // are named by `visibleNavItems` — so this has to answer with the same name.
+  it('names the forge item after the forge that answered', () => {
+    expect(activeNavItem('/github', 'forgejo')?.label).toBe('Forgejo')
+    expect(activeNavItem('/github', 'github')?.label).toBe('GitHub')
+    expect(activeNavItem('/github')?.label).toBe('GitHub')
+  })
+
+  it('leaves every other item alone', () => {
+    expect(activeNavItem('/skills', 'forgejo')?.label).toBe('Skills')
+    expect(activeNavItem('/automations', 'forgejo')?.label).toBe('Automations')
+  })
+
   it('returns null off-nav', () => {
     expect(activeNavItem('/new')).toBeNull()
   })
@@ -150,6 +163,55 @@ describe('visibleNavItems', () => {
 
   it('defaults to absent — the nav claims nothing before health answers', () => {
     expect(labelsOf()).toEqual(labelsOf({ forge: false, inbox: false, automations: false }))
+  })
+
+  // Stage 4 (spec 2026-08-14-forgejo-forge-support): the tab is named after the forge that
+  // actually answered. `forgeKind` is the ONLY
+  // thing that renames it — the gate itself is untouched.
+  it('names the forge item after the forge that answered', () => {
+    const forgejo = visibleNavItems({ forge: true, forgeKind: 'forgejo' })
+    expect(forgejo.map((item) => item.label)).toContain('Forgejo')
+    expect(forgejo.map((item) => item.label)).not.toContain('GitHub')
+  })
+
+  it('keeps saying GitHub when no kind is known — the upstream path is unchanged', () => {
+    expect(labelsOf({ forge: true })).toContain('GitHub')
+    expect(labelsOf({ forge: true, forgeKind: 'github' })).toContain('GitHub')
+  })
+
+  // An octocat next to the word "Forgejo" is exactly the mismatch this stage removes.
+  it('drops the GitHub mark for a forge that is not GitHub', () => {
+    const iconOf = (opts: Parameters<typeof visibleNavItems>[0]) =>
+      visibleNavItems(opts).find((item) => item.to === '/github')?.icon
+    const githubMark = iconOf({ forge: true })
+    expect(iconOf({ forge: true, forgeKind: 'github' })).toBe(githubMark)
+    expect(iconOf({ forge: true, forgeKind: 'forgejo' })).not.toBe(githubMark)
+  })
+
+  // Automations poll GitHub through the `gh` CLI directly (src/automations/github-poller.ts) —
+  // they never go through `resolveForge`. Widening the forge gate must not offer a Forgejo
+  // project a tab that cannot work.
+  it('withholds Automations from a non-GitHub forge', () => {
+    expect(labelsOf({ forge: true, automations: true, forgeKind: 'forgejo' }))
+      .not.toContain('Automations')
+    expect(labelsOf({ forge: true, automations: true, forgeKind: 'github' }))
+      .toContain('Automations')
+    // Static callers (a registry entry's own `forge`) have nothing left to settle, so an absent
+    // flag still reads as an answer.
+    expect(labelsOf({ forge: true, automations: true })).toContain('Automations')
+  })
+
+  // An unsettled `undefined` is not "GitHub", it is "nobody has said yet" — and the cost of the two
+  // readings is not symmetric. Naming an unnamed tab "GitHub" is the documented default and is
+  // reversible on the next render; OFFERING automations for it hands a Forgejo user a composer
+  // whose poller (`gh`, never `resolveForge`) can never fire what they build there.
+  it('withholds Automations until the kind is an answer', () => {
+    expect(labelsOf({ forge: true, automations: true, forgeSettled: false }))
+      .not.toContain('Automations')
+    expect(labelsOf({ forge: true, automations: true, forgeKind: 'github', forgeSettled: false }))
+      .not.toContain('Automations')
+    // The forge item itself is unaffected — the LABEL default is the non-regression contract.
+    expect(labelsOf({ forge: true, automations: true, forgeSettled: false })).toContain('GitHub')
   })
 
   it('never invents an item — the result is always a subset of NAV_ITEMS, in order', () => {

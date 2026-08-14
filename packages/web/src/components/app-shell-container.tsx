@@ -10,6 +10,7 @@ import { ProviderBannerContainer } from '@/components/provider-banner-container'
 import { ProjectGroups } from '@/components/project-groups'
 import { TaskQuickListContainer } from '@/components/task-quick-list'
 import { ToolsMenu } from '@/components/tools-menu'
+import { useForgeKindStatus } from '@/lib/use-forge-kind'
 import { useDocumentTitle } from '@/lib/use-document-title'
 import { useActiveProjectId } from '@/lib/project-router'
 import { unreadDoneCount } from '@/lib/read-state'
@@ -63,6 +64,13 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
   // GitHub automations are opt-in too (#801) — same honesty rule: without the server's word for
   // it the nav must not offer a tab whose every request would 409.
   const automationsAvailable = health.data?.capabilities.automations === true
+  // Which forge the flat nav's tab is named after. The hook prefers the URL project's own
+  // registry entry and falls back to health — in single-project mode, where the flat nav lives,
+  // those are the same folder.
+  //
+  // `settled` rides along for the Automations gate alone — see `automationsPollable`. The nav must
+  // not offer a page the poller cannot reach in the window before the registry has answered.
+  const { kind: forgeKind, settled: forgeSettled } = useForgeKindStatus()
   const todos = useTodos(inboxAvailable)
   // One query in the shell feeds every rendering of the active project's navigation (desktop,
   // mobile drawer, and grouped sidebar). Routes reuse this TanStack Query cache entry.
@@ -72,7 +80,7 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
   // list the sidebar quick-list and Tasks table already hold — one cache entry, no extra fetch.
   const runs = useRuns()
   const registry = useProjects().data
-  const titleContext = pageTitleContext(pathname)
+  const titleContext = pageTitleContext(pathname, forgeKind)
   const bootProjectId = registry?.bootProject ?? health.data?.bootProject ?? null
   const isBootProject = projectId !== null && projectId === bootProjectId
   const activeProject = registry?.projects.find((project) => project.id === projectId)
@@ -127,6 +135,15 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
         // the chips: the nav must not claim a GitHub tab it cannot back. The Tools menu's
         // forge note says why it is absent.
         forgeAvailable={health.data?.forge?.available === true}
+        // WHICH forge, so the tab carries its real name (spec 2026-08-14-forgejo-forge-support
+        // §"Stage 4"). Three readers, not one: the flat nav, the mobile top bar's title
+        // (`activeNavItem`, which renders in BOTH layouts) and the browser tab title
+        // (`pageTitleContext`, above). A grouped sidebar is the exception for the SIDEBAR only —
+        // `ProjectGroups` names those tabs per project from each registry entry's own `forge` —
+        // and there the top bar is this prop's sole reader.
+        forgeKind={forgeKind}
+        // Whether that kind is an ANSWER — the Automations item is withheld until it is.
+        forgeSettled={forgeSettled}
         // Hidden unless health reports the opt-in inbox (#471) — same honesty rule as above:
         // the nav must not offer an Inbox this server will never fill.
         inboxAvailable={inboxAvailable}

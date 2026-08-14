@@ -13,7 +13,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { Link } from '@/lib/project-router'
 
 import { createRun, putUiState } from '@/api/client'
-import { queryKeys, useUiState } from '@/api/queries'
+import { queryKeys, useProjects, useUiState } from '@/api/queries'
 import type { GithubItem, Skill, WorkflowDef } from '@open-mercato/cezar-api-client'
 import { EnginePills, engineBody, useResolvedEngine, type EnginePick } from '@/components/engine-pills'
 import { chipClass } from '@/components/picker-pill'
@@ -31,7 +31,9 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { toast } from '@/components/ui/toaster'
 import { PromptTemplateMenu } from '@/components/prompt-template-menu'
 import { SkillPreviewDialog } from '@/components/skill-detail'
-import { githubRunBody, githubTaskRef } from '@/lib/github-task'
+import { forgeLabel } from '@/lib/forge-label'
+import { applyItemTokens, githubRunBody, githubTaskRef, mentionsItem } from '@/lib/github-task'
+import { useForgeKindStatus } from '@/lib/use-forge-kind'
 import {
   autoApplyText,
   insertTemplate,
@@ -116,11 +118,47 @@ export function HandToAgent({
   // that replaces it — github.tsx), and the component is keyed by `item.url`, not by title — so a
   // title that differs between the two payloads would otherwise leave `prompt !== base`, which
   // reads as "user-owned": the pre-fill would be persisted as a draft and auto-apply would stop.
-  const [base] = useState(() => githubTaskRef(item))
+  // The forge the item lives on, so the prompt handed to the agent names it correctly
+  // (spec 2026-08-14-forgejo-forge-support §"Stage 4").
+  // `settled` — not "a kind is defined" — is what the one-shot correction below keys on.
+  const { kind: forgeKind, settled: forgeSettled } = useForgeKindStatus()
+  const [base, setBase] = useState(() => githubTaskRef(item, forgeKind))
   // The route remounts this component per item (key={item.url}); the DRAFT — not plain component
   // state (#408) — restores whatever was typed for THIS item, so switching away and back (or a
   // page refresh) never loses it. No draft stored → the pre-fill.
   const [prompt, setPrompt] = useState(() => readFollowupPrompt(item.url) || base)
+  // The one thing allowed to break the capture-once rule above, and only once: the forge kind
+  // comes from the project registry, a DIFFERENT query from the list that produced `item`, so on
+  // a cold deep link it can answer after this component has already mounted and pre-filled. Left
+  // alone, a Forgejo item would carry "Fix GitHub issue #N" to the agent for the rest of the
+  // mount — a false instruction, not a stale label. Exactly one correction, when the answer
+  // arrives, hence the ref.
+  //
+  // The latch reads `forgeSettled`, never `forgeKind !== undefined`. A kind that is merely
+  // present is not an answer about THIS project — health stands in for the boot folder until the
+  // registry speaks — and latching on the stand-in spends the single correction before the
+  // authority has answered, leaving a Forgejo item pre-filled as GitHub for the whole mount.
+  const kindSettled = useRef(forgeSettled)
+  const kindAtMount = useRef(forgeKind)
+  useEffect(() => {
+    if (kindSettled.current || !forgeSettled) return
+    kindSettled.current = true
+    // The FORGE is what this exception is spelled for, so the FORGE is what it compares — never
+    // the whole ref block. `item` outlives the payload it arrived in (the refresh button replaces
+    // the list, and this component is keyed by `item.url`, not by title), so a ref rebuilt from
+    // the current item also differs when only the TITLE has moved — and re-seeding on that breaks
+    // the capture-once rule above for a reason the correction was never about. Comparing the
+    // LABELS, not the kinds: `undefined` and `github` spell the same word, so a settle between
+    // them changes no text and must not spend the correction either.
+    if (forgeLabel(forgeKind) === forgeLabel(kindAtMount.current)) return
+    const corrected = githubTaskRef(item, forgeKind)
+    // Only an UNTOUCHED box is re-seeded. What the user typed is theirs; the forge name still
+    // reaches the agent, through `composeGithubTask` — which attaches the ref block to text that
+    // lacks one AND rewrites a stale spelling in text that opens with the seeded block, the case
+    // this branch leaves behind when the user extends the pre-fill instead of replacing it.
+    setPrompt((typed) => (typed === base ? corrected : typed))
+    setBase(corrected)
+  }, [forgeKind, forgeSettled, item, base])
   const resolved = useResolvedEngine(engine)
   const promptRef = useRef<HTMLTextAreaElement>(null)
   useEffect(() => {
@@ -160,11 +198,24 @@ export function HandToAgent({
   const promptRefValue = useRef(prompt)
   promptRefValue.current = prompt
   const autoAppliedRef = useRef('')
+  // What last ran this effect. `base` is a dependency because a forge correction (the one-shot
+  // above) must rewrite the stale forge name inside text auto-apply itself seeded — but a run
+  // triggered THAT way is a run the user never asked for, and the two cases part company below.
+  const lastAutoTextRef = useRef(autoText)
   useEffect(() => {
     // Reads/writes go through refs, never a setState updater: StrictMode double-invokes those in
     // dev, which would double-apply the ref bookkeeping (the composer's #double-paste hazard).
     // `base` is passed so the PRE-FILLED reference still reads as "untouched" and auto-applied
     // template text stacks below it instead of wiping it (#524).
+    const autoChanged = lastAutoTextRef.current !== autoText
+    lastAutoTextRef.current = autoText
+    // An empty box reads as "free" to `resolveAutoApply` — clearing it by hand deliberately opts
+    // back in. That door belongs to a SKILL CHANGE: the user clicked something and sees the
+    // result. A `base` correction (the registry answered after the mount — `setBase` above) is
+    // not their move, and re-seeding on it refills the prompt they just deleted to write their
+    // own, mid-keystroke. The correction effect already declines to touch a box that is not
+    // exactly `base`; without this guard, this effect undid that decision one tick later.
+    if (!autoChanged && promptRefValue.current === '') return
     const autoApplied = resolveAutoApply(
       promptRefValue.current,
       autoAppliedRef.current,
@@ -180,7 +231,9 @@ export function HandToAgent({
   const start = useMutation({
     mutationFn: async () => {
       if (!resolved.canRun) return null
-      return createRun(githubRunBody(item, workflow, validSkills, prompt, engineBody(resolved)))
+      return createRun(
+        githubRunBody(item, workflow, validSkills, prompt, engineBody(resolved), forgeKind),
+      )
     },
     onSuccess: (created) => {
       if (created === null) return
@@ -220,6 +273,42 @@ export function HandToAgent({
     onError: (error) => toast(error.message, { tone: 'danger' }),
   })
 
+  // Until something has named the forge, `composeGithubTask` receives `forge === undefined` and
+  // prepends "Fix GitHub issue #N" to a prompt the user wrote FROM SCRATCH — about an item that
+  // may live on Forgejo. That is the one path where the ref block is built FRESH at submit time;
+  // a box still carrying the seeded block takes `github-task.ts`'s `seeded` rewrite instead and
+  // sends the user the words they are reading. So the start waits for the forge the same way it
+  // already waits for provider status (`canRun`) — with two gates, because the authority differs
+  // by surface and so does the price of waiting on it:
+  //
+  //  - the REGISTRY, always. It is the authority for every SCOPED project, and `isPending` is
+  //    terminal, so a failed registry releases the button too.
+  //  - `forgeSettled`, on the fresh-ref path alone. The unscoped single-project routes have no
+  //    `/p/<id>` to look up, so there the registry says nothing and `useForgeKindStatus` takes the
+  //    kind from `/api/v1/health` — a workspace whose only project is on Forgejo is exactly the
+  //    deployment Stage 4 is for, and the registry gate is already open there while nothing has
+  //    named the forge. Waiting on this flag borrows health's failure modes, so only the path
+  //    that would otherwise state a falsehood pays: the #652 ordering test holds `/api/v1/health`
+  //    open forever and still expects a live Run button, and it clicks with the pre-fill intact.
+  //
+  // What that leaves: an untouched box submitted before health has answered on a single-project
+  // Forgejo workspace carries the seeded GitHub spelling. That is the pre-Stage-4 default on a
+  // surface nothing has named yet (spec 2026-08-14-forgejo-forge-support §"Stage 4"), sitting in
+  // the box for the user to read before they send it — not a fresh claim composed behind them.
+  const registryPending = useProjects().isPending
+  // Token substitution first: `{{url}}` is the user's way of placing the reference themselves,
+  // and `composeGithubTask` decides on the SUBSTITUTED text (`applyItemTokens`, then `mentionsItem`).
+  const composesFreshRef = !mentionsItem(applyItemTokens(prompt, item), item)
+  const canStart =
+    !start.isPending && resolved.canRun && !registryPending && (forgeSettled || !composesFreshRef)
+  // A control disabled with no explanation reads as broken, and nothing else on this panel moves
+  // while the wait runs — no spinner, no changed text. It has to be RENDERED to be read: a `title`
+  // on this button is unreachable, because `buttonVariants` (ui/button.tsx) carries
+  // `disabled:pointer-events-none`, so no hover ever lands on it while it is held — and browsers
+  // suppress `title` on disabled controls anyway. The provider gate a few lines up solves the same
+  // problem the same way: a sentence beside the affordance it explains.
+  const forgeHeld = registryPending || (composesFreshRef && !forgeSettled)
+
   const submitShortcut = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     const shouldSubmit =
       isSubmitShortcut({
@@ -233,7 +322,7 @@ export function HandToAgent({
       }) && (event.metaKey || event.ctrlKey) // multi-line box: bare Enter inserts a newline
     if (!shouldSubmit) return
     event.preventDefault()
-    if (!start.isPending && resolved.canRun) start.mutate()
+    if (canStart) start.mutate()
   }
 
   const toggleSkill = (name: string) =>
@@ -320,7 +409,7 @@ export function HandToAgent({
         <Button
           variant="contrast"
           data-action="gh-run"
-          disabled={start.isPending || !resolved.canRun}
+          disabled={!canStart}
           onClick={() => start.mutate()}
         >
           <PlayIcon aria-hidden="true" className="size-3.5" />
@@ -332,6 +421,11 @@ export function HandToAgent({
         >
           {submitShortcutHint()}
         </kbd>
+        {forgeHeld ? (
+          <span data-slot="gh-forge-gate" className="text-xs text-muted-foreground">
+            Waiting to learn which forge this item lives on — the prompt has to name it correctly.
+          </span>
+        ) : null}
         {queuedRunId ? (
           <>
             <span data-slot="gh-queued" className="flex items-center gap-1 text-xs font-medium text-success">

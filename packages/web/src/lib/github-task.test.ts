@@ -223,6 +223,57 @@ describe('composeGithubTask', () => {
     )
   })
 
+  // The guard above compares the text against the ref for the kind known AT SUBMIT TIME. A box
+  // seeded with the OTHER spelling — a draft stored before the registry answered, which
+  // `hand-to-agent.tsx` persists per item — then falls through to the plain branch, and the
+  // title's token is rewritten inside our own quoted ref after all.
+  it('recognizes its own ref block even when the box was seeded with another forge’s name', () => {
+    const tokenTitle = item({ title: 'Support {{url}} in prompt templates' })
+    const seeded = githubTaskRef(tokenTitle, 'github')
+    expect(composeGithubTask(tokenTitle, [], `${seeded}\n\nUse {{url}} please.`, 'forgejo')).toBe(
+      `${githubTaskRef(tokenTitle, 'forgejo')}\n\nUse ${tokenTitle.url} please.`,
+    )
+  })
+
+  // Recognizing the stale block is only half the job: it must also be REPLACED. The box is
+  // pre-filled, so extending it is the normal edit — a cold deep link to a Forgejo issue seeds
+  // "Fix GitHub issue #142" before the registry answers, the user appends a sentence, and
+  // `hand-to-agent.tsx` then leaves their touched text alone by design. `mentionsItem` matches
+  // (the URL is right there), so nothing prepends the corrected ref. Re-emitting the seeded
+  // block verbatim would hand the agent "Fix GitHub issue #142" about a Forgejo issue — the
+  // false instruction this stage exists to remove.
+  it('rewrites a stale forge name in the seeded ref block the user extended', () => {
+    const it142 = item()
+    const seeded = githubTaskRef(it142, 'github')
+    const task = composeGithubTask(it142, [], `${seeded}\n\nand add tests`, 'forgejo')
+    expect(task).toBe(`${githubTaskRef(it142, 'forgejo')}\n\nand add tests`)
+    expect(task).not.toContain('GitHub')
+  })
+
+  // The other direction of the same rewrite: silence is not an answer of "GitHub". The box's draft
+  // is stored per item URL (`hand-to-agent.tsx`), so it outlives a page refresh — reopen a Forgejo
+  // item and hit ⌘Enter while `/api/v1/projects` is still in flight and `forge` arrives
+  // `undefined` (the run body passes `kind`, not `settled`). Rewriting the block to
+  // `forgeLabel(undefined)` would turn a correct "Fix Forgejo issue #142" into the false
+  // "Fix GitHub issue #142" — the very instruction this rewrite exists to remove.
+  it('keeps the seeded block verbatim while no forge has been named', () => {
+    const it142 = item()
+    const seeded = githubTaskRef(it142, 'forgejo')
+    const task = composeGithubTask(it142, [], `${seeded}\n\nand add tests`, undefined)
+    expect(task).toBe(`${seeded}\n\nand add tests`)
+    expect(task).not.toContain('GitHub issue')
+  })
+
+  // The token shield covers this path too: a matched block is OURS whether or not we rewrite it,
+  // so a `{{url}}` embedded in the item's own title must not be substituted inside it.
+  it('still shields the seeded block from token substitution when no forge has been named', () => {
+    const tokenTitle = item({ title: 'Support {{url}} in prompt templates' })
+    const seeded = githubTaskRef(tokenTitle, 'forgejo')
+    expect(composeGithubTask(tokenTitle, [], `${seeded}\n\nUse {{url}} please.`, undefined)).toBe(
+      `${seeded}\n\nUse ${tokenTitle.url} please.`,
+    )
+  })
+
   it('puts the user instruction LAST, after the context', () => {
     const task = composeGithubTask(item(), [], 'Only triage.')
     expect(task.indexOf('#142')).toBeLessThan(task.indexOf('Only triage.'))
@@ -298,5 +349,48 @@ describe('githubRunBody backend (#401)', () => {
     })
     expect(JSON.parse(JSON.stringify(clean))).not.toHaveProperty('runner')
     expect(JSON.parse(JSON.stringify(clean))).not.toHaveProperty('model')
+  })
+})
+
+/**
+ * Stage 4 (spec 2026-08-14-forgejo-forge-support): the ref block is an INSTRUCTION sent to an
+ * agent, not a label on a screen — telling
+ * an agent to "fix GitHub issue #24" when the issue lives on Forgejo is simply false.
+ *
+ * What is load-bearing here is the SHAPE, not the forge's name: `extractTaskRefs`
+ * (packages/cezar/src/runs/task-refs.ts) recovers a run's PR/issue attribution from the words
+ * "issue"/"pull request" and the `#N`, both of which survive the rename. Its tier-1 URL patterns
+ * are github.com-only, so on Forgejo the worded tier is the ONLY thing carrying attribution.
+ */
+describe('the forge name in the ref block', () => {
+  it('names Forgejo for a Forgejo issue', () => {
+    expect(githubTaskRef(item(), 'forgejo')).toContain('Fix Forgejo issue #142:')
+  })
+
+  it('names Forgejo for a Forgejo pull request', () => {
+    expect(githubTaskRef(item({ kind: 'pr', number: 7 }), 'forgejo'))
+      .toContain('Address Forgejo pull request #7:')
+  })
+
+  it('still says GitHub with no kind — every existing caller is unchanged', () => {
+    expect(githubTaskRef(item())).toContain('Fix GitHub issue #142:')
+    expect(githubTaskRef(item(), 'github')).toBe(githubTaskRef(item()))
+  })
+
+  it('carries the forge name through every prompt the tab can send', () => {
+    expect(githubTaskPrompt(item(), [], 'forgejo')).toContain('Fix Forgejo issue #142:')
+    expect(composeGithubTask(item(), [], 'rebase this onto develop', 'forgejo'))
+      .toContain('Fix Forgejo issue #142:')
+    const body = githubRunBody(item(), null, [], undefined, {}, 'forgejo')
+    expect(body.task).toContain('Fix Forgejo issue #142:')
+  })
+
+  // The reason the rename is safe at all — asserted against the real extractor, not a comment.
+  // A Forgejo URL matches none of its tier-1 patterns, so the worded tier is all there is.
+  it('still gives extractTaskRefs the attribution it keys on', () => {
+    const issue = item({ url: 'http://forge.internal:3000/acme/demo/issues/142' })
+    expect(extractTaskRefs(githubTaskRef(issue, 'forgejo')).issueNumber).toBe(142)
+    const pr = item({ kind: 'pr', number: 7, url: 'http://forge.internal:3000/acme/demo/pulls/7' })
+    expect(extractTaskRefs(githubTaskRef(pr, 'forgejo')).prNumber).toBe(7)
   })
 })

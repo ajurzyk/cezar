@@ -15,6 +15,7 @@ import { AddProjectDialog } from '@/components/add-project-dialog'
 import { CloneProjectDialog } from '@/components/clone-project-dialog'
 import { openCommandPalette } from '@/components/command-palette'
 import { GithubIcon } from '@/components/icons'
+import { type ForgeKind } from '@/lib/forge-label'
 import { commandShortcutHint } from '@/lib/use-command-shortcut'
 import { Link, stripProjectPrefix } from '@/lib/project-router'
 import { StatusDot } from '@/components/status-dot'
@@ -82,6 +83,19 @@ export type AppShellProps = {
    *  Defaults to shown so the presentational shell stays renderable alone; the container
    *  passes the health payload's truth. */
   forgeAvailable?: boolean
+  /** WHICH forge answered — names the forge nav item AND the mobile top bar's title, and keeps
+   *  Automations off a forge its poller cannot reach. The container passes `useForgeKind()`: the
+   *  URL project's OWN registry entry, with health standing in for the boot project alone. Not
+   *  `health.forge.kind` directly — that payload is workspace-level and describes the boot
+   *  folder, so a scoped project reading it would wear another project's forge name. Absent keeps
+   *  the pre-Stage-4 "GitHub" (spec 2026-08-14-forgejo-forge-support §"Stage 4"), which is why
+   *  the shell renders unchanged for every caller that does not pass it. */
+  forgeKind?: ForgeKind
+  /** Whether `forgeKind` is an ANSWER yet (`useForgeKindStatus().settled`). Only the Automations
+   *  gate reads it: a kind nobody has named yet is not the same as GitHub when the question is
+   *  what to OFFER — see `automationsPollable`. Defaults to true, so a presentational render with
+   *  a static kind behaves exactly as it always did. */
+  forgeSettled?: boolean
   /** Inbox gating (#471): `false` drops the Inbox nav item and its badge — the global inbox is
    *  opt-in via `CEZ_FOLLOWUPS=1`. Defaults to shown for the same reason as `forgeAvailable`. */
   inboxAvailable?: boolean
@@ -149,6 +163,8 @@ export function AppShell({
   taskQuickList,
   toolsMenu,
   forgeAvailable = true,
+  forgeKind,
+  forgeSettled = true,
   inboxAvailable = true,
   automationsAvailable = true,
   singleProject = false,
@@ -160,7 +176,9 @@ export function AppShell({
   // (multi-project spec, step 3.2) so `/p/cezar/git/commits` still lights Git.
   const areaPathname = stripProjectPrefix(pathname)
   const activeTo = activeNavPath(areaPathname)
-  const current = activeNavItem(areaPathname)
+  // The kind rides along: the mobile bar's title must be the same word the sidebar item and the
+  // view's heading use for this tab.
+  const current = activeNavItem(areaPathname, forgeKind)
   const [menuOpen, setMenuOpen] = React.useState(false)
   const mainRef = React.useRef<HTMLElement>(null)
   // The desktop column's width (#788). Read once, lazily, from `localStorage` — it is a
@@ -207,7 +225,13 @@ export function AppShell({
 
   const nav = {
     activeTo,
-    items: visibleNavItems({ forge: forgeAvailable, inbox: inboxAvailable, automations: automationsAvailable }),
+    items: visibleNavItems({
+      forge: forgeAvailable,
+      forgeKind,
+      forgeSettled,
+      inbox: inboxAvailable,
+      automations: automationsAvailable,
+    }),
     repo,
     // The badge belongs to the Inbox item — with the item gone there is nothing to badge.
     inboxCount: inboxAvailable ? inboxCount : null,

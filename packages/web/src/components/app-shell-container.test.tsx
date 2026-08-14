@@ -237,6 +237,21 @@ describe('sidebar wiring', () => {
     expect(screen.getByRole('link', { name: /Automations/ })).toBeTruthy()
   })
 
+  // Stage 4 (spec 2026-08-14-forgejo-forge-support): single-project mode renders the flat nav,
+  // and there health IS the answer — the boot
+  // folder is the only project. The tab must carry the name of the forge that answered.
+  it('names the forge nav item after the forge health reported', async () => {
+    serve({
+      '/api/v1/health': { ...HEALTH, forge: { kind: 'forgejo' as const, available: true } },
+      '/api/v1/todos': [],
+    })
+    renderShell()
+
+    await waitFor(() => expect(versionChip()).not.toBeNull())
+    await waitFor(() => expect(screen.getByRole('link', { name: /Forgejo/ })).toBeTruthy())
+    expect(screen.queryByRole('link', { name: /GitHub/ })).toBeNull()
+  })
+
   it('renders no badge for an empty inbox', async () => {
     serve({ '/api/v1/health': HEALTH, '/api/v1/todos': [] })
     renderShell()

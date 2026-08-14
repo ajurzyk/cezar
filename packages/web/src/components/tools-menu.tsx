@@ -3,6 +3,7 @@ import { Link } from '@/lib/project-router'
 
 import type { BackendCheck, HealthResponse } from '@open-mercato/cezar-api-client'
 import { StatusDot } from '@/components/status-dot'
+import { forgeLabel } from '@/lib/forge-label'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -32,16 +33,29 @@ export function toolsTooltip(health: HealthResponse): string {
 }
 
 /**
- * Why the GitHub tab is absent (R6 Step 1.1) — the env-chips popover is where the spec's
+ * Why the forge tab is absent (R6 Step 1.1) — the env-chips popover is where the spec's
  * degradation table says the hint lives. Null while the forge works: a working forge needs
- * no explaining. Exported for the tests — the two sentences are a small contract.
+ * no explaining. Exported for the tests — the sentences are a small contract.
+ *
+ * The unreachable sentence names the forge the server actually tried
+ * (spec 2026-08-14-forgejo-forge-support §"Stage 4").
+ *
+ * The no-forge case is two different outages wearing one payload. `forge: null` means
+ * `resolveForge` built nothing — either there is no remote to classify, or there is one on a host
+ * `FORGE_HOSTS` does not know and the repo declared no usable `forge` block (a block missing any of
+ * `kind`/`apiUrl`/`webUrl` fails `forgeSettingsSchema` and is dropped without a word). `repo.remote`
+ * is what tells them apart, and this popover is the only place in the cockpit that says anything at
+ * all about the missing tab — so it must not diagnose a present remote as an absent one.
  */
 export function forgeNote(health: HealthResponse): string | null {
   if (health.forge?.available) return null
   if (!health.forge) {
-    return 'No GitHub remote detected — the GitHub tab is hidden. Every plain-git feature still works.'
+    return health.repo?.remote
+      ? 'This remote is not a forge cezar can reach — GitHub works out of the box, any other host needs a forge block (kind, apiUrl, webUrl) in .ai/cezar/config.json. The forge tab is hidden until then.'
+      : 'No GitHub remote detected — the GitHub tab is hidden. Every plain-git feature still works.'
   }
-  return `GitHub is unreachable — ${health.forge.reason ?? 'unknown reason'}. The GitHub tab is hidden until it comes back.`
+  const forge = forgeLabel(health.forge.kind)
+  return `${forge} is unreachable — ${health.forge.reason ?? 'unknown reason'}. The ${forge} tab is hidden until it comes back.`
 }
 
 export function ToolsMenu({ health }: { health: HealthResponse | undefined }) {

@@ -193,6 +193,50 @@ describe('ProjectGroups', () => {
     expect(within(plainNav).queryByRole('link', { name: 'GitHub' })).toBeNull()
   })
 
+  // Stage 4 (spec 2026-08-14-forgejo-forge-support), the blocker this stage exists for: the
+  // grouped sidebar is what a workspace with more
+  // than one project renders, and it used to gate the forge tab on `forge === 'github'` — so a
+  // Forgejo project's backlog simply vanished from the menu, reachable only by typing the URL.
+  it("offers a Forgejo project its tab, under the forge's own name", async () => {
+    storeCollapsed({ acme: false })
+    serve({ '/api/v1/p/cezar/runs': [], '/api/v1/p/acme/runs': [] })
+    renderGroups([
+      project(),
+      project({ id: 'acme', name: 'acme', forge: 'forgejo', lastOpenedAt: '2026-07-19T00:00:00.000Z' }),
+    ])
+
+    await waitFor(() => expect(header('acme').getAttribute('aria-expanded')).toBe('true'))
+    const nav = within(group('acme')).getByRole('navigation', { name: 'acme navigation' })
+    expect(within(nav).getByRole('link', { name: 'Forgejo' }).getAttribute('href'))
+      .toBe('/p/acme/github')
+    // …and it is not quietly also called GitHub somewhere in the same group.
+    expect(within(nav).queryByRole('link', { name: 'GitHub' })).toBeNull()
+    // The GitHub project in the same sidebar is untouched.
+    const cezarNav = within(group('cezar')).getByRole('navigation', { name: 'cezar navigation' })
+    expect(within(cezarNav).getByRole('link', { name: 'GitHub' })).not.toBeNull()
+  })
+
+  // The Automations poller shells out to `gh` (src/automations/github-poller.ts), so the widened
+  // forge gate must not hand a Forgejo project a tab that cannot do anything.
+  it('withholds Automations from a Forgejo project even with the opt-in on', async () => {
+    storeCollapsed({ acme: false })
+    serve({ '/api/v1/p/cezar/runs': [], '/api/v1/p/acme/runs': [] })
+    renderGroups(
+      [
+        project(),
+        project({ id: 'acme', name: 'acme', forge: 'forgejo', lastOpenedAt: '2026-07-19T00:00:00.000Z' }),
+      ],
+      '/p/cezar/',
+      { automations: true },
+    )
+
+    await waitFor(() => expect(header('acme').getAttribute('aria-expanded')).toBe('true'))
+    const nav = within(group('acme')).getByRole('navigation', { name: 'acme navigation' })
+    expect(within(nav).queryByRole('link', { name: 'Automations' })).toBeNull()
+    const cezarNav = within(group('cezar')).getByRole('navigation', { name: 'cezar navigation' })
+    expect(within(cezarNav).getByRole('link', { name: 'Automations' })).not.toBeNull()
+  })
+
   // #801: every group reads ONE workspace capability, so no group can offer Automations while
   // another hides it — and with the opt-in off, none of them offers it at all.
   it("gates every group's Automations tab on the workspace capability (#801)", async () => {
