@@ -11,6 +11,7 @@ import {
 
 import { useHealth, useProjects } from './api/queries'
 import { ProjectScopeProvider } from './api/project-scope-context'
+import { forgeLabel, type ForgeKind } from './lib/forge-label'
 import { locationToRestore, readStoredLastLocation } from './lib/last-location'
 import { Navigate as ScopedNavigate, stripProjectPrefix } from './lib/project-router'
 import { CompareLoading } from './routes/compare-loading'
@@ -273,7 +274,10 @@ const PAGE_TITLE_ROUTES = [
   { pattern: '/new', pageLabel: 'New task' },
   { pattern: '/compare/:groupId', pageLabel: 'Compare' },
   { pattern: '/git/*', pageLabel: 'Git' },
-  { pattern: '/github/*', pageLabel: 'GitHub' },
+  // `forge: true` rather than a literal: this tab wears the name of the forge that answered
+  // (Stage 4), the same as its heading, its mobile top bar and its nav item. `forgeLabel`
+  // supplies the label, so a window title cannot disagree with the page under it.
+  { pattern: '/github/*', pageLabel: 'GitHub', forge: true },
   { pattern: '/automations/*', pageLabel: 'Automations' },
   { pattern: '/skills', pageLabel: 'Skills' },
   { pattern: '/inbox', pageLabel: 'Inbox' },
@@ -281,8 +285,11 @@ const PAGE_TITLE_ROUTES = [
   { pattern: '/settings/*', pageLabel: 'Settings' },
 ] as const
 
-/** Browser-title context from the project-relative route map; raw ids are lookup keys only. */
-export function pageTitleContext(pathname: string): PageTitleContext {
+/** Browser-title context from the project-relative route map; raw ids are lookup keys only.
+ *
+ *  `forgeKind` names the forge tab, exactly as the nav does. Absent keeps the pre-Stage-4
+ *  default ("GitHub"), so a caller with no kind to offer behaves as it always did. */
+export function pageTitleContext(pathname: string, forgeKind?: ForgeKind): PageTitleContext {
   const projectPath = stripProjectPrefix(pathname)
   const task = matchPath({ path: '/tasks/:id/*', end: true }, projectPath)
   if (task) return { pageLabel: null, taskId: task.params.id ?? null }
@@ -290,7 +297,11 @@ export function pageTitleContext(pathname: string): PageTitleContext {
   const route = PAGE_TITLE_ROUTES.find(({ pattern }) =>
     matchPath({ path: pattern, end: true }, projectPath),
   )
-  return { pageLabel: route?.pageLabel ?? null, taskId: null }
+  if (!route) return { pageLabel: null, taskId: null }
+  return {
+    pageLabel: 'forge' in route ? forgeLabel(forgeKind) : route.pageLabel,
+    taskId: null,
+  }
 }
 
 /** The route map from the spec's "Routing — every surface is a URL" section.

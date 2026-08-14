@@ -77,7 +77,7 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
   // list the sidebar quick-list and Tasks table already hold — one cache entry, no extra fetch.
   const runs = useRuns()
   const registry = useProjects().data
-  const titleContext = pageTitleContext(pathname)
+  const titleContext = pageTitleContext(pathname, forgeKind)
   const bootProjectId = registry?.bootProject ?? health.data?.bootProject ?? null
   const isBootProject = projectId !== null && projectId === bootProjectId
   const activeProject = registry?.projects.find((project) => project.id === projectId)

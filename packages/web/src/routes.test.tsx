@@ -189,6 +189,20 @@ describe('pageTitleContext', () => {
   it('does not invent a label for an unknown route', () => {
     expect(pageTitleContext('/p/cezar/not-a-route')).toEqual({ pageLabel: null, taskId: null })
   })
+
+  // Stage 4's rule reaches the browser tab too. The heading, the mobile top bar and the sidebar
+  // item all say "Forgejo" on a Forgejo project; a window title still reading "GitHub" is the
+  // same mislabel, just in the one place the page cannot show it.
+  it('names the forge tab after the forge that answered', () => {
+    expect(pageTitleContext('/p/orakton/github/issues/543', 'forgejo'))
+      .toEqual({ pageLabel: 'Forgejo', taskId: null })
+  })
+
+  // Absent kind keeps the pre-Stage-4 default, the rule `forgeLabel` carries everywhere.
+  it('keeps GitHub when no kind is known', () => {
+    expect(pageTitleContext('/p/cezar/github/issues/543', 'github').pageLabel).toBe('GitHub')
+    expect(pageTitleContext('/p/cezar/github/issues/543').pageLabel).toBe('GitHub')
+  })
 })
 
 /** The URL contract from the spec's "Routing — every surface is a URL" section, now under the
