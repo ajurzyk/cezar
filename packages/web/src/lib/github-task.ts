@@ -1,6 +1,6 @@
 import type { CreateRunInput, GithubItem, WorkflowStepDef } from '@open-mercato/cezar-api-client'
 
-import { forgeLabel, type ForgeKind } from './forge-label'
+import { FORGE_KINDS, forgeLabel, type ForgeKind } from './forge-label'
 
 /**
  * The GitHub tab's hand-to-agent contract, ported verbatim from the legacy tab
@@ -119,11 +119,19 @@ export function composeGithubTask(
   const raw = (customPrompt ?? '').trim()
   if (!raw) return githubTaskPrompt(item, skillNames, forge)
   const ref = githubTaskRef(item, forge)
-  // Substitute tokens only in what the USER contributed. The box is pre-filled with `ref`, which
-  // embeds `item.title` — and a title may itself contain a token ("Support {{url}} in prompt
-  // templates"), which would otherwise be rewritten inside our own reference block.
-  const custom = raw.startsWith(ref)
-    ? ref + applyItemTokens(raw.slice(ref.length), item)
+  // Substitute tokens only in what the USER contributed. The box is pre-filled with a ref block,
+  // which embeds `item.title` — and a title may itself contain a token ("Support {{url}} in
+  // prompt templates"), which would otherwise be rewritten inside our own reference block.
+  //
+  // EVERY spelling of that block counts as ours, not just the one for `forge`: the box may have
+  // been seeded with a different kind than the one known now — a draft stored before the registry
+  // answered (`hand-to-agent.tsx` persists the box per item) — and matching the current spelling
+  // alone would send that draft down the plain branch, which is the very case this guards.
+  const seeded = FORGE_KINDS
+    .map((kind) => githubTaskRef(item, kind))
+    .find((candidate) => raw.startsWith(candidate))
+  const custom = seeded
+    ? seeded + applyItemTokens(raw.slice(seeded.length), item)
     : applyItemTokens(raw, item)
   const task = mentionsItem(custom, item) ? custom : `${ref}\n\n${custom}`
   return skillNames.length ? task + skillsHint(skillNames) : task

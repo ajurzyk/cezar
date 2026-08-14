@@ -223,6 +223,18 @@ describe('composeGithubTask', () => {
     )
   })
 
+  // The guard above compares the text against the ref for the kind known AT SUBMIT TIME. A box
+  // seeded with the OTHER spelling — a draft stored before the registry answered, which
+  // `hand-to-agent.tsx` persists per item — then falls through to the plain branch, and the
+  // title's token is rewritten inside our own quoted ref after all.
+  it('recognizes its own ref block even when the box was seeded with another forge’s name', () => {
+    const tokenTitle = item({ title: 'Support {{url}} in prompt templates' })
+    const seeded = githubTaskRef(tokenTitle, 'github')
+    expect(composeGithubTask(tokenTitle, [], `${seeded}\n\nUse {{url}} please.`, 'forgejo')).toBe(
+      `${seeded}\n\nUse ${tokenTitle.url} please.`,
+    )
+  })
+
   it('puts the user instruction LAST, after the context', () => {
     const task = composeGithubTask(item(), [], 'Only triage.')
     expect(task.indexOf('#142')).toBeLessThan(task.indexOf('Only triage.'))

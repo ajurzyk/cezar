@@ -6,6 +6,14 @@ import type { ForgeInfo } from '@open-mercato/cezar-api-client'
  */
 export type ForgeKind = ForgeInfo['kind']
 
+/** Every kind the cockpit can spell, for callers that must consider ALL spellings of a label
+ *  rather than the one for the kind currently known (`composeGithubTask`'s seeded-ref guard).
+ *  A `Record<ForgeKind, true>` rather than an array literal, so the contract growing a third
+ *  entry is a type error here instead of a spelling those callers silently stop recognizing —
+ *  the same guarantee `ForgeKind` itself carries. */
+const ALL_FORGE_KINDS: Record<ForgeKind, true> = { github: true, forgejo: true }
+export const FORGE_KINDS = Object.keys(ALL_FORGE_KINDS) as ForgeKind[]
+
 /**
  * What the cockpit CALLS the forge — the single source of truth for every label on the forge
  * surface (nav item, screen header, "open on …" links, hand-off prompt).
