@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { forgeHint, forgeHintText, forgeLabel } from './forge-label'
+import { forgeChecksUrl, forgeHint, forgeHintText, forgeLabel } from './forge-label'
 
 /** The single source of truth for what the cockpit CALLS the forge. The default is the part
  *  that matters most: every surface that has no kind to offer — a presentational shell rendered
@@ -65,5 +65,28 @@ describe('forgeHint', () => {
       .toEqual(['gh', 'gh auth login'])
     expect(forgeHint('forgejo').filter((part) => part.mono).map((part) => part.text))
       .toEqual(['CEZ_FORGEJO_TOKEN', 'forge', 'kind', 'apiUrl', 'webUrl', '.ai/cezar/config.json'])
+  })
+})
+
+/** Where the checks badge points. NOT a label — a route in someone else's web UI, and the two
+ *  forges do not share it. GitHub keeps checks on their own tab under the PR; Forgejo has no such
+ *  route at all (the CI box sits on the pull request page), so a pasted-on `/checks` 404s there. */
+describe('forgeChecksUrl', () => {
+  const PR = 'https://github.com/acme/demo/pull/137'
+
+  it('sends GitHub to the PR checks tab', () => {
+    expect(forgeChecksUrl(PR, 'github')).toBe(`${PR}/checks`)
+  })
+
+  it('sends Forgejo to the pull request itself — it has no checks route', () => {
+    const pull = 'https://forge.example/acme/demo/pulls/137'
+    expect(forgeChecksUrl(pull, 'forgejo')).toBe(pull)
+  })
+
+  // The same rule `forgeLabel` follows: "nothing has said yet" reads as GitHub, so the upstream
+  // path behaves exactly as it did before Stage 4.
+  it('falls back to the GitHub shape when no kind is known', () => {
+    expect(forgeChecksUrl(PR, undefined)).toBe(`${PR}/checks`)
+    expect(forgeChecksUrl(PR)).toBe(`${PR}/checks`)
   })
 })

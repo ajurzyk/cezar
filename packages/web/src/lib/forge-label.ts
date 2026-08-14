@@ -67,6 +67,22 @@ export function forgeHint(kind?: ForgeKind): ForgeHintSegment[] {
   ]
 }
 
+/**
+ * Where the checks badge on a pull request points. A function rather than a ternary at the call
+ * site because it is a decision about the shape of SOMEONE ELSE'S web UI — exactly the kind of
+ * knowledge this module already holds.
+ *
+ * GitHub has a checks tab under the PR (`<pr>/checks`, issue #415 — why the link exists at all).
+ * Forgejo has no such route: its CI status sits in a box on the pull request page itself, and
+ * `<pr>/checks` is a 404 there — so the badge aims at the PR. The Forgejo driver does populate
+ * the glyph (`server/forge/forgejo.ts` serves `GET /github/checks`), so this branch is reached in
+ * practice, not defensively. An unknown kind takes the GitHub shape, the same rule `forgeLabel`
+ * follows.
+ */
+export function forgeChecksUrl(url: string, kind?: ForgeKind): string {
+  return kind === 'forgejo' ? url : `${url}/checks`
+}
+
 /** The hint as flat text — what a test asserts on, and what a non-styling caller can read. */
 export function forgeHintText(kind?: ForgeKind): string {
   return forgeHint(kind).map((part) => part.text).join('')

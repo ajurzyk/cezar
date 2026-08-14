@@ -2281,6 +2281,24 @@ describe('forge naming', () => {
     expect(promptValue()).not.toContain('GitHub')
   })
 
+  // The checks badge is the one outbound link on this screen that is not a bare `item.url` — it
+  // appends a route. GitHub has `<pr>/checks`; Forgejo has no such page at all. And the Forgejo
+  // driver really does populate the glyph (it serves `GET /github/checks`), so the badge renders
+  // there — without this branch it hands the user a 404.
+  it('points the checks badge at the Forgejo pull request, not at a /checks route', async () => {
+    const pull = 'https://forge.example/acme/demo/pulls/137'
+    stubFetch(forgejoStubs({
+      'GET /api/v1/github?limit=1000': () =>
+        jsonResponse({ ...GITHUB, prs: [{ ...PR_137, url: pull }] }),
+    }))
+    renderAt('/p/orakton/github/prs/137')
+
+    await waitFor(() => expect(document.querySelector('[data-slot="gh-checks"]')).not.toBeNull())
+    const checks = document.querySelector('[data-slot="gh-checks"]')
+    expect(checks?.tagName).toBe('A')
+    expect(checks?.getAttribute('href')).toBe(pull)
+  })
+
   // The pre-fill is captured ONCE per mount (#524's snapshot rule), and the registry that names
   // the forge is a different query from the list that produced the item — so on a cold deep link
   // it can answer second. The box must still end up naming the right forge; a prompt frozen at

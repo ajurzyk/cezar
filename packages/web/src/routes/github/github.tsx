@@ -53,7 +53,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Skeleton } from '@/components/ui/skeleton'
 import { toast } from '@/components/ui/toaster'
 import { shortAge } from '@/lib/format'
-import { forgeHint, forgeLabel, type ForgeKind } from '@/lib/forge-label'
+import { forgeChecksUrl, forgeHint, forgeLabel, type ForgeKind } from '@/lib/forge-label'
 import { githubTaskPrompt } from '@/lib/github-task'
 import { orderSkillsByUsage } from '@/lib/skills'
 import { useForgeKind } from '@/lib/use-forge-kind'
@@ -689,7 +689,8 @@ function GithubDetail({
   /** Resolved checks glyph — the lazily-hydrated value overrides the list's `null` (#664). */
   checks?: GithubItem['checks']
 }) {
-  const forge = forgeLabel(useForgeKind())
+  const forgeKind = useForgeKind()
+  const forge = forgeLabel(forgeKind)
   const kindWord = item.kind === 'pr' ? 'pull request' : 'issue'
   const hasDiffStat = item.kind === 'pr' && Boolean(item.additions || item.deletions)
   return (
@@ -754,7 +755,7 @@ function GithubDetail({
           {item.labels.map((label) => (
             <LabelChip key={label} label={label} color={colors[label]} />
           ))}
-          {checks ? <ChecksBadge checks={checks} url={item.url} /> : null}
+          {checks ? <ChecksBadge checks={checks} url={item.url} forgeKind={forgeKind} /> : null}
         </div>
       ) : null}
 
@@ -1486,9 +1487,13 @@ function CommentCount({ count }: { count: number }) {
   )
 }
 
-/** The checks badge — the legacy tab's three phrases, tinted by outcome. Links out
- *  to the PR's checks tab on GitHub (issue #415) when a URL is available. */
-function ChecksBadge({ checks, url }: { checks: Checks; url?: string }) {
+/** The checks badge — the legacy tab's three phrases, tinted by outcome. Links out to wherever
+ *  the forge actually shows CI for this PR (issue #415) when a URL is available.
+ *
+ *  The kind has to reach this deep because the two forges disagree on the route, not just on the
+ *  name — see `forgeChecksUrl`. A PROP rather than `useForgeKind()` here, matching `GithubRow`:
+ *  the detail pane already holds the answer. */
+function ChecksBadge({ checks, url, forgeKind }: { checks: Checks; url?: string; forgeKind?: ForgeKind }) {
   const className = cn('text-[11px] font-medium', CHECKS_TONE[checks], url && 'hover:underline')
   const label = `${CHECKS_GLYPH[checks]} checks ${checks}`
 
@@ -1502,7 +1507,7 @@ function ChecksBadge({ checks, url }: { checks: Checks; url?: string }) {
 
   return (
     <a
-      href={`${url}/checks`}
+      href={forgeChecksUrl(url, forgeKind)}
       target="_blank"
       rel="noopener noreferrer"
       data-slot="gh-checks"
