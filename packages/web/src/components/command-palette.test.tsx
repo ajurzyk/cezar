@@ -319,8 +319,8 @@ describe('Views group', () => {
   it('names the forge view after the forge and withholds Automations from it', async () => {
     renderPalette({
       automations: true,
-      projects: [project({ id: 'orakton', forge: 'forgejo' })],
-      entry: '/p/orakton',
+      projects: [project({ id: 'acme', forge: 'forgejo' })],
+      entry: '/p/acme',
     })
     openWith({ metaKey: true })
     await screen.findByRole('dialog')

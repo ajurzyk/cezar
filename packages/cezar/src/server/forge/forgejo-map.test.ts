@@ -123,7 +123,7 @@ describe('mapForgejoIssue', () => {
     number: 42,
     title: 'Something broke',
     html_url: 'http://forgejo:3000/acme/demo/issues/42',
-    user: { login: 'ajr' },
+    user: { login: 'a' },
     created_at: '2026-08-07T10:00:00+02:00',
     labels: [{ name: 'bug' }, { name: 'p1' }],
     body: 'x'.repeat(FJ_BODY_CAP + 500),
@@ -137,7 +137,7 @@ describe('mapForgejoIssue', () => {
       kind: 'issue',
       number: 42,
       title: 'Something broke',
-      author: 'ajr',
+      author: 'a',
       createdAt: '2026-08-07T08:00:00.000Z',
       labels: ['bug', 'p1'],
       body: 'x'.repeat(FJ_BODY_CAP),
@@ -169,7 +169,7 @@ describe('mapForgejoPull', () => {
     number: 1,
     title: 'WIP: cezar: add driver',
     html_url: 'http://forgejo:3000/acme/demo/pulls/1',
-    user: { login: 'ajr' },
+    user: { login: 'a' },
     created_at: '2026-08-07T10:00:00+02:00',
     labels: [{ name: 'enhancement' }],
     body: 'desc',
@@ -187,7 +187,7 @@ describe('mapForgejoPull', () => {
       kind: 'pr',
       number: 1,
       title: 'cezar: add driver',
-      author: 'ajr',
+      author: 'a',
       createdAt: '2026-08-07T08:00:00.000Z',
       labels: ['enhancement', 'draft'],
       body: 'desc',
@@ -450,7 +450,7 @@ function mergePullRow(overrides: Record<string, unknown> = {}): Record<string, u
     number: 9,
     title: 'add thing',
     html_url: 'http://forgejo:3000/acme/demo/pulls/9',
-    user: { login: 'ajr' },
+    user: { login: 'a' },
     created_at: '2026-08-07T10:00:00Z',
     labels: [],
     body: '',
@@ -853,7 +853,7 @@ describe('mapForgejoComment', () => {
   function commentRow(overrides: Record<string, unknown> = {}): unknown {
     return {
       id: 144,
-      user: { login: 'ajr', avatar_url: 'https://example.com/a.png' },
+      user: { login: 'a', avatar_url: 'https://example.com/a.png' },
       created_at: '2026-08-09T13:37:33+02:00',
       body: 'hello there',
       html_url: 'http://forgejo:3000/acme/demo/issues/24#issuecomment-144',
@@ -864,7 +864,7 @@ describe('mapForgejoComment', () => {
   it('maps id/author/avatarUrl/body/url, rebasing html_url onto webUrl and normalizing the timestamp', () => {
     expect(mapForgejoComment(commentRow(), webUrl)).toEqual({
       id: 144,
-      author: 'ajr',
+      author: 'a',
       avatarUrl: 'https://example.com/a.png',
       createdAt: '2026-08-09T11:37:33.000Z',
       body: 'hello there',
@@ -895,7 +895,7 @@ describe('mapForgejoReview', () => {
   function review(overrides: Record<string, unknown> = {}) {
     return forgejoReviewSchema.parse({
       id: 10,
-      user: { login: 'ajr', avatar_url: 'https://example.com/a.png' },
+      user: { login: 'a', avatar_url: 'https://example.com/a.png' },
       state: 'COMMENT',
       dismissed: false,
       official: false,
@@ -910,7 +910,7 @@ describe('mapForgejoReview', () => {
   it('maps id/author/avatarUrl/body/url like a comment, plus kind:review', () => {
     expect(mapForgejoReview(review({ state: 'APPROVED' }), webUrl)).toEqual({
       id: 10,
-      author: 'ajr',
+      author: 'a',
       avatarUrl: 'https://example.com/a.png',
       createdAt: '2026-08-09T11:37:33.000Z',
       body: 'looks good',

@@ -208,7 +208,7 @@ function issueRow(number: number, overrides: Record<string, unknown> = {}): Reco
     number,
     title: `Issue ${number}`,
     html_url: `http://forgejo:3000/acme/demo/issues/${number}`,
-    user: { login: 'ajr' },
+    user: { login: 'a' },
     created_at: '2026-08-07T10:00:00Z',
     labels: [],
     body: 'body',
@@ -223,7 +223,7 @@ function pullRow(overrides: Record<string, unknown> = {}): Record<string, unknow
     number: 5,
     title: 'add x',
     html_url: 'http://forgejo:3000/acme/demo/pulls/5',
-    user: { login: 'ajr' },
+    user: { login: 'a' },
     created_at: '2026-08-07T10:00:00Z',
     labels: [],
     body: '',
@@ -898,7 +898,7 @@ describe('prStatus', () => {
 function commentRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id: 1,
-    user: { login: 'ajr', avatar_url: 'https://example.com/a.png' },
+    user: { login: 'a', avatar_url: 'https://example.com/a.png' },
     created_at: '2026-08-09T09:00:00Z',
     body: 'hello',
     html_url: 'http://forgejo:3000/acme/demo/issues/7#issuecomment-1',
@@ -909,7 +909,7 @@ function commentRow(overrides: Record<string, unknown> = {}): Record<string, unk
 function reviewRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id: 10,
-    user: { login: 'ajr' },
+    user: { login: 'a' },
     state: 'APPROVED',
     dismissed: false,
     official: false,
@@ -1495,7 +1495,7 @@ describe('createPR', () => {
   beforeEach(async () => {
     repo = mkdtempSync(join(tmpdir(), 'cez-forgejo-pr-'));
     await runGit('git', ['init', '-q', '-b', 'main'], { cwd: repo });
-    await runGit('git', ['remote', 'add', 'origin', 'ssh://git@q7010-dev.local:2222/acme/demo.git'], { cwd: repo });
+    await runGit('git', ['remote', 'add', 'origin', 'ssh://git@forge.internal:2222/acme/demo.git'], { cwd: repo });
     writeFileSync(join(repo, 'a.txt'), 'base\n');
     await runGit('git', ['add', '-A'], { cwd: repo });
     await runGit('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repo });

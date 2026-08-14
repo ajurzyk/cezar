@@ -194,7 +194,7 @@ describe('error normalization', () => {
   });
 
   /**
-   * Measured against the live instance (`q7010-dev:8929`, 15.0.3+gitea-1.22.0) on 2026-08-09:
+   * Measured against a live Forgejo 15.0.3+gitea-1.22.0 instance on 2026-08-09:
    * Forgejo echoes the credential it just REJECTED back inside the error body. That body used to be
    * copied verbatim into `ForgejoHttpError#message`, which `forgejo.ts`'s `describeError` hands on
    * as `ForgeAvailability.reason` — a string the cockpit renders to the user and the server writes
@@ -209,7 +209,7 @@ describe('error normalization', () => {
     ])('%s', async (_label, buildMessage) => {
       const token = 'nie-ma-takiego-tokenu-0000000000000000000';
       const fetchMock = vi.fn().mockResolvedValue(
-        jsonResponse({ message: buildMessage(token), url: 'http://q7010-dev.local:8929/api/swagger' }, { status }),
+        jsonResponse({ message: buildMessage(token), url: 'http://forge.internal:8929/api/swagger' }, { status }),
       );
       const http = createForgejoHttp('http://forgejo:3000', { fetch: fetchMock, token });
 
@@ -232,7 +232,7 @@ describe('error normalization', () => {
    */
   it('a 404 with no token configured says the repository may be private', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
-      jsonResponse({ message: "The target couldn't be found.", url: 'http://q7010-dev.local:8929/api/swagger', errors: [] }, { status: 404 }),
+      jsonResponse({ message: "The target couldn't be found.", url: 'http://forge.internal:8929/api/swagger', errors: [] }, { status: 404 }),
     );
     const http = createForgejoHttp('http://forgejo:3000', { fetch: fetchMock, token: null });
     await expect(http.getJson('repos/o/r')).rejects.toMatchObject({
@@ -243,7 +243,7 @@ describe('error normalization', () => {
 
   it('a 404 WITH a token configured stays a plain "not found" — the private-repo hint would be a lie there', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
-      jsonResponse({ message: "The target couldn't be found.", url: 'http://q7010-dev.local:8929/api/swagger', errors: [] }, { status: 404 }),
+      jsonResponse({ message: "The target couldn't be found.", url: 'http://forge.internal:8929/api/swagger', errors: [] }, { status: 404 }),
     );
     const http = createForgejoHttp('http://forgejo:3000', { fetch: fetchMock, token: 'a-valid-looking-token' });
     await expect(http.getJson('repos/o/r')).rejects.toMatchObject({

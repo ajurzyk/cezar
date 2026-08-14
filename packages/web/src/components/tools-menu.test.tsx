@@ -223,7 +223,7 @@ describe('forgeNote', () => {
   it('tells a remote with no forge block apart from no remote at all', () => {
     const note = forgeNote({
       ...HEALTH,
-      repo: { root: '/home/me/orakton', branch: 'main', remote: 'git@forge.example:acme/demo.git' },
+      repo: { root: '/home/me/demo', branch: 'main', remote: 'git@forge.example:acme/demo.git' },
     })
     expect(note).not.toContain('No GitHub remote detected')
     expect(note).toContain('.ai/cezar/config.json')

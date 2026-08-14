@@ -17,10 +17,10 @@ describe('extractTaskRefs', () => {
   // are still the templates this extractor has to read — and on Forgejo the WORDED tier is the
   // only one that can fire, since tier 1 matches github.com URLs alone.
   it('reads the Forgejo spelling of those same templates', () => {
-    expect(extractTaskRefs('Address Forgejo pull request #12: seam it\n\nhttp://forge.internal:3000/ajr/orakton/pulls/12')).toEqual({
+    expect(extractTaskRefs('Address Forgejo pull request #12: seam it\n\nhttp://forge.internal:3000/acme/demo/pulls/12')).toEqual({
       prNumber: 12,
     });
-    expect(extractTaskRefs('Fix Forgejo issue #24: avatars 404\n\nhttp://forge.internal:3000/ajr/orakton/issues/24')).toEqual({
+    expect(extractTaskRefs('Fix Forgejo issue #24: avatars 404\n\nhttp://forge.internal:3000/acme/demo/issues/24')).toEqual({
       issueNumber: 24,
     });
   });

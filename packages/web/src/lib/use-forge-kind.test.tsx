@@ -86,19 +86,19 @@ function wrapper(pathname: string) {
 describe('useForgeKind', () => {
   it('reads the forge of the project in the URL, not the boot project', async () => {
     serve({
-      projects: projects([project(), project({ id: 'orakton', name: 'orakton', forge: 'forgejo' })]),
+      projects: projects([project(), project({ id: 'acme', name: 'acme', forge: 'forgejo' })]),
       health: health(null),
     })
-    const { result } = renderHook(() => useForgeKind(), { wrapper: wrapper('/p/orakton/github') })
+    const { result } = renderHook(() => useForgeKind(), { wrapper: wrapper('/p/acme/github') })
     await waitFor(() => expect(result.current).toBe('forgejo'))
   })
 
   it('prefers the URL project even when health names a different forge', async () => {
     serve({
-      projects: projects([project({ id: 'orakton', name: 'orakton', forge: 'forgejo' })]),
+      projects: projects([project({ id: 'acme', name: 'acme', forge: 'forgejo' })]),
       health: health({ kind: 'github', available: true }),
     })
-    const { result } = renderHook(() => useForgeKind(), { wrapper: wrapper('/p/orakton/github') })
+    const { result } = renderHook(() => useForgeKind(), { wrapper: wrapper('/p/acme/github') })
     await waitFor(() => expect(result.current).toBe('forgejo'))
   })
 
@@ -146,7 +146,7 @@ describe('useForgeKind', () => {
       }
       if (url.includes('/api/v1/projects')) {
         await registryArrived
-        return json(projects([project({ id: 'orakton', name: 'orakton', forge: 'forgejo' })], 'cezar-lab'))
+        return json(projects([project({ id: 'acme', name: 'acme', forge: 'forgejo' })], 'cezar-lab'))
       }
       return new Response('not found', { status: 404 })
     })
@@ -155,7 +155,7 @@ describe('useForgeKind', () => {
     // the wrong reason.
     const { result } = renderHook(
       () => ({ kind: useForgeKind(), health: useHealth().data }),
-      { wrapper: wrapper('/p/orakton/github') },
+      { wrapper: wrapper('/p/acme/github') },
     )
 
     // Health has answered "github" — about the BOOT folder. The URL project is someone else.
@@ -174,10 +174,10 @@ describe('useForgeKind', () => {
 describe('useForgeKindStatus', () => {
   it('is unsettled until the authority for the surface has answered', async () => {
     serve({
-      projects: projects([project({ id: 'orakton', name: 'orakton', forge: 'forgejo' })], 'cezar-lab'),
+      projects: projects([project({ id: 'acme', name: 'acme', forge: 'forgejo' })], 'cezar-lab'),
       health: health({ kind: 'github', available: true }, 'cezar-lab'),
     })
-    const { result } = renderHook(() => useForgeKindStatus(), { wrapper: wrapper('/p/orakton/github') })
+    const { result } = renderHook(() => useForgeKindStatus(), { wrapper: wrapper('/p/acme/github') })
 
     expect(result.current).toEqual({ kind: undefined, settled: false })
     await waitFor(() => expect(result.current).toEqual({ kind: 'forgejo', settled: true }))
@@ -240,7 +240,7 @@ describe('useForgeKindStatus', () => {
       }
       return new Response('boom', { status: 500 })
     })
-    const { result } = renderHook(() => useForgeKindStatus(), { wrapper: wrapper('/p/orakton/github') })
+    const { result } = renderHook(() => useForgeKindStatus(), { wrapper: wrapper('/p/acme/github') })
     await waitFor(() => expect(result.current.settled).toBe(true), { timeout: 5000 })
     expect(result.current.kind).toBeUndefined()
   })

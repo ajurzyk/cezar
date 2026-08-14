@@ -195,7 +195,7 @@ describe('pageTitleContext', () => {
   // item all say "Forgejo" on a Forgejo project; a window title still reading "GitHub" is the
   // same mislabel, just in the one place the page cannot show it.
   it('names the forge tab after the forge that answered', () => {
-    expect(pageTitleContext('/p/orakton/github/issues/543', 'forgejo'))
+    expect(pageTitleContext('/p/acme/github/issues/543', 'forgejo'))
       .toEqual({ pageLabel: 'Forgejo', taskId: null })
   })
 

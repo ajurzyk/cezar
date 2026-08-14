@@ -2215,9 +2215,9 @@ describe('groupCommitRuns', () => {
 describe('forge naming', () => {
   const REGISTRY = {
     projects: [{
-      id: 'orakton',
-      name: 'orakton',
-      root: '/srv/dev/orakton',
+      id: 'acme',
+      name: 'acme',
+      root: '/srv/dev/demo',
       addedAt: '2026-08-01T00:00:00.000Z',
       lastOpenedAt: '2026-08-08T00:00:00.000Z',
       source: 'local' as const,
@@ -2238,7 +2238,7 @@ describe('forge naming', () => {
 
   it('titles the screen and its controls after Forgejo', async () => {
     stubFetch(forgejoStubs())
-    renderAt('/p/orakton/github/issues/142')
+    renderAt('/p/acme/github/issues/142')
 
     await waitFor(() => expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Forgejo'))
     expect(document.querySelector('[data-slot="gh-refresh"]')?.getAttribute('title'))
@@ -2248,7 +2248,7 @@ describe('forge naming', () => {
 
   it('says nothing about GitHub anywhere on a Forgejo screen', async () => {
     stubFetch(forgejoStubs())
-    renderAt('/p/orakton/github/issues/142')
+    renderAt('/p/acme/github/issues/142')
 
     await waitFor(() => expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Forgejo'))
     const route = document.querySelector('[data-route="github"]') as HTMLElement
@@ -2262,7 +2262,7 @@ describe('forge naming', () => {
       'GET /api/v1/github': () =>
         jsonResponse({ available: false, reason: 'CEZ_FORGEJO_TOKEN is not set', issues: [], prs: [] }),
     }))
-    renderAt('/p/orakton/github')
+    renderAt('/p/acme/github')
 
     await waitFor(() => expect(screen.getByText('Forgejo is unavailable here')).toBeTruthy())
     const route = document.querySelector('[data-route="github"]') as HTMLElement
@@ -2276,7 +2276,7 @@ describe('forge naming', () => {
   // GitHub issue #142" about a Forgejo issue would be a false instruction, not a cosmetic slip.
   it('hands the agent a prompt that names Forgejo', async () => {
     stubFetch(forgejoStubs())
-    renderAt('/p/orakton/github/issues/142')
+    renderAt('/p/acme/github/issues/142')
 
     await waitFor(() => expect(promptValue()).toContain('Fix Forgejo issue #142'))
     expect(promptValue()).not.toContain('GitHub')
@@ -2292,7 +2292,7 @@ describe('forge naming', () => {
       'GET /api/v1/github?limit=1000': () =>
         jsonResponse({ ...GITHUB, prs: [{ ...PR_137, url: pull }] }),
     }))
-    renderAt('/p/orakton/github/prs/137')
+    renderAt('/p/acme/github/prs/137')
 
     // Waits for the ANCHOR, not merely for the element: the badge renders its glyph as a plain
     // span until the registry has named the forge (see the next test), so waiting on the slot
@@ -2318,7 +2318,7 @@ describe('forge naming', () => {
         return jsonResponse(REGISTRY)
       },
     }))
-    renderAt('/p/orakton/github/prs/137')
+    renderAt('/p/acme/github/prs/137')
 
     // The glyph is still there — only the link waits.
     await waitFor(() => expect(document.querySelector('[data-slot="gh-checks"]')).not.toBeNull())
@@ -2345,7 +2345,7 @@ describe('forge naming', () => {
         return jsonResponse(REGISTRY)
       },
     }))
-    renderAt('/p/orakton/github/issues/142')
+    renderAt('/p/acme/github/issues/142')
 
     // The box exists before the registry has said anything — and reads as GitHub, the default.
     await waitFor(() => expect(promptValue()).toContain('Fix GitHub issue #142'))
@@ -2367,15 +2367,15 @@ describe('forge naming', () => {
     stubFetch(forgejoStubs({
       'GET /api/v1/health': () => jsonResponse({
         ...health(['claude']),
-        bootProject: 'orakton',
+        bootProject: 'acme',
         forge: { kind: 'github' as const, available: true },
       }),
       'GET /api/v1/projects': async () => {
         await registryArrived
-        return jsonResponse({ ...REGISTRY, bootProject: 'orakton' })
+        return jsonResponse({ ...REGISTRY, bootProject: 'acme' })
       },
     }))
-    renderAt('/p/orakton/github/issues/142')
+    renderAt('/p/acme/github/issues/142')
 
     await waitFor(() => expect(promptValue()).toContain('Fix GitHub issue #142'))
     await act(async () => {
@@ -2394,7 +2394,7 @@ describe('forge naming', () => {
         return jsonResponse(REGISTRY)
       },
     }))
-    renderAt('/p/orakton/github/issues/142')
+    renderAt('/p/acme/github/issues/142')
 
     await waitFor(() => expect(promptValue()).toContain('Fix GitHub issue #142'))
     fireEvent.change(promptField(), { target: { value: 'rebase this onto develop' } })
@@ -2421,7 +2421,7 @@ describe('forge naming', () => {
         return jsonResponse(REGISTRY)
       },
     }))
-    renderAt('/p/orakton/github/issues/142')
+    renderAt('/p/acme/github/issues/142')
 
     await waitFor(() => expect(promptValue()).toContain('Fix GitHub issue #142'))
     fireEvent.change(promptField(), { target: { value: '' } })
@@ -2446,7 +2446,7 @@ describe('forge naming', () => {
         return jsonResponse(REGISTRY)
       },
     }))
-    renderAt('/p/orakton/github/issues/142')
+    renderAt('/p/acme/github/issues/142')
 
     await waitFor(() => expect(promptValue()).toContain('Fix GitHub issue #142'))
     fireEvent.change(promptField(), { target: { value: 'rebase this onto develop' } })
@@ -2583,7 +2583,7 @@ describe('forge naming', () => {
         return jsonResponse(REGISTRY)
       },
     }))
-    renderAt('/p/orakton/github/issues/142')
+    renderAt('/p/acme/github/issues/142')
 
     const firstRow = () => document.querySelector('[data-slot="gh-row"]')!
     await waitFor(() => expect(document.querySelector('[data-slot="gh-row"]')).not.toBeNull())
@@ -2613,7 +2613,7 @@ describe('forge naming', () => {
         return jsonResponse(REGISTRY)
       },
     }))
-    renderAt('/p/orakton/github/issues/142')
+    renderAt('/p/acme/github/issues/142')
 
     await waitFor(() => expect(promptValue()).toContain('Fix GitHub issue #142'))
     const gate = () => document.querySelector('[data-slot="gh-forge-gate"]')
@@ -2641,7 +2641,7 @@ describe('forge naming', () => {
 
   it('withholds the automations shortcut from a forge the poller cannot reach', async () => {
     stubFetch(forgejoStubs({ 'GET /api/v1/health': automationsOn }))
-    renderAt('/p/orakton/github')
+    renderAt('/p/acme/github')
 
     await waitFor(() => expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Forgejo'))
     expect(screen.queryByRole('link', { name: 'Set up automations' })).toBeNull()
@@ -2661,7 +2661,7 @@ describe('forge naming', () => {
         return jsonResponse(REGISTRY)
       },
     }))
-    renderAt('/p/orakton/github')
+    renderAt('/p/acme/github')
 
     // The tab itself is on screen — only the offer is withheld.
     await waitFor(() => expect(document.querySelector('[data-slot="gh-header"]')).not.toBeNull())
@@ -2695,7 +2695,7 @@ describe('forge naming', () => {
   // chip collapses left against the repo slug, which is the re-flow the header comment forbids.
   it('keeps the refresh chip right-aligned when automations are on but the forge cannot be polled', async () => {
     stubFetch(forgejoStubs({ 'GET /api/v1/health': automationsOn }))
-    renderAt('/p/orakton/github')
+    renderAt('/p/acme/github')
 
     await waitFor(() => expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Forgejo'))
     expect(screen.queryByRole('link', { name: 'Set up automations' })).toBeNull()

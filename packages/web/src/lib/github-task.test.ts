@@ -388,9 +388,9 @@ describe('the forge name in the ref block', () => {
   // The reason the rename is safe at all — asserted against the real extractor, not a comment.
   // A Forgejo URL matches none of its tier-1 patterns, so the worded tier is all there is.
   it('still gives extractTaskRefs the attribution it keys on', () => {
-    const issue = item({ url: 'http://forge.internal:3000/ajr/orakton/issues/142' })
+    const issue = item({ url: 'http://forge.internal:3000/acme/demo/issues/142' })
     expect(extractTaskRefs(githubTaskRef(issue, 'forgejo')).issueNumber).toBe(142)
-    const pr = item({ kind: 'pr', number: 7, url: 'http://forge.internal:3000/ajr/orakton/pulls/7' })
+    const pr = item({ kind: 'pr', number: 7, url: 'http://forge.internal:3000/acme/demo/pulls/7' })
     expect(extractTaskRefs(githubTaskRef(pr, 'forgejo')).prNumber).toBe(7)
   })
 })
