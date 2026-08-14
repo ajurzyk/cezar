@@ -42,9 +42,18 @@ export function forgeHint(kind?: ForgeKind): ForgeHintSegment[] {
     return [
       { text: 'The tab needs a Forgejo token in ' },
       { text: 'CEZ_FORGEJO_TOKEN', mono: true },
+      // Every field `forgeSettingsSchema` demands, not just the interesting one: a `forge` key
+      // missing any of the three fails validation and is dropped SILENTLY, which leaves the user
+      // back on this empty state having done exactly what it told them to.
       { text: ' and a ' },
-      { text: 'forge.apiUrl', mono: true },
-      { text: ' declared in the repo’s ' },
+      { text: 'forge', mono: true },
+      { text: ' block — ' },
+      { text: 'kind', mono: true },
+      { text: ', ' },
+      { text: 'apiUrl', mono: true },
+      { text: ' and ' },
+      { text: 'webUrl', mono: true },
+      { text: ' — declared in the repo’s ' },
       { text: '.ai/cezar/config.json', mono: true },
       { text: '. Everything else in cezar works without it.' },
     ]

@@ -47,6 +47,15 @@ describe('forgeHint', () => {
     expect(hint).not.toContain('gh auth login')
   })
 
+  // A hint that names a SUBSET of what the parser demands is worse than no hint: `forgeSettings
+  // Schema` (server/forge/types.ts) requires `kind`, `apiUrl` AND `webUrl`, and a `forge` key
+  // missing any of them is dropped silently — so a user who follows the hint verbatim lands back
+  // on this very empty state with nothing new to read.
+  it('names every field the forge config actually requires', () => {
+    const hint = forgeHintText('forgejo')
+    for (const field of ['kind', 'apiUrl', 'webUrl']) expect(hint).toContain(field)
+  })
+
   it('falls back to the GitHub hint when no kind is known', () => {
     expect(forgeHint(undefined)).toEqual(forgeHint('github'))
   })
@@ -55,6 +64,6 @@ describe('forgeHint', () => {
     expect(forgeHint('github').filter((part) => part.mono).map((part) => part.text))
       .toEqual(['gh', 'gh auth login'])
     expect(forgeHint('forgejo').filter((part) => part.mono).map((part) => part.text))
-      .toEqual(['CEZ_FORGEJO_TOKEN', 'forge.apiUrl', '.ai/cezar/config.json'])
+      .toEqual(['CEZ_FORGEJO_TOKEN', 'forge', 'kind', 'apiUrl', 'webUrl', '.ai/cezar/config.json'])
   })
 })
