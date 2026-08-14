@@ -1,4 +1,8 @@
 import type { ForgeInfo } from '@open-mercato/cezar-api-client'
+import { GitPullRequestIcon } from 'lucide-react'
+import type { ComponentType, SVGProps } from 'react'
+
+import { GithubIcon } from '@/components/icons'
 
 /**
  * Which forge answered. Taken from the contract rather than re-declared, so the day the service's
@@ -27,6 +31,24 @@ export const FORGE_KINDS = Object.keys(ALL_FORGE_KINDS) as ForgeKind[]
  */
 export function forgeLabel(kind?: ForgeKind): string {
   return kind === 'forgejo' ? 'Forgejo' : 'GitHub'
+}
+
+/**
+ * What the cockpit MARKS the forge with. Lives beside `forgeLabel` because the two call sites
+ * that need a mark — the nav item (`forgeItem`) and the forge tab's own unavailable state —
+ * choose the name and the mark in the same breath. Two spellings of this mapping would eventually
+ * disagree, and a third forge would mean editing two unrelated files: the same argument
+ * `forgeChecksUrl` makes for itself below.
+ *
+ * lucide-react 1.x ships no Forgejo mark, and an octocat beside the word "Forgejo" is precisely
+ * the mismatch this stage removes — so a neutral forge-shaped icon stands in.
+ *
+ * Returns the COMPONENT, not an element: `NavItem.icon` holds a component, and `forgeItem`
+ * compares it by identity to leave the GitHub item untouched. The `undefined` default carries the
+ * same non-regression rule as `forgeLabel`.
+ */
+export function forgeIcon(kind?: ForgeKind): ComponentType<SVGProps<SVGSVGElement>> {
+  return kind === 'forgejo' ? GitPullRequestIcon : GithubIcon
 }
 
 /** One run of hint text. `mono` marks the command/identifier runs the empty state renders in

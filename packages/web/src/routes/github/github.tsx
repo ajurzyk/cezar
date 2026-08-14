@@ -36,7 +36,6 @@ import type {
 import { CenteredState } from '@/components/centered-state'
 import { Diff, type DiffFileChange } from '@/components/diff'
 import type { EnginePick } from '@/components/engine-pills'
-import { GithubIcon } from '@/components/icons'
 import { automationsPollable } from '@/components/nav-items'
 import { TabLink } from '@/components/tab-link'
 import { Button } from '@/components/ui/button'
@@ -53,7 +52,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Skeleton } from '@/components/ui/skeleton'
 import { toast } from '@/components/ui/toaster'
 import { shortAge } from '@/lib/format'
-import { forgeChecksUrl, forgeHint, forgeLabel, type ForgeKind } from '@/lib/forge-label'
+import { forgeChecksUrl, forgeHint, forgeIcon, forgeLabel, type ForgeKind } from '@/lib/forge-label'
 import { githubTaskPrompt } from '@/lib/github-task'
 import { orderSkillsByUsage } from '@/lib/skills'
 import { useForgeKind } from '@/lib/use-forge-kind'
@@ -130,10 +129,13 @@ export function GithubRoute({ view, changes = false }: { view: GithubView; chang
   // Forgejo project this shortcut would lead somewhere that can never run.
   const automationsAvailable = useHealth().data?.capabilities?.automations === true
   // What to CALL the forge on this screen (spec 2026-08-14-forgejo-forge-support §"Stage 4").
-  // The route, the endpoints and the payload are
-  // forge-agnostic already — only the words the user reads were hardcoded to one forge.
+  // The route, the endpoints and the payload are forge-agnostic already — only the words the
+  // user reads were hardcoded to one forge.
   const forgeKind = useForgeKind()
   const forge = forgeLabel(forgeKind)
+  // And what to MARK it with, from the same module — a mark chosen here would be a second
+  // spelling of the nav item's decision, free to drift from it.
+  const ForgeMark = forgeIcon(forgeKind)
   // ONE decision, not two: the header renders it both as the link's presence and as which element
   // carries `ml-auto`. Split across two conditions, a Forgejo project with the automations
   // capability on satisfied the wider one and withheld the link — leaving the class on nobody.
@@ -292,7 +294,7 @@ export function GithubRoute({ view, changes = false }: { view: GithubView; chang
     return (
       <div data-route="github" className="flex min-h-full flex-col">
         <CenteredState
-          icon={forgeKind === 'forgejo' ? <GitPullRequestIcon /> : <GithubIcon />}
+          icon={<ForgeMark />}
           tone="neutral"
           title={`${forge} is unavailable here`}
           subtitle={gh.reason ?? 'unknown reason'}

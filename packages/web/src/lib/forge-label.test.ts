@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
-import { forgeChecksUrl, forgeHint, forgeHintText, forgeLabel } from './forge-label'
+import { GithubIcon } from '@/components/icons'
+
+import { forgeChecksUrl, forgeHint, forgeHintText, forgeIcon, forgeLabel } from './forge-label'
 
 /** The single source of truth for what the cockpit CALLS the forge. The default is the part
  *  that matters most: every surface that has no kind to offer — a presentational shell rendered
@@ -24,6 +26,34 @@ describe('forgeLabel', () => {
   // service's `FORGE_KINDS`). Rendering the raw slug would be worse than the old default.
   it('falls back to GitHub on a kind it does not know', () => {
     expect(forgeLabel('gitlab' as never)).toBe('GitHub')
+  })
+})
+
+/** The MARK, decided next to the label because the two call sites that need one — the nav item
+ *  (`forgeItem`) and the forge tab's own unavailable state — choose the name and the mark in the
+ *  same breath. Two spellings of this mapping would eventually disagree, and a third forge would
+ *  mean editing two unrelated files; that is the argument `forgeChecksUrl` already makes for
+ *  itself one screen below. */
+describe('forgeIcon', () => {
+  it('wears the GitHub mark for GitHub', () => {
+    expect(forgeIcon('github')).toBe(GithubIcon)
+  })
+
+  it('drops the octocat for a forge that is not GitHub', () => {
+    expect(forgeIcon('forgejo')).not.toBe(GithubIcon)
+  })
+
+  // The same non-regression rule `forgeLabel` carries: a surface with no kind to offer renders
+  // exactly what it rendered before the stage.
+  it('falls back to the GitHub mark when no kind is known', () => {
+    expect(forgeIcon(undefined)).toBe(GithubIcon)
+    expect(forgeIcon()).toBe(GithubIcon)
+  })
+
+  // A kind the wire may grow before this file learns about it. The fallback must be the old
+  // default — a missing mark would be worse than a wrong one.
+  it('falls back to the GitHub mark on a kind it does not know', () => {
+    expect(forgeIcon('gitlab' as never)).toBe(GithubIcon)
   })
 })
 

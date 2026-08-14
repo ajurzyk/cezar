@@ -1,6 +1,5 @@
 import {
   GitBranchIcon,
-  GitPullRequestIcon,
   InboxIcon,
   ListChecksIcon,
   SettingsIcon,
@@ -11,7 +10,7 @@ import {
 import type { ComponentType, SVGProps } from 'react'
 
 import { GithubIcon } from '@/components/icons'
-import { forgeLabel, type ForgeKind } from '@/lib/forge-label'
+import { forgeIcon, forgeLabel, type ForgeKind } from '@/lib/forge-label'
 
 export type NavItem = {
   /** Where the item navigates. Also its identity — `activeNavPath` returns this. */
@@ -81,9 +80,9 @@ export type NavAvailability = {
 function forgeItem(item: NavItem, kind: ForgeKind | undefined): NavItem {
   const label = forgeLabel(kind)
   if (label === item.label) return item
-  // lucide ships no Forgejo mark, and the octocat next to the word "Forgejo" is precisely the
-  // mismatch this stage removes — so a neutral forge-shaped icon stands in.
-  return { ...item, label, icon: GitPullRequestIcon }
+  // Name and mark both come from `forge-label.ts`, so this item and the forge tab's own
+  // unavailable state can never wear different marks for the same forge.
+  return { ...item, label, icon: forgeIcon(kind) }
 }
 
 /**
