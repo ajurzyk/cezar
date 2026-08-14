@@ -2537,6 +2537,32 @@ describe('forge naming', () => {
     expect(promptValue()).not.toContain(RENAMED)
   })
 
+  // A disabled control with no explanation is indistinguishable from a broken one, and this wait
+  // is invisible: nothing else on the panel moves while the registry is in flight.
+  it('says why the run is held while the forge is unknown', async () => {
+    let releaseRegistry!: () => void
+    const registryArrived = new Promise<void>((resolve) => { releaseRegistry = resolve })
+    stubFetch(forgejoStubs({
+      'GET /api/v1/projects': async () => {
+        await registryArrived
+        return jsonResponse(REGISTRY)
+      },
+    }))
+    renderAt('/p/orakton/github/issues/142')
+
+    await waitFor(() => expect(promptValue()).toContain('Fix GitHub issue #142'))
+    const runButton = () => document.querySelector<HTMLButtonElement>('[data-action="gh-run"]')!
+    expect(runButton().getAttribute('title')).toContain('forge')
+
+    await act(async () => {
+      releaseRegistry()
+      await Promise.resolve()
+    })
+    // Once it can run, the button carries no explanation — there is nothing left to explain.
+    await waitFor(() => expect(runButton().hasAttribute('disabled')).toBe(false))
+    expect(runButton().getAttribute('title')).toBeNull()
+  })
+
   // Automations are GitHub-only in fact, not just in name: the poller shells out to the `gh` CLI
   // and never goes through `resolveForge`, which is why `visibleNavItems` withholds the item from
   // a forge it cannot reach. The tab's own cross-link is the same offer and must follow the same

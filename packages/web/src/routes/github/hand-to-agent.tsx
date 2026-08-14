@@ -301,6 +301,14 @@ export function HandToAgent({
   const composesFreshRef = !mentionsItem(applyItemTokens(prompt, item), item)
   const canStart =
     !start.isPending && resolved.canRun && !registryPending && (forgeSettled || !composesFreshRef)
+  // A control disabled with no explanation reads as broken, and nothing else on this panel moves
+  // while the wait runs — no spinner, no changed text. The provider gate renders its own sentence
+  // under the pills; this one is a tooltip, because the wait is normally over before a user has
+  // finished reading the box, and a sentence that appears and vanishes is its own kind of noise.
+  const forgeWait =
+    registryPending || (composesFreshRef && !forgeSettled)
+      ? 'Waiting to learn which forge this item lives on — the prompt has to name it correctly.'
+      : undefined
 
   const submitShortcut = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     const shouldSubmit =
@@ -402,6 +410,7 @@ export function HandToAgent({
         <Button
           variant="contrast"
           data-action="gh-run"
+          title={forgeWait}
           disabled={!canStart}
           onClick={() => start.mutate()}
         >
