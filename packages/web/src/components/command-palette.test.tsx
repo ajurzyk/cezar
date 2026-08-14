@@ -310,7 +310,8 @@ describe('Views group', () => {
     expect(targets).not.toContain('/automations')
   })
 
-  // Stage 4: `nav-items.ts` promises the sidebar and the palette can never disagree, and that is
+  // Stage 4 (spec 2026-08-14-forgejo-forge-support): `nav-items.ts` promises the sidebar and the
+  // palette can never disagree, and that is
   // only true if BOTH pass the forge kind. Without it the palette listed the tab as "GitHub" with
   // the octocat beside a sidebar reading "Forgejo", and still offered Automations — which the
   // `pollable` gate withholds because the poller shells out to `gh` — so ⌘K navigated straight to

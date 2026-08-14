@@ -237,7 +237,8 @@ describe('sidebar wiring', () => {
     expect(screen.getByRole('link', { name: /Automations/ })).toBeTruthy()
   })
 
-  // Stage 4: single-project mode renders the flat nav, and there health IS the answer — the boot
+  // Stage 4 (spec 2026-08-14-forgejo-forge-support): single-project mode renders the flat nav,
+  // and there health IS the answer — the boot
   // folder is the only project. The tab must carry the name of the forge that answered.
   it('names the forge nav item after the forge health reported', async () => {
     serve({

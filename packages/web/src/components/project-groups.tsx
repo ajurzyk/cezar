@@ -269,7 +269,8 @@ function ProjectGroup({
                 nothing about the other projects in the workspace. Whether the forge itself
                 answers still surfaces inside the tab as its availability hint.
 
-                ANY forge, not just GitHub (Stage 4): the gate used to read `=== 'github'`, which
+                ANY forge, not just GitHub (spec 2026-08-14-forgejo-forge-support §"Stage 4"):
+                the gate used to read `=== 'github'`, which
                 is why a Forgejo project's tab vanished from the grouped sidebar — the shape a
                 workspace takes as soon as it holds a second project. `forgeKind` then names the
                 tab after that forge and keeps Automations out of it (`visibleNavItems`). */}

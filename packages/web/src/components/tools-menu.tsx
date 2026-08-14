@@ -37,7 +37,8 @@ export function toolsTooltip(health: HealthResponse): string {
  * degradation table says the hint lives. Null while the forge works: a working forge needs
  * no explaining. Exported for the tests — the two sentences are a small contract.
  *
- * The unreachable sentence names the forge the server actually tried (Stage 4); the no-forge
+ * The unreachable sentence names the forge the server actually tried
+ * (spec 2026-08-14-forgejo-forge-support §"Stage 4"); the no-forge
  * sentence keeps its GitHub wording, because with no forge there is no kind to read and "no
  * GitHub remote" is exactly what that case is.
  */

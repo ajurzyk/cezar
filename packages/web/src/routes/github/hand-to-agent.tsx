@@ -117,7 +117,8 @@ export function HandToAgent({
   // that replaces it — github.tsx), and the component is keyed by `item.url`, not by title — so a
   // title that differs between the two payloads would otherwise leave `prompt !== base`, which
   // reads as "user-owned": the pre-fill would be persisted as a draft and auto-apply would stop.
-  // The forge the item lives on, so the prompt handed to the agent names it correctly (Stage 4).
+  // The forge the item lives on, so the prompt handed to the agent names it correctly
+  // (spec 2026-08-14-forgejo-forge-support §"Stage 4").
   // `settled` — not "a kind is defined" — is what the one-shot correction below keys on.
   const { kind: forgeKind, settled: forgeSettled } = useForgeKindStatus()
   const [base, setBase] = useState(() => githubTaskRef(item, forgeKind))

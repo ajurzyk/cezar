@@ -165,7 +165,8 @@ describe('visibleNavItems', () => {
     expect(labelsOf()).toEqual(labelsOf({ forge: false, inbox: false, automations: false }))
   })
 
-  // Stage 4: the tab is named after the forge that actually answered. `forgeKind` is the ONLY
+  // Stage 4 (spec 2026-08-14-forgejo-forge-support): the tab is named after the forge that
+  // actually answered. `forgeKind` is the ONLY
   // thing that renames it — the gate itself is untouched.
   it('names the forge item after the forge that answered', () => {
     const forgejo = visibleNavItems({ forge: true, forgeKind: 'forgejo' })

@@ -193,7 +193,8 @@ describe('ProjectGroups', () => {
     expect(within(plainNav).queryByRole('link', { name: 'GitHub' })).toBeNull()
   })
 
-  // Stage 4, the blocker this stage exists for: the grouped sidebar is what a workspace with more
+  // Stage 4 (spec 2026-08-14-forgejo-forge-support), the blocker this stage exists for: the
+  // grouped sidebar is what a workspace with more
   // than one project renders, and it used to gate the forge tab on `forge === 'github'` — so a
   // Forgejo project's backlog simply vanished from the menu, reachable only by typing the URL.
   it("offers a Forgejo project its tab, under the forge's own name", async () => {

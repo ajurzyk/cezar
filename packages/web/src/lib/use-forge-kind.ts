@@ -17,7 +17,8 @@ import type { ForgeKind } from './forge-label'
  * answer, so it is not consulted at all.
  *
  * `undefined` means "nothing has said yet", and every consumer treats it as the pre-Stage-4
- * default (`forgeLabel` → "GitHub"). The nav and the screen both read through here so the two
+ * default (`forgeLabel` → "GitHub"; spec 2026-08-14-forgejo-forge-support §"Stage 4"). The nav
+ * and the screen both read through here so the two
  * can never disagree about what to call the same tab.
  */
 export function useForgeKind(): ForgeKind | undefined {

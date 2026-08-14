@@ -27,7 +27,8 @@ export const MAX_CHAIN_STEPS = 8
  *
  * `forge` names the forge the item actually lives on. This text is an INSTRUCTION handed to an
  * agent, not a label on a screen — "fix GitHub issue #24" about a Forgejo issue is simply false.
- * Omitted keeps the pre-Stage-4 GitHub wording, which is why every existing caller is unchanged.
+ * Omitted keeps the pre-Stage-4 GitHub wording, which is why every existing caller is unchanged
+ * (spec 2026-08-14-forgejo-forge-support §"Stage 4").
  */
 export function githubTaskRef(item: GithubItem, forge?: ForgeKind): string {
   const name = forgeLabel(forge)

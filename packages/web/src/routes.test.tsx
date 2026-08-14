@@ -190,7 +190,8 @@ describe('pageTitleContext', () => {
     expect(pageTitleContext('/p/cezar/not-a-route')).toEqual({ pageLabel: null, taskId: null })
   })
 
-  // Stage 4's rule reaches the browser tab too. The heading, the mobile top bar and the sidebar
+  // Stage 4's rule (spec 2026-08-14-forgejo-forge-support) reaches the browser tab too. The
+  // heading, the mobile top bar and the sidebar
   // item all say "Forgejo" on a Forgejo project; a window title still reading "GitHub" is the
   // same mislabel, just in the one place the page cannot show it.
   it('names the forge tab after the forge that answered', () => {

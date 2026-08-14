@@ -20,7 +20,8 @@ export const FORGE_KINDS = Object.keys(ALL_FORGE_KINDS) as ForgeKind[]
  *
  * The `undefined` default is load-bearing, not tidiness: every surface that has no kind to offer
  * — a presentational shell rendered without health, a registry entry with no `forge`, a screen
- * whose queries have not answered yet — keeps saying "GitHub", exactly as it did before Stage 4.
+ * whose queries have not answered yet — keeps saying "GitHub", exactly as it did before Stage 4
+ * (spec 2026-08-14-forgejo-forge-support §"Stage 4").
  * That is what lets this change cost the GitHub path (the upstream path) zero test expectations.
  * An unknown kind lands here too: a raw `gitlab` slug on screen would be worse than the default.
  */

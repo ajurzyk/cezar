@@ -12,7 +12,8 @@ describe('extractTaskRefs', () => {
     });
   });
 
-  // Stage 4: the forge tab now names the forge the item actually lives on. The templates it emits
+  // Stage 4 (spec 2026-08-14-forgejo-forge-support): the forge tab now names the forge the item
+  // actually lives on. The templates it emits
   // are still the templates this extractor has to read — and on Forgejo the WORDED tier is the
   // only one that can fire, since tier 1 matches github.com URLs alone.
   it('reads the Forgejo spelling of those same templates', () => {

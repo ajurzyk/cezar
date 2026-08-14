@@ -353,7 +353,8 @@ describe('githubRunBody backend (#401)', () => {
 })
 
 /**
- * Stage 4: the ref block is an INSTRUCTION sent to an agent, not a label on a screen — telling
+ * Stage 4 (spec 2026-08-14-forgejo-forge-support): the ref block is an INSTRUCTION sent to an
+ * agent, not a label on a screen — telling
  * an agent to "fix GitHub issue #24" when the issue lives on Forgejo is simply false.
  *
  * What is load-bearing here is the SHAPE, not the forge's name: `extractTaskRefs`

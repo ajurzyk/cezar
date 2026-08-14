@@ -129,7 +129,8 @@ export function GithubRoute({ view, changes = false }: { view: GithubView; chang
   // condition `visibleNavItems` puts on the nav item. The poller only speaks `gh`, so on a
   // Forgejo project this shortcut would lead somewhere that can never run.
   const automationsAvailable = useHealth().data?.capabilities?.automations === true
-  // What to CALL the forge on this screen (Stage 4). The route, the endpoints and the payload are
+  // What to CALL the forge on this screen (spec 2026-08-14-forgejo-forge-support §"Stage 4").
+  // The route, the endpoints and the payload are
   // forge-agnostic already — only the words the user reads were hardcoded to one forge.
   const forgeKind = useForgeKind()
   const forge = forgeLabel(forgeKind)

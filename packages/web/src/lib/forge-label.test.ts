@@ -90,7 +90,7 @@ describe('forgeChecksUrl', () => {
   })
 
   // The same rule `forgeLabel` follows: "nothing has said yet" reads as GitHub, so the upstream
-  // path behaves exactly as it did before Stage 4.
+  // path behaves exactly as it did before Stage 4 (spec 2026-08-14-forgejo-forge-support).
   it('falls back to the GitHub shape when no kind is known', () => {
     expect(forgeChecksUrl(PR, undefined)).toBe(`${PR}/checks`)
     expect(forgeChecksUrl(PR)).toBe(`${PR}/checks`)

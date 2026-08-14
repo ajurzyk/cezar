@@ -2204,7 +2204,8 @@ describe('groupCommitRuns', () => {
 })
 
 /**
- * Stage 4: the screen is named after the forge that actually answered, not after the file it
+ * Stage 4 (spec 2026-08-14-forgejo-forge-support): the screen is named after the forge that
+ * actually answered, not after the file it
  * lives in. The route, the endpoints and the fixtures are unchanged — `/api/v1/github*` keeps
  * serving both forges (BACKWARD_COMPATIBILITY.md §2); only what the user reads changes.
  *

@@ -196,7 +196,8 @@ describe('forgeNote', () => {
     expect(note).toContain('GitHub tab is hidden')
   })
 
-  // Stage 4: an unreachable Forgejo is not an unreachable GitHub, and the note that explains the
+  // Stage 4 (spec 2026-08-14-forgejo-forge-support): an unreachable Forgejo is not an
+  // unreachable GitHub, and the note that explains the
   // missing tab must name the forge the server actually tried.
   it('names Forgejo when that is the forge that failed', () => {
     const note = forgeNote({

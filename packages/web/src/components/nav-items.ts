@@ -170,7 +170,8 @@ export function activeNavPath(pathname: string): string | null {
  *
  * `forgeKind` names the forge item exactly as `visibleNavItems` does, because the bar shares its
  * screen with the sidebar item and the view's own `<h1>`: a title reading "GitHub" beside a
- * heading reading "Forgejo" is the mismatch Stage 4 removes.
+ * heading reading "Forgejo" is the mismatch Stage 4 removes
+ * (spec 2026-08-14-forgejo-forge-support §"Stage 4").
  *
  * Gating is deliberately NOT applied here. A route reached while its tab is hidden still needs a
  * title, so this answers from the whole table — the availability question belongs to

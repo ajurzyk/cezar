@@ -102,7 +102,8 @@ describe('AppShell', () => {
     expect(links).toHaveLength(NAV_ITEMS.filter((item) => !item.forge).length)
   })
 
-  // Stage 4: the flat nav (single-project mode) names the tab after the forge health reported.
+  // Stage 4 (spec 2026-08-14-forgejo-forge-support): the flat nav (single-project mode) names
+  // the tab after the forge health reported.
   it('names the forge item after the forge health reported', () => {
     renderShell('/', { forgeAvailable: true, forgeKind: 'forgejo' })
     expect(within(nav()).getByRole('link', { name: 'Forgejo' }).getAttribute('href')).toBe('/github')
