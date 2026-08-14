@@ -1124,14 +1124,15 @@ function GithubThread({ item, colors }: { item: GithubItem; colors: Record<strin
       <ul className="flex flex-col gap-5">
         {groupCommitRuns(entries).map((grouped) =>
           grouped.group === 'commits' ? (
-            <CommitGroup key={grouped.commits[0]!.id} commits={grouped.commits} colors={colors} />
+            <CommitGroup key={grouped.commits[0]!.id} commits={grouped.commits} colors={colors} forge={forge} />
           ) : grouped.entry.row === 'comment' ? (
             <ThreadEntry
               key={`${grouped.entry.comment.kind}-${grouped.entry.comment.id}`}
               comment={grouped.entry.comment}
+              forge={forge}
             />
           ) : (
-            <EventRow key={grouped.entry.event.id} event={grouped.entry.event} colors={colors} />
+            <EventRow key={grouped.entry.event.id} event={grouped.entry.event} colors={colors} forge={forge} />
           ),
         )}
       </ul>
@@ -1208,7 +1209,7 @@ export function groupCommitRuns(entries: ThreadRow[]): GroupedRow[] {
 
 /** A collapsed run of consecutive commits — `{actor} added {n} commits`, expanding to the
  *  individual rows, each of which keeps its own message and CI glyph. */
-function CommitGroup({ commits, colors }: { commits: GithubTimelineEvent[]; colors: Record<string, string> }) {
+function CommitGroup({ commits, colors, forge }: { commits: GithubTimelineEvent[]; colors: Record<string, string>; forge: string }) {
   const [open, setOpen] = useState(false)
   const actor = commits[0]?.actor ?? '?'
 
@@ -1228,7 +1229,7 @@ function CommitGroup({ commits, colors }: { commits: GithubTimelineEvent[]; colo
           </button>
         </li>
         {commits.map((commit) => (
-          <EventRow key={commit.id} event={commit} colors={colors} />
+          <EventRow key={commit.id} event={commit} colors={colors} forge={forge} />
         ))}
       </>
     )
@@ -1272,9 +1273,12 @@ const EVENT_GLYPH: Record<GithubTimelineEventKind, string> = {
  * One timeline event — deliberately NOT a `ThreadEntry`: single line, muted, no card, no avatar
  * block, so events read as connective tissue between comments rather than competing with them.
  * Mirrors github.com's density.
+ *
+ * `forge` arrives as a PROP, not from `useForgeKind()` here: a busy PR's thread runs to hundreds
+ * of rows, and that hook subscribes to `useProjects`, `useHealth` and `useLocation` — three
+ * observers per row, for one `aria-label`. The same rule `GithubRow` follows for its `forgeKind`.
  */
-function EventRow({ event, colors }: { event: GithubTimelineEvent; colors: Record<string, string> }) {
-  const forge = forgeLabel(useForgeKind())
+function EventRow({ event, colors, forge }: { event: GithubTimelineEvent; colors: Record<string, string>; forge: string }) {
   return (
     <li
       data-slot="gh-event-row"
@@ -1394,9 +1398,10 @@ const REVIEW_CHIP: Record<NonNullable<GithubComment['reviewState']>, { label: st
 }
 
 /** One thread entry: avatar (letter fallback), author, age, an optional review-state chip, and the
- *  body via the shared `Markdown` component (images/code fences render as in the issue body). */
-function ThreadEntry({ comment }: { comment: GithubComment }) {
-  const forge = forgeLabel(useForgeKind())
+ *  body via the shared `Markdown` component (images/code fences render as in the issue body).
+ *
+ *  `forge` is a prop for the same reason `EventRow`'s is — see the note there. */
+function ThreadEntry({ comment, forge }: { comment: GithubComment; forge: string }) {
   const chip = comment.reviewState ? REVIEW_CHIP[comment.reviewState] : null
   return (
     <li data-slot="gh-thread-entry" data-kind={comment.kind} className="min-w-0">
