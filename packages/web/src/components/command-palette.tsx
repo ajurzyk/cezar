@@ -308,12 +308,20 @@ function PaletteContent({ close }: { close: () => void }) {
   // Skills list most-used → project → global (#519) — the same order every picker renders.
   const uiState = useUiState()
   // Health is cached by the shell's chips; here it gates the forge-gated Views row (R6 1.1) —
-  // the palette must not offer a GitHub view the sidebar honestly hides.
+  // the palette must not offer a forge view the sidebar honestly hides. Workspace-level on
+  // purpose: `forge.available` is the DRIVER's own probe, not merely "this remote looks like a
+  // forge", and it is the very gate the flat nav reads (`app-shell-container.tsx`).
   const health = useHealth()
-  // WHICH forge answered, so the row carries the forge's real name and its mark. The same answer
-  // the sidebar renders from: `nav-items.ts` guarantees the two agree, and that guarantee only
-  // holds if both surfaces pass the kind. It also keeps Automations off a forge whose poller
-  // (`gh`) cannot reach it — a row that navigates to a tab that cannot work.
+  // WHICH forge answered, so the row carries the forge's real name and its mark — the same answer
+  // the sidebar's flat nav renders from, through the same `visibleNavItems`, so the two can never
+  // call one tab by two names. It also keeps Automations off a forge whose poller (`gh`) cannot
+  // reach it — a row that navigates to a tab that cannot work.
+  //
+  // NAMING only. This does not align the palette with `ProjectGroups`' per-project availability
+  // gate (`project.forge != null`, #698): on a multi-project workspace whose boot folder is a
+  // plain repo, a group can offer a Forgejo project its tab while ⌘K withholds the row entirely.
+  // Closing that gap needs a per-project availability answer from the server — the registry probe
+  // classifies remotes and never probes a driver — so it is not a matter of one more prop here.
   const forgeKind = useForgeKind()
   const now = Date.now()
 
