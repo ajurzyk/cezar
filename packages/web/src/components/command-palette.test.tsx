@@ -310,6 +310,30 @@ describe('Views group', () => {
     expect(targets).not.toContain('/automations')
   })
 
+  // Stage 4: `nav-items.ts` promises the sidebar and the palette can never disagree, and that is
+  // only true if BOTH pass the forge kind. Without it the palette listed the tab as "GitHub" with
+  // the octocat beside a sidebar reading "Forgejo", and still offered Automations — which the
+  // `pollable` gate withholds because the poller shells out to `gh` — so ⌘K navigated straight to
+  // a tab that cannot work.
+  it('names the forge view after the forge and withholds Automations from it', async () => {
+    renderPalette({
+      automations: true,
+      projects: [project({ id: 'orakton', forge: 'forgejo' })],
+      entry: '/p/orakton',
+    })
+    openWith({ metaKey: true })
+    await screen.findByRole('dialog')
+
+    await waitFor(() =>
+      expect(document.querySelector('[data-nav-to="/github"]')?.textContent).toBe('Forgejo'),
+    )
+    const targets = [...document.querySelectorAll('[data-slot="palette-view"]')].map((view) =>
+      view.getAttribute('data-nav-to'),
+    )
+    expect(targets).toContain('/github')
+    expect(targets).not.toContain('/automations')
+  })
+
   it('navigates to the selected view and closes', async () => {
     renderPalette()
     openWith({ metaKey: true })

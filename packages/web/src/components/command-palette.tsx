@@ -4,6 +4,7 @@ import { useHealth, useProjects, useRuns, useRunsIndex, useSkills, useUiState } 
 import { scopeTo, useActiveProjectId, useNavigate } from '@/lib/project-router'
 import type { ProjectListEntry, RunIndexEntry, RunRecord } from '@open-mercato/cezar-api-client'
 import { visibleNavItems } from '@/components/nav-items'
+import { useForgeKind } from '@/lib/use-forge-kind'
 import { StatusDot } from '@/components/status-dot'
 import { NEXT_THEME } from '@/components/theme-toggle'
 import { useTheme } from '@/components/theme-provider'
@@ -309,6 +310,11 @@ function PaletteContent({ close }: { close: () => void }) {
   // Health is cached by the shell's chips; here it gates the forge-gated Views row (R6 1.1) —
   // the palette must not offer a GitHub view the sidebar honestly hides.
   const health = useHealth()
+  // WHICH forge answered, so the row carries the forge's real name and its mark. The same answer
+  // the sidebar renders from: `nav-items.ts` guarantees the two agree, and that guarantee only
+  // holds if both surfaces pass the kind. It also keeps Automations off a forge whose poller
+  // (`gh`) cannot reach it — a row that navigates to a tab that cannot work.
+  const forgeKind = useForgeKind()
   const now = Date.now()
 
   // Same threshold as the sidebar's grouped nav (`app-shell-container.tsx`): with one registered
@@ -418,6 +424,7 @@ function PaletteContent({ close }: { close: () => void }) {
         <CommandGroup heading="Views">
           {visibleNavItems({
             forge: health.data?.forge?.available === true,
+            forgeKind,
             inbox: health.data?.capabilities.followups === true,
             automations: health.data?.capabilities.automations === true,
           }).map((item) => {
