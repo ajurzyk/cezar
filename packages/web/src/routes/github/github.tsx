@@ -1044,8 +1044,8 @@ function GithubPrChanges({ item }: { item: GithubItem }) {
 /** The conversation thread (#499): comments (+ PR review summaries) rendered under the body, each
  *  body through the shared `Markdown` component so images and code fences render exactly as the
  *  issue body does. Lazy — only fetched while this detail view is mounted. Everything degrades:
- *  loading → skeleton, unreachable → one-line reason + "open on GitHub", empty → nothing (the
- *  count badge already said there were none). */
+ *  loading → skeleton, unreachable → one-line reason + "open on …" (the forge that answered),
+ *  empty → nothing (the count badge already said there were none). */
 function GithubThread({ item, colors }: { item: GithubItem; colors: Record<string, string> }) {
   const forge = forgeLabel(useForgeKind())
   const thread = useGithubComments(item.kind, item.number)

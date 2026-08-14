@@ -83,8 +83,12 @@ export type AppShellProps = {
    *  Defaults to shown so the presentational shell stays renderable alone; the container
    *  passes the health payload's truth. */
   forgeAvailable?: boolean
-  /** WHICH forge answered (`health.forge.kind`) — names the forge nav item and keeps Automations
-   *  off a forge its poller cannot reach. Absent keeps the pre-Stage-4 "GitHub", which is why
+  /** WHICH forge answered — names the forge nav item AND the mobile top bar's title, and keeps
+   *  Automations off a forge its poller cannot reach. The container passes `useForgeKind()`: the
+   *  URL project's OWN registry entry, with health standing in for the boot project alone. Not
+   *  `health.forge.kind` directly — that payload is workspace-level and describes the boot
+   *  folder, so a scoped project reading it would wear another project's forge name. Absent keeps
+   *  the pre-Stage-4 "GitHub" (spec 2026-08-14-forgejo-forge-support §"Stage 4"), which is why
    *  the shell renders unchanged for every caller that does not pass it. */
   forgeKind?: ForgeKind
   /** Inbox gating (#471): `false` drops the Inbox nav item and its badge — the global inbox is

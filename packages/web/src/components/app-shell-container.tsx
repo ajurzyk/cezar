@@ -132,9 +132,12 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
         // the chips: the nav must not claim a GitHub tab it cannot back. The Tools menu's
         // forge note says why it is absent.
         forgeAvailable={health.data?.forge?.available === true}
-        // WHICH forge, so the tab carries its real name (Stage 4). Only the FLAT nav reads this —
-        // a grouped sidebar's tabs are named per project by `ProjectGroups`, from each registry
-        // entry's own `forge`.
+        // WHICH forge, so the tab carries its real name (spec 2026-08-14-forgejo-forge-support
+        // §"Stage 4"). Three readers, not one: the flat nav, the mobile top bar's title
+        // (`activeNavItem`, which renders in BOTH layouts) and the browser tab title
+        // (`pageTitleContext`, above). A grouped sidebar is the exception for the SIDEBAR only —
+        // `ProjectGroups` names those tabs per project from each registry entry's own `forge` —
+        // and there the top bar is this prop's sole reader.
         forgeKind={forgeKind}
         // Hidden unless health reports the opt-in inbox (#471) — same honesty rule as above:
         // the nav must not offer an Inbox this server will never fill.
