@@ -302,13 +302,12 @@ export function HandToAgent({
   const canStart =
     !start.isPending && resolved.canRun && !registryPending && (forgeSettled || !composesFreshRef)
   // A control disabled with no explanation reads as broken, and nothing else on this panel moves
-  // while the wait runs — no spinner, no changed text. The provider gate renders its own sentence
-  // under the pills; this one is a tooltip, because the wait is normally over before a user has
-  // finished reading the box, and a sentence that appears and vanishes is its own kind of noise.
-  const forgeWait =
-    registryPending || (composesFreshRef && !forgeSettled)
-      ? 'Waiting to learn which forge this item lives on — the prompt has to name it correctly.'
-      : undefined
+  // while the wait runs — no spinner, no changed text. It has to be RENDERED to be read: a `title`
+  // on this button is unreachable, because `buttonVariants` (ui/button.tsx) carries
+  // `disabled:pointer-events-none`, so no hover ever lands on it while it is held — and browsers
+  // suppress `title` on disabled controls anyway. The provider gate a few lines up solves the same
+  // problem the same way: a sentence beside the affordance it explains.
+  const forgeHeld = registryPending || (composesFreshRef && !forgeSettled)
 
   const submitShortcut = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     const shouldSubmit =
@@ -410,7 +409,6 @@ export function HandToAgent({
         <Button
           variant="contrast"
           data-action="gh-run"
-          title={forgeWait}
           disabled={!canStart}
           onClick={() => start.mutate()}
         >
@@ -423,6 +421,11 @@ export function HandToAgent({
         >
           {submitShortcutHint()}
         </kbd>
+        {forgeHeld ? (
+          <span data-slot="gh-forge-gate" className="text-xs text-muted-foreground">
+            Waiting to learn which forge this item lives on — the prompt has to name it correctly.
+          </span>
+        ) : null}
         {queuedRunId ? (
           <>
             <span data-slot="gh-queued" className="flex items-center gap-1 text-xs font-medium text-success">

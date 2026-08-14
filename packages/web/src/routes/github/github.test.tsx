@@ -2538,7 +2538,10 @@ describe('forge naming', () => {
   })
 
   // A disabled control with no explanation is indistinguishable from a broken one, and this wait
-  // is invisible: nothing else on the panel moves while the registry is in flight.
+  // is invisible: nothing else on the panel moves while the registry is in flight. The explanation
+  // has to be RENDERED — a `title` on the disabled <Button> is unreachable, because the shared
+  // button class carries `disabled:pointer-events-none` (ui/button.tsx), so no hover ever lands on
+  // it while it is held, and browsers suppress `title` on disabled controls anyway.
   it('says why the run is held while the forge is unknown', async () => {
     let releaseRegistry!: () => void
     const registryArrived = new Promise<void>((resolve) => { releaseRegistry = resolve })
@@ -2551,16 +2554,17 @@ describe('forge naming', () => {
     renderAt('/p/orakton/github/issues/142')
 
     await waitFor(() => expect(promptValue()).toContain('Fix GitHub issue #142'))
-    const runButton = () => document.querySelector<HTMLButtonElement>('[data-action="gh-run"]')!
-    expect(runButton().getAttribute('title')).toContain('forge')
+    const gate = () => document.querySelector('[data-slot="gh-forge-gate"]')
+    expect(gate()?.textContent).toContain('forge')
 
     await act(async () => {
       releaseRegistry()
       await Promise.resolve()
     })
-    // Once it can run, the button carries no explanation — there is nothing left to explain.
+    // Once it can run there is nothing left to explain.
+    const runButton = () => document.querySelector<HTMLButtonElement>('[data-action="gh-run"]')!
     await waitFor(() => expect(runButton().hasAttribute('disabled')).toBe(false))
-    expect(runButton().getAttribute('title')).toBeNull()
+    expect(gate()).toBeNull()
   })
 
   // Automations are GitHub-only in fact, not just in name: the poller shells out to the `gh` CLI
