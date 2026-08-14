@@ -274,10 +274,11 @@ const PAGE_TITLE_ROUTES = [
   { pattern: '/new', pageLabel: 'New task' },
   { pattern: '/compare/:groupId', pageLabel: 'Compare' },
   { pattern: '/git/*', pageLabel: 'Git' },
-  // `forge: true` rather than a literal: this tab wears the name of the forge that answered
-  // (Stage 4), the same as its heading, its mobile top bar and its nav item. `forgeLabel`
-  // supplies the label, so a window title cannot disagree with the page under it.
-  { pattern: '/github/*', pageLabel: 'GitHub', forge: true },
+  // `forge: true` and NO `pageLabel`: this tab wears the name of the forge that answered (spec
+  // 2026-08-14-forgejo-forge-support §"Stage 4"), the same as its heading, its mobile top bar
+  // and its nav item. `forgeLabel` supplies the label, so a window title cannot disagree with
+  // the page under it — and a literal left here would be dead weight, editable for no effect.
+  { pattern: '/github/*', forge: true },
   { pattern: '/automations/*', pageLabel: 'Automations' },
   { pattern: '/skills', pageLabel: 'Skills' },
   { pattern: '/inbox', pageLabel: 'Inbox' },
