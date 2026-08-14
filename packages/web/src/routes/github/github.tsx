@@ -133,6 +133,10 @@ export function GithubRoute({ view, changes = false }: { view: GithubView; chang
   // forge-agnostic already — only the words the user reads were hardcoded to one forge.
   const forgeKind = useForgeKind()
   const forge = forgeLabel(forgeKind)
+  // ONE decision, not two: the header renders it both as the link's presence and as which element
+  // carries `ml-auto`. Split across two conditions, a Forgejo project with the automations
+  // capability on satisfied the wider one and withheld the link — leaving the class on nobody.
+  const showAutomations = automationsAvailable && automationsPollable(forgeKind)
   const gh = list.data
 
   // Lazy checks glyphs for the on-screen PR window (#664). Hooks must run before the early
@@ -354,7 +358,7 @@ export function GithubRoute({ view, changes = false }: { view: GithubView; chang
                 {gh.repo}
               </span>
             ) : null}
-            {automationsAvailable && automationsPollable(forgeKind) ? (
+            {showAutomations ? (
               <Link
                 to="/automations/new"
                 className="ml-auto shrink-0 text-[10px] font-medium text-primary hover:underline"
@@ -369,10 +373,12 @@ export function GithubRoute({ view, changes = false }: { view: GithubView; chang
               disabled={refresh.isPending}
               onClick={() => refresh.mutate()}
               // The automations link owns the `ml-auto` that pushes this cluster right; with the
-              // link gated away this button inherits it, so the header does not re-flow.
+              // link gated away this button inherits it, so the header does not re-flow. Both read
+              // `showAutomations`, never one gate each — that split is what collapsed this chip
+              // left on a Forgejo project with the automations capability on.
               className={cn(
                 'flex shrink-0 items-center gap-1 rounded-full border border-border px-1.5 py-px text-[10px] font-medium text-soft-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-55',
-                !automationsAvailable && 'ml-auto',
+                !showAutomations && 'ml-auto',
               )}
             >
               <RefreshCwIcon

@@ -2387,6 +2387,20 @@ describe('forge naming', () => {
     expect(await screen.findByRole('link', { name: 'Set up automations' })).not.toBeNull()
   })
 
+  // The link and the refresh chip's `ml-auto` are ONE decision rendered in two places: the link
+  // owns the class that pushes the cluster right, so whoever withholds the link must hand the
+  // class on. Gating the link on `automationsPollable` while the class stayed on the older, wider
+  // `automationsAvailable` left a Forgejo project with `CEZ_AUTOMATIONS=1` carrying neither — the
+  // chip collapses left against the repo slug, which is the re-flow the header comment forbids.
+  it('keeps the refresh chip right-aligned when automations are on but the forge cannot be polled', async () => {
+    stubFetch(forgejoStubs({ 'GET /api/v1/health': automationsOn }))
+    renderAt('/p/orakton/github')
+
+    await waitFor(() => expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Forgejo'))
+    expect(screen.queryByRole('link', { name: 'Set up automations' })).toBeNull()
+    expect(document.querySelector('[data-slot="gh-refresh"]')?.className).toContain('ml-auto')
+  })
+
   it('keeps every GitHub label when the project is on GitHub', async () => {
     stubFetch({
       'GET /api/v1/projects': () => jsonResponse({
