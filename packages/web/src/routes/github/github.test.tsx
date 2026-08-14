@@ -2356,6 +2356,37 @@ describe('forge naming', () => {
     expect(promptValue()).toBe('rebase this onto develop')
   })
 
+  // Automations are GitHub-only in fact, not just in name: the poller shells out to the `gh` CLI
+  // and never goes through `resolveForge`, which is why `visibleNavItems` withholds the item from
+  // a forge it cannot reach. The tab's own cross-link is the same offer and must follow the same
+  // rule — otherwise the sidebar and the ⌘K palette hide Automations on a Forgejo project while
+  // this header walks the user into building one that can never fire.
+  const automationsOn = () => jsonResponse({
+    ...health(['claude']),
+    capabilities: { ...health(['claude']).capabilities, automations: true },
+  })
+
+  it('withholds the automations shortcut from a forge the poller cannot reach', async () => {
+    stubFetch(forgejoStubs({ 'GET /api/v1/health': automationsOn }))
+    renderAt('/p/orakton/github')
+
+    await waitFor(() => expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Forgejo'))
+    expect(screen.queryByRole('link', { name: 'Set up automations' })).toBeNull()
+  })
+
+  it('keeps the automations shortcut on a GitHub project', async () => {
+    stubFetch({
+      'GET /api/v1/projects': () => jsonResponse({
+        ...REGISTRY,
+        projects: [{ ...REGISTRY.projects[0]!, id: 'demo', name: 'demo', forge: 'github' as const }],
+      }),
+      'GET /api/v1/health': automationsOn,
+    })
+    renderAt('/p/demo/github')
+
+    expect(await screen.findByRole('link', { name: 'Set up automations' })).not.toBeNull()
+  })
+
   it('keeps every GitHub label when the project is on GitHub', async () => {
     stubFetch({
       'GET /api/v1/projects': () => jsonResponse({

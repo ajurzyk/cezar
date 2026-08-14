@@ -101,16 +101,32 @@ function forgeItem(item: NavItem, kind: ForgeKind | undefined): NavItem {
  * explains the GitHub absence). Both the sidebar and the ⌘K palette's Views group render through
  * this, so the two can never disagree.
  */
+/**
+ * Can the automations poller talk to this forge at all? Automations carry a condition the other
+ * gates do not: the poller (`src/automations/github-poller.ts`) shells out to the `gh` CLI and
+ * never goes through `resolveForge`, so it has nothing to say about a Forgejo remote.
+ *
+ * An unknown kind reads as pollable, the pre-Stage-4 default — the same "absent means GitHub"
+ * rule `forgeLabel` follows, so a surface that never learns the kind behaves as it always did.
+ *
+ * Exported because the offer is made in more than one place: the nav (here) AND the forge tab's
+ * own cross-link into `/automations/new` (`routes/github/github.tsx`). Two spellings of this
+ * condition would eventually disagree, and the disagreement would hand a Forgejo user an
+ * automation that can never fire.
+ */
+export function automationsPollable(forgeKind?: ForgeKind): boolean {
+  return forgeKind === undefined || forgeKind === 'github'
+}
+
 export function visibleNavItems({
   forge = false,
   forgeKind,
   inbox = false,
   automations = false,
 }: NavAvailability = {}): NavItem[] {
-  // Automations carry a third condition the other gates do not: the forge must be one the
-  // poller can actually talk to. An unknown kind is treated like a non-GitHub one — offering a
-  // tab that cannot work is worse than withholding one that could.
-  const pollable = forgeKind === undefined || forgeKind === 'github'
+  // Offering a tab that cannot work is worse than withholding one that could — see
+  // `automationsPollable`.
+  const pollable = automationsPollable(forgeKind)
   return NAV_ITEMS
     .filter((item) =>
       (item.forge ? forge : true)

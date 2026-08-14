@@ -37,6 +37,7 @@ import { CenteredState } from '@/components/centered-state'
 import { Diff, type DiffFileChange } from '@/components/diff'
 import type { EnginePick } from '@/components/engine-pills'
 import { GithubIcon } from '@/components/icons'
+import { automationsPollable } from '@/components/nav-items'
 import { TabLink } from '@/components/tab-link'
 import { Button } from '@/components/ui/button'
 import {
@@ -123,6 +124,10 @@ export function GithubRoute({ view, changes = false }: { view: GithubView; chang
   // says the feature does — otherwise this tab would advertise a page that only says "off".
   // `capabilities?.` because this tab renders against minimal health payloads too; absent is
   // fail-closed, which is the honest answer while the server has not spoken.
+  //
+  // The capability alone is not enough: the link is gated on `automationsPollable` too, the same
+  // condition `visibleNavItems` puts on the nav item. The poller only speaks `gh`, so on a
+  // Forgejo project this shortcut would lead somewhere that can never run.
   const automationsAvailable = useHealth().data?.capabilities?.automations === true
   // What to CALL the forge on this screen (Stage 4). The route, the endpoints and the payload are
   // forge-agnostic already — only the words the user reads were hardcoded to one forge.
@@ -349,7 +354,7 @@ export function GithubRoute({ view, changes = false }: { view: GithubView; chang
                 {gh.repo}
               </span>
             ) : null}
-            {automationsAvailable ? (
+            {automationsAvailable && automationsPollable(forgeKind) ? (
               <Link
                 to="/automations/new"
                 className="ml-auto shrink-0 text-[10px] font-medium text-primary hover:underline"
