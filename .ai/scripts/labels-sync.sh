@@ -85,8 +85,15 @@ label_meta() {
   esac
 }
 
-if ! REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"; then
-  echo "cannot resolve the repository — is 'gh' authenticated and is this a checkout with a remote?" >&2
+# Resolve the target from $REPO_ROOT, not from the working directory. `gh repo view`
+# reads the remote of whatever checkout it is called in, while the taxonomy above came
+# from this script's own repository — run by absolute path from a different checkout
+# (the normal way to invoke it, since the agent instructions forbid `cd X && cmd`) the
+# two disagree and the script writes this repo's labels into someone else's. Observed:
+# from a checkout of open-mercato/skills it reported `1 label(s) missing in
+# open-mercato/skills` and would have created it there.
+if ! REPO="$(cd "$REPO_ROOT" && gh repo view --json nameWithOwner --jq .nameWithOwner)"; then
+  echo "cannot resolve the repository of $REPO_ROOT — is 'gh' authenticated and does the checkout have a remote?" >&2
   exit 2
 fi
 
@@ -112,21 +119,36 @@ if ! EXISTING_RAW="$(gh api --paginate "repos/$REPO/labels" --jq '.[].name')"; t
 fi
 mapfile -t EXISTING < <(printf '%s' "$EXISTING_RAW" | awk 'NF')
 
-# GitHub's label uniqueness is case-insensitive: a repo carrying `Bug` rejects a `bug`
-# creation with 422 already_exists. Compare the same way, so an existing label in a
-# different case is recognized as present instead of being retried and failing the run.
-is_existing() {
+# Three outcomes, not two. An exact match is usable. A label that matches only after
+# case folding is NOT usable and must not be reported as present: the tracker's own
+# guard (`label_exists` in .ai/trackers/github.md) compares byte-exact with `grep -Fxq`,
+# so on a repo carrying `Bug` every `apply_label "bug"` degrades to the logged skip this
+# whole change set exists to eliminate. It cannot be repaired here either — GitHub's
+# label uniqueness is case-insensitive, so creating the exact-case name comes back 422
+# already_exists. Only a human rename fixes it, so name it and fail rather than going
+# green over a taxonomy the pipeline cannot actually use.
+label_state() {
   local candidate="${1,,}" have
   for have in ${EXISTING+"${EXISTING[@]}"}; do
-    [ "${have,,}" = "$candidate" ] && return 0
+    if [ "$have" = "$1" ]; then echo exact; return; fi
+    if [ "${have,,}" = "$candidate" ]; then echo "case:$have"; return; fi
   done
-  return 1
+  echo absent
 }
 
 missing=0
 created=0
+mismatched=0
 for name in "${WANTED[@]}"; do
-  if is_existing "$name"; then continue; fi
+  state="$(label_state "$name")"
+  case "$state" in
+    exact) continue ;;
+    case:*)
+      echo "case mismatch: $REPO carries '${state#case:}' where the taxonomy needs '$name' — rename it on GitHub; the tracker's label_exists guard is byte-exact, so every mutation of '$name' silently skips until you do" >&2
+      mismatched=$((mismatched + 1))
+      continue
+      ;;
+  esac
   missing=$((missing + 1))
   meta="$(label_meta "$name")"
   color="${meta%%|*}"
@@ -161,13 +183,20 @@ for name in "${WANTED[@]}"; do
   created=$((created + 1))
 done
 
+if [ "$mismatched" -gt 0 ]; then
+  echo "$mismatched label(s) exist in $REPO only under a different case and need a manual rename" >&2
+fi
+
 if [ "$CHECK_ONLY" = "1" ]; then
   if [ "$missing" -gt 0 ]; then
     echo "$missing label(s) missing in $REPO"
     exit 1
   fi
+  if [ "$mismatched" -gt 0 ]; then exit 1; fi
   echo "label taxonomy complete in $REPO (${#WANTED[@]} labels)"
   exit 0
 fi
 
-echo "done: $created created, $(( ${#WANTED[@]} - created )) already present in $REPO"
+echo "done: $created created, $(( ${#WANTED[@]} - created - mismatched )) already present in $REPO"
+if [ "$mismatched" -gt 0 ]; then exit 1; fi
+exit 0
