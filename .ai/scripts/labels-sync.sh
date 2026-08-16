@@ -139,13 +139,22 @@ for name in "${WANTED[@]}"; do
   # concurrent run, or a case the listing did not cover) — that is "already present",
   # not a failure, and must not abort the labels still queued behind it. Anything else
   # is a real failure and says so with the API's own words instead of a bare exit code.
-  if ! err="$(gh api -X POST "repos/$REPO/labels" \
-      -f "name=$name" -f "color=$color" -f "description=$description" 2>&1 >/dev/null)"; then
-    if printf '%s' "$err" | grep -q 'already_exists'; then
+  #
+  # Capture both streams into one variable: on a failed request `gh api` writes the
+  # JSON error body to STDOUT and only a one-line summary ("gh: Validation Failed
+  # (HTTP 422)") to stderr, and the `already_exists` code lives in the body — sending
+  # stdout to /dev/null would throw away the only copy of the marker and turn every
+  # race into a hard exit. The marker cannot false-positive on our own payload:
+  # GitHub's validation body carries `resource`/`code`/`field` and never echoes the
+  # name, color or description that was submitted. A false miss (GitHub rewording the
+  # code) degrades to a loud failure, which is the safe direction.
+  if ! resp="$(gh api -X POST "repos/$REPO/labels" \
+      -f "name=$name" -f "color=$color" -f "description=$description" 2>&1)"; then
+    if printf '%s' "$resp" | grep -q 'already_exists'; then
       echo "already present: $name"
       continue
     fi
-    echo "failed to create '$name' in $REPO: $err" >&2
+    echo "failed to create '$name' in $REPO: $resp" >&2
     exit 1
   fi
   echo "created: $name"
