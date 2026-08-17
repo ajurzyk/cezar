@@ -47,9 +47,10 @@ export const projectListEntrySchema = z.object({
   /**
    * The remote's web root, `https://github.com/owner/repo`. Rebuilt server-side from the parsed
    * remote rather than passed through, so a remote carrying credentials cannot leak into the
-   * cockpit. Omitted when the project has no forge remote — and also for a project whose forge is
-   * known only from its repo config (`forge: 'forgejo'`), because that declaration names a kind,
-   * not a web root the server can rebuild from the remote; such a row degrades to plain text.
+   * cockpit. For a project whose forge is known only from its repo config (`forge: 'forgejo'`) the
+   * base comes from that block's own `webUrl` — schema-pinned to `http`/`https`, with `owner`/`repo`
+   * still taken from the parsed remote. Omitted only when nothing can name a root: no forge remote,
+   * or a remote that doesn't parse into `{host, owner, repo}`; such a row degrades to plain text.
    *
    * It exists for the cross-project surfaces: a run often knows a PR or issue only by NUMBER, and
    * the global Tasks page has one row per project, so it cannot use any single repo's base the
