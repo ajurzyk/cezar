@@ -104,25 +104,51 @@ export function forgeKindOfRemote(remote: string | undefined, forge?: ForgeSetti
 }
 
 /**
- * A remote's web root — `https://github.com/owner/repo` — or null for anything not on a known
- * forge host.
+ * A remote's web root — `https://github.com/owner/repo` — or null when neither the host table nor
+ * the repo's own config can name one.
  *
  * Built from the PARSED remote, never by string-editing the raw one, and that is the point: a
  * remote may carry credentials (`https://user:token@github.com/o/r.git`), and this is a value the
  * cockpit renders and links to. Rebuilding it from `{host, owner, repo}` leaves nothing to leak.
+ * That holds on BOTH branches below — only the base differs, never where `owner`/`repo` come from.
  *
- * Gated on the HOST TABLE alone, unlike `forgeKindOfRemote` next to it: a repo-config forge names
- * a kind, never a web root this could rebuild (`forge.webUrl` is the driver's business), so a
- * Forgejo project answers `null` here and the surfaces that link by number degrade to plain text
- * for it — the pre-Forgejo behaviour, not a wrong link.
+ * `forge`, when given, is the repo's own `.ai/cezar/config.json` declaration, and it follows the
+ * same precedence rule `forgeKindOfRemote` applies (see `classifyForgeKind`): the host table
+ * answers first and the config only fills the gap it leaves, so a `github.com` remote paired with
+ * `kind: 'forgejo'` still yields the github.com root. `forgeSettingsSchema` has already pinned
+ * `webUrl` to `http`/`https`, so the composed root cannot carry a scheme no consumer expected.
+ *
+ * What this does NOT do is verify that the declared `webUrl` and the remote's host describe the
+ * same instance — `classifyForgeKind` answers `forgejo` for ANY host the table cannot name once the
+ * config declares one, so a repo whose remote points elsewhere gets a link into the configured
+ * instance. That is the trust `resolveForge` already extends to the same config value; the only
+ * thing new here is that such a mistake becomes a visibly wrong link rather than a failing API
+ * call. Config-declared, hand-edited, code-trusted — stated so a future "why does this row link to
+ * the wrong server" starts here.
  */
-export function forgeWebRoot(remote: string | undefined): string | null {
+export function forgeWebRoot(remote: string | undefined, forge?: ForgeSettings): string | null {
+  const parsed = remote ? parseRemote(remote) : null;
+  // `parseRemote` is the only source of `owner`/`repo`, so an unparseable remote has no root to
+  // compose even with a config present — same reason `forgeKindOfRemote` stays null for one.
+  if (!parsed) return null;
   // `FORGE_HOSTS.has(...)`, not `host in FORGE_HOSTS`: the table is a Map (see its comment), and
   // `in` against a Map asks about the Map's OWN properties — never its entries — so every host
   // would answer "unknown" and this would return null for github.com too.
-  const parsed = remote ? parseRemote(remote) : null;
-  if (!parsed || !FORGE_HOSTS.has(parsed.host)) return null;
-  return `https://${parsed.host}/${parsed.owner}/${parsed.repo}`;
+  //
+  // The table's own answer is returned unencoded, exactly as before: this value is the one the
+  // cockpit has always rendered for a GitHub project and it stays byte-identical.
+  if (FORGE_HOSTS.has(parsed.host)) return `https://${parsed.host}/${parsed.owner}/${parsed.repo}`;
+  // Not `forge?.webUrl` directly: routing through `classifyForgeKind` is what keeps the probe, the
+  // resolver and this function on ONE precedence rule, and it is also what refuses a self-hosted
+  // `kind: 'github'` here for the same reason it refuses one there.
+  if (!forge || classifyForgeKind(parsed.host, forge) === null) return null;
+  // Encoded per segment exactly as `forgejoViewUrl` encodes the same pair — `parseRemote` only
+  // checks `owner`/`repo` for non-emptiness, so this is the ONLY thing keeping a traversed path out
+  // of a URL the cockpit links. `webUrl`'s trailing slashes are trimmed because nothing else trims
+  // them (`apiUrl` is trimmed on its way into `ForgejoHttp`; `webUrl` is trimmed nowhere), so a
+  // config ending in '/' would otherwise render `https://host//owner/repo`.
+  const base = forge.webUrl.replace(/\/+$/, '');
+  return `${base}/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}`;
 }
 
 /** Remote host (or, for a host the table can't reveal, a repo-config `ForgeSettings`) → driver |
