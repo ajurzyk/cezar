@@ -144,10 +144,22 @@ describe('forgeWebRoot', () => {
   });
 
   it('encodes owner/repo segments the way forgejoViewUrl encodes the same pair', () => {
-    // `parseRemote` only checks these for non-emptiness, so encoding here is the one thing keeping a
-    // '..' segment or a space out of a URL the cockpit renders and links.
+    // `parseRemote` only checks these for non-emptiness, so encoding is what keeps a DELIMITER inside
+    // a segment — a space, a '%' that would otherwise read as an escape — from reshaping a URL the
+    // cockpit renders and links.
     expect(forgeWebRoot('ssh://git@forge.internal:2222/a c/..%2Fetc.git', forgejoSettings)).toBe(
       'http://forge.internal:8929/a%20c/..%252Fetc',
+    );
+  });
+
+  it('leaves a bare `..` segment verbatim — the encoding is about delimiters, not traversal', () => {
+    // Pinned because the sentence beside the `encodeURIComponent` call used to claim traversal was
+    // what it prevented: dots are unreserved, so `encodeURIComponent('..')` is `'..'`. Accepted, and
+    // bounded — the result resolves to a sibling path on the SAME configured host (`…:8929/demo`),
+    // so a hand-edited remote of this shape buys a wrong link inside the configured instance, never
+    // a link to another origin.
+    expect(forgeWebRoot('ssh://git@forge.internal:2222/../demo.git', forgejoSettings)).toBe(
+      'http://forge.internal:8929/../demo',
     );
   });
 

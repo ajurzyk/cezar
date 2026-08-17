@@ -143,10 +143,19 @@ export function forgeWebRoot(remote: string | undefined, forge?: ForgeSettings):
   // `kind: 'github'` here for the same reason it refuses one there.
   if (!forge || classifyForgeKind(parsed.host, forge) === null) return null;
   // Encoded per segment exactly as `forgejoViewUrl` encodes the same pair — `parseRemote` only
-  // checks `owner`/`repo` for non-emptiness, so this is the ONLY thing keeping a traversed path out
-  // of a URL the cockpit links. `webUrl`'s trailing slashes are trimmed because nothing else trims
-  // them (`apiUrl` is trimmed on its way into `ForgejoHttp`; `webUrl` is trimmed nowhere), so a
-  // config ending in '/' would otherwise render `https://host//owner/repo`.
+  // checks `owner`/`repo` for non-emptiness, so this is what keeps a DELIMITER inside a segment from
+  // reshaping a URL the cockpit renders and links: `encodeURIComponent('a?b#c')` → `'a%3Fb%23c'`,
+  // `encodeURIComponent('a%2Fb')` → `'a%252Fb'` (both run in node, not assumed).
+  //
+  // It does NOT neutralize a `..` segment: dots are unreserved, so `encodeURIComponent('..')` is
+  // `'..'` verbatim. That is accepted rather than overlooked — a remote of `host/../repo` composes
+  // `webUrl/../repo`, which resolves to a sibling path on the SAME configured host, so the worst
+  // case is a wrong link inside the instance the config already points at, never another origin.
+  //
+  // `webUrl`'s trailing slashes are trimmed because nothing else trims them (`apiUrl` is trimmed on
+  // its way into `ForgejoHttp`; `webUrl` is trimmed nowhere — `forgejoViewUrl` still composes
+  // `${webUrl}/${owner}/${repo}` raw), so a config ending in '/' would otherwise render
+  // `https://host//owner/repo`.
   const base = forge.webUrl.replace(/\/+$/, '');
   return `${base}/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}`;
 }
