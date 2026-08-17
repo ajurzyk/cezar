@@ -81,17 +81,29 @@ export function applyItemTokens(text: string, item: GithubItem): string {
  * Does this text already carry the item's reference in a form that survives round-tripping?
  *
  * The bar is deliberately what `src/runs/task-refs.ts` keys on, not merely "the number appears":
- * either the item URL (its tier-1 match) or the KIND-qualified wording — "issue 142", "PR #142",
- * "pull request 142" (its tier-2 match). A bare `#142` is explicitly NOT enough: `extractTaskRefs`
- * degrades it to `ambiguousNumber`, so the run would still lose its issue/PR chip. Trimming the
- * pre-filled box down to "fix #142 on develop" is an ordinary edit, and it must still get the ref
- * block attached.
+ * the KIND-qualified wording — "issue 142", "PR #142", "pull request 142" (its tier-2 match). A
+ * bare `#142` is explicitly NOT enough: `extractTaskRefs` degrades it to `ambiguousNumber`, so the
+ * run would still lose its issue/PR chip. Trimming the pre-filled box down to "fix #142 on
+ * develop" is an ordinary edit, and it must still get the ref block attached.
+ *
+ * The item's URL is NOT a match, on any forge (#6). It reads like the strongest possible signal,
+ * and for a `github.com` item `extractTaskRefs` tier 1 would indeed recover it — but tier 1 is
+ * spelled `github.com` and nothing else, so a Forgejo URL is recovered by no tier at all: not
+ * tier 2, whose `/\bissue\s*#?\s*(\d+)/i` does not fire inside `…/issues/24` (`issue` is followed
+ * by `s`), and not the `#N` fallback, since a URL carries no `#`. Accepting it here suppressed the
+ * ref block and then carried nothing in its place — the same hole F2
+ * (open-mercato/cezar#541) closed for a bare `#N`, re-opened through a different door.
+ *
+ * Gating the URL on the `github.com` shape would work too, at the price of a second host table
+ * kept in step with tier 1. The wording is forge-agnostic and already covers every spelling
+ * `githubTaskRef` emits, so ONE rule carries both this bar and the extractor's recovery. The cost
+ * is paid on GitHub, in the harmless direction: a prompt carrying only an item URL now gets the
+ * ref block prepended where it previously did not — strictly more attribution, never less.
  *
  * `\b` after the digits keeps `#142` from being satisfied by `#1420` (digits are word characters,
  * so there is no boundary between "142" and "0").
  */
 export function mentionsItem(text: string, item: GithubItem): boolean {
-  if (text.includes(item.url)) return true
   const worded =
     item.kind === 'pr'
       ? String.raw`(?:pull\s+request|pr)`
