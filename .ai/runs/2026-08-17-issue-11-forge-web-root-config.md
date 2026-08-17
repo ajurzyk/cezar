@@ -72,15 +72,15 @@ what keeps probe, resolver and web root on one precedence rule.
 
 ### Phase 1: `forgeWebRoot` reads the config
 
-- [ ] 1.1 Red — extend `forge/index.test.ts` with the `forgeWebRoot` cases (config fills the gap; host table still wins; trailing-slash `webUrl`; odd owner/repo segments; unparseable remote with a block present; no block)
-- [ ] 1.2 Green — add the optional `forge` parameter to `forgeWebRoot` and rewrite its doc comment
+- [x] 1.1 Red — extend `forge/index.test.ts` with the `forgeWebRoot` cases (config fills the gap; host table still wins; trailing-slash `webUrl`; odd owner/repo segments; unparseable remote with a block present; no block) — 37ab0f2b
+- [x] 1.2 Green — add the optional `forge` parameter to `forgeWebRoot` and rewrite its doc comment — 37ab0f2b
 
 ### Phase 2: Call site and the contract's own account of `repoUrl`
 
-- [ ] 2.1 Red — extend `workspace/projects.test.ts` with a Forgejo project row asserting `repoUrl`
-- [ ] 2.2 Green — pass `forgeSettings` through in `computeProbe` and rewrite its comment
-- [ ] 2.3 Update `projectListEntrySchema.repoUrl`'s doc comment and `BACKWARD_COMPATIBILITY.md` §2
+- [x] 2.1 Red — extend `workspace/projects.test.ts` with a Forgejo project row asserting `repoUrl` — ec5aef37
+- [x] 2.2 Green — pass `forgeSettings` through in `computeProbe` and rewrite its comment — ec5aef37
+- [x] 2.3 Update `projectListEntrySchema.repoUrl`'s doc comment and `BACKWARD_COMPATIBILITY.md` §2 — ec5aef37
 
 ### Phase 3: Validation
 
-- [ ] 3.1 Full validation gate green (typecheck, test, test:unit, build, test:package)
+- [x] 3.1 Full validation gate green (typecheck, test, test:unit, build, test:package) — ec5aef37
