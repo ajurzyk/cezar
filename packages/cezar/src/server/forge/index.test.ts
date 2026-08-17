@@ -166,6 +166,27 @@ describe('forgeWebRoot', () => {
   it('stays null for a self-hosted remote with no repo config — the pre-Forgejo behaviour', () => {
     expect(forgeWebRoot('ssh://git@forge.internal:2222/acme/demo.git')).toBeNull();
   });
+
+  it.each([
+    ['https://github.com/acme/demo.git', undefined],
+    ['https://github.com/acme/demo.git', forgejoSettings],
+    ['https://github.com/acme/demo.git', githubSettings],
+    ['ssh://git@forge.internal:2222/acme/demo.git', forgejoSettings],
+    ['ssh://git@forge.internal:2222/acme/demo.git', githubSettings],
+    ['ssh://git@forge.internal:2222/acme/demo.git', undefined],
+    ['git@gitlab.com:acme/demo.git', forgejoSettings],
+    ['/srv/git/demo.git', forgejoSettings],
+  ])('agrees with forgeKindOfRemote about which forge named the root (%s)', (remote, settings) => {
+    // The invariant the cockpit newly DEPENDS on. `global-tasks.tsx` spells a number-only PR chip
+    // from the row's `repoUrl` and its `forge` together, and the two segments differ (`/pulls/` on
+    // Forgejo, `/pull/` on GitHub) — so a row whose kind and root disagreed would render a 404.
+    // They cannot disagree, because both answers come from `classifyForgeKind`; this pins that.
+    const kind = forgeKindOfRemote(remote, settings);
+    const root = forgeWebRoot(remote, settings);
+    expect(root === null).toBe(kind === null);
+    if (kind === 'github') expect(root).toMatch(/^https:\/\/github\.com\//);
+    if (kind === 'forgejo') expect(root?.startsWith(`${settings?.webUrl}/`)).toBe(true);
+  });
 });
 
 describe('resolveForge', () => {

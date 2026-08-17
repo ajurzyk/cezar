@@ -311,6 +311,27 @@ describe('taskReferences', () => {
     ])
   })
 
+  it('spells a synthesized PR path the way the row’s own forge spells it', () => {
+    // Forgejo's web UI routes pull requests at `/pulls/{n}` (plural) — `/pull/{n}`, GitHub's
+    // spelling, is a hard 404 there with no redirect, and `forgejoViewUrl` on the server carries
+    // the same note from a live `html_url`. Reachable only since a Forgejo project started
+    // reporting `repoUrl` at all; before that these chips were inert text, so a wrong link is a
+    // strictly worse answer than the one it replaced. Issues are `/issues/{n}` on both forges.
+    const FORGEJO = 'http://forge.internal:8929/o/r'
+    expect(taskReferences(run({ prNumber: 42, issueNumber: 12 }), FORGEJO, 'forgejo')).toEqual([
+      { kind: 'PR', number: 42, url: `${FORGEJO}/pulls/42` },
+      { kind: 'Issue', number: 12, url: `${FORGEJO}/issues/12` },
+    ])
+  })
+
+  it('keeps GitHub’s singular spelling when no forge is named', () => {
+    // The default has to stay GitHub's: every caller that predates a per-row forge passes two
+    // arguments, and `useProjectRepoBase` only ever yields a github.com root.
+    expect(taskReferences(run({ prNumber: 42 }), REPO, undefined)).toEqual([
+      { kind: 'PR', number: 42, url: `${REPO}/pull/42` },
+    ])
+  })
+
   it('never invents a URL without a repo to build it from', () => {
     // Inert text beats a link that goes somewhere made up.
     expect(taskReferences(run({ prNumber: 42 }), undefined)).toEqual([{ kind: 'PR', number: 42 }])

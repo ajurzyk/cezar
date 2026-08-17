@@ -1,4 +1,5 @@
 import type { ProcessUsage, RunRecord, RunStatus } from '@open-mercato/cezar-api-client'
+import type { ForgeKind } from '@/lib/forge-label'
 import { groupTitle, runTitle, type ListView } from '@/lib/task-groups'
 
 /**
@@ -220,7 +221,11 @@ export interface TaskReference {
  *
  * Deduped by kind+number, so one reference reached through two fields stays one chip.
  */
-export function taskReferences(run: TaskReferenceInput, repoBase?: string): TaskReference[] {
+export function taskReferences(
+  run: TaskReferenceInput,
+  repoBase?: string,
+  forge?: ForgeKind,
+): TaskReference[] {
   const sources: { kind: TaskReference['kind']; url?: string; number?: number }[] = [
     ...prUrls(run).map((url) => ({ kind: 'PR' as const, url })),
     // Numeric-only: a reference known by number before any URL was scraped. `repoBase` turns it
@@ -242,20 +247,33 @@ export function taskReferences(run: TaskReferenceInput, repoBase?: string): Task
     // `taskIssueUrl` already applies, and the same hard limit: only ever the project's repo,
     // never a URL scraped from a transcript, which routinely names another repository (#526).
     // Without a `repoBase` the chip stays inert text rather than linking somewhere invented.
-    const url = source.url ?? synthesizeUrl(source.kind, number, repoBase)
+    const url = source.url ?? synthesizeUrl(source.kind, number, repoBase, forge)
     references.push({ kind: source.kind, number, ...(url ? { url } : {}) })
   }
   return references
 }
 
-/** `#402` on a known repo → its forge URL. Undefined without a repo to build it from. */
+/**
+ * `#402` on a known repo → its forge URL. Undefined without a repo to build it from.
+ *
+ * The PR segment is spelled per FORGE, not once for everyone: Forgejo routes pull requests at
+ * `/pulls/{n}` (plural) and answers a hard 404 for GitHub's singular `/pull/{n}` — no redirect to
+ * soften it. The server's `forgejoViewUrl` carries the same note, taken from a live `html_url`.
+ * Issues are `/issues/{n}` on both, so only this one segment forks.
+ *
+ * Defaulting to GitHub's spelling is deliberate rather than lazy: every caller that predates a
+ * per-row forge passes no kind, and the only other `repoBase` source (`useProjectRepoBase`) is
+ * github.com-only by construction, so the default is correct for all of them.
+ */
 function synthesizeUrl(
   kind: TaskReference['kind'],
   number: number,
   repoBase: string | undefined,
+  forge: ForgeKind | undefined,
 ): string | undefined {
   if (!repoBase) return undefined
-  return `${repoBase}/${kind === 'PR' ? 'pull' : 'issues'}/${number}`
+  const segment = kind === 'PR' ? (forge === 'forgejo' ? 'pulls' : 'pull') : 'issues'
+  return `${repoBase}/${segment}/${number}`
 }
 
 /** The strongest known tracker reference — what a row with space for exactly one shows (the
