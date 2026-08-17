@@ -19,6 +19,11 @@
 #   bash .ai/scripts/labels-sync.sh            create every missing label
 #   bash .ai/scripts/labels-sync.sh --check    report what is missing, create nothing
 #                                              (exit 1 when anything is missing)
+#
+# Exit 1 also means "a label exists only under a different case" — in both modes, and
+# even when every missing label was created. That state is real drift the script cannot
+# repair (GitHub's label names are case-insensitively unique), so it refuses to go green
+# over it; the message names the rename a human has to make.
 set -euo pipefail
 
 CHECK_ONLY=0
@@ -85,15 +90,32 @@ label_meta() {
   esac
 }
 
-# Resolve the target from $REPO_ROOT, not from the working directory. `gh repo view`
-# reads the remote of whatever checkout it is called in, while the taxonomy above came
-# from this script's own repository — run by absolute path from a different checkout
-# (the normal way to invoke it, since the agent instructions forbid `cd X && cmd`) the
-# two disagree and the script writes this repo's labels into someone else's. Observed:
-# from a checkout of open-mercato/skills it reported `1 label(s) missing in
-# open-mercato/skills` and would have created it there.
-if ! REPO="$(cd "$REPO_ROOT" && gh repo view --json nameWithOwner --jq .nameWithOwner)"; then
-  echo "cannot resolve the repository of $REPO_ROOT — is 'gh' authenticated and does the checkout have a remote?" >&2
+# Name the target repository explicitly, from $REPO_ROOT's own `origin`. Letting `gh`
+# pick it leaves two independent ways to sync this repository's taxonomy into someone
+# else's, and closing only one of them still leaves the door open:
+#
+#   1. Working directory. `gh repo view` reads the remote of whatever checkout it is
+#      called in, while the taxonomy above came from this script's own repository — run
+#      by absolute path from a different checkout (the normal way to invoke it, since the
+#      agent instructions forbid `cd X && cmd`) the two disagree. Observed: from a
+#      checkout of open-mercato/skills it reported `1 label(s) missing in
+#      open-mercato/skills` and would have created it there.
+#   2. Remote preference. Given several remotes and no `gh repo set-default`, `gh` picks
+#      a remote named `upstream` over one named `origin`. This repository is a fork that
+#      carries both, so `gh repo view` answers with the PARENT — verified: in a clone
+#      holding origin=ajurzyk/cezar and upstream=open-mercato/cezar it returns
+#      open-mercato/cezar. What suppresses that here is `remote.origin.gh-resolved` in
+#      .git/config, which is machine-local and unversioned: it protects this checkout and
+#      no other, and a fresh clone of the fork gets the upstream's labels rewritten.
+#
+# Passing the URL closes both, and costs nothing: `gh` still normalizes it (ssh and https
+# forms alike) and still fails loudly on a bad token or an unreachable repository.
+if ! ORIGIN_URL="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null)"; then
+  echo "$REPO_ROOT has no 'origin' remote — this script syncs the labels of the repository its own checkout came from, and nothing else names which one that is" >&2
+  exit 2
+fi
+if ! REPO="$(gh repo view "$ORIGIN_URL" --json nameWithOwner --jq .nameWithOwner)"; then
+  echo "cannot resolve $ORIGIN_URL (the 'origin' of $REPO_ROOT) — is 'gh' authenticated?" >&2
   exit 2
 fi
 
