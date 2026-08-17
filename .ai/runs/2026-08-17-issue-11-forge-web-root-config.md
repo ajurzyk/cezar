@@ -62,6 +62,12 @@ what keeps probe, resolver and web root on one precedence rule.
 - **Low.** The only wire-shape change is a field that used to be omitted now being present for
   Forgejo projects; `repoUrl` is already `optional()` in the contract, so no consumer's parse
   narrows.
+- **Found in review, fixed in 493c5601.** Making `repoUrl` non-null for Forgejo flipped the global
+  Tasks page's number-only chips from inert text to links, and `synthesizeUrl`
+  (`packages/web/src/lib/tasks-table.ts`) spelled the PR path as GitHub's `/pull/{n}`. Forgejo
+  routes pull requests at `/pulls/{n}` and 404s the singular form — verified against a live Forgejo
+  (`codeberg.org`: `/pulls/1` → 303, `/pull/1` → 404, no redirect). Left alone, this stage would
+  have shipped a broken link where it used to ship plain text.
 - A repo declaring a `forge` block whose `webUrl` points at a different instance than its remote now
   renders a link into the configured instance instead of plain text. Accepted per the spec, and
   recorded here so a future "why does this row link to the wrong server" starts at this note.
@@ -84,3 +90,8 @@ what keeps probe, resolver and web root on one precedence rule.
 ### Phase 3: Validation
 
 - [x] 3.1 Full validation gate green (typecheck, test, test:unit, build, test:package) — ec5aef37
+
+### Phase 4: Review findings
+
+- [x] 4.1 Spell a synthesized PR path per forge — `/pulls/` on Forgejo, which 404s GitHub's `/pull/` — 493c5601
+- [x] 4.2 Re-run the full validation gate after the fix — 493c5601
