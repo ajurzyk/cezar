@@ -298,6 +298,28 @@ describe('workspace projects', () => {
     expect(listed?.forge).toBe('github');
   });
 
+  it("composes the web root from a Forgejo repo's own forge block", async () => {
+    const root = makeRepo('self-hosted');
+    execFileSync('git', ['remote', 'add', 'origin', 'https://tok3n:x@forge.internal/acme/self-hosted.git'], {
+      cwd: root,
+    });
+    mkdirSync(join(root, '.ai/cezar'), { recursive: true });
+    writeFileSync(
+      join(root, '.ai/cezar', 'config.json'),
+      JSON.stringify({ forge: { kind: 'forgejo', apiUrl: 'http://forgejo:3000', webUrl: 'http://forge.internal:8929' } }),
+      'utf8',
+    );
+    await registerProject(root);
+    clearProjectProbeCache();
+
+    const listed = (await listProjects())[0];
+    // The host table cannot name this host, so the row used to carry no `repoUrl` at all and every
+    // cross-project reference on it degraded to plain text. Still rebuilt from the parsed remote,
+    // so the token stays out of it.
+    expect(listed?.repoUrl).toBe('http://forge.internal:8929/acme/self-hosted');
+    expect(listed?.forge).toBe('forgejo');
+  });
+
   it('omits the web root for a repo with no forge remote', async () => {
     const root = makeRepo('local-only');
     execFileSync('git', ['remote', 'add', 'origin', '/srv/git/local-only.git'], { cwd: root });

@@ -246,9 +246,11 @@ async function computeProbe(root: string): Promise<RootProbe> {
   const [info, forgeSettings] = await Promise.all([getRepoInfo(root), readForgeSettings(root)]);
   const forge = forgeKindOfRemote(info?.remote, forgeSettings);
   // Free: `getRepoInfo` already ran for the branch, and the remote is already parsed for `forge`.
-  // Host-table only, so a Forgejo project answers `forge: 'forgejo'` with no `repoUrl` — see
-  // `forgeWebRoot`: the repo config names a kind, not a web root this could rebuild safely.
-  const repoUrl = forgeWebRoot(info?.remote);
+  // `forgeSettings` is the same value `forgeKindOfRemote` just took, and it fills the same gap here
+  // — a self-hosted forge the host table cannot name still gets a `repoUrl`, composed from the
+  // block's own `webUrl`, so this row's references stop degrading to plain text. Precedence is
+  // `forgeWebRoot`'s to apply, not this call site's.
+  const repoUrl = forgeWebRoot(info?.remote, forgeSettings);
   return {
     status: 'ok',
     ...(info?.branch ? { branch: info.branch } : {}),

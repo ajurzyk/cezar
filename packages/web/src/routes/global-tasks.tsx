@@ -326,7 +326,7 @@ export function GlobalTasksRoute() {
   const referenceRequests = React.useMemo(
     () =>
       visible.flatMap((task) =>
-        taskReferences(task.run, task.project?.repoUrl).map((reference) => ({
+        taskReferences(task.run, task.project?.repoUrl, task.project?.forge).map((reference) => ({
           projectId: task.run.projectId,
           kind: reference.kind,
           number: reference.number,
@@ -769,7 +769,11 @@ function TaskRow({
   // The project's own repo root is what makes a reference known only by NUMBER clickable. A
   // project-scoped view can use the one repo it is standing in; this page has a different repo
   // per row, which is why the registry entry carries `repoUrl`.
-  const references = taskReferences(run, task.project?.repoUrl)
+  //
+  // The row's `forge` rides along because the PR path is spelled per forge (`/pulls/` on Forgejo,
+  // `/pull/` on GitHub) — this page is the one surface whose `repoBase` can be non-GitHub, so it
+  // is the one that has to say which.
+  const references = taskReferences(run, task.project?.repoUrl, task.project?.forge)
   // The SAME live/peak rule the per-project table applies. The live sample rides the index row
   // itself (`run.usage`, attached server-side per poll) rather than the run event stream, which
   // is project-scoped and so cannot reach forty projects at once.
