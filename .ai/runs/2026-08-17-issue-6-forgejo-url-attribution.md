@@ -89,6 +89,8 @@ Every command in `validation.commands`, plus a re-read of the diff for scope cre
 
 ## Progress
 
+PR: #25
+
 > Convention: `- [ ]` pending, `- [x]` done. Append ` — <commit sha>` when a step lands. Do not rename step titles.
 
 Phase 1 and Phase 2 share commit `2d9d3b60`: the tests were written and watched fail first
