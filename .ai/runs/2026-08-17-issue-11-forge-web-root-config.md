@@ -97,3 +97,16 @@ PR: #22
 
 - [x] 4.1 Spell a synthesized PR path per forge — `/pulls/` on Forgejo, which 404s GitHub's `/pull/` — 493c5601
 - [x] 4.2 Re-run the full validation gate after the fix — 493c5601
+
+### Phase 5: Second review pass (`om-auto-review-pr`)
+
+- [x] 5.1 Correct the `encodeURIComponent` comment: it named traversal as what the encoding prevents, but `encodeURIComponent('..')` is `'..'`. Say what it actually neutralizes, and pin the `..` passthrough as bounded (same host) rather than leaving it unstated — 66284cf4
+- [x] 5.2 Re-run the full validation gate after the comment/test change — 66284cf4 (332 files / 6560 tests)
+- [x] 5.3 Correct the PR body's test count (it was written before 4.1's cases existed) — PR description, no commit
+
+Left as a follow-up, deliberately out of this diff: `forgejoViewUrl`
+(`packages/cezar/src/server/forge/forgejo.ts:433`) composes `${webUrl}/${owner}/${repo}` from the
+same `webUrl` WITHOUT the trailing-slash trim `forgeWebRoot` now applies, so a config ending in `/`
+renders `host//owner/repo` from the driver and `host/owner/repo` from the projects row. Pre-existing,
+and outside the files this stage touches; the fix is one shared composer for both call sites, which
+is the argument `classifyForgeKind` already makes for itself.
