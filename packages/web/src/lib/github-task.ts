@@ -86,7 +86,8 @@ export function applyItemTokens(text: string, item: GithubItem): string {
  * run would still lose its issue/PR chip. Trimming the pre-filled box down to "fix #142 on
  * develop" is an ordinary edit, and it must still get the ref block attached.
  *
- * The item's URL is NOT a match, on any forge (#6). It reads like the strongest possible signal,
+ * The item's URL is NOT a match, on any forge (ajurzyk/cezar#6 — a FORK issue; a bare `#N` in this
+ * repo's comments is upstream numbering). It reads like the strongest possible signal,
  * and for a `github.com` item `extractTaskRefs` tier 1 would indeed recover it — but tier 1 is
  * spelled `github.com` and nothing else, so a Forgejo URL is recovered by no tier at all: not
  * tier 2, whose `/\bissue\s*#?\s*(\d+)/i` does not fire inside `…/issues/24` (`issue` is followed

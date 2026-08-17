@@ -154,7 +154,7 @@ describe('mentionsItem', () => {
     expect(mentionsItem('port #142 to develop', item())).toBe(false)
   })
 
-  // The Forgejo half of #6, and the reason the item URL is no longer a match at all. Tier 1 of
+  // The Forgejo half of ajurzyk/cezar#6, and the reason the item URL is no longer a match. Tier 1 of
   // `task-refs.ts` is spelled `github.com`, so a Forgejo URL is recovered by NOTHING there — not
   // even as `ambiguousNumber`, since a URL carries no `#`. Accepting it here would suppress the
   // ref block and leave the URL carrying no attribution in its place: no chip, no `#N` title
@@ -237,7 +237,7 @@ describe('composeGithubTask', () => {
     )
   })
 
-  // #6 end to end: the two ways a prompt comes to carry the item URL *instead of* the wording —
+  // ajurzyk/cezar#6 end to end: the two ways a prompt carries the item URL *instead of* the wording —
   // the supported `{{url}}` token in a saved prompt template, and a user pasting the link. On a
   // Forgejo item the URL is recoverable by nothing (`task-refs.ts` tier 1 is `github.com`), so
   // suppressing the ref block for it left the run with no attribution at all.
@@ -305,8 +305,8 @@ describe('composeGithubTask', () => {
   // pre-filled, so extending it is the normal edit — a cold deep link to a Forgejo issue seeds
   // "Fix GitHub issue #142" before the registry answers, the user appends a sentence, and
   // `hand-to-agent.tsx` then leaves their touched text alone by design. `mentionsItem` matches
-  // (the block's own "issue #142" wording), so nothing prepends the corrected ref. Re-emitting the seeded
-  // block verbatim would hand the agent "Fix GitHub issue #142" about a Forgejo issue — the
+  // (the block's own "issue #142" wording), so nothing prepends the corrected ref. Re-emitting
+  // the seeded block verbatim would hand the agent "Fix GitHub issue #142" about a Forgejo issue — the
   // false instruction this stage exists to remove.
   it('rewrites a stale forge name in the seeded ref block the user extended', () => {
     const it142 = item()
