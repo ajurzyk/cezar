@@ -91,16 +91,44 @@ Every command in `validation.commands`, plus a re-read of the diff for scope cre
 
 > Convention: `- [ ]` pending, `- [x]` done. Append ` — <commit sha>` when a step lands. Do not rename step titles.
 
+Phase 1 and Phase 2 share commit `2d9d3b60`: the tests were written and watched fail first
+(5 failing, all for the expected reason — the ref block not prepended), but landing them as their
+own commit would put a knowingly red commit in this repository's history, which its "a red suite is
+a full stop" rule does not distinguish from a broken one.
+
 ### Phase 1: Red tests
 
-- [ ] 1.1 Pin in `task-refs.test.ts` that a Forgejo item URL alone recovers nothing
-- [ ] 1.2 Rewrite the `mentionsItem` URL expectations in `github-task.test.ts`
-- [ ] 1.3 Pin that a URL-only prompt composes a readable ref block
+- [x] 1.1 Pin in `task-refs.test.ts` that a Forgejo item URL alone recovers nothing — 2d9d3b60
+- [x] 1.2 Rewrite the `mentionsItem` URL expectations in `github-task.test.ts` — 2d9d3b60
+- [x] 1.3 Pin that a URL-only prompt composes a readable ref block — 2d9d3b60
 
 ### Phase 2: Implementation
 
-- [ ] 2.1 Drop the URL shortcut from `mentionsItem` and correct its doc block
+- [x] 2.1 Drop the URL shortcut from `mentionsItem` and correct its doc block — 2d9d3b60
 
 ### Phase 3: Validation
 
-- [ ] 3.1 Run the full validation gate and re-read the diff
+- [x] 3.1 Run the full validation gate and re-read the diff — 2d9d3b60
+
+## Outcome
+
+All five `validation.commands` green, run with `TMPDIR=/tmp TMP=/tmp` for the reason recorded
+under **Baseline**:
+
+| Command | Result |
+|---|---|
+| `npm run typecheck` | clean |
+| `npm test` | 332 files / **6567** tests — baseline 6560 plus exactly the 7 cases added here |
+| `npm run test:unit` | 36 passed |
+| `npm run build` | built; `check:pack ok — 487 files` |
+| `npm run test:package` | 15 passed |
+
+Acceptance criterion from the issue, verified by test `a Forgejo item URL in the prompt still gets
+the ref block, and it is readable`:
+`extractTaskRefs(composeGithubTask(item, [], '<forgejo item url> to develop', 'forgejo'))` answers
+`{issueNumber: 24}` — the same value the `github.com` control already answered.
+
+Final diff: 3 files, one deleted line of production code
+(`if (text.includes(item.url)) return true`), its doc block rewritten, and 7 new test cases. One
+stale parenthetical in `github-task.test.ts` ("the URL is right there") was corrected to name the
+wording, since that is now what makes `mentionsItem` match a seeded ref block.
