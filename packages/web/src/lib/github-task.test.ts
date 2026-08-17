@@ -305,8 +305,8 @@ describe('composeGithubTask', () => {
   // pre-filled, so extending it is the normal edit — a cold deep link to a Forgejo issue seeds
   // "Fix GitHub issue #142" before the registry answers, the user appends a sentence, and
   // `hand-to-agent.tsx` then leaves their touched text alone by design. `mentionsItem` matches
-  // (the block's own "issue #142" wording), so nothing prepends the corrected ref. Re-emitting
-  // the seeded block verbatim would hand the agent "Fix GitHub issue #142" about a Forgejo issue — the
+  // (the block's own "issue #142" wording), so nothing prepends the corrected ref. Re-emitting the
+  // seeded block verbatim would hand the agent "Fix GitHub issue #142" about a Forgejo issue — the
   // false instruction this stage exists to remove.
   it('rewrites a stale forge name in the seeded ref block the user extended', () => {
     const it142 = item()
