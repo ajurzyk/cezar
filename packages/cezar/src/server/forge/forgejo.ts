@@ -449,6 +449,182 @@ function forgejoViewUrl(webUrl: string, owner: string, repo: string, kind: Forge
   }
 }
 
+// ---- CEZ_DRY_RUN=1 fixtures (#26) -------------------------------------------
+// The read side's offline catalog — the Forgejo twin of `github.ts`'s `mockGithub()`, and the one
+// source every dry-run READ path in this file answers from (`listForgejo`, `forgejoPrStatus`,
+// `forgejoListChecks`).
+//
+// Why it has to exist at all: the probe already reports the forge AVAILABLE under dry-run, so a
+// Forgejo project's GitHub tab rendered as healthy-and-empty — no row to click, therefore no item
+// detail page, therefore no "Hand this to the agent" panel, therefore no browser-level coverage of
+// any Forgejo behaviour. `{available:true, items:[]}` is also precisely the silent-failure shape
+// `listForgejo`'s own all-rows-failed gate exists to refuse; the dry-run branch was producing it by
+// hand. Every other dry-run path here (merge state, create PR) already carried a real fixture.
+//
+// The values are chosen to be DISJOINT from `mockGithub()`'s — numbers, titles, authors, labels and
+// label colours all differ — so an assertion about Forgejo cannot be satisfied by GitHub fixtures
+// that happen to be in front of it. `dry-run-fixtures.test.ts` pins that as an invariant rather
+// than a convention, since both catalogs are hand-maintained.
+
+/** One catalog row. `branch` is Forgejo-only bookkeeping (`ForgeItem` has no head-branch field) and
+ *  is what lets `forgejoPrStatus` answer for the branch a fixture PR actually heads. */
+interface DryRunForgejoRow {
+  kind: 'issue' | 'pr';
+  number: number;
+  title: string;
+  author: string;
+  labels: string[];
+  body: string;
+  comments: number;
+  isDraft?: boolean;
+  additions?: number;
+  deletions?: number;
+  checks?: 'passing' | 'failing' | 'pending' | null;
+  branch?: string;
+}
+
+const DRY_RUN_FORGEJO_ROWS: readonly DryRunForgejoRow[] = [
+  {
+    kind: 'issue',
+    number: 24,
+    title: 'Webhook retries hammer the mirror after a 502',
+    author: 'aurelia',
+    labels: ['ci', 'mirror'],
+    comments: 5,
+    body: 'The delivery queue retries with no backoff, so one 502 from the mirror turns into a few hundred requests a minute until the endpoint is disabled by hand.',
+  },
+  {
+    kind: 'issue',
+    number: 18,
+    title: 'Package registry rejects a scoped tag on push',
+    author: 'kestrel',
+    labels: ['registry'],
+    comments: 2,
+    body: 'Pushing `@acme/tool@1.4.0` answers 422 with an empty body. An unscoped name on the same repository is accepted, so the scope separator looks like the part that is not being decoded.',
+  },
+  {
+    kind: 'issue',
+    number: 11,
+    title: 'Wiki search misses pages behind a redirect',
+    author: 'bo',
+    labels: ['wiki', 'needs-triage'],
+    comments: 1,
+    body: 'A renamed wiki page keeps serving under its old slug, but the search index only ever holds the new one — so the redirect works and the search result never appears.',
+  },
+  {
+    kind: 'pr',
+    // 777 deliberately: `createForgejoPr`'s dry-run branch hands back `…/pulls/777` and
+    // `DRY_RUN_MERGE_STATE_FIXTURE` describes that same number. Those two were unreachable while
+    // the list was empty; a clickable list makes them reachable, so the catalog agrees with them
+    // instead of inventing a PR they know nothing about.
+    number: 777,
+    title: 'Dry-run pull request',
+    author: 'aurelia',
+    labels: ['ready-to-merge'],
+    comments: 0,
+    isDraft: false,
+    additions: 1,
+    deletions: 1,
+    checks: 'passing',
+    branch: 'feat/dry-run',
+  },
+  {
+    kind: 'pr',
+    number: 764,
+    title: 'Mirror the release tarball to the package registry',
+    author: 'kestrel',
+    labels: ['registry', 'packaging'],
+    comments: 3,
+    isDraft: true,
+    additions: 96,
+    deletions: 12,
+    checks: 'pending',
+    branch: 'feat/mirror-tarball',
+  },
+];
+
+/** Colours for every label the catalog uses. Disjoint from `mockGithub()`'s palette, same as the
+ *  label names themselves. */
+const DRY_RUN_FORGEJO_LABEL_COLORS: Record<string, string> = {
+  ci: '2f6f4e',
+  mirror: 'b45f06',
+  registry: '7b1fa2',
+  wiki: '00838f',
+  packaging: 'ad1457',
+  'needs-triage': 'ef6c00',
+  'ready-to-merge': '1b5e20',
+};
+
+/** A catalog row as the cockpit consumes it. The URL is composed through `forgejoViewUrl`, never
+ *  written out literally, so it lands on the CONFIGURED `webUrl` host by construction — the one
+ *  property #26 turns on ("never `github.com`") cannot drift out of a hand-written string. */
+function dryRunForgejoItem(row: DryRunForgejoRow, owner: string, repo: string, webUrl: string): ForgeItem {
+  return {
+    kind: row.kind,
+    number: row.number,
+    title: row.title,
+    author: row.author,
+    // Ages relative to now, exactly as `mockGithub` does it — a fixed timestamp would render as
+    // "2 years ago" in a demo a year from now.
+    createdAt: new Date(Date.now() - row.number * 3_600_000).toISOString(),
+    labels: row.labels,
+    body: row.body ?? '',
+    url: forgejoViewUrl(webUrl, owner, repo, row.kind === 'pr' ? 'pr' : 'issue', row.number),
+    comments: row.comments,
+    ...(row.kind === 'pr'
+      ? { isDraft: row.isDraft ?? false, additions: row.additions, deletions: row.deletions, checks: row.checks ?? null }
+      : {}),
+  };
+}
+
+/** The dry-run answer for one list walk. `repo`/`syncedAt`/`labelColors` are filled exactly as the
+ *  live walk fills them, so `/api/github` composes an identical payload shape either way. */
+function dryRunForgejoList(
+  listKind: 'issues' | 'prs',
+  owner: string,
+  repo: string,
+  webUrl: string,
+  limit: number,
+): ForgeListResult {
+  const wanted = listKind === 'issues' ? 'issue' : 'pr';
+  const items = DRY_RUN_FORGEJO_ROWS.filter((row) => row.kind === wanted)
+    .slice(0, limit)
+    .map((row) => dryRunForgejoItem(row, owner, repo, webUrl));
+  return {
+    available: true,
+    items,
+    repo: `${owner}/${repo}`,
+    syncedAt: new Date().toISOString(),
+    labelColors: DRY_RUN_FORGEJO_LABEL_COLORS,
+  };
+}
+
+/** The dry-run `prStatus` answer: the fixture PR that heads `branch`, or `null` when none does. */
+function dryRunForgejoPrStatus(owner: string, repo: string, webUrl: string, branch: string): ForgePrStatus | null {
+  const row = DRY_RUN_FORGEJO_ROWS.find((candidate) => candidate.kind === 'pr' && candidate.branch === branch);
+  if (!row) return null;
+  return {
+    number: row.number,
+    url: forgejoViewUrl(webUrl, owner, repo, 'pr', row.number),
+    // Every catalog PR is open: a merged or closed one would have no business in a list the live
+    // walk builds from `state=open`.
+    state: 'open',
+    isDraft: row.isDraft ?? false,
+    checks: row.checks ?? null,
+  };
+}
+
+/** The dry-run `listChecks` answer. A number outside the catalog resolves to `null` — no CI, NOT a
+ *  failed read — which is the same distinction `mockGithubChecks` draws. */
+function dryRunForgejoChecks(numbers: number[]): ForgeChecksResult {
+  const byNumber = new Map(
+    DRY_RUN_FORGEJO_ROWS.filter((row) => row.kind === 'pr').map((row) => [row.number, row.checks ?? null] as const),
+  );
+  const checks: Record<number, 'passing' | 'failing' | 'pending' | null> = {};
+  for (const n of numbers) checks[n] = byNumber.get(n) ?? null;
+  return { available: true, checks };
+}
+
 /**
  * `listIssues`/`listPRs` share this walk: paginate the matching endpoint up to the caller's
  * (capped) `limit`, map each row, drop rows the mapper rejects (`mapForgejoIssue` returns `null`
@@ -481,8 +657,10 @@ async function listForgejo(
   webUrl: string,
   opts: ForgeListOptions | undefined,
 ): Promise<ForgeListResult> {
-  if (process.env.CEZ_DRY_RUN === '1') return { available: true, items: [] };
   const limit = Math.min(Math.max(opts?.limit ?? 30, 1), FJ_MAX_LIST_LIMIT);
+  // Ahead of the cache, same as before — but AFTER `limit`, so the fixture walk honours the
+  // caller's cap exactly like the live one does.
+  if (process.env.CEZ_DRY_RUN === '1') return dryRunForgejoList(listKind, owner, repo, webUrl, limit);
   const key = listCacheKey(repoRoot, http.apiBase, listKind);
   const repoHandle = `${owner}/${repo}`;
   if (!opts?.refresh) {
@@ -769,7 +947,14 @@ async function forgejoPrStatus(
   webUrl: string,
   branch: string,
 ): Promise<ForgePrStatusResult> {
-  if (process.env.CEZ_DRY_RUN === '1') return { available: true, status: null };
+  // Dry-run answers from the same catalog the lists serve (#26), keyed on the branch a fixture PR
+  // actually heads. Deliberately NOT "a status for every branch": this feeds the Create PR → View
+  // PR flip, and handing a task branch someone else's PR would make the button lie about what it
+  // opens. A branch no fixture PR heads is a PROVEN absence — `{available:true, status:null}`,
+  // byte-identical to what this returned before.
+  if (process.env.CEZ_DRY_RUN === '1') {
+    return { available: true, status: dryRunForgejoPrStatus(owner, repo, webUrl, branch) };
+  }
   const key = prStatusCacheKey(repoRoot, http.apiBase, branch);
   const hit = prStatusCache.get(key);
   if (hit && Date.now() - hit.at < hit.ttlMs) return hit.data;
@@ -1742,7 +1927,10 @@ async function forgejoListChecks(
   repo: string,
   numbers: number[],
 ): Promise<ForgeChecksResult> {
-  if (process.env.CEZ_DRY_RUN === '1') return { available: true, checks: {} };
+  // Glyphs straight from the catalog (#26) — parity with `mockGithubChecks`. The list tier ships
+  // `checks: null` per row and the glyph is hydrated lazily from this call (#664), so an empty map
+  // here means a seeded PR row paints no chip at all.
+  if (process.env.CEZ_DRY_RUN === '1') return dryRunForgejoChecks(numbers);
   const checks: Record<number, 'passing' | 'failing' | 'pending' | null> = {};
   const misses: number[] = [];
   const now = Date.now();

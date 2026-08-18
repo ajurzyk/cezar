@@ -352,12 +352,32 @@ describe('listIssues', () => {
     expect(result.items).toEqual([expect.objectContaining({ kind: 'issue', number: 7 })]);
   });
 
-  it('CEZ_DRY_RUN=1 short-circuits to an available empty list without calling fetch', async () => {
+  it('CEZ_DRY_RUN=1 serves the fixture catalog without calling fetch', async () => {
     process.env.CEZ_DRY_RUN = '1';
     const fetchMock = vi.fn();
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
-    await expect(driver.listIssues()).resolves.toEqual({ available: true, items: [] });
+
+    const result = await driver.listIssues();
+
+    expect(result.available).toBe(true);
+    // Non-empty is the whole point (#26): `available:true` + `items:[]` is the silent-failure shape
+    // the live walk below goes out of its way to refuse, and it left the cockpit with no row to click.
+    expect(result.items.length).toBeGreaterThan(0);
+    expect(result.items.every((item) => item.kind === 'issue')).toBe(true);
+    expect(result.repo).toBe('acme/demo');
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('CEZ_DRY_RUN=1 puts every fixture URL on the CONFIGURED webUrl host, never github.com', async () => {
+    process.env.CEZ_DRY_RUN = '1';
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: vi.fn(), token: null });
+
+    const result = await driver.listIssues();
+
+    for (const item of result.items) {
+      expect(item.url.startsWith('https://forge.example.com/acme/demo/issues/')).toBe(true);
+      expect(item.url).not.toContain('github.com');
+    }
   });
 
   it('every row failing to parse resolves available:false with a reason, NOT a false "no open issues", and is NOT cached', async () => {
@@ -438,12 +458,32 @@ describe('listPRs', () => {
     expect(() => new Date(result.syncedAt as string).toISOString()).not.toThrow();
   });
 
-  it('CEZ_DRY_RUN=1 short-circuits to an available empty list without calling fetch', async () => {
+  it('CEZ_DRY_RUN=1 serves the fixture catalog without calling fetch', async () => {
     process.env.CEZ_DRY_RUN = '1';
     const fetchMock = vi.fn();
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
-    await expect(driver.listPRs()).resolves.toEqual({ available: true, items: [] });
+
+    const result = await driver.listPRs();
+
+    expect(result.available).toBe(true);
+    expect(result.items.length).toBeGreaterThan(0);
+    expect(result.items.every((item) => item.kind === 'pr')).toBe(true);
+    for (const item of result.items) {
+      expect(item.url.startsWith('https://forge.example.com/acme/demo/pulls/')).toBe(true);
+      expect(item.url).not.toContain('github.com');
+    }
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('CEZ_DRY_RUN=1 includes PR 777 — the number every other dry-run PR path already answers for', async () => {
+    process.env.CEZ_DRY_RUN = '1';
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: vi.fn(), token: null });
+
+    // `createPR` hands back `…/pulls/777` and `prMergeState` returns a fixture whose number is 777.
+    // Seeding a list the cockpit can CLICK makes those two reachable for the first time, so the
+    // catalog has to agree with them rather than invent a PR they know nothing about.
+    const result = await driver.listPRs();
+    expect(result.items.map((item) => item.number)).toContain(777);
   });
 
   it('every row failing to parse resolves available:false with a reason, NOT a false "no open pull requests", and is NOT cached', async () => {
@@ -884,11 +924,34 @@ describe('prStatus', () => {
     expect(result.available).toBe(false);
   });
 
-  it('CEZ_DRY_RUN=1 short-circuits to a proven "no PR" without calling fetch', async () => {
+  it('CEZ_DRY_RUN=1 answers a status for the branch a fixture PR heads, without calling fetch', async () => {
     process.env.CEZ_DRY_RUN = '1';
     const fetchMock = vi.fn();
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
-    await expect(driver.prStatus('feat/x')).resolves.toEqual({ available: true, status: null });
+
+    const result = await driver.prStatus('feat/dry-run');
+
+    expect(result).toEqual({
+      available: true,
+      status: {
+        number: 777,
+        url: 'https://forge.example.com/acme/demo/pulls/777',
+        state: 'open',
+        isDraft: false,
+        checks: 'passing',
+      },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('CEZ_DRY_RUN=1 still reports a proven "no PR" for a branch no fixture PR heads', async () => {
+    process.env.CEZ_DRY_RUN = '1';
+    const fetchMock = vi.fn();
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    // The Create PR → View PR flip must stay honest: a task branch that has no PR in the catalog
+    // is a PROVEN absence, not a fixture PR borrowed from another branch.
+    await expect(driver.prStatus('cez/abc123')).resolves.toEqual({ available: true, status: null });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
@@ -1460,12 +1523,19 @@ describe('listChecks', () => {
     expect(fetchMock.mock.calls.some((call) => String(call[0]).endsWith(`/commits/${shaOf(17)}/status`))).toBe(false);
   });
 
-  it('CEZ_DRY_RUN=1 short-circuits to an available empty map without calling fetch', async () => {
+  it('CEZ_DRY_RUN=1 answers glyphs from the fixture catalog without calling fetch', async () => {
     process.env.CEZ_DRY_RUN = '1';
     const fetchMock = vi.fn();
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
 
-    await expect(driver.listChecks?.([1])).resolves.toEqual({ available: true, checks: {} });
+    // The list tier ships `checks: null` and the row glyph is filled in lazily from
+    // GET /api/v1/github/checks (#664) — an empty map here means a seeded PR row paints no chip.
+    // A number outside the catalog resolves to `null`: no CI, not a failed read (mirrors
+    // `mockGithubChecks`).
+    await expect(driver.listChecks?.([777, 1])).resolves.toEqual({
+      available: true,
+      checks: { 777: 'passing', 1: null },
+    });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
