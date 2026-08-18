@@ -527,6 +527,7 @@ const DRY_RUN_FORGEJO_ROWS: readonly DryRunForgejoRow[] = [
     deletions: 1,
     checks: 'passing',
     branch: 'feat/dry-run',
+    body: 'The pull request every dry-run PR path in this driver already answers for — `createPR` hands back this number and the merge-state fixture describes it.',
   },
   {
     kind: 'pr',
@@ -540,6 +541,7 @@ const DRY_RUN_FORGEJO_ROWS: readonly DryRunForgejoRow[] = [
     deletions: 12,
     checks: 'pending',
     branch: 'feat/mirror-tarball',
+    body: 'Draft: publishes the signed tarball as a generic package on release. The signature check still runs after the upload rather than before it, so this is not ready for review yet.',
   },
 ];
 
@@ -568,7 +570,7 @@ function dryRunForgejoItem(row: DryRunForgejoRow, owner: string, repo: string, w
     // "2 years ago" in a demo a year from now.
     createdAt: new Date(Date.now() - row.number * 3_600_000).toISOString(),
     labels: row.labels,
-    body: row.body ?? '',
+    body: row.body,
     url: forgejoViewUrl(webUrl, owner, repo, row.kind === 'pr' ? 'pr' : 'issue', row.number),
     comments: row.comments,
     ...(row.kind === 'pr'
