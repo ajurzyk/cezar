@@ -74,10 +74,10 @@ Forgejo URL, and that `extractTaskRefs` recovered the number into the run's `#N`
 
 ### Phase 1: the fixture catalog in the Forgejo driver
 
-- [ ] 1.1 Add the dry-run Forgejo catalog and serve it from `listForgejo`
-- [ ] 1.2 Answer `prStatus` from the catalog for a branch a catalog PR heads
-- [ ] 1.3 Answer `listChecks` glyphs from the catalog
-- [ ] 1.4 Pin fixture disjointness from `mockGithub()` in a cross-driver test
+- [x] 1.1 Add the dry-run Forgejo catalog and serve it from `listForgejo` — 987c8259
+- [x] 1.2 Answer `prStatus` from the catalog for a branch a catalog PR heads — 987c8259
+- [x] 1.3 Answer `listChecks` glyphs from the catalog — 987c8259
+- [x] 1.4 Pin fixture disjointness from `mockGithub()` in a cross-driver test — 987c8259
 
 ### Phase 2: a Forgejo project in the shared test env
 
