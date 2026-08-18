@@ -62,6 +62,8 @@ describe('workspace projects API', () => {
   const savedFollowups = process.env.CEZ_FOLLOWUPS;
   const savedSingleProject = process.env.CEZ_SINGLE_PROJECT;
   const savedDryRun = process.env.CEZ_DRY_RUN;
+  const savedProjectsDir = process.env.CEZ_PROJECTS_DIR;
+  const savedBrowseRoot = process.env.CEZ_BROWSE_ROOT;
   let home: string;
   let repoRoot: string;
   let otherRoot: string;
@@ -76,6 +78,11 @@ describe('workspace projects API', () => {
     delete process.env.CEZ_REMOTE;
     delete process.env.CEZ_FOLLOWUPS;
     delete process.env.CEZ_SINGLE_PROJECT;
+    // Both feed `workspacePathSchema` in workspace/config.ts, so a host that
+    // exports either one (the cockpit's own container exports
+    // CEZ_PROJECTS_DIR=/srv/dev) rewrites the defaults these tests assert on.
+    delete process.env.CEZ_PROJECTS_DIR;
+    delete process.env.CEZ_BROWSE_ROOT;
     // Deterministic on any machine: no network, no real agent CLIs.
     process.env.CEZ_DRY_RUN = '1';
     clearProjectProbeCache();
@@ -94,6 +101,10 @@ describe('workspace projects API', () => {
     else process.env.CEZ_SINGLE_PROJECT = savedSingleProject;
     if (savedDryRun === undefined) delete process.env.CEZ_DRY_RUN;
     else process.env.CEZ_DRY_RUN = savedDryRun;
+    if (savedProjectsDir === undefined) delete process.env.CEZ_PROJECTS_DIR;
+    else process.env.CEZ_PROJECTS_DIR = savedProjectsDir;
+    if (savedBrowseRoot === undefined) delete process.env.CEZ_BROWSE_ROOT;
+    else process.env.CEZ_BROWSE_ROOT = savedBrowseRoot;
   });
 
   const makeApp = (over: Partial<ServerDeps> = {}) =>
