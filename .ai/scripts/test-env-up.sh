@@ -350,6 +350,64 @@ start_app() {
   exit 1
 }
 
+# ---- 6b. a Forgejo-classified project (#26) ---------------------------------
+# The repo this script boots has a github.com remote, and the host table outranks a repo config by
+# design (`server/forge/index.ts` `classifyForgeKind`) — so without a SECOND project nothing in the
+# test env ever resolves to the Forgejo driver, and no Forgejo surface is reachable to QA or to a
+# browser at all.
+#
+# Pure local setup, no network: `git init` plus a remote on a host the forge table cannot name,
+# plus a `forge` block naming the instance. Under `CEZ_DRY_RUN=1` (exported above) those URLs are
+# only ever read for classification and link composition — never contacted — and the driver's read
+# paths answer from their own fixture catalog. `.test` is the reserved TLD precisely so a stray
+# request would fail locally rather than reach someone's server.
+#
+# Never fails the boot. Registration is refused inside a cezar task worktree (`shouldRegisterProject`
+# — the `.ai/cezar/worktrees/` guard), which is exactly where an agent-driven boot runs from; that
+# costs the Forgejo surface, not the environment.
+FORGEJO_PROJECT_DIR="$QA_DIR/forgejo-project"
+
+ensure_forgejo_project() {
+  if [ ! -f "$REPO_ROOT/packages/cezar/dist/index.js" ]; then
+    log "no built CLI — skipping the Forgejo test project"
+    return 0
+  fi
+
+  if [ ! -d "$FORGEJO_PROJECT_DIR/.git" ]; then
+    log "creating the Forgejo test project at .ai/qa/forgejo-project"
+    mkdir -p "$FORGEJO_PROJECT_DIR"
+    git init -q -b main "$FORGEJO_PROJECT_DIR" || { log "git init failed — skipping the Forgejo test project"; return 0; }
+    git -C "$FORGEJO_PROJECT_DIR" remote add origin 'https://forgejo.test/mock-forge/dry-run-demo.git' 2>/dev/null || true
+    printf 'Scratch project for the cezar test env: a repo the forge seam classifies as Forgejo.\n' \
+      > "$FORGEJO_PROJECT_DIR/README.md"
+    # -c rather than `git config`: the operator's own identity may be unset, and a boot script must
+    # not write into their global config to make one commit.
+    git -C "$FORGEJO_PROJECT_DIR" add -A >/dev/null 2>&1 || true
+    git -C "$FORGEJO_PROJECT_DIR" -c user.name='cezar test env' -c user.email='test-env@cezar.local' \
+      commit -q -m 'chore: scratch Forgejo project' >/dev/null 2>&1 || true
+  fi
+
+  # Rewritten every boot, not just at creation: the shape of this key is the contract under test, so
+  # a stale copy from an older revision of this script must not survive.
+  mkdir -p "$FORGEJO_PROJECT_DIR/.ai/cezar"
+  cat > "$FORGEJO_PROJECT_DIR/.ai/cezar/config.json" <<'EOF'
+{
+  "forge": {
+    "kind": "forgejo",
+    "apiUrl": "http://forgejo.test:3000",
+    "webUrl": "https://forgejo.test"
+  }
+}
+EOF
+
+  # Idempotent by realpath (`registerProject`), so a repeat boot just bumps `lastOpenedAt`.
+  if (cd "$REPO_ROOT" && node packages/cezar/dist/index.js projects add "$FORGEJO_PROJECT_DIR" >/dev/null 2>&1); then
+    log "Forgejo test project registered (.ai/qa/forgejo-project)"
+  else
+    log "could not register the Forgejo test project — the cockpit will show the repo project only"
+  fi
+}
+
 # ---- 7. descriptor write ----------------------------------------------------
 write_descriptor() {
   SINGLE_PROJECT=false
@@ -394,6 +452,9 @@ acquire_lock
 
 if try_reuse; then
   log "reusing the healthy instance at $BASE_URL"
+  # Also on the reuse path: an env booted before this project existed would otherwise never
+  # acquire it, and `GET /api/v1/projects` reads the registry per request — no restart needed.
+  ensure_forgejo_project
   emit 1
   exit 0
 fi
@@ -401,6 +462,7 @@ fi
 teardown_stale
 ensure_browser
 ensure_build
+ensure_forgejo_project
 start_app
 write_descriptor
 emit 0
