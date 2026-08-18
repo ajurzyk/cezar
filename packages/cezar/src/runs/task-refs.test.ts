@@ -25,6 +25,21 @@ describe('extractTaskRefs', () => {
     });
   });
 
+  // The other half of that sentence, pinned from this side so both files agree on where the bar
+  // sits: a Forgejo item URL on its own recovers NOTHING — not even `ambiguousNumber`. Tier 1 is
+  // spelled `github.com`; tier 2's `/\bissue\s*#?\s*(\d+)/i` does not fire inside `…/issues/24`
+  // either, because `issue` is followed by `s` rather than whitespace, `#` or a digit; and the
+  // last-resort `#N` scan finds no `#` in a URL.
+  //
+  // `packages/web/src/lib/github-task.ts`'s `mentionsItem` is the consumer that must not outrun
+  // this: it decides whether the ref block — the only carrier of attribution on a non-GitHub
+  // forge — gets attached, so accepting a URL this extractor cannot read costs the run its chip
+  // and its `#N` title prefix (ajurzyk/cezar#6).
+  it('a Forgejo item URL alone recovers nothing at all', () => {
+    expect(extractTaskRefs('port http://forge.internal:3000/acme/demo/issues/24 to develop')).toEqual({});
+    expect(extractTaskRefs('port http://forge.internal:3000/acme/demo/pulls/12 to develop')).toEqual({});
+  });
+
   it('URLs are the strongest signal and set the kind', () => {
     expect(extractTaskRefs('see https://github.com/open-mercato/cezar/pull/441 please')).toEqual({ prNumber: 441 });
     expect(extractTaskRefs('see https://github.com/o-m/repo.name/issues/12')).toEqual({ issueNumber: 12 });

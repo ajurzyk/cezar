@@ -142,8 +142,7 @@ describe('githubTaskRef', () => {
 })
 
 describe('mentionsItem', () => {
-  it('matches the URL, or the KIND-qualified wording task-refs keys on', () => {
-    expect(mentionsItem('see https://github.com/acme/demo/issues/142 first', item())).toBe(true)
+  it('matches the KIND-qualified wording task-refs keys on', () => {
     expect(mentionsItem('port issue #142 to develop', item())).toBe(true)
     expect(mentionsItem('port ISSUE 142 to develop', item())).toBe(true)
     const pr = item({ kind: 'pr', number: 77, url: 'https://github.com/acme/demo/pull/77' })
@@ -153,6 +152,29 @@ describe('mentionsItem', () => {
 
   it('a BARE #N is not enough — extractTaskRefs could only call it ambiguous', () => {
     expect(mentionsItem('port #142 to develop', item())).toBe(false)
+  })
+
+  // The Forgejo half of ajurzyk/cezar#6, and the reason the item URL is no longer a match. Tier 1 of
+  // `task-refs.ts` is spelled `github.com`, so a Forgejo URL is recovered by NOTHING there — not
+  // even as `ambiguousNumber`, since a URL carries no `#`. Accepting it here would suppress the
+  // ref block and leave the URL carrying no attribution in its place: no chip, no `#N` title
+  // prefix, nothing to recover from the task text.
+  it('an item URL on a non-GitHub forge is not a durable reference', () => {
+    const forgejo = item({ url: 'http://forge.internal:3000/ajr/orakton/issues/24', number: 24 })
+    expect(mentionsItem('port http://forge.internal:3000/ajr/orakton/issues/24 to develop', forgejo))
+      .toBe(false)
+    // The kind-qualified wording still carries it — that is the forge-agnostic route, and it is
+    // what `githubTaskRef` emits, so the pre-filled box is unaffected.
+    expect(mentionsItem('port Forgejo issue #24 to develop', forgejo)).toBe(true)
+  })
+
+  // Deliberately NOT special-cased back to `true` for github.com. One rule beats a host table:
+  // `mentionsItem`'s bar is the kind-qualified wording, on every forge. This changes GitHub
+  // behaviour in one observable direction — a prompt carrying only the item URL now gets the ref
+  // block prepended, where it previously did not. That is strictly more attribution, never less,
+  // and it is the same bar F2 (open-mercato/cezar#541) set for a bare `#N`.
+  it('a github.com item URL is not enough either — the bar is one rule, not a host table', () => {
+    expect(mentionsItem('see https://github.com/acme/demo/issues/142 first', item())).toBe(false)
   })
 
   it('the wrong kind does not count either', () => {
@@ -215,6 +237,50 @@ describe('composeGithubTask', () => {
     )
   })
 
+  // ajurzyk/cezar#6 end to end: the two ways a prompt carries the item URL *instead of* the wording —
+  // the supported `{{url}}` token in a saved prompt template, and a user pasting the link. On a
+  // Forgejo item the URL is recoverable by nothing (`task-refs.ts` tier 1 is `github.com`), so
+  // suppressing the ref block for it left the run with no attribution at all.
+  it('a Forgejo item URL in the prompt still gets the ref block, and it is readable', () => {
+    const forgejo = item({ url: 'http://forge.internal:3000/ajr/orakton/issues/24', number: 24 })
+    const ref = githubTaskRef(forgejo, 'forgejo')
+
+    for (const prompt of ['port {{url}} to develop', `port ${forgejo.url} to develop`]) {
+      const task = composeGithubTask(forgejo, [], prompt, 'forgejo')
+      expect(task).toBe(`${ref}\n\nport ${forgejo.url} to develop`)
+      // The value the github.com control has always answered — the point of the whole fix.
+      expect(extractTaskRefs(task)).toEqual({ issueNumber: 24 })
+    }
+  })
+
+  // Same shape for a PR, where the wording tier the ref block relies on is the other one.
+  it('a Forgejo PR URL composes a ref block task-refs reads as a prNumber', () => {
+    const forgejo = item({
+      kind: 'pr',
+      number: 12,
+      url: 'http://forge.internal:3000/ajr/orakton/pulls/12',
+    })
+    const task = composeGithubTask(forgejo, [], `rebase ${forgejo.url}`, 'forgejo')
+    expect(task).toBe(`${githubTaskRef(forgejo, 'forgejo')}\n\nrebase ${forgejo.url}`)
+    expect(extractTaskRefs(task).prNumber).toBe(12)
+  })
+
+  // The GitHub side of the same rule. Previously this prompt was handed over verbatim; the ref
+  // block it now carries is redundant with the URL for `extractTaskRefs`, but it is what keeps
+  // one rule instead of two — and it adds the title and the kind wording besides.
+  it('a github.com item URL alone now gets the ref block too', () => {
+    const task = composeGithubTask(item(), [], `see ${item().url} first`)
+    expect(task).toBe(`${githubTaskRef(item())}\n\nsee ${item().url} first`)
+    expect(extractTaskRefs(task).issueNumber).toBe(142)
+  })
+
+  // The guard against the obvious over-correction: a prompt carrying BOTH still matches on the
+  // wording, so nothing is prepended and the block is not duplicated.
+  it('does not duplicate the ref when the prompt carries both the URL and the wording', () => {
+    const task = composeGithubTask(item(), [], `see ${item().url}, i.e. issue #142`)
+    expect(task).toBe(`see ${item().url}, i.e. issue #142`)
+  })
+
   it('a token inside the ITEM TITLE is never rewritten inside our own ref block', () => {
     const tokenTitle = item({ title: 'Support {{url}} in prompt templates' })
     const base = githubTaskRef(tokenTitle)
@@ -239,8 +305,8 @@ describe('composeGithubTask', () => {
   // pre-filled, so extending it is the normal edit — a cold deep link to a Forgejo issue seeds
   // "Fix GitHub issue #142" before the registry answers, the user appends a sentence, and
   // `hand-to-agent.tsx` then leaves their touched text alone by design. `mentionsItem` matches
-  // (the URL is right there), so nothing prepends the corrected ref. Re-emitting the seeded
-  // block verbatim would hand the agent "Fix GitHub issue #142" about a Forgejo issue — the
+  // (the block's own "issue #142" wording), so nothing prepends the corrected ref. Re-emitting the
+  // seeded block verbatim would hand the agent "Fix GitHub issue #142" about a Forgejo issue — the
   // false instruction this stage exists to remove.
   it('rewrites a stale forge name in the seeded ref block the user extended', () => {
     const it142 = item()

@@ -2709,6 +2709,61 @@ describe('forge naming', () => {
       expect(sent.some((request) => request.method === 'POST' && request.path === '/api/v1/runs')).toBe(true))
   })
 
+  // The third state of that gate, and the one ajurzyk/cezar#6 moved into it. A box holding only the
+  // item's URL used to satisfy `mentionsItem` — so it composed nothing fresh and never waited — and
+  // that shortcut is exactly what cost a Forgejo run its attribution: the URL suppressed the ref
+  // block and `extractTaskRefs` could read nothing back out of it. With the shortcut gone this
+  // prompt builds a ref block at submit time like any other, so it belongs on the WAITING side of
+  // the gate; fired before health answers it would say "Fix GitHub issue #142" about a Forgejo
+  // issue. `github-task.test.ts` pins the composition; this pins the button the user actually sees.
+  it('holds a prompt carrying only the item URL until health names the forge', async () => {
+    let releaseHealth!: () => void
+    const healthArrived = new Promise<void>((resolve) => { releaseHealth = resolve })
+    const sent = stubFetch({
+      'GET /api/v1/health': async () => {
+        await healthArrived
+        return jsonResponse({ ...health(['claude']), forge: { kind: 'forgejo' as const, available: true } })
+      },
+    })
+    renderAt('/github/issues/142')
+
+    await waitFor(() => expect(promptValue()).toContain('Fix GitHub issue #142'))
+    fireEvent.change(promptField(), { target: { value: 'port https://github.com/acme/demo/issues/142 to develop' } })
+    const runButton = () => document.querySelector<HTMLButtonElement>('[data-action="gh-run"]')!
+    expect(runButton().hasAttribute('disabled')).toBe(true)
+    fireEvent.keyDown(promptField(), { key: 'Enter', metaKey: true })
+    const posts = () => sent.filter((request) => request.method === 'POST' && request.path === '/api/v1/runs')
+    expect(posts()).toHaveLength(0)
+
+    await act(async () => {
+      releaseHealth()
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(runButton().hasAttribute('disabled')).toBe(false))
+    fireEvent.keyDown(promptField(), { key: 'Enter', metaKey: true })
+    await waitFor(() => expect(posts()).toHaveLength(1))
+    // The whole point of dropping the shortcut: the block is there, it names the right forge, and
+    // the URL the user typed is still the last thing the agent reads.
+    expect(posts()[0]!.body).toMatchObject({
+      task: expect.stringContaining('Fix Forgejo issue #142') as unknown as string,
+    })
+  })
+
+  // The `{{url}}` token is the same prompt through the other door, and it is the door that makes
+  // this a ROUTE-level case rather than a `composeGithubTask` one: `hand-to-agent.tsx` substitutes
+  // tokens BEFORE asking `mentionsItem`, so a template written as `{{url}}` reaches the gate as a
+  // bare URL. A gate that read the raw text instead would let this one through unheld.
+  it('holds a prompt whose only reference is the {{url}} token', async () => {
+    stubFetch({ 'GET /api/v1/health': () => new Promise<Response>(() => {}) })
+    renderAt('/github/issues/142')
+
+    await waitFor(() => expect(promptValue()).toContain('Fix GitHub issue #142'))
+    await waitForAgentRunEnabled()
+    fireEvent.change(promptField(), { target: { value: 'port {{url}} to develop' } })
+    await waitFor(() =>
+      expect(document.querySelector<HTMLButtonElement>('[data-action="gh-run"]')!.hasAttribute('disabled')).toBe(true))
+  })
+
   // The one-shot correction is the single exception to #524's capture-once rule, and it is spelled
   // for the FORGE alone. A mounted box outlives the list that produced its item — the refresh
   // button replaces the whole list, and the component is keyed by `item.url`, not by title — so a
