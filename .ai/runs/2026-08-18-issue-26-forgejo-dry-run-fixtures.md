@@ -56,11 +56,11 @@ Forgejo URL, and that `extractTaskRefs` recovered the number into the run's `#N`
 
 ## Risks
 
-- **The e2e specs cannot be executed here.** This container cannot launch Chrome (no system
-  libraries, documented and previously proven), so `npm run test:e2e` reports
-  `TEST_E2E_STATUS=skipped`. The new spec is written against the patterns the existing specs use
-  and is type-checked, but its browser assertions are unproven until a machine with a browser runs
-  it. Disclosed on the PR rather than papered over.
+- ~~The e2e specs cannot be executed here.~~ **Resolved:** `agent-browser` ships its own Chrome and
+  installed cleanly, so `packages/web/e2e/forgejo.e2e.ts` was actually RUN — 4/4 passing, with
+  `forgejo-detail.png` / `forgejo-handoff.png` captured from a real browser. The wider e2e suite is
+  red on this machine independently of this change (see the PR); `npm run test:e2e` is not part of
+  `validation.commands`.
 - The e2e `globalSetup` (`packages/web/e2e/workspace-registry.ts`) pins the shared registry to the
   boot project alone for the duration of a vitest run, so the Phase-2 project is visible to manual
   QA and to any non-vitest consumer of the env, and deliberately invisible to the flat-shell specs.
@@ -81,11 +81,11 @@ Forgejo URL, and that `extractTaskRefs` recovered the number into the run's `#N`
 
 ### Phase 2: a Forgejo project in the shared test env
 
-- [ ] 2.1 Materialize and register a scratch Forgejo project in `test-env-up.sh`
+- [x] 2.1 Materialize and register a scratch Forgejo project in `test-env-up.sh` — 118908aa
 
 ### Phase 3: the browser-level case
 
-- [ ] 3.1 Add `packages/web/e2e/forgejo.e2e.ts` — list, detail, URL-only hand-off, run attribution
+- [x] 3.1 Add `packages/web/e2e/forgejo.e2e.ts` — list, detail, URL-only hand-off, run attribution — 7c442297
 
 ### Phase 4: validation gate and PR
 
