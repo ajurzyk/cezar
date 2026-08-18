@@ -3,6 +3,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, beforeEach } from 'vitest'
 
+import { scrubInheritedCezEnv } from './src/host-env.testkit.ts'
+
+// Nic z env procesu, który odpalił `npm test`, nie może zmienić wyniku suite'u —
+// patrz host-env.testkit.ts po dowód (run 526bafac padał na `CEZ_PROJECTS_DIR`
+// z env kontenera). Musi polecieć PRZED pinem sandboxa niżej: odziedziczony
+// `CEZ_HOME` kasował właśnie ten pin.
+scrubInheritedCezEnv()
+
 // Nothing in this suite may write to the developer's own `~/.cezar`. Most cases pin
 // `CEZ_HOME` themselves, but the pin is one global for the whole worker and their
 // `afterEach` deletes it — so a write that outlives its test (a timeout is enough)
