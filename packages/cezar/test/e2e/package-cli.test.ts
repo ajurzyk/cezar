@@ -7,7 +7,19 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
+import { scrubInheritedCezEnv } from '../../src/host-env.testkit.js';
+
 const execFile = promisify(execFileCallback);
+
+// Kopia env bez CEZ_*, oddawana CLI pod testem zamiast `process.env` — patrz
+// release-snapshot.test.ts po zmierzony przypadek (`CEZ_RELEASE_CHANNEL` z env hosta
+// przewracał tam 3 z 5 testów). Tu ryzyko jest dziś utajone, ale mechanizm ten sam:
+// każdy spawn niżej odpalał prawdziwe CLI z pełnym CEZ_* hosta, nadpisując tylko te
+// dwa–trzy klucze, które nazywa po spreadzie. Helper mutuje to, co dostanie, więc
+// kopia jest konieczna: `process.env` runnera zostaje nietknięty.
+const hostEnv = { ...process.env };
+scrubInheritedCezEnv(hostEnv);
+
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
@@ -79,7 +91,7 @@ test('the release tarball installs and runs the dry-run CLI workflow', { timeout
     const cezHome = join(root, 'cez-home');
     const run = await execFile(process.execPath, [cliPath, 'run', 'mock:done', '--repo', fixtureRepo], {
       cwd: consumerDir,
-      env: { ...process.env, CEZ_DRY_RUN: '1', CEZ_HOME: cezHome },
+      env: { ...hostEnv, CEZ_DRY_RUN: '1', CEZ_HOME: cezHome },
       timeout: 60_000,
       maxBuffer: 10 * 1024 * 1024,
     });
@@ -109,7 +121,7 @@ test('the release tarball installs and runs the dry-run CLI workflow', { timeout
     await assert.rejects(
       execFile(process.execPath, [cliPath, 'run', 'mock:done must stay blocked', '--repo', fixtureRepo], {
         cwd: consumerDir,
-        env: { ...process.env, CEZ_DRY_RUN: '1', CEZ_HOME: cezHome },
+        env: { ...hostEnv, CEZ_DRY_RUN: '1', CEZ_HOME: cezHome },
         timeout: 60_000,
         maxBuffer: 10 * 1024 * 1024,
       }),
@@ -147,7 +159,7 @@ if (args.join(' ') === 'auth status --json') {
       {
         cwd: consumerDir,
         env: {
-          ...process.env,
+          ...hostEnv,
           CEZ_CLAUDE_BIN: claudeShim,
           CEZ_HOME: cezHome,
         },
@@ -177,7 +189,7 @@ if (args.join(' ') === 'auth status --json') {
     // running — the ssh-into-the-box view of Settings → Projects.
     const projects = await execFile(process.execPath, [cliPath, 'projects'], {
       cwd: consumerDir,
-      env: { ...process.env, CEZ_HOME: cezHome },
+      env: { ...hostEnv, CEZ_HOME: cezHome },
       timeout: 30_000,
       maxBuffer: 10 * 1024 * 1024,
     });
@@ -189,7 +201,7 @@ if (args.join(' ') === 'auth status --json') {
     // CEZ_DRY_RUN performs no real sudo.
     assert.match(help.stdout, /cezar server-install/);
     const serverHome = join(root, 'server-home');
-    const serverEnv = { ...process.env, CEZ_DRY_RUN: '1', CEZ_HOME: serverHome };
+    const serverEnv = { ...hostEnv, CEZ_DRY_RUN: '1', CEZ_HOME: serverHome };
     const serverExec = { cwd: consumerDir, env: serverEnv, timeout: 60_000, maxBuffer: 10 * 1024 * 1024 } as const;
 
     await execFile(

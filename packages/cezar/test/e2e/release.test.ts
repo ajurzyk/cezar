@@ -7,7 +7,16 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
+import { scrubInheritedCezEnv } from '../../src/host-env.testkit.js';
+
 const execFile = promisify(execFileCallback);
+
+// Kopia env bez CEZ_*, oddawana skryptowi pod testem zamiast `process.env` — patrz
+// release-snapshot.test.ts po zmierzony przypadek (`CEZ_RELEASE_CHANNEL` z env hosta
+// przewracał tam 3 z 5 testów). Helper mutuje to, co dostanie, więc kopia jest
+// konieczna: `process.env` runnera zostaje nietknięty.
+const hostEnv = { ...process.env };
+scrubInheritedCezEnv(hostEnv);
 // This file lives at packages/cezar/test/e2e; the orchestrator it drives is at the REPO root,
 // because a release spans every workspace and belongs to none of them.
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
@@ -84,7 +93,7 @@ const readPkg = async (root: string, ...segments: string[]) =>
 
 function runScript(fixtureRoot: string, args: string[], extraEnv: Record<string, string> = {}) {
   const env: Record<string, string | undefined> = {
-    ...process.env,
+    ...hostEnv,
     CEZ_RELEASE_ROOT: fixtureRoot,
     GITHUB_OUTPUT: join(fixtureRoot, 'github-output.txt'),
     NODE_AUTH_TOKEN: '',

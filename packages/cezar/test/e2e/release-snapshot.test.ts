@@ -7,7 +7,24 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
+import { scrubInheritedCezEnv } from '../../src/host-env.testkit.js';
+
 const execFile = promisify(execFileCallback);
+
+// Ten sam uszczelniacz co w vitest.setup.ts, tylko na KOPII: helper mutuje to, co
+// dostanie, więc `process.env` samego runnera zostaje nietknięty. node:test nie ma
+// setupFiles, więc bez tego odziedziczone CEZ_* wjeżdża do skryptu pod testem razem
+// ze spreadem w `runScript` niżej. Zmierzone na HEAD 2a06b18b, przed tą linią:
+//
+//     $ CEZ_RELEASE_CHANNEL=nightly node --import tsx --test test/e2e/release-snapshot.test.ts
+//     ✖ the same schedule event without the channel request publishes nothing
+//       AssertionError: + '0.9.9-nightly.20260818.13'  - '0.9.9'
+//     ℹ tests 5 · pass 2 · fail 3
+//
+// Przypadek "bez żądanego kanału" dostawał kanał z env hosta. `CEZ_RELEASE_CHANNEL`
+// nie jest hipotetyczne — .github/workflows/nightly.yml:115 sam je eksportuje.
+const hostEnv = { ...process.env };
+scrubInheritedCezEnv(hostEnv);
 // This file lives at packages/cezar/test/e2e; the orchestrator it drives is at the REPO root,
 // because a release spans every workspace and belongs to none of them.
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
@@ -85,7 +102,7 @@ const readPkg = async (root: string, ...segments: string[]) =>
 
 function runScript(fixtureRoot: string, extraEnv: Record<string, string>, args: string[] = []) {
   const env: Record<string, string | undefined> = {
-    ...process.env,
+    ...hostEnv,
     CEZ_SNAPSHOT_ROOT: fixtureRoot,
     GITHUB_OUTPUT: join(fixtureRoot, 'github-output.txt'),
     NODE_AUTH_TOKEN: '',
