@@ -1076,12 +1076,17 @@ function defaultSleep(ms: number): Promise<void> {
 
 /** The catalog row the merge-state fixture describes. Not optional: `dryRunMergeStateFixture` below
  *  is only correct as long as the catalog still carries 777 (see its doc comment), so a catalog edit
- *  that drops the row has to fail loudly here rather than quietly answer for a PR nobody lists. */
-const DRY_RUN_MERGE_STATE_ROW = (() => {
+ *  that drops the row fails loudly rather than quietly answering for a PR nobody lists.
+ *
+ *  Resolved on call, NOT at module load: an eager top-level throw would take the whole driver — every
+ *  live, non-dry-run path in this file included — down at import time over a fixture that only
+ *  `CEZ_DRY_RUN=1` ever reads. Lazily it reaches exactly the caller that depends on it, and the unit
+ *  tests exercise that caller, so the loudness is kept and the blast radius is not. */
+function dryRunMergeStateRow(): DryRunForgejoRow {
   const row = DRY_RUN_FORGEJO_ROWS.find((candidate) => candidate.kind === 'pr' && candidate.number === 777);
   if (!row) throw new Error('DRY_RUN_FORGEJO_ROWS must carry PR 777 — the dry-run merge-state fixture describes it');
   return row;
-})();
+}
 
 /** Forgejo's combined-status vocabulary for the glyph a catalog row carries — the merge panel's
  *  check list and the list row's chip are the same claim about the same PR, so neither is written
@@ -1101,7 +1106,7 @@ const DRY_RUN_STATUS_FOR_GLYPH = { passing: 'success', failing: 'failure', pendi
  * now comes from the one catalog row, and none of them can drift apart again by hand.
  */
 function dryRunMergeStateFixture(owner: string, repo: string, webUrl: string) {
-  const row = DRY_RUN_MERGE_STATE_ROW;
+  const row = dryRunMergeStateRow();
   const glyph = row.checks ?? null;
   return {
     pullRaw: {
