@@ -1948,6 +1948,22 @@ describe('prMergeState', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('CEZ_DRY_RUN=1 answers for PR 777 with the SAME url the catalog lists it under', async () => {
+    process.env.CEZ_DRY_RUN = '1';
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: vi.fn(), token: null });
+
+    // The merge panel is reached by clicking the list row (#26 is what makes that click possible),
+    // so the two answers describe the same pull request and must not disagree about where it lives.
+    // A hardcoded fixture path (`/mock/repo/pulls/777`) survives `rebaseToWebUrl` — which replaces
+    // only the ORIGIN — and lands the user on a repository that does not exist.
+    const listed = (await driver.listPRs()).items.find((item) => item.number === 777);
+    const merge = await driver.prMergeState?.(777);
+
+    expect(listed?.url).toBe('https://forge.example.com/acme/demo/pulls/777');
+    expect(merge?.available).toBe(true);
+    expect(merge?.available === true ? merge.mergeState.url : undefined).toBe(listed?.url);
+  });
+
   it('happy path assembles a ready mergeState from pull + status + branch + reviews + repository', async () => {
     const fetchMock = router();
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });

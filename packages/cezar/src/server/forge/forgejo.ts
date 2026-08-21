@@ -1066,41 +1066,71 @@ function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-const DRY_RUN_MERGE_STATE_FIXTURE = {
-  pullRaw: {
-    number: 777,
-    title: 'Dry-run pull request',
-    html_url: 'http://forgejo:3000/mock/repo/pulls/777',
-    created_at: '2026-01-01T00:00:00Z',
-    draft: false,
-    additions: 1,
-    deletions: 1,
-    state: 'open',
-    merged: false,
-    mergeable: true,
-    head: { ref: 'feat/dry-run', sha: '0'.repeat(40) },
-    base: { ref: 'main' },
-  },
-  statusRaw: { statuses: [{ status: 'success', context: 'ci/build' }] },
-  branch: { readable: true, protected: false, requiredApprovals: 0, enableStatusCheck: false, statusCheckContexts: [], userCanMerge: true } as ForgejoBranchInfo,
-  // A real (not `null`) repository: `mergePR`'s own CEZ_DRY_RUN path runs its preflight through
-  // THIS fixture (via `prMergeState`), and a preflight that reports `methods: []` would 409 every
-  // dry-run merge attempt with `disabled-method` before it ever reaches the dry-run success branch.
-  // `allow_merge_commits`/`allow_squash_merge`/`allow_rebase` all `true` so every `ForgeMergeMethod`
-  // a caller might exercise in dry-run mode is actually enabled.
-  repository: {
-    default_branch: 'main',
-    allow_merge_commits: true,
-    allow_squash_merge: true,
-    allow_rebase: true,
-    allow_rebase_explicit: false,
-    allow_fast_forward_only_merge: false,
-    default_merge_style: 'merge',
-    has_pull_requests: true,
-    archived: false,
-  } as ForgejoRepository,
-  reviewsRaw: [] as unknown[],
-};
+/** The catalog row the merge-state fixture describes. Not optional: `dryRunMergeStateFixture` below
+ *  is only correct as long as the catalog still carries 777 (see its doc comment), so a catalog edit
+ *  that drops the row has to fail loudly here rather than quietly answer for a PR nobody lists. */
+const DRY_RUN_MERGE_STATE_ROW = (() => {
+  const row = DRY_RUN_FORGEJO_ROWS.find((candidate) => candidate.kind === 'pr' && candidate.number === 777);
+  if (!row) throw new Error('DRY_RUN_FORGEJO_ROWS must carry PR 777 — the dry-run merge-state fixture describes it');
+  return row;
+})();
+
+/** Forgejo's combined-status vocabulary for the glyph a catalog row carries — the merge panel's
+ *  check list and the list row's chip are the same claim about the same PR, so neither is written
+ *  out by hand. */
+const DRY_RUN_STATUS_FOR_GLYPH = { passing: 'success', failing: 'failure', pending: 'pending' } as const;
+
+/**
+ * The dry-run `prMergeState` answer for PR 777, composed from the catalog row rather than restated.
+ *
+ * It used to be a module constant with every field written out, including
+ * `html_url: 'http://forgejo:3000/mock/repo/pulls/777'`. That hardcoded path survived
+ * `rebaseToWebUrl` (`forgejo-map.ts:29`) — which replaces the ORIGIN and keeps `src.pathname` — so
+ * the merge panel pointed at `{webUrl}/mock/repo/pulls/777` while the very row the user clicked to
+ * get there listed as `{webUrl}/{owner}/{repo}/pulls/777`. Harmless while the dry-run list was
+ * empty and nothing was clickable; #26 is what makes that click possible, so every field the two
+ * fixtures both describe — number, title, draft, diffstat, head branch, check glyph and the URL —
+ * now comes from the one catalog row, and none of them can drift apart again by hand.
+ */
+function dryRunMergeStateFixture(owner: string, repo: string, webUrl: string) {
+  const row = DRY_RUN_MERGE_STATE_ROW;
+  const glyph = row.checks ?? null;
+  return {
+    pullRaw: {
+      number: row.number,
+      title: row.title,
+      html_url: forgejoViewUrl(webUrl, owner, repo, 'pr', row.number),
+      created_at: '2026-01-01T00:00:00Z',
+      draft: row.isDraft ?? false,
+      additions: row.additions,
+      deletions: row.deletions,
+      state: 'open',
+      merged: false,
+      mergeable: true,
+      head: { ref: row.branch ?? 'feat/dry-run', sha: '0'.repeat(40) },
+      base: { ref: 'main' },
+    },
+    statusRaw: glyph ? { statuses: [{ status: DRY_RUN_STATUS_FOR_GLYPH[glyph], context: 'ci/build' }] } : null,
+    branch: { readable: true, protected: false, requiredApprovals: 0, enableStatusCheck: false, statusCheckContexts: [], userCanMerge: true } as ForgejoBranchInfo,
+    // A real (not `null`) repository: `mergePR`'s own CEZ_DRY_RUN path runs its preflight through
+    // THIS fixture (via `prMergeState`), and a preflight that reports `methods: []` would 409 every
+    // dry-run merge attempt with `disabled-method` before it ever reaches the dry-run success branch.
+    // `allow_merge_commits`/`allow_squash_merge`/`allow_rebase` all `true` so every `ForgeMergeMethod`
+    // a caller might exercise in dry-run mode is actually enabled.
+    repository: {
+      default_branch: 'main',
+      allow_merge_commits: true,
+      allow_squash_merge: true,
+      allow_rebase: true,
+      allow_rebase_explicit: false,
+      allow_fast_forward_only_merge: false,
+      default_merge_style: 'merge',
+      has_pull_requests: true,
+      archived: false,
+    } as ForgejoRepository,
+    reviewsRaw: [] as unknown[],
+  };
+}
 
 /**
  * Assembles `ForgePrMergeState` from four independent reads (`GET pulls/{n}`, the combined commit
@@ -1125,7 +1155,7 @@ async function forgejoPrMergeState(
   if (process.env.CEZ_DRY_RUN === '1') {
     return {
       available: true,
-      mergeState: normalizeForgejoMergeState({ ...DRY_RUN_MERGE_STATE_FIXTURE, webUrl, hasToken: http.hasToken() }),
+      mergeState: normalizeForgejoMergeState({ ...dryRunMergeStateFixture(owner, repo, webUrl), webUrl, hasToken: http.hasToken() }),
     };
   }
 
