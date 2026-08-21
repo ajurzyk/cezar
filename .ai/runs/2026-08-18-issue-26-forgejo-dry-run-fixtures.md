@@ -58,9 +58,25 @@ Forgejo URL, and that `extractTaskRefs` recovered the number into the run's `#N`
 
 - ~~The e2e specs cannot be executed here.~~ **Resolved:** `agent-browser` ships its own Chrome and
   installed cleanly, so `packages/web/e2e/forgejo.e2e.ts` was actually RUN — 4/4 passing, with
-  `forgejo-detail.png` / `forgejo-handoff.png` captured from a real browser. The wider e2e suite is
-  red on this machine independently of this change (see the PR); `npm run test:e2e` is not part of
-  `validation.commands`.
+  `forgejo-detail.png` / `forgejo-handoff.png` captured from a real browser.
+- The wider `npm run test:e2e` suite is red on this machine, and — measured rather than assumed —
+  red to exactly the same extent on the base branch:
+
+  | | spec files | tests | failed | passed | skipped |
+  |---|---|---|---|---|---|
+  | `origin/main` @ `1589498a` | 35 | 215 | **12 files / 29 tests** | 180 | 6 |
+  | this branch | 36 | 219 | **12 files / 29 tests** | 184 | 6 |
+
+  Same failure magnitude; the branch's whole delta is `+1` spec file and `+4` passing tests, which
+  is `forgejo.e2e.ts` itself. Failing on main: `agents-dock`, `empty-states`, `github`, `new-task`,
+  `plan-mode`, `project-groups`, `queued-stack`, `quick-list`, `settings-agents`,
+  `settings-appearance`, `task-thread`, `thread-scroll`. Many are 25 s browser-wait timeouts, some
+  are sub-100 ms assertion failures; either way this change neither causes nor fixes them.
+
+  Worth flagging beyond this run: `npm run test:e2e` is not in `validation.commands` **and not in
+  CI either** — `.github/workflows/ci.yml`'s job "Unit, build, E2E, and package" runs
+  `npm run test:package` (the packaged-CLI tests), never the browser suite. So nothing automated
+  currently watches this. Filed as its own issue rather than carried here.
 - The e2e `globalSetup` (`packages/web/e2e/workspace-registry.ts`) pins the shared registry to the
   boot project alone for the duration of a vitest run, so the Phase-2 project is visible to manual
   QA and to any non-vitest consumer of the env, and deliberately invisible to the flat-shell specs.
@@ -89,5 +105,21 @@ Forgejo URL, and that `extractTaskRefs` recovered the number into the run's `#N`
 
 ### Phase 4: validation gate and PR
 
-- [ ] 4.1 Run the full validation gate
-- [ ] 4.2 Open the PR, apply labels, run the review pass
+- [x] 4.1 Run the full validation gate — 39730863
+
+  All five `validation.commands`, in order, in an isolated worktree after `npm ci`:
+  `npm run typecheck` ✅ · `npm test` ✅ 334 files / 6586 tests (base `main`: 332 / 6533) ·
+  `npm run test:unit` ✅ 36/36 · `npm run build` ✅ (`check:pack ok — 487 files`) ·
+  `npm run test:package` ✅ 15/15. Beyond the gate: `forgejo.e2e.ts` 4/4 in a real browser, and
+  the whole `test:e2e` suite measured against `origin/main` (see Risks).
+
+- [x] 4.2 Open the PR, apply labels, run the review pass — #29
+
+### Phase 5: review round
+
+- [x] 5.1 Restore the 2026-07-22 run's archived checkpoint artifacts — 0164aa71
+- [x] 5.2 Compose the dry-run merge-state fixture from the catalog row — 84639f81, 39730863
+- [x] 5.3 Stop the catalog advertising comments no thread serves — 8c3d2f8d
+- [x] 5.4 Copy `labelColors` instead of sharing the module constant — c1dc5cee
+- [x] 5.5 Correct the dry-run `listChecks` comment's stated reason — 6148b4b8
+- [x] 5.6 Tell a refused Forgejo registration from a broken CLI — fae394a8
