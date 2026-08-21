@@ -602,7 +602,10 @@ function dryRunForgejoList(
     items,
     repo: `${owner}/${repo}`,
     syncedAt: new Date().toISOString(),
-    labelColors: DRY_RUN_FORGEJO_LABEL_COLORS,
+    // Copied, not handed out by reference: the live walk (`listForgejo`) builds a fresh map per
+    // call, and a driver read that leaks a shared module-level object is one `Object.assign` away
+    // from a cross-request bug that only ever reproduces under dry-run.
+    labelColors: { ...DRY_RUN_FORGEJO_LABEL_COLORS },
   };
 }
 
