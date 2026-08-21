@@ -475,6 +475,11 @@ interface DryRunForgejoRow {
   author: string;
   labels: string[];
   body: string;
+  /** Always `0`, and pinned as such by `dry-run-fixtures.test.ts`: `forgejoListComments`'s dry-run
+   *  branch serves no thread (seeding one is a non-goal of #26), so any other count would send a QA
+   *  click from "5 comments" to an empty pane — the same "looks healthy, holds nothing" shape this
+   *  catalog exists to remove. Kept as a field rather than dropped so seeding threads later is a
+   *  fixture edit, not a shape change. */
   comments: number;
   isDraft?: boolean;
   additions?: number;
@@ -490,7 +495,7 @@ const DRY_RUN_FORGEJO_ROWS: readonly DryRunForgejoRow[] = [
     title: 'Webhook retries hammer the mirror after a 502',
     author: 'aurelia',
     labels: ['ci', 'mirror'],
-    comments: 5,
+    comments: 0,
     body: 'The delivery queue retries with no backoff, so one 502 from the mirror turns into a few hundred requests a minute until the endpoint is disabled by hand.',
   },
   {
@@ -499,7 +504,7 @@ const DRY_RUN_FORGEJO_ROWS: readonly DryRunForgejoRow[] = [
     title: 'Package registry rejects a scoped tag on push',
     author: 'kestrel',
     labels: ['registry'],
-    comments: 2,
+    comments: 0,
     body: 'Pushing `@acme/tool@1.4.0` answers 422 with an empty body. An unscoped name on the same repository is accepted, so the scope separator looks like the part that is not being decoded.',
   },
   {
@@ -508,7 +513,7 @@ const DRY_RUN_FORGEJO_ROWS: readonly DryRunForgejoRow[] = [
     title: 'Wiki search misses pages behind a redirect',
     author: 'bo',
     labels: ['wiki', 'needs-triage'],
-    comments: 1,
+    comments: 0,
     body: 'A renamed wiki page keeps serving under its old slug, but the search index only ever holds the new one — so the redirect works and the search result never appears.',
   },
   {
@@ -535,7 +540,7 @@ const DRY_RUN_FORGEJO_ROWS: readonly DryRunForgejoRow[] = [
     title: 'Mirror the release tarball to the package registry',
     author: 'kestrel',
     labels: ['registry', 'packaging'],
-    comments: 3,
+    comments: 0,
     isDraft: true,
     additions: 96,
     deletions: 12,

@@ -85,6 +85,21 @@ describe('CEZ_DRY_RUN=1 forge fixtures', () => {
     expect(mine.filter((color) => theirs.has(color))).toEqual([]);
   });
 
+  it('every Forgejo catalog row advertises exactly as many comments as its thread serves', async () => {
+    // A row saying "5 comments" that opens onto an empty thread is the same "looks healthy, holds
+    // nothing" shape #26 exists to remove, one level down: `forgejoListComments`'s dry-run branch
+    // answers `{available: true, comments: []}` and seeding a thread is out of scope, so the count
+    // is what has to tell the truth. Asserted through the driver seam for both halves, so the
+    // catalog cannot be made honest on paper and dishonest once composed.
+    const rows = await catalog(forgejo);
+    expect(rows.length).toBeGreaterThan(0);
+    for (const item of rows) {
+      const thread = await forgejo.listComments?.(item.kind, item.number);
+      expect(thread?.available).toBe(true);
+      expect(item.comments).toBe(thread?.comments.length ?? 0);
+    }
+  });
+
   it('the Forgejo catalog links onto the configured webUrl host and never onto github.com', async () => {
     for (const item of await catalog(forgejo)) {
       expect(item.url.startsWith(`${settings.webUrl}/acme/demo/`)).toBe(true);
