@@ -1967,9 +1967,11 @@ async function forgejoListChecks(
   repo: string,
   numbers: number[],
 ): Promise<ForgeChecksResult> {
-  // Glyphs straight from the catalog (#26) — parity with `mockGithubChecks`. The list tier ships
-  // `checks: null` per row and the glyph is hydrated lazily from this call (#664), so an empty map
-  // here means a seeded PR row paints no chip at all.
+  // Glyphs straight from the catalog (#26) — parity with `mockGithubChecks`. The dry-run rows carry
+  // their glyph inline already (`dryRunForgejoItem`), so unlike the live tier — where
+  // `mapForgejoPull` ships `checks: null` and the chip is hydrated lazily from this call (#664) —
+  // this answer is not what paints the list. It still has to agree with the row it describes, and
+  // it is the only answer the cockpit gets for a number the list never carried.
   if (process.env.CEZ_DRY_RUN === '1') return dryRunForgejoChecks(numbers);
   const checks: Record<number, 'passing' | 'failing' | 'pending' | null> = {};
   const misses: number[] = [];
