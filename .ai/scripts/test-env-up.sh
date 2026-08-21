@@ -401,10 +401,36 @@ ensure_forgejo_project() {
 EOF
 
   # Idempotent by realpath (`registerProject`), so a repeat boot just bumps `lastOpenedAt`.
-  if (cd "$REPO_ROOT" && node packages/cezar/dist/index.js projects add "$FORGEJO_PROJECT_DIR" >/dev/null 2>&1); then
+  #
+  # stderr is captured rather than discarded so the two ways this can fail stay tellable apart. The
+  # CLI refuses a task-worktree root by design (`addCommand` -> `shouldRegisterProject`,
+  # `workspace/projects-cli.ts`) and says so on stderr before exiting 1 — verified by running it:
+  #
+  #   $ node packages/cezar/dist/index.js projects add .ai/qa/forgejo-project   # from a task worktree
+  #   refusing to register /…/.ai/cezar/worktrees/…/.ai/qa/forgejo-project — cezar task worktrees
+  #   and your home directory are not projects
+  #   $ echo $?
+  #   1
+  #
+  # Collapsing that into the same line as a genuinely broken CLI left an operator no way to tell
+  # "refused by design, as this script's own header says" from "the build is broken".
+  #
+  # `|| FORGEJO_ADD_RC=$?` is not decoration: this script runs under `set -eu` (line 18), where a
+  # BARE `VAR=$(failing-cmd)` aborts on the spot — measured, not assumed:
+  #
+  #   $ printf 'set -eu\nE=$(sh -c "exit 1")\necho reached\n' | /bin/sh ; echo "rc=$?"
+  #   rc=1                                    # "reached" never prints
+  #
+  # which would break this section's own "never fails the boot" promise on exactly the refusal it
+  # exists to report. The `if (…); then` form it replaces was `set -e`-exempt for free.
+  FORGEJO_ADD_RC=0
+  FORGEJO_ADD_ERR=$(cd "$REPO_ROOT" && node packages/cezar/dist/index.js projects add "$FORGEJO_PROJECT_DIR" 2>&1 >/dev/null) || FORGEJO_ADD_RC=$?
+  if [ "$FORGEJO_ADD_RC" -eq 0 ]; then
     log "Forgejo test project registered (.ai/qa/forgejo-project)"
+  elif printf '%s' "$FORGEJO_ADD_ERR" | grep -q 'refusing to register'; then
+    log "Forgejo test project skipped by design — ${FORGEJO_ADD_ERR}"
   else
-    log "could not register the Forgejo test project — the cockpit will show the repo project only"
+    log "could not register the Forgejo test project (exit ${FORGEJO_ADD_RC}) — the cockpit will show the repo project only: ${FORGEJO_ADD_ERR:-no output}"
   fi
 }
 
