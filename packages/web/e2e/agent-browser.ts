@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, readFileSync, statSync } from 'node:fs'
+import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 
 /**
@@ -56,12 +56,59 @@ export function readTestEnv(): EnvDescriptor {
  *
  * The shared test env pins the same variable under `.ai/qa/cez-home`
  * (`.ai/scripts/test-env-up.sh`); this is that rule for the specs that boot their own server.
+ *
+ * WRITES A FILE, deliberately, despite the `…Env` name: it seals `dataRoot` off from the team
+ * skills before returning (see `sealFixtureSkills`). The seal belongs here rather than in a
+ * companion helper because this is the one call every self-booting spec already makes, and the
+ * point of #32 is that no future spec has to remember it — the `fixture-serve-must-pin-cez-home`
+ * design guardian enforces that by requiring this helper outright.
  */
 export function fixtureServeEnv(
   dataRoot: string,
   extra: Record<string, string> = {},
 ): NodeJS.ProcessEnv {
+  sealFixtureSkills(dataRoot)
   return { ...process.env, CEZ_DRY_RUN: '1', CEZ_HOME: resolve(dataRoot, '.cez-home'), ...extra }
+}
+
+/**
+ * Pin a fixture repo's skill catalog to what the fixture itself put there (#32).
+ *
+ * `CEZ_HOME` cannot do this job. `discoverSkills` merges `getTeamSkillsCached(repoRoot)`, whose
+ * bare clone lives at `join(homedir(), '.cache', 'cez', 'skills', …)` — keyed off `homedir()`,
+ * so it escapes the `dataRoot` pin by construction. A fixture that declares nothing therefore
+ * inherits `open-mercato/skills`, the vendor default, and its catalog becomes whatever the
+ * machine running the suite happens to have cloned: `new-task.e2e.ts` saw `om-apply-upgrade-notes`
+ * where its fixture had written `spec-writer`.
+ *
+ * `"skillsRepos": []` in the repo's own `.ai/cezar/config.json` is the documented opt-out
+ * (`packages/cezar/src/config.ts`), and it closes the cold-cache race as well as the warm one:
+ * an empty source list is not "clone, then find nothing" — `loadTeamSkills` iterates nothing, so
+ * no background load can change the answer between two reads. `packages/cezar/src/skills.test.ts`
+ * pins that at the config seam, with a positive control, so this seal is never asserted vacuously.
+ *
+ * Merges rather than overwrites: `forgejo.e2e.ts` writes a `forge` block into this same file
+ * before booting, and a spec that deliberately configured `skillsRepos` has already spoken —
+ * the seal is a default for the silent majority, not an override.
+ */
+function sealFixtureSkills(dataRoot: string): void {
+  const configPath = resolve(dataRoot, '.ai/cezar/config.json')
+  let config: Record<string, unknown> = {}
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(configPath, 'utf8'))
+    // cezar degrades an unreadable or non-object config to defaults and boots anyway; this
+    // helper must not be stricter, or a junk fixture file becomes a failed spec instead of a
+    // sealed one.
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      config = parsed as Record<string, unknown>
+    }
+  } catch {
+    // absent or malformed — start from an empty object and write the seal.
+  }
+  if (config.skillsRepos !== undefined) return
+  config.skillsRepos = []
+  mkdirSync(dirname(configPath), { recursive: true })
+  writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8')
 }
 
 /**
