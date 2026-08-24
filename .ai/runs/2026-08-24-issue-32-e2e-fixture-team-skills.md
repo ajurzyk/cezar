@@ -82,17 +82,17 @@ Warm cache, cold cache, the two target specs, and the full suite before/after.
 
 ### Phase 1: Pin the mechanism at the config seam
 
-- [ ] 1.1 Unit test: `skillsRepos: []` yields no team skills, with a local-repo positive control
+- [x] 1.1 Unit test: `skillsRepos: []` yields no team skills, with a local-repo positive control — 5fdbcee9
 
 ### Phase 2: Seal the chokepoint
 
-- [ ] 2.1 `fixtureServeEnv` seals the fixture repo's `.ai/cezar/config.json`
-- [ ] 2.2 Unit test for the seal: creates, merges, and never clobbers a deliberate `skillsRepos`
+- [x] 2.1 `fixtureServeEnv` seals the fixture repo's `.ai/cezar/config.json` — 03dc3e9e
+- [x] 2.2 Unit test for the seal: creates, merges, and never clobbers a deliberate `skillsRepos` — 03dc3e9e
 
 ### Phase 3: Close the bypass
 
-- [ ] 3.1 Tighten the `fixture-serve-must-pin-cez-home` guardian to require the helper
-- [ ] 3.2 Route `queued-stack.e2e.ts`'s hand-rolled serve env through `fixtureServeEnv`
+- [x] 3.1 Tighten the `fixture-serve-must-pin-cez-home` guardian to require the helper — f724c3eb (renamed to `fixture-serve-must-use-helper`, since the fix it asks for changed)
+- [x] 3.2 Route `queued-stack.e2e.ts`'s hand-rolled serve env through `fixtureServeEnv` — f724c3eb
 
 ### Phase 4: Verify
 

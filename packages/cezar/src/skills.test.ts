@@ -199,7 +199,16 @@ describe('discoverSkills team-skill seal', () => {
     return repoRoot;
   }
 
-  /** Run `body` with `homedir()` pointed at a throwaway directory, and hand it that path. */
+  /**
+   * Run `body` with `homedir()` pointed at a throwaway directory, and hand it that path.
+   *
+   * The redirect reaches `bareDirFor`, which calls `homedir()` per invocation — that is the half
+   * the seal depends on. It does NOT reach `GLOBAL_SKILL_DIRS` (`skills.ts`), a module-level
+   * const evaluated at import time against the real home, so `discoverSkills` still reads this
+   * machine's `~/.agents/skills` and `~/.claude/skills`. That is why every assertion below
+   * filters on `source === 'team'` rather than looking at the merged catalog; an unfiltered
+   * assertion here would be machine-dependent, which is the very bug this describe block pins.
+   */
   async function withThrowawayHome<T>(body: (home: string) => Promise<T>): Promise<T> {
     const home = await mkdtemp(join(tmpdir(), 'cezar-skills-home-'));
     tempDirs.push(home);
