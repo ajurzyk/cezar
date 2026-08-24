@@ -365,6 +365,13 @@ start_app() {
 # Never fails the boot. Registration is refused inside a cezar task worktree (`shouldRegisterProject`
 # — the `.ai/cezar/worktrees/` guard), which is exactly where an agent-driven boot runs from; that
 # costs the Forgejo surface, not the environment.
+#
+# QA CAVEAT — boot from a checkout OUTSIDE `.ai/cezar/worktrees/`. A pass started inside a task
+# worktree hits that refusal, so the cockpit lists the repo project only and NO Forgejo surface
+# exists to test. The failure mode is the misleading part: nothing errors, the boot reports success,
+# and the missing tab reads like the Forgejo change not working rather than like this environment
+# declining to build it. The only signal is the `skipped by design` line in this script's own log.
+# A scratch clone under `.ai/tmp/` is enough; that is where PR #29's QA pass booted from.
 FORGEJO_PROJECT_DIR="$QA_DIR/forgejo-project"
 
 ensure_forgejo_project() {
@@ -429,6 +436,7 @@ EOF
     log "Forgejo test project registered (.ai/qa/forgejo-project)"
   elif printf '%s' "$FORGEJO_ADD_ERR" | grep -q 'refusing to register'; then
     log "Forgejo test project skipped by design — ${FORGEJO_ADD_ERR}"
+    log "  → no Forgejo surface in this boot; to QA one, re-boot from a checkout outside .ai/cezar/worktrees/"
   else
     log "could not register the Forgejo test project (exit ${FORGEJO_ADD_RC}) — the cockpit will show the repo project only: ${FORGEJO_ADD_ERR:-no output}"
   fi
