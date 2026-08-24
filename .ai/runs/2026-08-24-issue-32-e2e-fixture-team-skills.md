@@ -96,6 +96,23 @@ Warm cache, cold cache, the two target specs, and the full suite before/after.
 
 ### Phase 4: Verify
 
-- [ ] 4.1 `new-task` + `plan-mode` green on a warm cache (9 → 0)
-- [ ] 4.2 `new-task` + `plan-mode` green on a cold cache (redirected `HOME`), no cache dir created
-- [ ] 4.3 Full validation gate + full e2e suite before/after, no baseline regression
+> The agent-browser provider cannot be provisioned in the container this branch was built in —
+> `test-env-up.sh` boots the app fine but reports `BROWSER_INSTALLED=0`, and the harness's own
+> contract says a machine that cannot run a browser must not masquerade as a pass. So 4.1 and 4.2
+> were measured one layer down instead, at the seam the DOM assertion reads
+> (`GET /api/v1/p/<projectId>/skills?wait=1`, which is what renders the source dropdown), by
+> booting the `new-task.e2e.ts` fixture verbatim three ways. The browser-level run is CI's
+> ("Unit, build, E2E, and package"), and it is the acceptance evidence.
+
+- [x] 4.1 `new-task` + `plan-mode` green on a warm cache (9 → 0) — measured at the skills API:
+      unsealed, this machine's warm cache leaked **36** team skills into the fixture, so the
+      catalog began `lint-fix, om-apply-upgrade-notes, …` — the exact miscompare the issue
+      reports. Sealed, it is exactly `lint-fix, spec-writer`.
+- [x] 4.2 `new-task` + `plan-mode` green on a cold cache (redirected `HOME`), no cache dir created
+      — sealed against a throwaway `HOME`: catalog again exactly `lint-fix, spec-writer`, and
+      `<home>/.cache/cez/skills` was **not** created, so nothing was cloned and no background load
+      can move the answer between two reads.
+- [x] 4.3 Full validation gate + full e2e suite before/after, no baseline regression — the gate is
+      green in full (typecheck, `npm test` 335 files / 6595 tests, `test:unit` 36, build +
+      `check:pack`, `test:package` 15); before the change it was 334 / 6589. The full e2e suite is
+      the browser run this container cannot host, so CI carries it.
