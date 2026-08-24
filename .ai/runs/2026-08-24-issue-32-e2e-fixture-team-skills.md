@@ -66,10 +66,16 @@ Warm cache, cold cache, the two target specs, and the full suite before/after.
 
 ## Risks
 
-- The seal adds one untracked file to each fixture repo. `diff-scroll.e2e.ts` already absorbs the
-  `.ai/cezar/.gitignore` cezar writes at boot (it reads the server's own count and asserts
-  `>= FIXTURE_FILES`), and no other fixture spec asserts an exact untracked-file set — but the
-  full-suite before/after comparison is what actually settles this.
+- The seal adds one untracked `.ai/cezar/config.json` to each fixture repo — untracked and stays
+  that way, since cezar's `ensureDataGitignore` (`packages/cezar/src/index.ts:663`) deliberately
+  omits `config.json` so workflows and skills remain committable. Settled by enumeration rather
+  than by the full-suite comparison originally planned here (which, per the Phase 4 note, cannot
+  run in this environment): of the 19 self-booting specs only `diff-scroll.e2e.ts` reads
+  `/api/v1/repo/changes`, and it takes the server's own count with
+  `toBeGreaterThanOrEqual(FIXTURE_FILES)` because it already absorbs the `.ai/cezar/.gitignore`
+  cezar writes at boot. The specs that assert exact changed-file sets (`repo-git.e2e.ts`) attach
+  to the shared env and are untouched. No self-booting spec asserts an exact untracked-file
+  listing.
 - Making an env-returning function write a file is a real surprise. Mitigated by naming it in the
   doc comment and by the guardian, which is now the thing that says specs must go through it.
 - The full suite is run from inside `.ai/cezar/worktrees/`, so `test-env-up.sh` skips the Forgejo
@@ -101,8 +107,31 @@ Warm cache, cold cache, the two target specs, and the full suite before/after.
 > contract says a machine that cannot run a browser must not masquerade as a pass. So 4.1 and 4.2
 > were measured one layer down instead, at the seam the DOM assertion reads
 > (`GET /api/v1/p/<projectId>/skills?wait=1`, which is what renders the source dropdown), by
-> booting the `new-task.e2e.ts` fixture verbatim three ways. The browser-level run is CI's
-> ("Unit, build, E2E, and package"), and it is the acceptance evidence.
+> booting the `new-task.e2e.ts` fixture verbatim three ways.
+>
+> **The browser-level run happened NOWHERE, and CI does not carry it.** An earlier revision of
+> this note said it did, naming CI's "Unit, build, E2E, and package" job. That job runs
+> `npm run test:package` — the packaged **CLI** e2e tests — and the word "E2E" in its name refers
+> to those. No workflow in this repository runs `npm run test:e2e` (`sh .ai/scripts/e2e.sh`), the
+> AgentBrowser suite that holds `new-task.e2e.ts` and `plan-mode.e2e.ts`. Measured, not inferred:
+>
+> ```
+> $ grep -rn "test:e2e" .github/          # -> no hits
+> $ grep -n "run: npm" .github/workflows/ci.yml
+>   45:  run: npm run typecheck
+>   48:  run: npm run test:unit
+>   51:  run: npm test
+>   54:  run: npm run build
+>   57:  run: npm run test:package        # the step named "Run packaged CLI E2E tests"
+> ```
+>
+> So the acceptance evidence for 4.1/4.2 is the API-level measurement below and nothing else: it
+> exercises the real mechanism through the endpoint the DOM assertion reads, but it is a manual
+> measurement, not a committed repeatable test, and it does not prove the two specs pass as
+> written. What would settle that: `npm run test:e2e` on a machine with the agent-browser provider
+> installed, or the suite run in the `mcr.microsoft.com/playwright` container. Anyone resuming this
+> work should treat issue #32's "the specs pass in full" criterion as measured one layer down,
+> not as demonstrated end to end.
 
 - [x] 4.1 `new-task` + `plan-mode` green on a warm cache (9 → 0) — measured at the skills API:
       unsealed, this machine's warm cache leaked **36** team skills into the fixture, so the
@@ -112,7 +141,15 @@ Warm cache, cold cache, the two target specs, and the full suite before/after.
       — sealed against a throwaway `HOME`: catalog again exactly `lint-fix, spec-writer`, and
       `<home>/.cache/cez/skills` was **not** created, so nothing was cloned and no background load
       can move the answer between two reads.
-- [x] 4.3 Full validation gate + full e2e suite before/after, no baseline regression — the gate is
-      green in full (typecheck, `npm test` 335 files / 6595 tests, `test:unit` 36, build +
-      `check:pack`, `test:package` 15); before the change it was 334 / 6589. The full e2e suite is
-      the browser run this container cannot host, so CI carries it.
+- [x] 4.3 Full validation gate before/after, no baseline regression — the gate is green in full
+      (typecheck, `npm test` 335 files / 6595 tests, `test:unit` 36, build + `check:pack`,
+      `test:package` 15); before the change it was 334 / 6589.
+- [ ] 4.4 Full **browser** e2e suite (`npm run test:e2e`) before/after — NOT RUN. This container
+      cannot host a browser and no workflow runs it (see the Phase 4 note), so this step is open
+      rather than delegated. It is the only outstanding item in the plan; the seal itself is
+      covered at both unit seams and by the guardian. No new tracking issue for it: the parent
+      issue **#30** already carries exactly this gap — "The browser e2e suite is red on main
+      (12 files / 29 tests) and is watched by neither CI nor `validation.commands`" — and it is
+      the right home for making the suite runnable and watched. That this plan nevertheless
+      credited CI with the browser run is the mistake worth remembering: the parent issue said
+      otherwise in its own title, one click away.
