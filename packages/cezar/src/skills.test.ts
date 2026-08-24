@@ -1,4 +1,6 @@
-import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { mkdtemp, mkdir, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -8,6 +10,8 @@ import {
   readImportedSkills,
   type Skill,
 } from './skills.ts';
+import { waitForTeamSkills } from './skills-remote.ts';
+import { DEFAULT_SKILLS_REPOS, loadConfig } from './config.ts';
 
 /**
  * The opt-out gate's two pure halves (#391 follow-up: the promo banner is gone, replaced by
@@ -154,5 +158,107 @@ describe('discoverSkills local entrypoints', () => {
 
     expect(skills).toHaveLength(1);
     expect(skills[0]?.source).toBe('agents');
+  });
+});
+
+/**
+ * The seal an e2e fixture repo relies on (#32): `"skillsRepos": []` in `.ai/cezar/config.json`
+ * must empty the team catalog OUTRIGHT — no clone, no listing, nothing merged into
+ * `discoverSkills`. Without it a spec-owned `cezar serve` reads the collection cached in the
+ * developer's `$HOME` (`bareDirFor` keys off `homedir()`, which `CEZ_HOME` cannot contain), so
+ * `new-task.e2e.ts` saw `om-apply-upgrade-notes` where its fixture had written `spec-writer`.
+ *
+ * The positive control is the load-bearing half: on a machine with a cold cache the negative
+ * assertion passes for the wrong reason, so each case first proves the SAME code path does
+ * surface a team skill when a source is configured. `HOME` is redirected to a throwaway
+ * directory rather than the developer's real one — `~/.cache/cez/skills` is never read, written,
+ * or deleted here, and the local source repo keeps the whole thing offline.
+ */
+describe('discoverSkills team-skill seal', () => {
+  /** A real git repo defining one skill, cloneable over a plain local path. */
+  async function skillsSourceRepo(name: string): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), 'cezar-skills-src-'));
+    tempDirs.push(dir);
+    await mkdir(join(dir, name), { recursive: true });
+    await writeFile(join(dir, name, 'SKILL.md'), `---\ndescription: from the team repo\n---\n\nBody`);
+    const git = (...args: string[]) =>
+      execFileSync('git', ['-C', dir, '-c', 'user.email=t@cezar.test', '-c', 'user.name=t', ...args], {
+        stdio: 'ignore',
+      });
+    git('init', '-q', '-b', 'main');
+    git('add', '-A');
+    git('commit', '-qm', 'skills');
+    return dir;
+  }
+
+  async function repoWith(skillsRepos: unknown): Promise<string> {
+    const repoRoot = await mkdtemp(join(tmpdir(), 'cezar-skills-consumer-'));
+    tempDirs.push(repoRoot);
+    await mkdir(join(repoRoot, '.ai/cezar'), { recursive: true });
+    await writeFile(join(repoRoot, '.ai/cezar/config.json'), JSON.stringify({ skillsRepos }));
+    return repoRoot;
+  }
+
+  /** Run `body` with `homedir()` pointed at a throwaway directory, and hand it that path. */
+  async function withThrowawayHome<T>(body: (home: string) => Promise<T>): Promise<T> {
+    const home = await mkdtemp(join(tmpdir(), 'cezar-skills-home-'));
+    tempDirs.push(home);
+    const previous = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+    process.env.HOME = home;
+    process.env.USERPROFILE = home; // os.homedir() reads this one on win32
+    try {
+      return await body(home);
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  }
+
+  it('surfaces a configured team skill (the positive control the seal is measured against)', async () => {
+    await withThrowawayHome(async (home) => {
+      const source = await skillsSourceRepo('team-only-skill');
+      const repoRoot = await repoWith([{ repo: source, ref: 'main' }]);
+
+      await waitForTeamSkills(repoRoot);
+      const skills = await discoverSkills(repoRoot);
+
+      expect(skills.filter((skill) => skill.source === 'team').map((skill) => skill.name)).toEqual([
+        'team-only-skill',
+      ]);
+      expect(existsSync(join(home, '.cache/cez/skills'))).toBe(true);
+    });
+  }, 30_000);
+
+  it('contributes no team skill — and clones nothing — when skillsRepos is empty', async () => {
+    await withThrowawayHome(async (home) => {
+      // Warm the same throwaway cache first, so "no team skill" cannot pass merely because
+      // this machine has never cloned one.
+      const source = await skillsSourceRepo('team-only-skill');
+      await waitForTeamSkills(await repoWith([{ repo: source, ref: 'main' }]));
+      const cache = join(home, '.cache/cez/skills');
+      const warmed = await readdir(cache);
+      expect(warmed).toHaveLength(1);
+
+      const sealed = await repoWith([]);
+      await waitForTeamSkills(sealed);
+      const skills = await discoverSkills(sealed);
+
+      expect(skills.filter((skill) => skill.source === 'team')).toEqual([]);
+      // The cold-cache race closes here too: an empty source list is not "clone, then find
+      // nothing" — `loadTeamSkills` iterates nothing, so there is no background clone whose
+      // arrival could change the answer between two reads.
+      expect(await readdir(cache)).toEqual(warmed);
+    });
+  }, 30_000);
+
+  it('needs the seal: a repo that declares nothing inherits the vendor source', async () => {
+    // The leak's entry point. A fixture repo writes `.ai/skills/*` and no config, so its
+    // sources are `DEFAULT_SKILLS_REPOS` — `open-mercato/skills`, whose bare clone in the
+    // developer's `$HOME` is exactly what showed up in the fixture's catalog.
+    const bare = await mkdtemp(join(tmpdir(), 'cezar-skills-unsealed-'));
+    tempDirs.push(bare);
+    expect((await loadConfig(bare)).skillsRepos).toEqual(DEFAULT_SKILLS_REPOS);
   });
 });
