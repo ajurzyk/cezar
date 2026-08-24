@@ -60,7 +60,7 @@ export function readTestEnv(): EnvDescriptor {
  * WRITES A FILE, deliberately, despite the `…Env` name: it seals `dataRoot` off from the team
  * skills before returning (see `sealFixtureSkills`). The seal belongs here rather than in a
  * companion helper because this is the one call every self-booting spec already makes, and the
- * point of #32 is that no future spec has to remember it — the `fixture-serve-must-pin-cez-home`
+ * point of #32 is that no future spec has to remember it — the `fixture-serve-must-use-helper`
  * design guardian enforces that by requiring this helper outright.
  */
 export function fixtureServeEnv(
