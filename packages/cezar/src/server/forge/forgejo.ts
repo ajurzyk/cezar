@@ -449,6 +449,192 @@ function forgejoViewUrl(webUrl: string, owner: string, repo: string, kind: Forge
   }
 }
 
+// ---- CEZ_DRY_RUN=1 fixtures (#26) -------------------------------------------
+// The read side's offline catalog — the Forgejo twin of `github.ts`'s `mockGithub()`, and the one
+// source every dry-run READ path in this file answers from (`listForgejo`, `forgejoPrStatus`,
+// `forgejoListChecks`).
+//
+// Why it has to exist at all: the probe already reports the forge AVAILABLE under dry-run, so a
+// Forgejo project's GitHub tab rendered as healthy-and-empty — no row to click, therefore no item
+// detail page, therefore no "Hand this to the agent" panel, therefore no browser-level coverage of
+// any Forgejo behaviour. `{available:true, items:[]}` is also precisely the silent-failure shape
+// `listForgejo`'s own all-rows-failed gate exists to refuse; the dry-run branch was producing it by
+// hand. Every other dry-run path here (merge state, create PR) already carried a real fixture.
+//
+// The values are chosen to be DISJOINT from `mockGithub()`'s — numbers, titles, authors, labels and
+// label colours all differ — so an assertion about Forgejo cannot be satisfied by GitHub fixtures
+// that happen to be in front of it. `dry-run-fixtures.test.ts` pins that as an invariant rather
+// than a convention, since both catalogs are hand-maintained.
+
+/** One catalog row. `branch` is Forgejo-only bookkeeping (`ForgeItem` has no head-branch field) and
+ *  is what lets `forgejoPrStatus` answer for the branch a fixture PR actually heads. */
+interface DryRunForgejoRow {
+  kind: 'issue' | 'pr';
+  number: number;
+  title: string;
+  author: string;
+  labels: string[];
+  body: string;
+  /** Always `0`, and pinned as such by `dry-run-fixtures.test.ts`: `forgejoListComments`'s dry-run
+   *  branch serves no thread (seeding one is a non-goal of #26), so any other count would send a QA
+   *  click from "5 comments" to an empty pane — the same "looks healthy, holds nothing" shape this
+   *  catalog exists to remove. Kept as a field rather than dropped so seeding threads later is a
+   *  fixture edit, not a shape change. */
+  comments: number;
+  isDraft?: boolean;
+  additions?: number;
+  deletions?: number;
+  checks?: 'passing' | 'failing' | 'pending' | null;
+  branch?: string;
+}
+
+const DRY_RUN_FORGEJO_ROWS: readonly DryRunForgejoRow[] = [
+  {
+    kind: 'issue',
+    number: 24,
+    title: 'Webhook retries hammer the mirror after a 502',
+    author: 'aurelia',
+    labels: ['ci', 'mirror'],
+    comments: 0,
+    body: 'The delivery queue retries with no backoff, so one 502 from the mirror turns into a few hundred requests a minute until the endpoint is disabled by hand.',
+  },
+  {
+    kind: 'issue',
+    number: 18,
+    title: 'Package registry rejects a scoped tag on push',
+    author: 'kestrel',
+    labels: ['registry'],
+    comments: 0,
+    body: 'Pushing `@acme/tool@1.4.0` answers 422 with an empty body. An unscoped name on the same repository is accepted, so the scope separator looks like the part that is not being decoded.',
+  },
+  {
+    kind: 'issue',
+    number: 11,
+    title: 'Wiki search misses pages behind a redirect',
+    author: 'bo',
+    labels: ['wiki', 'needs-triage'],
+    comments: 0,
+    body: 'A renamed wiki page keeps serving under its old slug, but the search index only ever holds the new one — so the redirect works and the search result never appears.',
+  },
+  {
+    kind: 'pr',
+    // 777 deliberately: `createForgejoPr`'s dry-run branch hands back `…/pulls/777` and
+    // `DRY_RUN_MERGE_STATE_FIXTURE` describes that same number. Those two were unreachable while
+    // the list was empty; a clickable list makes them reachable, so the catalog agrees with them
+    // instead of inventing a PR they know nothing about.
+    number: 777,
+    title: 'Dry-run pull request',
+    author: 'aurelia',
+    labels: ['ready-to-merge'],
+    comments: 0,
+    isDraft: false,
+    additions: 1,
+    deletions: 1,
+    checks: 'passing',
+    branch: 'feat/dry-run',
+    body: 'The pull request every dry-run PR path in this driver already answers for — `createPR` hands back this number and the merge-state fixture describes it.',
+  },
+  {
+    kind: 'pr',
+    number: 764,
+    title: 'Mirror the release tarball to the package registry',
+    author: 'kestrel',
+    labels: ['registry', 'packaging'],
+    comments: 0,
+    isDraft: true,
+    additions: 96,
+    deletions: 12,
+    checks: 'pending',
+    branch: 'feat/mirror-tarball',
+    body: 'Draft: publishes the signed tarball as a generic package on release. The signature check still runs after the upload rather than before it, so this is not ready for review yet.',
+  },
+];
+
+/** Colours for every label the catalog uses. Disjoint from `mockGithub()`'s palette, same as the
+ *  label names themselves. */
+const DRY_RUN_FORGEJO_LABEL_COLORS: Record<string, string> = {
+  ci: '2f6f4e',
+  mirror: 'b45f06',
+  registry: '7b1fa2',
+  wiki: '00838f',
+  packaging: 'ad1457',
+  'needs-triage': 'ef6c00',
+  'ready-to-merge': '1b5e20',
+};
+
+/** A catalog row as the cockpit consumes it. The URL is composed through `forgejoViewUrl`, never
+ *  written out literally, so it lands on the CONFIGURED `webUrl` host by construction — the one
+ *  property #26 turns on ("never `github.com`") cannot drift out of a hand-written string. */
+function dryRunForgejoItem(row: DryRunForgejoRow, owner: string, repo: string, webUrl: string): ForgeItem {
+  return {
+    kind: row.kind,
+    number: row.number,
+    title: row.title,
+    author: row.author,
+    // Ages relative to now, exactly as `mockGithub` does it — a fixed timestamp would render as
+    // "2 years ago" in a demo a year from now.
+    createdAt: new Date(Date.now() - row.number * 3_600_000).toISOString(),
+    labels: row.labels,
+    body: row.body,
+    url: forgejoViewUrl(webUrl, owner, repo, row.kind === 'pr' ? 'pr' : 'issue', row.number),
+    comments: row.comments,
+    ...(row.kind === 'pr'
+      ? { isDraft: row.isDraft ?? false, additions: row.additions, deletions: row.deletions, checks: row.checks ?? null }
+      : {}),
+  };
+}
+
+/** The dry-run answer for one list walk. `repo`/`syncedAt`/`labelColors` are filled exactly as the
+ *  live walk fills them, so `/api/github` composes an identical payload shape either way. */
+function dryRunForgejoList(
+  listKind: 'issues' | 'prs',
+  owner: string,
+  repo: string,
+  webUrl: string,
+  limit: number,
+): ForgeListResult {
+  const wanted = listKind === 'issues' ? 'issue' : 'pr';
+  const items = DRY_RUN_FORGEJO_ROWS.filter((row) => row.kind === wanted)
+    .slice(0, limit)
+    .map((row) => dryRunForgejoItem(row, owner, repo, webUrl));
+  return {
+    available: true,
+    items,
+    repo: `${owner}/${repo}`,
+    syncedAt: new Date().toISOString(),
+    // Copied, not handed out by reference: the live walk (`listForgejo`) builds a fresh map per
+    // call, and a driver read that leaks a shared module-level object is one `Object.assign` away
+    // from a cross-request bug that only ever reproduces under dry-run.
+    labelColors: { ...DRY_RUN_FORGEJO_LABEL_COLORS },
+  };
+}
+
+/** The dry-run `prStatus` answer: the fixture PR that heads `branch`, or `null` when none does. */
+function dryRunForgejoPrStatus(owner: string, repo: string, webUrl: string, branch: string): ForgePrStatus | null {
+  const row = DRY_RUN_FORGEJO_ROWS.find((candidate) => candidate.kind === 'pr' && candidate.branch === branch);
+  if (!row) return null;
+  return {
+    number: row.number,
+    url: forgejoViewUrl(webUrl, owner, repo, 'pr', row.number),
+    // Every catalog PR is open: a merged or closed one would have no business in a list the live
+    // walk builds from `state=open`.
+    state: 'open',
+    isDraft: row.isDraft ?? false,
+    checks: row.checks ?? null,
+  };
+}
+
+/** The dry-run `listChecks` answer. A number outside the catalog resolves to `null` — no CI, NOT a
+ *  failed read — which is the same distinction `mockGithubChecks` draws. */
+function dryRunForgejoChecks(numbers: number[]): ForgeChecksResult {
+  const byNumber = new Map(
+    DRY_RUN_FORGEJO_ROWS.filter((row) => row.kind === 'pr').map((row) => [row.number, row.checks ?? null] as const),
+  );
+  const checks: Record<number, 'passing' | 'failing' | 'pending' | null> = {};
+  for (const n of numbers) checks[n] = byNumber.get(n) ?? null;
+  return { available: true, checks };
+}
+
 /**
  * `listIssues`/`listPRs` share this walk: paginate the matching endpoint up to the caller's
  * (capped) `limit`, map each row, drop rows the mapper rejects (`mapForgejoIssue` returns `null`
@@ -481,8 +667,10 @@ async function listForgejo(
   webUrl: string,
   opts: ForgeListOptions | undefined,
 ): Promise<ForgeListResult> {
-  if (process.env.CEZ_DRY_RUN === '1') return { available: true, items: [] };
   const limit = Math.min(Math.max(opts?.limit ?? 30, 1), FJ_MAX_LIST_LIMIT);
+  // Ahead of the cache, same as before — but AFTER `limit`, so the fixture walk honours the
+  // caller's cap exactly like the live one does.
+  if (process.env.CEZ_DRY_RUN === '1') return dryRunForgejoList(listKind, owner, repo, webUrl, limit);
   const key = listCacheKey(repoRoot, http.apiBase, listKind);
   const repoHandle = `${owner}/${repo}`;
   if (!opts?.refresh) {
@@ -769,7 +957,14 @@ async function forgejoPrStatus(
   webUrl: string,
   branch: string,
 ): Promise<ForgePrStatusResult> {
-  if (process.env.CEZ_DRY_RUN === '1') return { available: true, status: null };
+  // Dry-run answers from the same catalog the lists serve (#26), keyed on the branch a fixture PR
+  // actually heads. Deliberately NOT "a status for every branch": this feeds the Create PR → View
+  // PR flip, and handing a task branch someone else's PR would make the button lie about what it
+  // opens. A branch no fixture PR heads is a PROVEN absence — `{available:true, status:null}`,
+  // byte-identical to what this returned before.
+  if (process.env.CEZ_DRY_RUN === '1') {
+    return { available: true, status: dryRunForgejoPrStatus(owner, repo, webUrl, branch) };
+  }
   const key = prStatusCacheKey(repoRoot, http.apiBase, branch);
   const hit = prStatusCache.get(key);
   if (hit && Date.now() - hit.at < hit.ttlMs) return hit.data;
@@ -879,41 +1074,76 @@ function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-const DRY_RUN_MERGE_STATE_FIXTURE = {
-  pullRaw: {
-    number: 777,
-    title: 'Dry-run pull request',
-    html_url: 'http://forgejo:3000/mock/repo/pulls/777',
-    created_at: '2026-01-01T00:00:00Z',
-    draft: false,
-    additions: 1,
-    deletions: 1,
-    state: 'open',
-    merged: false,
-    mergeable: true,
-    head: { ref: 'feat/dry-run', sha: '0'.repeat(40) },
-    base: { ref: 'main' },
-  },
-  statusRaw: { statuses: [{ status: 'success', context: 'ci/build' }] },
-  branch: { readable: true, protected: false, requiredApprovals: 0, enableStatusCheck: false, statusCheckContexts: [], userCanMerge: true } as ForgejoBranchInfo,
-  // A real (not `null`) repository: `mergePR`'s own CEZ_DRY_RUN path runs its preflight through
-  // THIS fixture (via `prMergeState`), and a preflight that reports `methods: []` would 409 every
-  // dry-run merge attempt with `disabled-method` before it ever reaches the dry-run success branch.
-  // `allow_merge_commits`/`allow_squash_merge`/`allow_rebase` all `true` so every `ForgeMergeMethod`
-  // a caller might exercise in dry-run mode is actually enabled.
-  repository: {
-    default_branch: 'main',
-    allow_merge_commits: true,
-    allow_squash_merge: true,
-    allow_rebase: true,
-    allow_rebase_explicit: false,
-    allow_fast_forward_only_merge: false,
-    default_merge_style: 'merge',
-    has_pull_requests: true,
-    archived: false,
-  } as ForgejoRepository,
-  reviewsRaw: [] as unknown[],
-};
+/** The catalog row the merge-state fixture describes. Not optional: `dryRunMergeStateFixture` below
+ *  is only correct as long as the catalog still carries 777 (see its doc comment), so a catalog edit
+ *  that drops the row fails loudly rather than quietly answering for a PR nobody lists.
+ *
+ *  Resolved on call, NOT at module load: an eager top-level throw would take the whole driver — every
+ *  live, non-dry-run path in this file included — down at import time over a fixture that only
+ *  `CEZ_DRY_RUN=1` ever reads. Lazily it reaches exactly the caller that depends on it, and the unit
+ *  tests exercise that caller, so the loudness is kept and the blast radius is not. */
+function dryRunMergeStateRow(): DryRunForgejoRow {
+  const row = DRY_RUN_FORGEJO_ROWS.find((candidate) => candidate.kind === 'pr' && candidate.number === 777);
+  if (!row) throw new Error('DRY_RUN_FORGEJO_ROWS must carry PR 777 — the dry-run merge-state fixture describes it');
+  return row;
+}
+
+/** Forgejo's combined-status vocabulary for the glyph a catalog row carries — the merge panel's
+ *  check list and the list row's chip are the same claim about the same PR, so neither is written
+ *  out by hand. */
+const DRY_RUN_STATUS_FOR_GLYPH = { passing: 'success', failing: 'failure', pending: 'pending' } as const;
+
+/**
+ * The dry-run `prMergeState` answer for PR 777, composed from the catalog row rather than restated.
+ *
+ * It used to be a module constant with every field written out, including
+ * `html_url: 'http://forgejo:3000/mock/repo/pulls/777'`. That hardcoded path survived
+ * `rebaseToWebUrl` (`forgejo-map.ts:29`) — which replaces the ORIGIN and keeps `src.pathname` — so
+ * the merge panel pointed at `{webUrl}/mock/repo/pulls/777` while the very row the user clicked to
+ * get there listed as `{webUrl}/{owner}/{repo}/pulls/777`. Harmless while the dry-run list was
+ * empty and nothing was clickable; #26 is what makes that click possible, so every field the two
+ * fixtures both describe — number, title, draft, diffstat, head branch, check glyph and the URL —
+ * now comes from the one catalog row, and none of them can drift apart again by hand.
+ */
+function dryRunMergeStateFixture(owner: string, repo: string, webUrl: string) {
+  const row = dryRunMergeStateRow();
+  const glyph = row.checks ?? null;
+  return {
+    pullRaw: {
+      number: row.number,
+      title: row.title,
+      html_url: forgejoViewUrl(webUrl, owner, repo, 'pr', row.number),
+      created_at: '2026-01-01T00:00:00Z',
+      draft: row.isDraft ?? false,
+      additions: row.additions,
+      deletions: row.deletions,
+      state: 'open',
+      merged: false,
+      mergeable: true,
+      head: { ref: row.branch ?? 'feat/dry-run', sha: '0'.repeat(40) },
+      base: { ref: 'main' },
+    },
+    statusRaw: glyph ? { statuses: [{ status: DRY_RUN_STATUS_FOR_GLYPH[glyph], context: 'ci/build' }] } : null,
+    branch: { readable: true, protected: false, requiredApprovals: 0, enableStatusCheck: false, statusCheckContexts: [], userCanMerge: true } as ForgejoBranchInfo,
+    // A real (not `null`) repository: `mergePR`'s own CEZ_DRY_RUN path runs its preflight through
+    // THIS fixture (via `prMergeState`), and a preflight that reports `methods: []` would 409 every
+    // dry-run merge attempt with `disabled-method` before it ever reaches the dry-run success branch.
+    // `allow_merge_commits`/`allow_squash_merge`/`allow_rebase` all `true` so every `ForgeMergeMethod`
+    // a caller might exercise in dry-run mode is actually enabled.
+    repository: {
+      default_branch: 'main',
+      allow_merge_commits: true,
+      allow_squash_merge: true,
+      allow_rebase: true,
+      allow_rebase_explicit: false,
+      allow_fast_forward_only_merge: false,
+      default_merge_style: 'merge',
+      has_pull_requests: true,
+      archived: false,
+    } as ForgejoRepository,
+    reviewsRaw: [] as unknown[],
+  };
+}
 
 /**
  * Assembles `ForgePrMergeState` from four independent reads (`GET pulls/{n}`, the combined commit
@@ -938,7 +1168,7 @@ async function forgejoPrMergeState(
   if (process.env.CEZ_DRY_RUN === '1') {
     return {
       available: true,
-      mergeState: normalizeForgejoMergeState({ ...DRY_RUN_MERGE_STATE_FIXTURE, webUrl, hasToken: http.hasToken() }),
+      mergeState: normalizeForgejoMergeState({ ...dryRunMergeStateFixture(owner, repo, webUrl), webUrl, hasToken: http.hasToken() }),
     };
   }
 
@@ -1742,7 +1972,12 @@ async function forgejoListChecks(
   repo: string,
   numbers: number[],
 ): Promise<ForgeChecksResult> {
-  if (process.env.CEZ_DRY_RUN === '1') return { available: true, checks: {} };
+  // Glyphs straight from the catalog (#26) — parity with `mockGithubChecks`. The dry-run rows carry
+  // their glyph inline already (`dryRunForgejoItem`), so unlike the live tier — where
+  // `mapForgejoPull` ships `checks: null` and the chip is hydrated lazily from this call (#664) —
+  // this answer is not what paints the list. It still has to agree with the row it describes, and
+  // it is the only answer the cockpit gets for a number the list never carried.
+  if (process.env.CEZ_DRY_RUN === '1') return dryRunForgejoChecks(numbers);
   const checks: Record<number, 'passing' | 'failing' | 'pending' | null> = {};
   const misses: number[] = [];
   const now = Date.now();

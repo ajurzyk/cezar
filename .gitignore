@@ -24,6 +24,9 @@ skills-lock.json
 .ai/qa/*.log
 .ai/qa/.build-cache
 .ai/qa/cez-home/
+# The Forgejo-classified scratch project test-env-up.sh materializes (#26) — a git repo of its
+# own, regenerated on every boot.
+.ai/qa/forgejo-project/
 
 # local symlink into .agents/skills
 .claude/skills
