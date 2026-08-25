@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync, realpathSync, type Dirent } from 'node:fs';
-import { readdir, readFile, rm, stat } from 'node:fs/promises';
+import { lstat, readdir, readFile, rm, stat } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 import { resolveTaskDiffBase } from './git-diff-base.ts';
 import { isSafeGitRef } from './git-refs.ts';
@@ -289,6 +289,37 @@ const CONFLICT_END = /^>{7}(?:\s|$)/;
  */
 const MARKER_SCAN_MAX_BYTES = 2_000_000;
 
+/**
+ * Largest *new* file an autosave will commit. Anything above this is held back
+ * out of the index; the rest of the worktree still lands, because a skipped
+ * recovery point is temporary while a committed blob is permanent — it stays in
+ * the branch's history and in any PR opened from it.
+ *
+ * 10 MB sits between three measured numbers rather than being a round guess:
+ *
+ *  - It is 5× the `MARKER_SCAN_MAX_BYTES` defined above — the size at which this
+ *    same guard already calls a file too big to read. Nothing this
+ *    repository tracks approaches it — the largest tracked file is 565 014 B
+ *    (`docs/screenshots/task-view.png`, measured 2026-08-25 with
+ *    `git ls-files -z | xargs -0 stat -c %s | sort -rn | head -1`).
+ *  - It is well under GitHub's 50 MB per-file warning, so a file large enough to
+ *    make a push complain is always held back rather than shipped.
+ *  - It is under half the 28 401 664 B core dumps that commit `27bd8880` swept
+ *    into a run branch — six of them, ~162 MiB, the incident this guard exists
+ *    for.
+ *
+ * Overridable per call (see `autosaveCommit`) so tests need not write tens of
+ * megabytes.
+ */
+export const AUTOSAVE_MAX_NEW_FILE_BYTES = 10_000_000;
+
+/**
+ * How many pathspecs one `git reset` gets. Chunked only so a worktree holding a
+ * pathological number of oversized files cannot exceed the ~2 MB argv limit;
+ * any bound comfortably below that works, this one is not otherwise special.
+ */
+const RESET_PATHSPEC_BATCH = 100;
+
 /** Does this file carry a complete, ordered conflict hunk? */
 function hasConflictMarkers(text: string): boolean {
   let want: 0 | 1 | 2 = 0; // 0: `<<<<<<<`, 1: `=======`, 2: `>>>>>>>`
@@ -316,8 +347,24 @@ function hasConflictMarkers(text: string): boolean {
  * Refuses to commit a worktree that is mid-merge or still carries conflict
  * markers: the incident behind #471 was an autosave capturing a half-resolved
  * merge, and a blind `git add -A` would do it again.
+ *
+ * Also holds *new* files above `maxNewFileBytes` back out of the index and
+ * commits the rest — see `AUTOSAVE_MAX_NEW_FILE_BYTES`. Unlike the conflict
+ * guard this never refuses the whole autosave: the oversized file is the
+ * problem, not the run's work.
+ *
+ * The threshold is a parameter rather than a `CEZ_*` variable on purpose. An
+ * env var is ambient state — order-dependent across a parallel test run, and a
+ * stray value would silently disable the guard in production, which is exactly
+ * the failure it was added to prevent. Widening the signature breaks no caller:
+ * all five pass two arguments (`workflows/run.ts`, `server/forge/github.ts`,
+ * `server/forge/forgejo.ts`).
  */
-export async function autosaveCommit(dir: string, reason: AutosaveReason): Promise<AutosaveResult> {
+export async function autosaveCommit(
+  dir: string,
+  reason: AutosaveReason,
+  maxNewFileBytes: number = AUTOSAVE_MAX_NEW_FILE_BYTES,
+): Promise<AutosaveResult> {
   const status = await git(dir, ['status', '--porcelain']);
   if (!status.ok || !status.stdout.trim()) return 'nothing-to-do';
   const unresolved = await unresolvedConflicts(dir, status.stdout);
@@ -330,6 +377,19 @@ export async function autosaveCommit(dir: string, reason: AutosaveReason): Promi
     return 'refused';
   }
   await git(dir, ['add', '-A']);
+  const heldBack = await holdBackOversized(dir, maxNewFileBytes);
+  if (heldBack.length) {
+    console.warn(
+      `[cezar] ${reason} autosave in ${dir}: held back ${heldBack.length} new file(s) over ` +
+        `${maxNewFileBytes} bytes: ${heldBack.join(', ')}`,
+    );
+    // Holding back can empty the index, and `git commit` fails on an empty one.
+    // Reporting that as `failed` would tell the user a recovery point was lost
+    // (createDraftPr does exactly that), when in truth the only change was a
+    // file we deliberately declined to commit. `--quiet` exits 0 when the index
+    // matches HEAD, i.e. when there is genuinely nothing left to save.
+    if ((await git(dir, ['diff', '--cached', '--quiet'])).ok) return 'nothing-to-do';
+  }
   // Commit as the CURRENT git user, so the branch's commits (and any PR opened from it) are
   // attributed to the real author and pass CLA / attribution checks. The old hardcoded
   // `cezar <cezar@local>` identity made every autosave look like a non-GitHub user. Fall back to
@@ -346,6 +406,60 @@ export async function autosaveCommit(dir: string, reason: AutosaveReason): Promi
     `cezar autosave (${reason})`,
   ]);
   return commit.ok ? 'committed' : 'failed';
+}
+
+/**
+ * Un-stage new files larger than `limit`, and report what was held back.
+ *
+ * Runs AFTER `git add -A`, reading the index rather than the porcelain status
+ * taken before it. Three reasons, all measured 2026-08-25:
+ *
+ *  - Default `-unormal` porcelain collapses an untracked directory to a single
+ *    `?? junkdir/` entry, so a dump inside it is never seen as a file at all.
+ *  - Porcelain quotes paths containing a space or non-ASCII, and `-z` cannot be
+ *    added to the status call above because `unresolvedConflicts` splits that
+ *    same output on `\n`. `git diff -z` has no such quoting.
+ *  - `??` is not trustworthy in a run's worktree regardless: `worktreeDiff`,
+ *    `worktreeShortstat` and `server/git-changes.ts` all issue `git add -N .`
+ *    here, after which untracked files report as ` A`. One cockpit diff-pane
+ *    render would blind a `??`-based check.
+ *
+ * Reading the index also closes the window between the status call and the
+ * `add`, which matters because the periodic flush fires on a timer while the
+ * agent is still writing files.
+ *
+ * `--diff-filter=A` is the precise reading of "new": absent from HEAD. A tracked
+ * file that merely grew is `M`, never enters the set, and keeps being committed
+ * — dropping it would rewrite content the branch already carries.
+ *
+ * Fails open (empty result) the way the conflict guard does: a missed oversized
+ * file costs what today already costs, while a false positive would drop the
+ * agent's work.
+ */
+async function holdBackOversized(dir: string, limit: number): Promise<string[]> {
+  const added = await git(dir, ['diff', '--cached', '--name-only', '--diff-filter=A', '-z']);
+  if (!added.ok) return [];
+  const oversized: string[] = [];
+  for (const path of added.stdout.split('\0').filter(Boolean)) {
+    try {
+      // `lstat`, not `stat`: what git stores for a symlink is its target path, a
+      // few bytes. Following the link would hold back something that costs the
+      // branch nothing.
+      if ((await lstat(join(dir, path))).size > limit) oversized.push(path);
+    } catch {
+      continue; // races, permissions — leave it staged rather than lose it
+    }
+  }
+  for (let i = 0; i < oversized.length; i += RESET_PATHSPEC_BATCH) {
+    // `:(literal)` because a pathspec globs by default, and the glob is not
+    // hypothetical: in a repo holding `a*.txt`, `ab.txt` and `ac.txt`,
+    // `git reset -q -- 'a*.txt'` un-staged all three, while
+    // `git reset -q -- ':(literal)a*.txt'` un-staged only the file by that name.
+    // Un-staging a neighbour would silently drop it from the recovery point.
+    const batch = oversized.slice(i, i + RESET_PATHSPEC_BATCH);
+    await git(dir, ['reset', '-q', '--', ...batch.map((path) => `:(literal)${path}`)]);
+  }
+  return oversized;
 }
 
 /**
