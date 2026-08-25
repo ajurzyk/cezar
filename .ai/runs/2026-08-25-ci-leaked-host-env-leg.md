@@ -146,7 +146,13 @@ npm test           → Test Files  336 passed (336)
 
 ### Phase 3: Validation gate and PR evidence
 
-- [ ] 3.1 Full `validation.commands` gate green
-- [ ] 3.2 Baseline gate green (`.ai/cezar/gates/baseline.sh`)
-- [ ] 3.3 Acceptance quotes collected (diff list, bare commands, `needs: verify`)
-- [ ] 3.4 New leg settled green on this PR
+- [x] 3.1 Full `validation.commands` gate green — all five, in order, at `16a57eac`:
+      `npm run typecheck` exit 0; `npm test` → `Test Files 336 passed (336)` / `Tests 6602 passed (6602)`;
+      `npm run test:unit` → `pass 36 / fail 0`; `npm run build` exit 0; `npm run test:package` → `pass 15 / fail 0`
+- [x] 3.2 Baseline gate green (`.ai/cezar/gates/baseline.sh`, via `verify.sh`) — `336 passed (336)` / `6602 passed (6602)`, 70.46 s
+- [x] 3.3 Acceptance quotes collected — `git diff --name-only origin/main...HEAD` lists exactly
+      `.ai/runs/2026-08-25-ci-leaked-host-env-leg.md` and `.github/workflows/ci.yml`;
+      `jq -r '.validation.commands[]' .ai/agentic.config.json` answers the five bare commands and
+      `grep -n "env -u" .ai/agentic.config.json` prints nothing; `needs: verify` still at `.github/workflows/ci.yml:142`
+- [x] 3.4 New leg settled green on this PR — `gh pr checks 43` → `Suite under a leaked host environment  pass  4m17s`
+      (run 32888710316, job 97935473659; all seven steps `success`)
