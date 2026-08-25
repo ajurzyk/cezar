@@ -176,7 +176,6 @@ import { fetchGithubRefStatus, forgetRefStatus, readCachedRefStatuses, refNumber
 import { ensureLaunchKey } from './launch-key.ts';
 import { openInTerminal } from './open-in-terminal.ts';
 import { agentCliRunner, detectOpenTargets, openFileInDefaultApp, openInApp } from './open-in-app.ts';
-import { createDraftPr } from './pr.ts';
 import { ProviderRuntimeAuthObserver } from './provider-auth-runtime.ts';
 import {
   providerForActiveRun,
@@ -4186,10 +4185,10 @@ export function createApp(deps: ServerDeps) {
       });
     })
 
-    // Draft PR from the review gate (spec 009): final autosave → push →
-    // `gh pr create --draft`; on success the run completes as done with the PR
-    // badge. Failures come back as 409 with a `manual` merge command the GUI
-    // shows next to the toast. CEZ_DRY_RUN=1 fakes the URL (no push, no gh).
+    // Draft PR from the review gate (spec 009): final autosave → push → create, through the
+    // repo's own `ForgeDriver`; on success the run completes as done with the PR badge. Failures
+    // come back as 409 with a `manual` merge command the GUI shows next to the toast.
+    // CEZ_DRY_RUN=1 fakes the URL (no push, no network) in every driver.
     .post('/runs/:id/pr', async (c) => {
       const { root: repoRoot, dataDir, store, manager } = c.get('project');
       const id = c.req.param('id');
@@ -4204,19 +4203,14 @@ export function createApp(deps: ServerDeps) {
           400,
         );
       }
-      // `createDraftPr` is GitHub-only (it ends in `gh pr create`) and this route does NOT resolve
-      // a driver — but `resolveForge` now answers with a real Forgejo driver, so the cockpit's
-      // Create PR button is enabled for those repos. Letting the click through would push the
-      // branch (`createDraftPr` pushes BEFORE it creates) and only then fail, leaving the remote
-      // ahead with no rollback. Refuse before the mutation instead. Wiring this route through
-      // `resolveForge` — the Forgejo driver's own `createPR` is implemented and tested — is the
-      // later change that removes this gate. `git-actions.ts`'s `createPrAction` mirrors it so the
-      // button is disabled rather than the click discovering the 409.
-      const forge = resolveForge(await getRepoInfo(repoRoot), (await loadConfig(repoRoot)).forge);
-      if (forge && forge.kind !== 'github') {
-        return c.json({ error: 'Create PR is not supported for this forge yet', manual: `git merge ${run.branch}` }, 409);
-      }
-      const outcome = await createDraftPr({
+      // `resolveForgeOrGithub`, not `resolveForge`: the GitHub driver's `createPR` IS
+      // `createDraftPr`, so the fallback for a repo this resolver cannot answer for (no remote, an
+      // unrecognized host) reproduces the pre-seam behaviour exactly — no second branch needed to
+      // express it. Both drivers push BEFORE they create, so the "push, then create" ordering the
+      // error handling below assumes holds either way.
+      const [repoInfo, forgeSettings] = await loadForgeInputs(repoRoot);
+      const forge = resolveForgeOrGithub(repoRoot, repoInfo, forgeSettings);
+      const outcome = await forge.createPR({
         repoRoot,
         run,
         handoffText: readHandoff(dataDir, id),
@@ -4812,9 +4806,13 @@ export function createApp(deps: ServerDeps) {
   const prChangesParams = z.object({ number: z.coerce.number().int().positive().safe() });
   const prChangesQuery = z.object({ refresh: queryValue.refine((v) => v === undefined || v === '1') });
   // Parallel, not nested awaits: `getRepoInfo` spawns git and the config read hits the disk, they
-  // don't depend on each other. Shared by every route below that resolves a driver (four through
+  // don't depend on each other. Shared by every route that resolves a driver (five through
   // `resolveForgeOrGithub`, two through `resolveForge` directly) — the preamble is byte-identical
   // either way, and the cockpit polls several of these routes while a PR page is open.
+  //
+  // A `function` declaration, not a `const`: `POST /runs/:id/pr` is the one caller declared ABOVE
+  // this line (`runsRoutes`), and hoisting within `createApp`'s body is what puts it in scope
+  // there. Both are direct children of `createApp`.
   async function loadForgeInputs(repoRoot: string) {
     return Promise.all([getRepoInfo(repoRoot), readForgeSettings(repoRoot)] as const);
   }

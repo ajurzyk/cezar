@@ -186,8 +186,18 @@ export function resolveForge(repoInfo: RepoInfo | null, forge?: ForgeSettings): 
 /** The `/api/v1/github*` route family answered via `gh` for EVERY repo before this seam existed:
  *  no remote, a remote outside the host table, and `CEZ_DRY_RUN` all landed in `fetchGithub*`'s own
  *  degrade paths/mocks. So this family's routes get a fallback to the GitHub driver (`repoRef null`)
- *  instead of gating on `null` — that keeps those payloads byte-for-byte unchanged. Scoped to this
- *  route family only; health, automations and `createPR` keep calling `resolveForge` directly. */
+ *  instead of gating on `null` — that keeps those payloads byte-for-byte unchanged.
+ *
+ *  `POST /runs/:id/pr` uses it too, and it is the one MUTATION route that does. The rule that
+ *  admits it is the same one: the GitHub driver's `createPR` **is** `createDraftPr`, the function
+ *  that route called directly before it resolved a driver, so the fallback reproduces the old
+ *  behaviour by construction rather than by resemblance — a repo with no forge takes the identical
+ *  code path it always did. That property is what makes this safe to widen to a mutation, and it is
+ *  what a third caller would have to prove before joining: `resolveForge` returning `null` must
+ *  mean "the GitHub path is what this repo already got", not "pick a default".
+ *
+ *  Health and automations keep calling `resolveForge` directly — for them `null` means "no forge",
+ *  and answering with a GitHub driver would invent a forge the repo does not have. */
 export function resolveForgeOrGithub(repoRoot: string, repoInfo: RepoInfo | null, forge?: ForgeSettings): ForgeDriver {
   return resolveForge(repoInfo, forge) ?? createGithubDriver(repoRoot, null);
 }
