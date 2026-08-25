@@ -136,13 +136,21 @@ describe('gitActionPolicy — create PR', () => {
     expect(action?.reason).toContain(phrase)
   })
 
-  it('disabled for a non-GitHub forge — the route still runs the GitHub-only path', () => {
-    // Not cosmetic: the route pushes the branch BEFORE creating the PR, so an enabled button on a
-    // Forgejo repo pushes successfully and then fails, with nothing rolled back. Until the route
-    // is wired through resolveForge, "unavailable" is the honest answer.
-    const action = find(withState({ forge: { kind: 'forgejo', available: true } }), 'create-pr')
+  it('enabled for an available non-GitHub forge — the route resolves a driver now', () => {
+    // The kind stopped mattering here the moment `POST /runs/:id/pr` went through
+    // `forge.createPR`: the Forgejo driver creates the pull request itself, so the only questions
+    // left are the forge-agnostic ones this policy already asks (is there one, is it reachable).
+    expect(find(withState({ forge: { kind: 'forgejo', available: true } }), 'create-pr')).toEqual({
+      id: 'create-pr',
+      label: 'Create PR',
+      enabled: true,
+    })
+  })
+
+  it('still disabled for an unreachable non-GitHub forge — for the forge-agnostic reason', () => {
+    const action = find(withState({ forge: { kind: 'forgejo', available: false, reason: 'forgejo is unreachable' } }), 'create-pr')
     expect(action?.enabled).toBe(false)
-    expect(action?.reason).toContain('not supported for this forge yet')
+    expect(action?.reason).toContain('forgejo is unreachable')
   })
 
   it.each<RunStatus>(['review', 'done', 'failed', 'cancelled'])('enabled once the run is %s', (status) => {
