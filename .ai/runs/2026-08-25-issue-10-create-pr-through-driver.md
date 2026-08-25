@@ -85,14 +85,14 @@ Baseline suite (`.ai/cezar/gates/baseline.sh`) plus `npm run typecheck`, then th
 
 ### Phase 1: Red tests
 
-- [ ] 1.1 Rewrite `forgejo-pr-gate.test.ts`: the Forgejo case reaches the driver's `createPR` and answers 201 with the driver's URL; keep the github-forge case; add a no-forge case proving the GitHub fallback
-- [ ] 1.2 Flip `git-actions.test.ts`'s "disabled for a non-GitHub forge" case to "enabled for an available non-GitHub forge"
+- [x] 1.1 Rewrite `forgejo-pr-gate.test.ts`: the Forgejo case reaches the driver's `createPR` and answers 201 with the driver's URL; keep the github-forge case; add a no-forge case proving the GitHub fallback — c6357898
+- [x] 1.2 Flip `git-actions.test.ts`'s "disabled for a non-GitHub forge" case to "enabled for an available non-GitHub forge" — c6357898
 
 ### Phase 2: Route the handler through the driver
 
-- [ ] 2.1 `server.ts`: resolve via `loadForgeInputs` + `resolveForgeOrGithub`, call `forge.createPR`, delete the 409 gate, its comment, the unused `loadConfig` read and the unused `createDraftPr` import
-- [ ] 2.2 `forge/index.ts`: widen `resolveForgeOrGithub`'s doc comment to cover this mutation route and say why it is behaviour-preserving
-- [ ] 2.3 `git-actions.ts`: delete the `state.forge.kind !== 'github'` branch and its rationale comment
+- [x] 2.1 `server.ts`: resolve via `loadForgeInputs` + `resolveForgeOrGithub`, call `forge.createPR`, delete the 409 gate, its comment, the unused `loadConfig` read and the unused `createDraftPr` import — c0be5da5
+- [x] 2.2 `forge/index.ts`: widen `resolveForgeOrGithub`'s doc comment to cover this mutation route and say why it is behaviour-preserving — c0be5da5
+- [x] 2.3 `git-actions.ts`: delete the `state.forge.kind !== 'github'` branch and its rationale comment — c0be5da5
 
 ### Phase 3: The same gate, written down three more times
 
