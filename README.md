@@ -734,19 +734,16 @@ the PR-diff view (`GET /github/prs/:number/changes`) all resolve through
 served by the same seam a GitHub repo is on every one of those routes — with
 the one payload difference named below.
 
-Two gaps remain. The first: draft-PR creation (`POST /runs/:id/pr`, `server.ts:4135` →
-`pr.ts` → `forge/github.ts`) still calls the GitHub-only `createDraftPr`
-directly instead of resolving a driver. Wiring it through `resolveForge`
-would push the branch before creating the PR, and the Forgejo driver's own
-`createPR` isn't wired in here yet — so both the route and the web UI guard
-against that rather than letting a Forgejo repo hit it: the server checks
-`forge.kind` and refuses with a 409 (`'Create PR is not supported for this
-forge yet'`) before any push happens, and the "Create PR" button
-(`git-actions.ts`) is disabled for the same reason rather than letting the
-click discover the 409. Until this route is wired, open the PR by hand in
-Forgejo's own web UI.
+Writes are wired too: draft-PR creation (`POST /runs/:id/pr`) resolves a
+driver through `resolveForgeOrGithub` and publishes with `forge.createPR`, so
+the cockpit's "Create PR" button works on a Forgejo repo and creates the pull
+request in the configured instance. One caveat rides along, and it is the
+driver's, not the route's: Forgejo's `CreatePullRequestOption` has no `draft`
+field, so `createForgejoPr` fakes draft state with a `WIP:` title prefix — an
+instance that has customized `WORK_IN_PROGRESS_PREFIXES` away from the default
+list gets a NON-draft pull request instead.
 
-The second: the comment/review thread has no timeline-events axis for a
+One gap remains: the comment/review thread has no timeline-events axis for a
 Forgejo repo. GitHub's timeline API (joins, label changes, renames, and the
 rest of the non-comment events `mergeThread` folds in) has no Forgejo
 equivalent, so `events` is always absent on a Forgejo thread and the response
@@ -756,7 +753,7 @@ timeline entries at all. The contract already treats a response with no
 deliberate scope line, not an oversight — but it does mean a Forgejo thread
 reads thinner than a GitHub one for the same PR.
 
-Closing these gaps is later work. See the automations caveat below
+Closing that gap is later work. See the automations caveat below
 for a further, unrelated gap in the same vein.
 
 **The key fills a gap; it never overrides.** cezar asks its host table first
