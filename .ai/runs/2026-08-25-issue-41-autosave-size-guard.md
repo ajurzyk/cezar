@@ -78,8 +78,8 @@ PR: #42
 
 ### Phase 3: Evidence
 
-- [ ] 3.1 Red-first reproduction by base revision (`git checkout origin/main -- …`)
-- [ ] 3.2 Sealed vitest run of the new test file
-- [ ] 3.3 `npm run typecheck`
-- [ ] 3.4 Full baseline gate, before/after side by side
-- [ ] 3.5 Scope check: `git diff --name-only origin/main...HEAD`
+- [x] 3.1 Red-first reproduction by base revision (`git checkout origin/main -- …`) — base: 3 failed / 2 passed; restored: 5 passed; `git status --porcelain` empty
+- [x] 3.2 Sealed vitest run of the new test file — `Test Files 2 passed (2)`, `Tests 13 passed (13)` with the conflict-guard sibling
+- [x] 3.3 `npm run typecheck` — exit 0
+- [x] 3.4 Full baseline gate, before/after side by side — before 335/6597, after 336/6602 (+1 file, +5 tests); `test:unit` 36 pass, `build` exit 0, `test:package` 15/15 after the build
+- [x] 3.5 Scope check: `git diff --name-only origin/main...HEAD` — the plan, the test file, `git-worktree.ts`, nothing else
