@@ -63,16 +63,18 @@ recovery point: hold the oversized paths back out of the index and commit everyt
 
 ## Progress
 
+PR: #42
+
 > Convention: `- [ ]` pending, `- [x]` done. Append ` — <commit sha>` when a step lands. Do not rename step titles.
 
 ### Phase 1: Red-first test and the guard
 
-- [ ] 1.1 Add `autosave-size-guard.test.ts` with case 1 and watch it fail
-- [ ] 1.2 Implement the size guard in `autosaveCommit`
+- [x] 1.1 Add `autosave-size-guard.test.ts` with case 1 and watch it fail — 70e04480
+- [x] 1.2 Implement the size guard in `autosaveCommit` — b80657fe
 
 ### Phase 2: The remaining four cases
 
-- [ ] 2.1 Cases 2–5 (tracked-file growth, named paths, unchanged happy path, `nothing-to-do`)
+- [x] 2.1 Cases 2–5 (tracked-file growth, named paths, unchanged happy path, `nothing-to-do`) — 70e04480
 
 ### Phase 3: Evidence
 
