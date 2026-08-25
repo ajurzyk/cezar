@@ -96,12 +96,16 @@ const RULES: Rule[] = [
     applies: styleSources,
   },
   {
-    name: 'fixture-serve-must-pin-cez-home',
-    why: "a spec-owned `cezar serve` takes its env from fixtureServeEnv(dataRoot) — a hand-rolled { CEZ_DRY_RUN } leaves CEZ_HOME at the developer's real ~/.cezar, so every run appends a dead /tmp fixture to their project registry",
-    // Line-level: a CEZ_DRY_RUN that is not accompanied by a CEZ_HOME on the same line. Both
-    // fixtureServeEnv() and the specs that spell the pair inline satisfy it.
-    pattern: /^(?![^\n]*CEZ_HOME)[^\n]*\bCEZ_DRY_RUN\b/g,
+    name: 'fixture-serve-must-use-helper',
+    why: "a spec-owned `cezar serve` takes its env from fixtureServeEnv(dataRoot) and nowhere else — a hand-rolled { CEZ_DRY_RUN, CEZ_HOME } leaves the fixture's skill catalog open to the team-skill collection cached in the developer's $HOME (#32), on top of the registry pollution the pin was added for",
+    // Was `fixture-serve-must-pin-cez-home`, and line-level: it accepted any line that spelled
+    // CEZ_HOME beside CEZ_DRY_RUN, which `queued-stack.e2e.ts` did — satisfying the letter while
+    // bypassing the helper. Now the helper is the only sanctioned spelling, so a seal added to
+    // it cannot be routed around by the next spec that copies an older one's shape.
+    pattern: /\bCEZ_DRY_RUN\b/g,
     applies: (f) => f.isE2e,
+    // The definition site: `fixtureServeEnv` is where the pair is spelled once, for everyone.
+    allowed: (rel) => rel === 'e2e/agent-browser.ts',
   },
   {
     name: 'no-100vh',

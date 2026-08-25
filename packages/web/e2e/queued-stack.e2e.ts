@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { AgentBrowser, cezarCli } from './agent-browser'
+import { AgentBrowser, cezarCli, fixtureServeEnv } from './agent-browser'
 
 /**
  * Stacking, editing and removing a queued run's prompt (#472), end-to-end against a LIVE
@@ -107,8 +107,10 @@ beforeAll(async () => {
   git('add', '.')
   git('commit', '-qm', 'init')
 
-  // One workspace-wide agent slot, so the second run demonstrably waits in the queue.
-  // CEZ_HOME keeps this test isolated from the developer's real workspace config.
+  // One workspace-wide agent slot, so the second run demonstrably waits in the queue. The path
+  // is `fixtureServeEnv`'s own CEZ_HOME pin, spelled here because this file writes into that
+  // workspace before the server boots — the env still comes from the helper, which is what also
+  // seals the fixture off from the machine's team-skill collection (#32).
   const cezHome = join(dataRoot, '.cez-home')
   mkdirSync(cezHome, { recursive: true })
   writeFileSync(
@@ -122,7 +124,7 @@ beforeAll(async () => {
   server = spawn(
     process.execPath,
     [cezarCli, 'serve', '--repo', dataRoot, '--port', String(port), '--no-open'],
-    { env: { ...process.env, CEZ_DRY_RUN: '1', CEZ_HOME: cezHome }, stdio: 'ignore' },
+    { env: fixtureServeEnv(dataRoot), stdio: 'ignore' },
   )
   await waitForHealth(baseUrl)
 
