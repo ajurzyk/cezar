@@ -4810,9 +4810,18 @@ export function createApp(deps: ServerDeps) {
   // `resolveForgeOrGithub`, two through `resolveForge` directly) — the preamble is byte-identical
   // either way, and the cockpit polls several of these routes while a PR page is open.
   //
-  // A `function` declaration, not a `const`: `POST /runs/:id/pr` is the one caller declared ABOVE
-  // this line (`runsRoutes`), and hoisting within `createApp`'s body is what puts it in scope
-  // there. Both are direct children of `createApp`.
+  // `POST /runs/:id/pr` calls this from `runsRoutes` (line 3483), declared ABOVE it — both are
+  // direct children of `createApp`. What makes that work is NOT the `function` form's hoisting:
+  // the handler is a closure that runs at REQUEST time, long after this body finished, so a
+  // `const` arrow would resolve just as well. Measured in node rather than reasoned about:
+  //
+  //   function build() { const h = () => later('x'); const later = async (v) => 'ran:' + v; return h }
+  //   build()()  →  'ran:x'                                    // closure registered before the const
+  //   function eagerBody() { eager('x'); const eager = (v) => v }
+  //   eagerBody()  →  ReferenceError: Cannot access 'eager' before initialization
+  //
+  // So the `function` form buys exactly one thing: a caller added to `createApp`'s SYNCHRONOUS
+  // body above this line keeps working, where a `const` would hit that TDZ error. Kept for that.
   async function loadForgeInputs(repoRoot: string) {
     return Promise.all([getRepoInfo(repoRoot), readForgeSettings(repoRoot)] as const);
   }
