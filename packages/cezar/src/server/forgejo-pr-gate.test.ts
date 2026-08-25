@@ -120,7 +120,9 @@ describe('the draft-PR route resolves a forge driver', () => {
     const res = await publish(id);
 
     expect(res.status).toBe(201);
-    expect(store.getRun(id)?.pullRequestUrl).toBeDefined();
+    // The exact URL, not just "some URL": the GitHub driver's dry-run answer is deterministic, so
+    // pinning it is what separates "took the GitHub path" from "took SOME path and returned 201".
+    expect(store.getRun(id)?.pullRequestUrl).toBe('https://github.com/open-mercato/demo/pull/777');
   });
 
   /** `resolveForge` answers `null` for a repo with no remote, so the route falls back to the GitHub

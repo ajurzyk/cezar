@@ -96,11 +96,23 @@ Baseline suite (`.ai/cezar/gates/baseline.sh`) plus `npm run typecheck`, then th
 
 ### Phase 3: The same gate, written down three more times
 
-- [ ] 3.1 `BACKWARD_COMPATIBILITY.md` §2: retire the `POST /api/v1/runs/:id/pr` 409 entry
-- [ ] 3.2 `README.md`: rewrite the Forgejo section's "two gaps remain" — draft-PR creation is no longer one
-- [ ] 3.3 `AGENTS.md`: drop the "Known gap" sentence from the forge-integration row
+- [x] 3.1 `BACKWARD_COMPATIBILITY.md` §2: retire the `POST /api/v1/runs/:id/pr` 409 entry — 32bb23da
+- [x] 3.2 `README.md`: rewrite the Forgejo section's "two gaps remain" — draft-PR creation is no longer one — 32bb23da
+- [x] 3.3 `AGENTS.md`: drop the "Known gap" sentence from the forge-integration row — 32bb23da
 
 ### Phase 4: Full validation gate
 
-- [ ] 4.1 `npm run typecheck` clean and the baseline suite green with no lost tests
-- [ ] 4.2 Grep-proof: no `kind === 'github'` / `kind !== 'github'` left in `server.ts` or `git-actions.ts`
+- [x] 4.1 `npm run typecheck` clean and the baseline suite green with no lost tests — `verify.sh`: typecheck clean,
+      335 files / 6597 tests passed, exit 0 (~72 s). Against the `main` baseline of 335 / 6595 that is **+2 tests,
+      none lost** — the two this PR adds (the no-forge fallback case, and the split of the git-actions Forgejo case
+      into enabled/unreachable). `npm run test:unit` 36/36, `npm run build` ok (`check:pack ok — 487 files`),
+      `npm run test:package` 15/15 — the full `validation.commands` gate, exit 0 on all five.
+- [x] 4.2 Grep-proof: no `kind === 'github'` / `kind !== 'github'` left in `server.ts` or `git-actions.ts` —
+      `grep -n "kind === 'github'\|kind !== 'github'" packages/cezar/src/server/server.ts packages/web/src/lib/git-actions.ts`
+      → no matches. The phrase `not supported for this forge yet` is gone repo-wide too.
+
+### Phase 5: Review (`om-auto-review-pr 37 --autofix`)
+
+- [x] 5.1 Full `om-code-review` pass on the PR diff — no blockers, no majors; three minor/nit items found and fixed
+      in this phase (the `loadForgeInputs` hoisting comment stated an unverified mechanism; the github-forge test
+      case asserted `toBeDefined()` where the dry-run URL is deterministic; this Progress section was stale).
