@@ -35,8 +35,27 @@ import { apiRequest } from './loopback-request.testkit.ts';
 
 /** The fixture identity, as `-c` overrides. Repository-local `git config` loses to
  *  `GIT_CONFIG_*` in the environment, so a host that exports one renames the fixture's
- *  commits out from under the `author` assertions; command-line `-c` outranks both. */
-const GIT_ID = ['-c', 'user.email=test@cezar.local', '-c', 'user.name=cezar-test'];
+ *  commits out from under the `author` assertions; command-line `-c` outranks both.
+ *
+ *  `commit.gpgsign` rides along because repo-local config loses to `GIT_CONFIG_*` for
+ *  EVERY key, not just the identity pair — a host exporting signing through that channel
+ *  breaks the fixture by the identical mechanism, even though `initRepo` sets it locally.
+ *  Measured with `GIT_CONFIG_KEY_n=commit.gpgsign GIT_CONFIG_VALUE_n=true` exported:
+ *  without this entry 20+ of the 70 cases fail (`gpg failed to sign the data` — every
+ *  fixture commit is lost), with it exactly one does. That one is
+ *  `POST git/commit commits everything…`, where the committer is the CODE UNDER TEST:
+ *  `commitAll` runs its own `git`, which this fixture cannot inject `-c` into, so it is
+ *  reachable only by scrubbing the variables process-wide — the workaround issue #17
+ *  exists to remove. Left exposed on purpose; the same boundary as the repo-local lines
+ *  in `initRepo` below. */
+const GIT_ID = [
+  '-c',
+  'user.email=test@cezar.local',
+  '-c',
+  'user.name=cezar-test',
+  '-c',
+  'commit.gpgsign=false',
+];
 
 function g(dir: string, ...args: string[]): string {
   return execFileSync('git', [...GIT_ID, ...args], { cwd: dir, encoding: 'utf8' });

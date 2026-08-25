@@ -118,4 +118,50 @@ exported explicitly for the repro to prove anything.
 
 ### Phase 4: Full validation gate
 
-- [ ] 4.1 Run the baseline gate and `npm run typecheck`, and record the acceptance evidence
+- [x] 4.1 Run the baseline gate and `npm run typecheck`, and record the acceptance evidence — 79016d91 (evidence below)
+
+### Phase 5: Review follow-up (om-auto-review-pr on PR #38)
+
+- [x] 5.1 Extend `GIT_ID` with `commit.gpgsign=false` — repo-local config loses to `GIT_CONFIG_*`
+      for every key, not just the identity pair, so the same leak axis was still open
+
+## Acceptance evidence
+
+All five `validation.commands` were run in order in the PR's isolated worktree:
+
+| Command | Result |
+|---|---|
+| `npm run typecheck` | `tsc --noEmit`, exit 0 |
+| `npm test` | 335 test files, 6595 tests passed (~70 s) |
+| `npm run test:unit` | 36 tests, 0 failures |
+| `npm run build` | `check:pack ok — 487 files, 85 under web/dist` |
+| `npm run test:package` | 15 tests, 0 failures |
+
+335 files / 6595 tests matches the `main` @ `0678ea8a` baseline exactly, so the branch
+lost no tests.
+
+The gate above ran through `.ai/cezar/gates/baseline.sh`, which strips the leaking variables —
+so on its own it proves no regression, not that the fixtures are sealed. The sealing was measured
+separately, with the host environment deliberately exported (`CLAUDE_CONFIG_DIR=/srv/claude-home`
+plus `GIT_CONFIG_COUNT=2` carrying `user.email`/`user.name`; `TMPDIR=/tmp` pins the unrelated
+pre-existing tmp axis that the removed prefix never covered either):
+
+```
+TMPDIR=/tmp npx vitest run packages/cezar/src/server/config-api.test.ts    → 15 passed (15)
+TMPDIR=/tmp npx vitest run packages/cezar/src/server/git-changes.test.ts   → 70 passed (70)
+TMPDIR=/tmp npm test                                                       → 335 files / 6595 tests passed
+TMPDIR=/tmp npm run test:unit                                              → 36 pass, 0 fail
+```
+
+The bare-`npm test` line is the one that licenses removing the `env -u` prefix: it shows no other
+test file in the suite depended on it.
+
+Negative control — the `origin/main` versions of both files under the identical leaked environment
+fail with exactly the six cases issue #17 named, and no others (`6 failed | 79 passed (85)`), so
+the fix is not a no-op.
+
+Remaining known gap (filed as a follow-up, not fixed here): the sealing has no regression guard,
+because a guard written inside these fixtures runs *after* `beforeEach` has applied the seal and
+therefore passes on a clean host whether or not the seal exists. The only honest guard is
+environmental — a CI leg that runs the suite with the variables deliberately exported — and
+`.github/workflows/ci.yml` is out of scope for this issue.
