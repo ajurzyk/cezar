@@ -10,12 +10,20 @@ import { apiRequest } from './loopback-request.testkit.ts';
 import { createApp } from './server.ts';
 
 /**
- * `POST /runs/:id/pr` still runs the GitHub-only `createDraftPr`, which pushes the branch BEFORE
- * calling `gh pr create`. Since `resolveForge` now answers with a real Forgejo driver, the route
- * has to refuse a non-GitHub forge itself — otherwise the push lands and the create fails, with
- * nothing rolled back. This pins the refusal, and pins that the GitHub path is untouched.
+ * `POST /runs/:id/pr` resolves a `ForgeDriver` and publishes through `forge.createPR` — it no
+ * longer imports the GitHub-only `createDraftPr` directly, so a Forgejo repo publishes through the
+ * Forgejo driver instead of being refused before the mutation.
+ *
+ * These cases pin the seam by the URL each driver hands back, not by a status code alone: under
+ * `CEZ_DRY_RUN=1` the Forgejo driver answers `<webUrl>/<owner>/<repo>/pulls/777` and the GitHub one
+ * answers `https://github.com/open-mercato/demo/pull/777`, so a handler that silently kept the old
+ * path would still return 201 and still fail here.
+ *
+ * The resolver is `resolveForgeOrGithub`, not `resolveForge`: the GitHub driver's `createPR` IS
+ * `createDraftPr`, so a repo the resolver cannot answer for (no remote, an unrecognized host) keeps
+ * today's behaviour with no second branch to express it. The third case is what proves that.
  */
-describe('the draft-PR route on a non-GitHub forge', () => {
+describe('the draft-PR route resolves a forge driver', () => {
   let repoRoot: string;
   let store: RunStore;
   let app: Hono;
@@ -86,16 +94,23 @@ describe('the draft-PR route on a non-GitHub forge', () => {
       headers: { origin: 'http://127.0.0.1:4321' },
     });
 
-  it('refuses with 409 instead of pushing the branch and failing on gh pr create', async () => {
+  it('creates the pull request through the Forgejo driver instead of refusing before the push', async () => {
     setRemote('https://forge.example.com/acme/demo.git');
     declareForge('forgejo');
     const id = seedRun();
 
     const res = await publish(id);
 
-    expect(res.status).toBe(409);
-    expect(((await res.json()) as { error: string }).error).toContain('not supported for this forge yet');
-    expect(store.getRun(id)?.pullRequestUrl).toBeUndefined();
+    expect(res.status).toBe(201);
+    // The Forgejo driver's own dry-run URL — plural `/pulls/`, and the repo's configured `webUrl`
+    // as the base. `createDraftPr` could not produce this string.
+    expect((await res.json()) as unknown).toMatchObject({
+      url: 'https://forge.example.com/acme/demo/pulls/777',
+      dryRun: true,
+    });
+    // The route's post-create bookkeeping is driver-agnostic and still runs.
+    expect(store.getRun(id)?.pullRequestUrl).toBe('https://forge.example.com/acme/demo/pulls/777');
+    expect(store.getRun(id)?.status).toBe('done');
   });
 
   it('still creates the draft PR for a github forge', async () => {
@@ -105,6 +120,20 @@ describe('the draft-PR route on a non-GitHub forge', () => {
     const res = await publish(id);
 
     expect(res.status).toBe(201);
-    expect(store.getRun(id)?.pullRequestUrl).toBeDefined();
+    // The exact URL, not just "some URL": the GitHub driver's dry-run answer is deterministic, so
+    // pinning it is what separates "took the GitHub path" from "took SOME path and returned 201".
+    expect(store.getRun(id)?.pullRequestUrl).toBe('https://github.com/open-mercato/demo/pull/777');
+  });
+
+  /** `resolveForge` answers `null` for a repo with no remote, so the route falls back to the GitHub
+   *  driver — which is the pre-seam behaviour byte for byte, since its `createPR` IS `createDraftPr`. */
+  it('falls back to the GitHub path for a repo no forge can be resolved for', async () => {
+    execFileSync('git', ['remote', 'remove', 'origin'], { cwd: repoRoot });
+    const id = seedRun();
+
+    const res = await publish(id);
+
+    expect(res.status).toBe(201);
+    expect(store.getRun(id)?.pullRequestUrl).toBe('https://github.com/open-mercato/demo/pull/777');
   });
 });
