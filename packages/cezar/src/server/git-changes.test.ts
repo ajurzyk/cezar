@@ -33,21 +33,35 @@ import { apiRequest } from './loopback-request.testkit.ts';
  * here on purpose — nothing in this step touches it.
  */
 
+/** The fixture identity, as `-c` overrides. Repository-local `git config` loses to
+ *  `GIT_CONFIG_*` in the environment, so a host that exports one renames the fixture's
+ *  commits out from under the `author` assertions; command-line `-c` outranks both. */
+const GIT_ID = ['-c', 'user.email=test@cezar.local', '-c', 'user.name=cezar-test'];
+
 function g(dir: string, ...args: string[]): string {
-  return execFileSync('git', args, { cwd: dir, encoding: 'utf8' });
+  return execFileSync('git', [...GIT_ID, ...args], { cwd: dir, encoding: 'utf8' });
 }
 
 /** `g`, with the clock moved: reflog entries take their timestamp from the committer
  *  ident, so this is how a fixture puts branch history *before* a run started. */
 function gAt(dir: string, iso: string, ...args: string[]): string {
-  return execFileSync('git', args, {
+  return execFileSync('git', [...GIT_ID, ...args], {
     cwd: dir,
     encoding: 'utf8',
     env: { ...process.env, GIT_AUTHOR_DATE: iso, GIT_COMMITTER_DATE: iso },
   });
 }
 
-/** Fresh repo with identity configured and one initial commit on `main`. */
+/** Fresh repo with identity configured and one initial commit on `main`.
+ *
+ *  The repo-local identity looks redundant next to `GIT_ID`, and is not: it is what the
+ *  *code under test* commits as. `POST git/commit` runs `commitAll` inside the fixture, and
+ *  this fixture cannot inject `-c` flags into that; a runner with no global identity — a
+ *  GitHub Actions job, where `actions/checkout` sets `http.extraheader` and no user ident —
+ *  then fails with "Author identity unknown". Measured: dropping these two lines and running
+ *  `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null npx vitest run git-changes.test.ts`
+ *  fails exactly one case, `POST git/commit commits everything…`. So the two mechanisms cover
+ *  two different committers — `GIT_ID` the fixture's own commits, this the API's. */
 function initRepo(dir: string): void {
   g(dir, 'init', '-b', 'main');
   g(dir, 'config', 'user.email', 'test@cezar.local');

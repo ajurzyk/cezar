@@ -23,6 +23,10 @@ describe('the config API', () => {
   const savedHome = process.env.HOME;
   const savedCezHome = process.env.CEZ_HOME;
   const savedCodexHome = process.env.CODEX_HOME;
+  // `agentHomePaths` resolves the Claude home as `CLAUDE_CONFIG_DIR || join(HOME, '.claude')`
+  // (paths.ts), so an exported value outranks the repointed HOME below and the code under test
+  // would read the host's real Claude config. Repointed and restored like CODEX_HOME.
+  const savedClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
   const savedXdgConfigHome = process.env.XDG_CONFIG_HOME;
   const savedModelsLocked = process.env.CEZ_AGENT_MODELS_LOCKED;
   let store: RunStore;
@@ -34,6 +38,7 @@ describe('the config API', () => {
     process.env.HOME = homeRoot;
     process.env.CEZ_HOME = join(homeRoot, '.cezar');
     process.env.CODEX_HOME = join(homeRoot, '.codex');
+    process.env.CLAUDE_CONFIG_DIR = join(homeRoot, '.claude');
     process.env.XDG_CONFIG_HOME = join(homeRoot, '.config');
     delete process.env.CEZ_AGENT_MODELS_LOCKED;
     mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
@@ -53,6 +58,8 @@ describe('the config API', () => {
     else process.env.CEZ_HOME = savedCezHome;
     if (savedCodexHome === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = savedCodexHome;
+    if (savedClaudeConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = savedClaudeConfigDir;
     if (savedXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
     else process.env.XDG_CONFIG_HOME = savedXdgConfigHome;
     if (savedModelsLocked === undefined) delete process.env.CEZ_AGENT_MODELS_LOCKED;
