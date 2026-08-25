@@ -8,8 +8,8 @@
   "validation": {
     "commands": [
       "npm run typecheck",
-      "env -u CLAUDE_CONFIG_DIR -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u GIT_CONFIG_KEY_1 -u GIT_CONFIG_VALUE_0 -u GIT_CONFIG_VALUE_1 npm test",
-      "env -u CLAUDE_CONFIG_DIR -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u GIT_CONFIG_KEY_1 -u GIT_CONFIG_VALUE_0 -u GIT_CONFIG_VALUE_1 npm run test:unit",
+      "npm test",
+      "npm run test:unit",
       "npm run build",
       "npm run test:package"
     ]
