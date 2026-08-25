@@ -89,6 +89,12 @@ exported explicitly for the repro to prove anything.
   would fail. Mitigation: keep the repo-local config for the code-under-test's commits and
   add `-c` for the fixture's own commits, then verify the claim by measurement rather than
   argument — run the file with the global and system config files neutralized.
+  **Measured, and the risk was real:** with the two repo-local `config` lines removed,
+  `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null TMPDIR=/tmp npx vitest run
+  packages/cezar/src/server/git-changes.test.ts` fails exactly one case —
+  `POST git/commit commits everything; a clean tree is a 409, a bad body a 400` (1 failed |
+  69 passed). The lines therefore stay, and the reasoning is recorded on `initRepo` so the
+  next reader does not "tidy" them away. With them kept, the same command is 70 passed.
 - **Low blast radius otherwise.** Both edits are confined to test fixtures; the config edit
   only removes a prefix, restoring parity with CI.
 
@@ -98,17 +104,17 @@ exported explicitly for the repro to prove anything.
 
 ### Phase 1: Reproduce the leak (red)
 
-- [ ] 1.1 Reproduce the four `config-api.test.ts` failures under an exported `CLAUDE_CONFIG_DIR`
-- [ ] 1.2 Reproduce the two `git-changes.test.ts` failures under exported `GIT_CONFIG_*`
+- [x] 1.1 Reproduce the four `config-api.test.ts` failures under an exported `CLAUDE_CONFIG_DIR` — 1b1319d7
+- [x] 1.2 Reproduce the two `git-changes.test.ts` failures under exported `GIT_CONFIG_*` — 1b1319d7
 
 ### Phase 2: Seal the two fixtures (green)
 
-- [ ] 2.1 Repoint and restore `CLAUDE_CONFIG_DIR` in the `config-api.test.ts` fixture
-- [ ] 2.2 Carry the `git-changes.test.ts` fixture identity as `-c` flags
+- [x] 2.1 Repoint and restore `CLAUDE_CONFIG_DIR` in the `config-api.test.ts` fixture — 1b1319d7
+- [x] 2.2 Carry the `git-changes.test.ts` fixture identity as `-c` flags — 1b1319d7
 
 ### Phase 3: Remove the workaround from the gate
 
-- [ ] 3.1 Drop the `env -u …` prefix from both `validation.commands` entries
+- [x] 3.1 Drop the `env -u …` prefix from both `validation.commands` entries — 79016d91
 
 ### Phase 4: Full validation gate
 
