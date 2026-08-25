@@ -297,8 +297,8 @@ const MARKER_SCAN_MAX_BYTES = 2_000_000;
  *
  * 10 MB sits between three measured numbers rather than being a round guess:
  *
- *  - It is 5× `MARKER_SCAN_MAX_BYTES` above, the size at which this same guard
- *    already calls a file too big to read on every autosave. Nothing this
+ *  - It is 5× the `MARKER_SCAN_MAX_BYTES` defined above — the size at which this
+ *    same guard already calls a file too big to read. Nothing this
  *    repository tracks approaches it — the largest tracked file is 565 014 B
  *    (`docs/screenshots/task-view.png`, measured 2026-08-25 with
  *    `git ls-files -z | xargs -0 stat -c %s | sort -rn | head -1`).
