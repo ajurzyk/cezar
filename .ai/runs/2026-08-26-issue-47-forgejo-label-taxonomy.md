@@ -136,35 +136,37 @@ Every test below must fail against the current tree before Phase 2 touches produ
 
 ## Progress
 
+PR: #52
+
 > Convention: `- [ ]` pending, `- [x]` done. Append ` — <commit sha>` when a step lands. Do not rename step titles.
 
 ### Phase 1: Red tests
 
-- [ ] 1.1 `label-taxonomy.test.ts`: the table is exactly the 26 names of `.ai/agentic.config.json` plus `do-not-close`, with `labels-sync.sh`'s `label_meta()` colours and descriptions — a drift guard reading both files
-- [ ] 1.2 `forgejo-labels.test.ts` hermetic tier: empty repo → 27 `POST`s; second pass over a 40-label repo → zero `POST`s; the 13 `ajr/orakton` names survive; colour/description drift is left untouched and reported with zero `PATCH`/`DELETE`; `Bug` alongside `bug` still creates `bug`; check-only creates nothing and names what is missing; a truncated listing refuses
-- [ ] 1.3 `forge-labels-api.test.ts`: the route reaches the driver, and the three #16-guard cases (no forge → 400, target mismatch → refusal, a forge without `ensureLabels` → 400)
-- [ ] 1.4 `forge-label-sync.test.ts`: the cockpit policy table — enabled only for a reachable Forgejo forge with a known `owner/repo`
+- [x] 1.1 `label-taxonomy.test.ts`: the table is exactly the 26 names of `.ai/agentic.config.json` plus `do-not-close`, with `labels-sync.sh`'s `label_meta()` colours and descriptions — a drift guard reading both files — 131a7646
+- [x] 1.2 `forgejo-labels.test.ts` hermetic tier: empty repo → 27 `POST`s; second pass over a 40-label repo → zero `POST`s; the 13 `ajr/orakton` names survive; colour/description drift is left untouched and reported with zero `PATCH`/`DELETE`; `Bug` alongside `bug` still creates `bug`; check-only creates nothing and names what is missing; a truncated listing refuses — 131a7646
+- [x] 1.3 `forge-labels-api.test.ts`: the route reaches the driver, and the three #16-guard cases (no forge → 400, target mismatch → refusal, a forge without `ensureLabels` → 400) — 131a7646
+- [x] 1.4 `forge-label-sync.test.ts`: the cockpit policy table — enabled only for a reachable Forgejo forge with a known `owner/repo` — 131a7646
 
 ### Phase 2: The taxonomy table and the types
 
-- [ ] 2.1 `label-taxonomy.ts` — the 27 `ForgeLabelSpec` entries
-- [ ] 2.2 `types.ts` — `ForgeLabelSpec`, `ForgeEnsureLabelsInput`, `ForgeEnsureLabelsResult`, optional `ForgeDriver.ensureLabels`
+- [x] 2.1 `label-taxonomy.ts` — the 27 `ForgeLabelSpec` entries — 0b669926
+- [x] 2.2 `types.ts` — `ForgeLabelSpec`, `ForgeEnsureLabelsInput`, `ForgeEnsureLabelsResult`, optional `ForgeDriver.ensureLabels` — 0b669926
 
 ### Phase 3: The Forgejo provisioning path
 
-- [ ] 3.1 `forgejo-labels.ts` — full paged read (refusing a truncated one), byte-exact name match, create-only writes
-- [ ] 3.2 `forgejo.ts` — expose `ensureLabels` on the driver with the target-match guard
+- [x] 3.1 `forgejo-labels.ts` — full paged read (refusing a truncated one), byte-exact name match, create-only writes — 8f59f861
+- [x] 3.2 `forgejo.ts` — expose `ensureLabels` on the driver with the target-match guard — 8f59f861
 
 ### Phase 4: The cockpit action
 
-- [ ] 4.1 `packages/contract/src/forge.ts` — the response shape, exported from the contract index
-- [ ] 4.2 `server.ts` — `POST /forge/labels` resolved through `resolveForge`, plus its `contract-parity` assertion
-- [ ] 4.3 `packages/web/src/api/client.ts` + `packages/web/src/lib/forge-label-sync.ts` — the call and the pure policy
-- [ ] 4.4 `github.tsx` — the header button that projects the policy
+- [x] 4.1 `packages/contract/src/forge.ts` — the response shape, exported from the contract index — 33e26ba5
+- [x] 4.2 `server.ts` — `POST /forge/labels` resolved through `resolveForge`, plus its `contract-parity` assertion — 33e26ba5
+- [x] 4.3 `packages/web/src/api/client.ts` + `packages/web/src/lib/forge-label-sync.ts` — the call and the pure policy — 33e26ba5
+- [x] 4.4 `github.tsx` — the header button that projects the policy — 33e26ba5
 
 ### Phase 5: The documents the same contract is written down in
 
-- [ ] 5.1 `BACKWARD_COMPATIBILITY.md` §2 — the new route in the inventory (the drift guard is a test)
+- [x] 5.1 `BACKWARD_COMPATIBILITY.md` §2 — the new route in the inventory (the drift guard is a test) — 33e26ba5
 - [ ] 5.2 `README.md` — the Forgejo section gains the provisioning path and its **Manual steps**
 
 ### Phase 6: Validation, live verification, and the GitHub path's unchanged answer
