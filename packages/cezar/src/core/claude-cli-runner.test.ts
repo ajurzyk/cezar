@@ -137,14 +137,19 @@ describe('a teardown cezar initiated', () => {
  *  the file (real timers, result awaited). */
 function signallableChild(): {
   child: ChildProcessWithoutNullStreams;
+  /** The same stream as `child.stdout`, kept at its concrete type: the child is
+   *  cast to `ChildProcessWithoutNullStreams`, where `stdout` is a `Readable`
+   *  and has no `write`. */
+  stdout: PassThrough;
   signals: NodeJS.Signals[];
   exit: (code: number) => void;
 } {
   const signals: NodeJS.Signals[] = [];
   const emitter = new EventEmitter();
+  const stdout = new PassThrough();
   const child = Object.assign(emitter, {
     stdin: new PassThrough(),
-    stdout: new PassThrough(),
+    stdout,
     stderr: new PassThrough(),
     exitCode: null as number | null,
     signalCode: null as NodeJS.Signals | null,
@@ -162,7 +167,7 @@ function signallableChild(): {
     Object.assign(child, { exitCode: code });
     emitter.emit('exit', code, null);
   };
-  return { child, signals, exit };
+  return { child, stdout, signals, exit };
 }
 
 /**
@@ -326,7 +331,7 @@ describe('what a wall-clock timeout reports (#48)', () => {
         { userPrompt: 'do it', cwd: process.cwd() },
         (event) => events.push(event),
       );
-      for (const frame of frames) fake.child.stdout.write(`${JSON.stringify(frame)}\n`);
+      for (const frame of frames) fake.stdout.write(`${JSON.stringify(frame)}\n`);
       // A frame still unread when the clock fires would silently weaken the
       // assertion below, so prove it landed first rather than hoping it did.
       await waitUntil(() => consumed(events), 'the seeded frames to be consumed');
