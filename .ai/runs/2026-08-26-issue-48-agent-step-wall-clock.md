@@ -84,8 +84,8 @@ here because the stated reason was wrong even though the conclusion was not.
 
 ### Phase 3: Runner diagnostics on the timeout path
 
-- [ ] 3.1 Red: `claude-cli-runner.test.ts` — the lost-accounting note, its `sawUsage` guard, and the tool-call count
-- [ ] 3.2 Green: Axis 2 and Axis 3 in `claude-cli-runner.ts`
+- [x] 3.1 Red: `claude-cli-runner.test.ts` — the lost-accounting note, its `sawUsage` guard, and the tool-call count — ba2f3556
+- [x] 3.2 Green: Axis 2 and Axis 3 in `claude-cli-runner.ts` — ba2f3556
 
 ### Phase 4: Proof
 
