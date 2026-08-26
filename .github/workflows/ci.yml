@@ -66,6 +66,71 @@ jobs:
           npm pack --dry-run --ignore-scripts -w @open-mercato/cezar
           (cd alias-cezar && npm pack --dry-run --ignore-scripts)
 
+  # Guards the fixture seals added by ajurzyk/cezar#38 — `config-api.test.ts` repointing
+  # `CLAUDE_CONFIG_DIR` into its own temp home, `git-changes.test.ts` passing its identity as
+  # `git -c` flags. `verify` above cannot guard them: it runs on a clean runner that never exports
+  # those variables, so deleting a seal leaves it green and the seal rots unnoticed. This leg supplies
+  # the leak the seals defend against, so a removed seal fails here. It runs in PARALLEL with
+  # `verify`, never as extra steps inside it — `verify` already runs the suite once under a 15-minute
+  # cap, and doubling its work would push it toward that cap.
+  verify-host-env-leak:
+    name: Suite under a leaked host environment
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # A bare non-existent path guards ONE of the four `config-api` cases the seal fixed, not four.
+      # The path alone moves `agentHomePaths(env).claude` off `homeRoot/.claude`, which one case
+      # notices; the other three assert on `defaultModels` and only notice when the leaked directory
+      # really carries a model. Measured at 8700e139, fixtures still unsealed, with
+      # `TMPDIR=/tmp npx vitest run packages/cezar/src/server/config-api.test.ts`:
+      #   bare path                  → Tests  1 failed | 14 passed (15)
+      #   path + {"model":"opus"}    → Tests  4 failed | 11 passed (15)
+      # Same `${{ runner.temp }}` expression as the `env:` blocks below, so this step cannot drift
+      # from the variable and nobody has to assume `$RUNNER_TEMP` resolves to the same path. No `env:`
+      # of its own: this step creates the leak, it does not run under it.
+      - name: Fake a leaked Claude config dir
+        run: |
+          mkdir -p "${{ runner.temp }}/leaked-claude-home"
+          printf '{"model":"opus"}' > "${{ runner.temp }}/leaked-claude-home/settings.json"
+
+      # The leak is declared per step, never at job level. Scope, not a guess about what
+      # `actions/checkout` does with git config: the seals concern only what `npm run test:unit` and
+      # `npm test` see. Spilling the leak over `checkout` and `npm ci` would measure something the
+      # seals never covered, and a failure there would be noise in a check that must answer exactly
+      # one question — "does the suite still survive a leaked host environment?".
+      - name: Run unit tests under a leaked host environment
+        env:
+          CLAUDE_CONFIG_DIR: ${{ runner.temp }}/leaked-claude-home
+          GIT_CONFIG_COUNT: '2'
+          GIT_CONFIG_KEY_0: user.email
+          GIT_CONFIG_VALUE_0: host@leak.invalid
+          GIT_CONFIG_KEY_1: user.name
+          GIT_CONFIG_VALUE_1: host-leak
+        run: npm run test:unit
+
+      - name: Run server and cockpit unit suites under a leaked host environment
+        env:
+          CLAUDE_CONFIG_DIR: ${{ runner.temp }}/leaked-claude-home
+          GIT_CONFIG_COUNT: '2'
+          GIT_CONFIG_KEY_0: user.email
+          GIT_CONFIG_VALUE_0: host@leak.invalid
+          GIT_CONFIG_KEY_1: user.name
+          GIT_CONFIG_VALUE_1: host-leak
+        run: npm test
+
   # npm preview publishing (spec .ai/specs/2026-07-18-npm-preview-publish.md, #482).
   # Publishes a snapshot of both packages after a fully green verify run:
   # same-repo PRs → dist-tag pr-<N>, develop pushes → @develop. `main` pushes do
