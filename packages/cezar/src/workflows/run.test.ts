@@ -1979,7 +1979,7 @@ describe('registry /skill expansion survives a continuation (#811)', () => {
  * field must NOT disturb — the workflow's last agent step stays interactive
  * with no wall clock at all, because the idle timer rules there instead.
  */
-describe('an agent step\'s declared wall clock reaches the runner (#48)', () => {
+describe("an agent step's declared wall clock reaches the runner (#48)", () => {
   let repoRoot: string;
   let store: RunStore;
   let manager: RunManager;
@@ -2039,7 +2039,7 @@ describe('an agent step\'s declared wall clock reaches the runner (#48)', () => 
 
   const probed = (): AgentRunSpec[] => runnerSpecs.filter((s) => s.userPrompt.includes(PROBE));
 
-  it('an agent step\'s timeoutMinutes reaches the runner as timeoutMs', () => {
+  it("an agent step's timeoutMinutes reaches the runner as timeoutMs", () => {
     const specs = probed();
     expect(specs.length).toBe(2);
     // 90 minutes, in the millisecond unit the runner arms its timer with — and
