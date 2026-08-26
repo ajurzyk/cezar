@@ -13,6 +13,7 @@ import type {
 } from '@open-mercato/cezar-contract';
 import type {
   changesPayloadSchema,
+  forgeLabelsSyncResponseSchema,
   reclaimWorktreesResponseSchema,
   repoBranchResponseSchema,
   repoCommitPayloadSchema,
@@ -98,6 +99,12 @@ describe('src/contract github + repo schemas match the routes exactly', () => {
   type Worktrees200 = InferResponseType<typeof client.api.v1.worktrees.$get, 200>;
   type ReclaimWorktrees200 = InferResponseType<typeof client.api.v1.worktrees.reclaim.$post, 200>;
 
+  // ---- forge administration (#47) -------------------------------------------------------
+  // Not part of the `/github*` family's in-payload degrade: this route is a MUTATION and refuses
+  // by status code, so only its 200 has a shape to pin. That is the point — a caller must not be
+  // able to read `complete` off a request that never reached the forge.
+  type ForgeLabels200 = InferResponseType<typeof client.api.v1.forge.labels.$post, 200>;
+
   type _Checks = [
     Assert<Exact<z.infer<typeof githubDataSchema>, Github200>>,
     Assert<Exact<z.infer<typeof githubCommentsDataSchema>, GithubComments200>>,
@@ -115,6 +122,7 @@ describe('src/contract github + repo schemas match the routes exactly', () => {
     Assert<Exact<z.infer<typeof worktreeEntrySchema>, RunFiles200>>,
     Assert<Exact<z.infer<typeof worktreesResponseSchema>, Worktrees200>>,
     Assert<Exact<z.infer<typeof reclaimWorktreesResponseSchema>, ReclaimWorktrees200>>,
+    Assert<Exact<z.infer<typeof forgeLabelsSyncResponseSchema>, ForgeLabels200>>,
   ];
 
   it('is enforced by tsc, not at runtime', () => {

@@ -7,6 +7,7 @@ export * from './health.ts';
 export * from './runs.ts';
 export * from './repo.ts';
 export * from './github.ts';
+export * from './forge.ts';
 export * from './projects.ts';
 export * from './workspace.ts';
 export * from './workflows.ts';

@@ -5003,6 +5003,59 @@ export function createApp(deps: ServerDeps) {
     overrideRules: z.boolean().optional().default(false),
   }).strict();
 
+  // ---- chained family: forge administration (project-scoped) ----
+  //
+  // `target` is REQUIRED and `.strict()`, both deliberately. This is a write into a repository the
+  // cockpit names, and PR #16 (`381fb10e`) is the reason it may not be inferred: on the GitHub path
+  // two independent mechanisms could aim cezar's taxonomy at somebody else's repository — the
+  // ambient working directory, and `gh` preferring an `upstream` remote over `origin`, which on a
+  // fork answers with the PARENT. A default here would be exactly the implicit target that fixed.
+  const forgeLabelsBodySchema = z.object({ target: z.string().min(1), checkOnly: z.boolean().optional() }).strict();
+  const forgeRoutes = new Hono<ProjectApiEnv>()
+    /**
+     * Put the pipeline label taxonomy in place on this project's forge (#47).
+     *
+     * The `om-*` claim/lock protocol and the review signalling run on LABELS, not comments: a
+     * label that does not exist makes every mutation of it a logged skip, so the protocol stops
+     * working while each step still reports success. A run cannot bootstrap the labels it is
+     * already trying to use, which is why this is a cockpit action rather than something a run does
+     * for itself.
+     *
+     * `resolveForge`, NOT `resolveForgeOrGithub` — the one mutation route in this file that must
+     * not take that fallback. `resolveForgeOrGithub` answers with `createGithubDriver(repoRoot,
+     * null)` for a repo it cannot place, and a `repoRef` of `null` means "let `gh` pick the
+     * repository": the precise hazard #16 closed. `POST /runs/:id/pr` may use the fallback because
+     * the GitHub driver's `createPR` IS the function that route called before the seam existed, so
+     * the fallback reproduces its old behaviour by construction. Nothing of the sort holds here —
+     * there is no pre-seam label behaviour to reproduce, and the GitHub taxonomy has its own tool.
+     */
+    .post('/forge/labels', jsonZodValidator(() => forgeLabelsBodySchema, { message: 'target must be "owner/repo"' }), async (c) => {
+      const { root: repoRoot } = c.get('project');
+      const [repoInfo, forgeSettings] = await loadForgeInputs(repoRoot);
+      const forge = resolveForge(repoInfo, forgeSettings);
+      if (!forge) {
+        return c.json({ error: 'no supported forge remote detected for this project' }, 400);
+      }
+      if (!forge.ensureLabels) {
+        // Named rather than generic: the GitHub path is not missing this capability, it has a
+        // different tool for it, and this change leaves that tool byte for byte.
+        return c.json(
+          { error: `label provisioning is not available for a ${forge.kind} forge — use .ai/scripts/labels-sync.sh` },
+          400,
+        );
+      }
+      const body = c.req.valid('json');
+      const outcome = await forge.ensureLabels({
+        target: body.target,
+        ...(body.checkOnly !== undefined ? { checkOnly: body.checkOnly } : {}),
+      });
+      // 409, not 500: every not-ok branch is a state the caller can act on — a mismatched target, a
+      // listing that stopped short, a rejected write — not a server fault.
+      if (!outcome.ok) return c.json({ error: outcome.error }, 409);
+      const { ok: _ok, ...payload } = outcome;
+      return c.json(payload, 200);
+    });
+
   // ---- chained family: repo / git (project-scoped) ----
   const repoRoutes = new Hono<ProjectApiEnv>()
     .get('/repo', async (c) => {
@@ -5329,6 +5382,7 @@ export function createApp(deps: ServerDeps) {
     .route('/', todosRoutes)
     .route('/', sseRoutes)
     .route('/', githubRoutes)
+    .route('/', forgeRoutes)
     .route('/', repoRoutes)
     .route('/', configRoutes)
     .route('/', agentConfigRoutes);

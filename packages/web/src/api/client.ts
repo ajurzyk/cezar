@@ -45,6 +45,7 @@ import type {
   GithubCommentsData,
   GithubData,
   GithubMergeMethod,
+  ForgeLabelsSyncResponse,
   GithubMergeResponse,
   GithubPrMergeStateResponse,
   GithubPrChangesData,
@@ -850,6 +851,26 @@ export async function mergeGithubPr(
       json: input,
     }),
     '/github/prs/:number/merge',
+  )
+}
+
+/**
+ * `POST /api/v1/forge/labels` (#47) — put the pipeline label taxonomy in place on this project's
+ * forge, so the `om-*` claim/lock protocol has labels to signal on instead of degrading every
+ * mutation to a logged skip.
+ *
+ * `target` is passed explicitly and is not optional here either. The server refuses a target that
+ * does not match what the project's own `origin` resolves to, and this call is deliberately unable
+ * to paper over that: a client-side default would be the inferred target PR #16 removed from the
+ * GitHub path, just relocated one layer up.
+ */
+export async function syncForgeLabels(input: { target: string; checkOnly?: boolean }): Promise<ForgeLabelsSyncResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].forge.labels.$post({
+      param: { projectId: queryScope() },
+      json: input,
+    }),
+    '/forge/labels',
   )
 }
 
