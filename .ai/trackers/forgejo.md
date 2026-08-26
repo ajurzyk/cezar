@@ -275,7 +275,18 @@ Verify the CLI is authenticated and new enough. → exit status (non-zero when u
 # A live identity query, not `tea login list`: a stale token still lists fine.
 tea_api /user >/dev/null || exit 1
 
-TEA_VERSION=$(tea --version 2>/dev/null | sed -n '1s/.*Version: *\([0-9][0-9.]*\).*/\1/p')
+# `tea --version` colours the number, and it does so even when stdout is a pipe:
+#
+#   $ tea --version | head -1 | cat -v
+#   Version: ^[[1m0.15.1^[[0m	golang: 1.26.5	go-sdk: v1.2.0
+#
+# A parse anchored on `Version: *[0-9]` therefore matches nothing and reports
+# every client as "unknown", i.e. warns on the very version it was written for.
+# The ESC is built with printf rather than written as `\x1b`, which GNU sed
+# understands and BSD sed does not.
+ESC=$(printf '\033')
+TEA_VERSION=$(tea --version 2>/dev/null \
+  | sed -e "s/${ESC}\\[[0-9;]*m//g" -n -e '1s/.*Version:[[:space:]]*\([0-9][0-9.]*\).*/\1/p')
 MIN_TEA_VERSION=0.15.1
 if [ "$(printf '%s\n%s\n' "$MIN_TEA_VERSION" "$TEA_VERSION" | sort -V | head -n1)" != "$MIN_TEA_VERSION" ]; then
   echo "WARNING: tea ${TEA_VERSION:-unknown} predates $MIN_TEA_VERSION — this descriptor routes every mutation through 'tea api', which older clients do not have."

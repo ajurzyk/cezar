@@ -79,6 +79,11 @@ describe('forgejo tracker descriptor (#46)', () => {
       join(bin, 'tea'),
       [
         '#!/bin/sh',
+        // `tea --version` is not an API call: it answers from $TEA_VERSION_OUT,
+        // which defaults to the real 0.15.1 line — ANSI escapes included,
+        // because tea emits them through a pipe and that is what broke the
+        // first version parse this descriptor shipped.
+        'case "$1" in --version) printf "%b\\n" "${TEA_VERSION_OUT:-Version: \\033[1m0.15.1\\033[0m\\tgolang: 1.26.5}"; exit 0 ;; esac',
         'for a in "$@"; do printf "%s\\n" "$a" >> "$TEA_LOG"; done',
         'printf "<<call>>\\n" >> "$TEA_LOG"',
         'exec sh "$TEA_IMPL" "$@"',
@@ -177,7 +182,7 @@ describe('forgejo tracker descriptor (#46)', () => {
           (section) => !section.includes('```bash') && !/Not yet implemented — /.test(section),
         )
         .map((section) => section.split('\n')[0]);
-      // Three headings are pure delegations to the guards, which are themselves
+      // Two headings are pure delegations to the guards, which are themselves
       // executable and tested below; everything else must ship a command.
       expect(silent).toEqual([
         '#### label-issue / unlabel-issue',
@@ -200,6 +205,26 @@ describe('forgejo tracker descriptor (#46)', () => {
         'ajr/orakton',
         '/user',
       ]);
+    });
+
+    it('auth-check reads the version through the colour codes tea emits', async () => {
+      // Measured: `tea --version | cat -v` → `Version: ^[[1m0.15.1^[[0m<TAB>golang: …`.
+      // A parse anchored on `Version: *[0-9]` matches nothing and warns about the
+      // very client the descriptor was written against.
+      const result = await run(operation('auth-check'));
+
+      expect(result.code).toBe(0);
+      expect(result.stdout).not.toContain('WARNING');
+      expect(result.stdout).not.toContain('unknown');
+    });
+
+    it('auth-check does warn about a client older than the tested one', async () => {
+      const result = await run(operation('auth-check'), {
+        TEA_VERSION_OUT: 'Version: \u001b[1m0.9.2\u001b[0m\tgolang: 1.21.0',
+      });
+
+      expect(result.code).toBe(0);
+      expect(result.stdout).toContain('0.9.2 predates 0.15.1');
     });
 
     it('auth-check fails when the credentials are rejected', async () => {
