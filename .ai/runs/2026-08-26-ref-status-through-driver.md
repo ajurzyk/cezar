@@ -142,3 +142,16 @@ PR: #45
 
 - [x] 4.1 Fix the unproven-404 cache and the missing dry-run short-circuit — f46c51ff
 - [x] 4.2 Re-run the full gate after the fixes — f46c51ff
+
+### Phase 5: Resume (om-auto-continue-pr)
+
+Phases 1–4 arrived fully checked, so this resume had no pending step to execute. What it owed
+instead was the verification those checkboxes assert — a full gate re-run at the PR head and a
+fresh-context re-read of the diff — plus the `Tracking plan:` line the PR body was missing, without
+which no later resume could find this file through the ordinary path.
+
+The re-read found two defects, both introduced by 4.1's own fix:
+
+- [x] 5.1 Settle an anonymous 404 against warm cache evidence, not only a fresh read — 67022ae1
+- [x] 5.2 Drop the stale "the ref-status family has no driver seam yet" line the seam made false — 8eec8f2d
+- [x] 5.3 Re-run the full gate after the fixes — 67022ae1 (gate run, no code change)
