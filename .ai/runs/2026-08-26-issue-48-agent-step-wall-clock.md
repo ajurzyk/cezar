@@ -69,6 +69,8 @@ here because the stated reason was wrong even though the conclusion was not.
 
 ## Progress
 
+PR: #54
+
 > Convention: `- [ ]` pending, `- [x]` done. Append ` — <commit sha>` when a step lands. Do not rename step titles.
 
 ### Phase 1: Schema, guards and the contract mirror
@@ -89,6 +91,6 @@ here because the stated reason was wrong even though the conclusion was not.
 
 ### Phase 4: Proof
 
-- [ ] 4.1 Full validation gate green, both counts quoted
-- [ ] 4.2 Mutation check per guard, red output pasted into the PR body
-- [ ] 4.3 PR body, labels, summary comment
+- [x] 4.1 Full validation gate green, both counts quoted — 337 files / 6662 tests, all five commands exit 0
+- [x] 4.2 Mutation check per guard, red output pasted into the PR body — 11 guards, all red under their restored bug
+- [x] 4.3 PR body, labels, summary comment — fb97ec3e
