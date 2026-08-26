@@ -137,3 +137,8 @@ PR: #45
 ### Phase 3: Gate
 
 - [x] 3.1 Full validation gate — 65b9b879 (gate run, no code change)
+
+### Phase 4: Review pass (om-auto-review-pr engine)
+
+- [x] 4.1 Fix the unproven-404 cache and the missing dry-run short-circuit — f46c51ff
+- [x] 4.2 Re-run the full gate after the fixes — f46c51ff
