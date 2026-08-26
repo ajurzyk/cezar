@@ -603,9 +603,17 @@ An empty `statuses` array with `total_count: 0` means *no CI ran*, which is not 
 #### get-required-checks
 Base branch → the set of required status checks. A 404 means branch protection is not configured or not readable — treat every reported check as required.
 ```bash
-tea_api "/repos/{owner}/{repo}/branch_protections/${BASE_BRANCH}" 2>/dev/null \
-  | jq -r '.status_check_contexts[]?'
+# The degradation has to happen HERE, not in whatever the caller appends. This
+# operation's 404 is the measured DEFAULT on the tested instance, and every block
+# in this file may be executed under `set -euo pipefail`: piping `tea_api`
+# straight into jq makes that ordinary case return 1 and abort the calling skill
+# before the rule above can be applied. Capture first, then decide.
+PROTECTION=$(tea_api "/repos/{owner}/{repo}/branch_protections/${BASE_BRANCH}" 2>/dev/null) || PROTECTION=""
+if [ -n "$PROTECTION" ]; then
+  printf '%s' "$PROTECTION" | jq -r '.status_check_contexts[]?'
+fi
 ```
+Empty output therefore means "the forge requires nothing" — which for a merge decision reads as "every check the PR reports is required", exactly as an unreadable protection does. The two are deliberately indistinguishable, because the resulting decision is the same one.
 Measured on `ajr/cezar-qa`: `/branch_protections` → `[]`, `/branch_protections/main` → `404`. Both mean "nothing is required by the forge", which for a merge decision reads as "every check the PR reports is required".
 
 #### get-pr-comment / get-review-comment
@@ -696,7 +704,23 @@ The color is sent with a leading `#`; Forgejo stores it without one (measured: `
 Create every label from the config's taxonomy that does not exist yet (skip ones that already exist per **list-labels**). Existence is checked against the full paginated list, so re-running on a repo with a large taxonomy does not re-create the labels past the first page.
 ```bash
 ensure_label() {   # $1 = name, $2 = color, $3 = description
-  if label_exists "$1"; then return 0; fi
+  # `label_exists` answers 2 for "could not read the taxonomy", and `if
+  # label_exists …` cannot tell that apart from "missing" — it would create the
+  # label blind, which is the one thing this instance does not protect against:
+  #
+  #   $ tea api -i --repo ajr/cezar-qa -X POST '…/labels' -f 'name=zz-probe-46-dup' …
+  #   HTTP/1.1 201 Created   {"id":86,"name":"zz-probe-46-dup",…}
+  #   $ …the identical call again
+  #   HTTP/1.1 201 Created   {"id":87,"name":"zz-probe-46-dup",…}   # two labels, one name
+  #
+  # (measured 2026-08-26; both probes deleted afterwards). So a taxonomy we could
+  # not read stops the loop — `apply_label` already draws this exact distinction.
+  _e=0; label_exists "$1" || _e=$?
+  if [ "$_e" -eq 0 ]; then return 0; fi
+  if [ "$_e" -eq 2 ]; then
+    echo "ensure_label: cannot read this repo's labels; refusing to create '$1' blind (a duplicate name would be created, not rejected)" >&2
+    return 1
+  fi
   tea_api -X POST '/repos/{owner}/{repo}/labels' \
     -f "name=$1" -f "color=$2" -f "description=$3" >/dev/null
 }

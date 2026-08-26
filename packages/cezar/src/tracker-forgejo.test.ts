@@ -715,11 +715,18 @@ describe('forgejo tracker descriptor (#46)', () => {
     it('get-required-checks treats unreadable branch protection as "everything is required"', async () => {
       stubTea('reply 404 \'{"message":"The target couldn\\u0027t be found."}\'');
 
-      const result = await run(`${operation('get-required-checks')} || true`, {
+      // No `|| true` here on purpose. 404 is the MEASURED default on the tested
+      // instance (`/branch_protections/main` → 404), and the operation's own
+      // prose promises it degrades to "every reported check is required". A
+      // block that instead exits non-zero takes the calling skill down with it
+      // under `set -euo pipefail`, so the degradation has to live in the
+      // descriptor rather than in whatever the caller happens to append.
+      const result = await run(`${operation('get-required-checks')}\necho AFTER`, {
         BASE_BRANCH: 'main',
       });
 
-      expect(result.stdout.trim()).toBe('');
+      expect(result.code).toBe(0);
+      expect(result.stdout.trim()).toBe('AFTER');
     });
 
     it('checkout-pr names the repository rather than letting tea infer it', async () => {
@@ -1055,6 +1062,25 @@ describe('forgejo tracker descriptor (#46)', () => {
       expect(created).toContain('name=needs-qa');
       // The 27-label taxonomy minus the two that already exist.
       expect(created).toHaveLength(25);
+    });
+
+    it('ensure-label-taxonomy refuses to create blind when the taxonomy is unreadable', async () => {
+      // `label_exists` answers 2 for "could not read the taxonomy", which is not
+      // the same as "missing" — `apply_label` already separates the two. Treating
+      // 2 as missing here creates every label a second time, and Forgejo does not
+      // stop it: measured 2026-08-26 on ajr/cezar-qa (both probes deleted after),
+      // POST /labels with a name that already exists answers `201` with a fresh
+      // id, leaving two labels sharing one name.
+      stubTea(`
+        case "$endpoint" in
+          */labels\\?page=*) reply 500 '{"message":"boom"}' ;;
+          */labels) reply 201 '{"name":"created"}' ;;
+        esac`);
+
+      const result = await run(operation('ensure-label-taxonomy'));
+
+      expect(result.code).not.toBe(0);
+      expect(result.calls.filter((call) => call.includes('POST'))).toEqual([]);
     });
 
     it('create-label sends the colour the caller gave it', async () => {
