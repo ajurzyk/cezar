@@ -128,9 +128,9 @@ for scope creep.
 
 ### Phase 2: The Forgejo driver
 
-- [ ] 2.1 Sibling schema for the one issues/{n} read
-- [ ] 2.2 forgejoRefStatus and driver wiring
-- [ ] 2.3 Route-level coverage for a Forgejo repo
+- [x] 2.1 Sibling schema for the one issues/{n} read — 278a8622
+- [x] 2.2 forgejoRefStatus and driver wiring — 36847117, 75ef0cb9
+- [x] 2.3 Route-level coverage for a Forgejo repo — 65b9b879
 
 ### Phase 3: Gate
 
