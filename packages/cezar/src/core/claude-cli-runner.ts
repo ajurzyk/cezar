@@ -287,7 +287,31 @@ export class ClaudeCliRunner implements AgentRunner {
 
       if (timedOut) {
         const mins = Math.round((limitMs / 60_000) * 10) / 10;
-        onEvent?.({ type: 'error', message: `claude CLI timed out after ${mins}m and was killed` });
+        // The tool-call count is the one number that separates the two failures
+        // this message used to conflate: an agent hung on its first call (0)
+        // and an agent doing real work that simply needed more than the cap
+        // (198, measured). They want opposite responses — debug the hang, or
+        // raise `timeoutMinutes` on the step (#48).
+        const calls = `${toolCalls.length} tool call${toolCalls.length === 1 ? '' : 's'} observed`;
+        onEvent?.({
+          type: 'error',
+          message: `claude CLI timed out after ${mins}m and was killed (${calls})`,
+        });
+        // The kill lands BEFORE the terminal `result` frame, and that frame is
+        // the only authoritative source of usage (assistant frames stay
+        // presentation-only and return 0, upstream #716). So the step reports
+        // `tokensUsed: 0` and no cost — indistinguishable from a step that did
+        // nothing at all. Say what happened instead of letting the zero speak.
+        //
+        // Only when `sawUsage` is false: a multi-turn session killed AFTER a
+        // result frame kept its accounting, and the note must not claim
+        // otherwise.
+        if (!sawUsage) {
+          onEvent?.({
+            type: 'note',
+            message: 'token accounting lost — the step was killed before its result frame',
+          });
+        }
         onEvent?.({ type: 'done' });
         return { text, toolCalls, tokensUsed, sessionId: spec.sessionId };
       }
