@@ -92,6 +92,39 @@ export const forgejoIssueSchema = z.object({
   pull_request: z.unknown().nullish(),
 });
 
+/**
+ * The `GET /repos/{owner}/{repo}/issues/{n}` payload, read for what a NUMBER is and where it stands
+ * (#12). A deliberate sibling of `forgejoIssueSchema` above rather than an extension of it: that
+ * schema also validates every `/issues` LIST row `mapForgejoIssue` consumes, and tightening
+ * `pull_request` from `z.unknown()` to an object there would make an unexpected shape reject a row
+ * the list renders today. This read wants two fields that one does not have, and nothing else.
+ *
+ * Forgejo answers this endpoint for pull requests too, and the payload carries a `pull_request`
+ * member — so ONE read settles both what a number IS and what state it is in, which is the same
+ * rule the GitHub path follows via `issueOrPullRequest`: the kind is the forge's answer, never the
+ * caller's guess.
+ *
+ * Measured against a live instance (Forgejo `15.0.3+gitea-1.22.0`): `state` is present, and a PR's
+ * `pull_request` carries `{merged, merged_at, draft, html_url}`. `draft` therefore comes free from
+ * this one read and the `WIP:`-prefix fallback (`stripWipTitle`) is not needed here. Every field of
+ * the nested object is nullish anyway — an older server that omits `draft` costs one rung of the
+ * ladder, never a parse failure, and `state` is `z.string()` rather than an enum so an unrecognized
+ * value degrades to "not closed" instead of throwing the whole read away.
+ */
+export const forgejoRefStatusSchema = z.object({
+  state: z.string(),
+  /** Non-null ⇒ this number is a PULL REQUEST. `null`/absent ⇒ a genuine issue — the same
+   *  null-ness test `mapForgejoIssue` uses on the list rows. */
+  pull_request: z
+    .object({
+      merged: z.boolean().nullish(),
+      draft: z.boolean().nullish(),
+    })
+    .nullish(),
+});
+
+export type ForgejoRefStatusRow = z.infer<typeof forgejoRefStatusSchema>;
+
 /** Covers both list rows (`/pulls`) and the `prStatus` walk (`/pulls?state=all` + the
  *  `/pulls/{base}/{head}` fallback) — one shape, since both endpoints return the same PR resource.
  *  `state`/`merged`/`head` are unused by `mapForgejoPull` (list rows) but load-bearing for
