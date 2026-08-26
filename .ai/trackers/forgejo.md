@@ -506,9 +506,10 @@ printf '%s\n%s' "$PR_OBJECT" "$PR_REVIEWS" | jq -sc 'add'
 | `createdAt`, `mergedAt`, `closedAt`, `mergeCommit`, `additions`, `changedFiles` | `normalize_pr` |
 | `reviews`, `latestReviews` | the second call, through `pr_reviews` |
 | `comments` | **not** in `normalize_pr`. Forgejo's `comments` is an integer count, not the array `github.md` answers, so it is exposed as `commentCount` and the list comes from **list-issue-comments** |
-| `commits` | **get-pr-files** answers the changed files; a commit list is `/repos/{owner}/{repo}/pulls/${PR}/commits`, not folded in here because no skill in the collection reads it |
+| `files` | **get-pr-files**, its own operation, rather than a field — the changed-file list is what `om-auto-review-pr` scopes its review with |
+| `commits` | `/repos/{owner}/{repo}/pulls/${PR}/commits`, deliberately not folded in. Skills do name it (`om-auto-review-pr/references/pr-metadata.md`, `om-pr-autopilot/references/diagnose.md`), but they decide "are there new commits" from `headRefOid`, which is in the object above — so folding it in would cost a third request per **get-pr** to answer a question already answered. Call the route directly if you need the list itself |
 | `reviewDecision` | genuinely absent. `review_decision` is the replacement, and it is better than the field: it makes the unrecognized-state case explicit instead of hiding it behind a value |
-| `closingIssuesReferences` | genuinely absent — Forgejo resolves `Fixes #n` at merge time and exposes no parsed list. Read the body |
+| `closingIssuesReferences` | genuinely absent, and this one has real consumers to disappoint: `om-close-fixed-issues` calls it "the tracker's authoritative parse" and `om-auto-update-changelog` appends `(fixes #N)` from it. Forgejo exposes no parsed list on either **get-pr** or **list-prs**, so on a Forgejo project both skills fall back to reading `Fixes #n` out of the body themselves. Flagged here rather than left to be discovered as a `null` |
 
 #### list-prs
 State/search filters, field list, limit → PRs.
