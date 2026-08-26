@@ -257,3 +257,75 @@ caller (candidate 1 wearing a different name), and the `??` fallback dropping th
 7.4, is a no-regression case rather than a defect guard: the ORIGINAL defect leaves it green by
 construction, which is the whole point of it, so it was checked against the inverse mutation — a
 pinned root that is not `project.root` (a trailing-slash normalization slip), which reddens it.
+
+### Phase 8: the gate's own flake — `automations-gate.test.ts` under load
+
+The `verify` step of this run failed the full gate at head `829d442e` on a case this PR does not
+touch and did not write:
+
+```
+ ❯ server src/server/automations-gate.test.ts (21 tests | 1 failed)
+   × starts once the flag is on, so the gate is the only thing holding it back
+```
+
+`automations-gate.test.ts` came in with `e8db2931` on `main` and is outside this PR's diff
+(`git diff origin/main...HEAD` does not list it), so nothing here caused it — but a red gate is a
+red gate, and "pre-existing failure" is not a category this repo has. The cause is in the test, and
+it is load-sensitive rather than random.
+
+`boot()` slept a flat 50 ms and then asserted. That is a wall-clock budget for a chain that spawns
+processes: with the flag ON, `server.ts:5657-5665` awaits `getRepoInfo(project.root)` per project —
+up to four `git` children — between the gate decision and `automationScheduler.start()`. With the
+flag OFF the chain returns synchronously at the decision and never pays that cost, which is exactly
+why only the ON case failed, and only inside a full-suite run with every worker busy.
+
+- [x] 8.1 Reproduce the gate's failure deterministically: make the warm-up chain slow (300 ms before
+      `automationScheduler.start()`) and confirm the ON case goes red with the reported assertion —
+      670b53b5
+- [x] 8.2 Replace the ON case's time budget with a synchronization point — `vi.waitFor` on the spy
+      itself, so only a scheduler that never starts can fail it — 670b53b5
+- [x] 8.3 Give the OFF case a real starting line: wait for `SkillsUpdateCoordinator.prototype.start`
+      (`server.ts:5652`, one line above the gate check) before the grace period, so the grace covers
+      the gate decision instead of covering `listProjects()` — 670b53b5
+- [x] 8.4 Mutation-check both halves against the defect each one guards, and re-run the full gate —
+      670b53b5
+
+The OFF case keeps a grace period (`OFF_GRACE_MS`, 250 ms) because it cannot be given a
+synchronization point: the gate's whole point is that nothing further happens, so there is no event
+to wait for. It is strictly more margin than before — it now begins after `listProjects()` has
+resolved rather than having to cover it — and a false pass there costs only guard sensitivity, never
+a red gate. A first draft dropped the grace entirely and was rejected by its own mutation check:
+with the gate removed, the OFF case passed. That is recorded below as mutation A.
+
+**Mutation checks.** Three, all against a `server.ts` restored byte-identical afterwards
+(`diff` against a pre-mutation copy, empty).
+
+1. The reported failure itself — `.then(() => new Promise((r) => setTimeout(r, 300)))` inserted
+   before `automationScheduler.start()`, against the **old** helper:
+
+```
+$ TMPDIR=/tmp npx vitest run packages/cezar/src/server/automations-gate.test.ts
+AssertionError: expected "start" to be called 1 times, but got 0 times
+ ❯ boot src/server/automations-gate.test.ts:213:23
+ Test Files  1 failed (1)
+      Tests  1 failed | 20 passed (21)
+```
+
+   The same mutation against the new helper: `Tests 21 passed (21)`.
+
+2. Mutation A — `if (!automationsEnabled()) return;` deleted, the #801 defect the OFF case exists to
+   catch:
+
+```
+$ TMPDIR=/tmp npx vitest run packages/cezar/src/server/automations-gate.test.ts -t "never starts polling"
+AssertionError: expected "start" to be called +0 times, but got 1 times
+      Tests  1 failed | 20 skipped (21)
+```
+
+3. Mutation B — the same line forced to `if (true) return;`, so the scheduler never starts:
+
+```
+$ TMPDIR=/tmp npx vitest run packages/cezar/src/server/automations-gate.test.ts -t "starts once the flag is on"
+ FAIL  src/server/automations-gate.test.ts > … > starts once the flag is on, so the gate is the only thing holding it back
+      Tests  1 failed | 20 skipped (21)
+```
