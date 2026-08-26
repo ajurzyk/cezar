@@ -20,8 +20,10 @@ import type { ForgeLabelSpec, ForgeSettings } from './types.ts';
  *     read is the only thing standing between a re-run and a duplicated taxonomy.
  *  2. Names are **case-sensitive**: `Bug` and `bug` coexist. Treated as distinct, deliberately —
  *     the `case:` / `mismatched` branch of `labels-sync.sh` has no analogue here.
- *  3. Paging cuts at `default_paging_num: 30` / `max_response_items: 50`. A provisioned repo with a
- *     backlog taxonomy of its own holds 40, so an unpaged read sees 30 and (1) then duplicates ten.
+ *  3. Paging engages only once `page` is sent, and `limit` is then capped at 50 (measured on a
+ *     58-label repo: no `page` → 58 rows, `?limit=50` → 58, `?page=1` → 30, `?page=1&limit=50` →
+ *     50). `ForgejoHttp.paginate` always sends `page`, so this transport is unconditionally in the
+ *     paging regime and a reader that stopped at page 1 would miss everything past 50.
  *  4. Colour is returned **without** a leading `#`.
  */
 
@@ -158,8 +160,9 @@ describe('ensureForgejoLabels provisions a repository that has none of them', ()
   });
 
   it('reads the listing through a paged URL, not a bare one', async () => {
-    // Behaviour 3: an unparameterised GET answers 30 rows whatever the repository holds. The page
-    // and limit params are the difference between a complete read and a plausible one.
+    // Behaviour 3: sending `page` is what puts the request into the paging regime at all, and it
+    // is `ForgejoHttp.paginate` that sends it. Pinning the exact first URL is what makes the
+    // walk's completeness auditable — the rest of this file's idempotence claims rest on it.
     const { fetchMock, requests } = labelServer([]);
     await run(fetchMock);
     expect(gets(requests)[0]!.url).toBe('http://q7010-dev:8929/api/v1/repos/ajr/cezar-qa/labels?page=1&limit=50');
@@ -169,8 +172,11 @@ describe('ensureForgejoLabels provisions a repository that has none of them', ()
 describe('ensureForgejoLabels is idempotent against Forgejo`s actual semantics', () => {
   it('creates nothing on a second pass over a 40-label repository served 30 rows to a page', async () => {
     // The case that makes paging mandatory rather than an optimisation: 27 + 13 = 40 labels behind
-    // a 30-row page. An implementation reading one page sees 30 of them and re-creates the other
-    // ten — and because a duplicate POST answers 201 (behaviour 1), nothing downstream would notice.
+    // a page smaller than the whole set. An implementation reading one page sees 30 of them and
+    // re-creates the other ten — and because a duplicate POST answers 201 (behaviour 1), nothing
+    // downstream would notice. The fixture's 30-row page is deliberately smaller than the live
+    // instance's 50-row cap: the defect is "stopped at page 1", and pinning it at the exact live
+    // page size would make the case pass for a repository one label under the cap.
     const { fetchMock, requests } = labelServer([...provisioned(), ...asLabels(ORAKTON_LABELS)], { pageSize: 30 });
     const result = await run(fetchMock);
 

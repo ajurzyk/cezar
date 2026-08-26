@@ -79,9 +79,23 @@ $ curl -sH "Authorization: token …" …/repos/ajr/cezar-qa/labels?page=1&limit
    treated as "these are missing".
 2. **Names are case-sensitive.** `Bug` and `bug` coexist. Decided explicitly: they are distinct, and
    the whole `case:` / `mismatched` branch of `labels-sync.sh` has no analogue here.
-3. **Paging is mandatory, not an optimisation.** 30 by default, 50 max. A provisioned `ajr/orakton`
-   would hold 27 + 13 = 40, so an unparameterised read sees 30 of 40 and (1) would then duplicate
-   ten labels on a second pass.
+3. **Paging engages only once `page` is sent — the issue's own statement of this is wrong, and the
+   correction is sharper.** #47 says "an unparameterised `GET …/labels` returns 30 of 40". It does
+   not. Measured against `ajr/cezar-qa` holding 58 labels, so the counts are directly comparable:
+
+   ```
+   GET .../labels                  -> 58 rows   (X-Total-Count: 58)
+   GET .../labels?limit=50         -> 58 rows   <- `limit` ALONE is ignored
+   GET .../labels?page=1           -> 30 rows   <- default_paging_num
+   GET .../labels?page=1&limit=50  -> 50 rows   <- max_response_items caps `limit`
+   ```
+
+   An unparameterised read truncates nothing. The hazard is that `ForgejoHttp.paginate` ALWAYS
+   sends `page`, so this transport is unconditionally in the paging regime: a reader that took page
+   1 and stopped would see 50 of 58 and, with (1), duplicate the other eight. Walking the pages
+   stays mandatory — and reaching for the unparameterised form instead would mean asking an
+   unbounded endpoint for everything, which is what `paginate`'s budget and page cap exist to
+   refuse.
 4. **Colour** is accepted with or without `#` and always returned without it; `exclusive` /
    `is_archived` stay at their defaults and are not part of this contract.
 
@@ -124,9 +138,12 @@ Every test below must fail against the current tree before Phase 2 touches produ
   Additive edits in all three here (a new optional member, a new method, a new route), so the
   conflicts are textual rather than semantic — but whichever lands second rebases.
 - **`paginate`'s completeness flag is load-bearing.** `ForgejoPage.stoppedShort` is the only thing
-  standing between a truncated listing and ten duplicated labels (behaviour 1 above). The walk asks
+  standing between a truncated listing and a duplicated taxonomy (behaviour 1 above). The walk asks
   for full enumeration and treats ANY `stoppedShort` as a hard refusal, never as "the rest are
   missing".
+- **RESOLVED — the issue's paging measurement was wrong.** Re-measured live (behaviour 3 above);
+  the design is unaffected because it pages either way, but every comment that had repeated the
+  issue's version was corrected to what was observed.
 - **Live verification needs a token.** `CEZ_FORGEJO_TOKEN` is unset in the run's shell; the run
   reads the `q7010-dev` login out of the host's `tea` config for the live tier only. Nothing in the
   deliverable reads that file, and no token is ever printed. If it becomes unreadable the hermetic

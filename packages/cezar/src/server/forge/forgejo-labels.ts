@@ -24,10 +24,22 @@ import type { ForgeEnsureLabelsResult, ForgeLabelDrift, ForgeLabelSpec } from '.
  *     ported — a repository carrying `Bug` simply keeps it and gets `bug` alongside. On GitHub that
  *     same state is unrepairable drift the script fails loudly over, because label uniqueness there
  *     is case-INSENSITIVE.
- *  3. `GET /api/v1/settings/api` → `{"default_paging_num":30,"max_response_items":50}`. An
- *     unparameterised listing answers 30 rows. A provisioned repo that also has a backlog taxonomy
- *     holds 27 + 13 = 40, so a single unpaged read sees 30 of 40 and, with (1), duplicates the
- *     other ten on the next pass. Paging is mandatory, not an optimisation.
+ *  3. **Paging engages only once `page` is sent, and then `limit` is capped at 50.** Measured on a
+ *     repository holding 58 labels — the numbers below are row counts from that one repo, so they
+ *     are directly comparable:
+ *
+ *         GET .../labels                  -> 58 rows   (X-Total-Count: 58)
+ *         GET .../labels?limit=50         -> 58 rows   <- `limit` ALONE is ignored
+ *         GET .../labels?page=1           -> 30 rows   <- default_paging_num
+ *         GET .../labels?page=1&limit=50  -> 50 rows   <- max_response_items caps `limit`
+ *
+ *     So the hazard is not that an unparameterised read truncates — it does not. It is that
+ *     `ForgejoHttp.paginate` ALWAYS sends `page`, which puts this transport unconditionally in the
+ *     paging regime: a reader that took page 1 and stopped would see 50 of 58 and, with (1),
+ *     duplicate the other eight on the next pass. Walking the pages is therefore mandatory here
+ *     even though a hand-rolled `curl` would have got away without it — and relying on the
+ *     unparameterised form instead would mean asking an unbounded endpoint for everything, which
+ *     is exactly what `paginate`'s budget and page cap exist to refuse.
  *
  * Colour is accepted with or without a leading `#` and always returned without one, so the
  * `#`-less spelling in `label-taxonomy.ts` compares by plain string equality. `exclusive` and
