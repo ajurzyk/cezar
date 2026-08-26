@@ -171,7 +171,6 @@ import { parseRemote, resolveForge, resolveForgeOrGithub, type ForgeAvailability
 // `fetchGithub`/`fetchGithubChecks`/`fetchGithubComments`/`fetchGithubPrDiff` are deliberately NOT
 // imported here any more: the four `/api/v1/github*` routes that called them now go through the
 // forge driver (`resolveForgeOrGithub`), which reaches the same functions via the GitHub driver.
-// The ref-status family below has no driver seam yet, so it still calls `github.ts` directly.
 // `fetchGithubRefStatus` is deliberately absent: since #12 the `/github/ref-status` route reaches
 // it through the driver seam. `forgetRefStatus`, `readCachedRefStatuses` and `refNumberFromUrl`
 // stay direct imports — they are forge-agnostic per-repo cache operations, not driver behaviour.
