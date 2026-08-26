@@ -225,20 +225,35 @@ Constraints that are not negotiable in this phase (full text in #50):
 Do **not** revert `dryRunForgejoRefStatus` while in here: issue #12's scope decision 1 was retired
 on 2026-08-26 with the measurement that disproved its premise, and the dry-run path is ratified.
 
-- [ ] 7.1 Align the ref-status cache key across the writer and both readers — choose one of #50's
-      three candidates and record the choice and its reasoning in PR #45's body
-- [ ] 7.2 RED-first guard: "ref-status writes and reads one key when the project root is below the
+**Candidate 2 was taken** — an explicit cache root on the factories, defaulted to `repoInfo.root`,
+with only the ref-status route opting out. The reasoning, and what it did (nothing) to
+`/github/checks`, is in PR #45's body under "The cache key, and which candidate closed it". The
+option is named `refStatusRoot` rather than a generic `cacheRoot` precisely so #50's stated cost —
+"a rule someone has to keep, which of the two roots a new cache should use" — is answered in the
+type instead of in someone's memory: the doc on `ForgeDriverCacheRoots` (`forge/types.ts`) states
+the rule, and a cache read only from inside a driver has no field to reach for.
+
+- [x] 7.1 Align the ref-status cache key across the writer and both readers — choose one of #50's
+      three candidates and record the choice and its reasoning in PR #45's body — bbfebb12
+- [x] 7.2 RED-first guard: "ref-status writes and reads one key when the project root is below the
       repository top level" in `forge-seam-api.test.ts` — `git init` at `<tmp>`, pass
-      `<tmp>/packages/app` as `createApp`'s `repoRoot`, no `registerProject()`
-- [ ] 7.3 RED-first guard: "a merge invalidates the entry the route wrote when the project root is
-      below the top level" — the `forgetRefStatus` half, same file
-- [ ] 7.4 No-regression case: "a project root that is the repository top level keeps its existing
-      key" — same file
-- [ ] 7.5 If the candidate touched `forge/index.ts`: "resolveForgeOrGithub builds both drivers on
+      `<tmp>/packages/app` as `createApp`'s `repoRoot`, no `registerProject()` — bbfebb12
+- [x] 7.3 RED-first guard: "a merge invalidates the entry the route wrote when the project root is
+      below the top level" — the `forgetRefStatus` half, same file — bbfebb12
+- [x] 7.4 No-regression case: "a project root that is the repository top level keeps its existing
+      key" — same file — bbfebb12
+- [x] 7.5 If the candidate touched `forge/index.ts`: "resolveForgeOrGithub builds both drivers on
       the documented root" in `forge/index.test.ts` (a new case — no test asserts on
-      `resolveForgeOrGithub` today)
-- [ ] 7.6 Mutation-check every guard by restoring the original defect (`repoInfo.root` back where
+      `resolveForgeOrGithub` today) — bbfebb12
+- [x] 7.6 Mutation-check every guard by restoring the original defect (`repoInfo.root` back where
       the fix took it out) and paste each red `npx vitest run <file> -t "<name>"` output into a
-      `## Mutation checks` section of PR #45's body
-- [ ] 7.7 Re-run the full gate; quote the file/test counts against the 336 / 6646 reference at
-      `1aeee99c` and state the difference
+      `## Mutation checks` section of PR #45's body — bbfebb12
+- [x] 7.7 Re-run the full gate; quote the file/test counts against the 336 / 6646 reference at
+      `1aeee99c` and state the difference — bbfebb12
+
+Five guards were written, and all five were mutation-checked (7.6). Four restore a defect the fix
+removed — the route's missing pin, `resolveForge` not forwarding it, the driver root taken from the
+caller (candidate 1 wearing a different name), and the `??` fallback dropping the pin. The fifth,
+7.4, is a no-regression case rather than a defect guard: the ORIGINAL defect leaves it green by
+construction, which is the whole point of it, so it was checked against the inverse mutation — a
+pinned root that is not `project.root` (a trailing-slash normalization slip), which reddens it.
