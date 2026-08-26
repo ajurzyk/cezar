@@ -98,9 +98,9 @@ that no section body is empty.
 
 ### Phase 1: the delivery seam
 
-- [ ] 1.1 Red tests for the seam
-- [ ] 1.2 Implement `pipeline-seam.ts`
-- [ ] 1.3 Wire into `createWorktree` and prove the negative
+- [x] 1.1 Red tests for the seam — dda38dc6
+- [x] 1.2 Implement `pipeline-seam.ts` — dda38dc6
+- [x] 1.3 Wire into `createWorktree` and prove the negative — dda38dc6
 
 ### Phase 2: the descriptor's spine and its test harness
 
