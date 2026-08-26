@@ -2971,6 +2971,48 @@ describe('refStatus (#12)', () => {
       expect(fetchMock.mock.calls.length).toBe(callsBefore); // both served warm, #6 as a proven absence
     });
 
+    it('counts a WARM cache hit as that proof — the readable siblings need not be re-read to supply it', async () => {
+      // The gate above asks "did anything resolve at all", and a fresh read is not the only way a
+      // number resolves: the cache serves one too, and an entry in it is a row THIS driver read
+      // from THIS repository. Missing that is not a corner case, it is the steady state — the TTL
+      // table hands a merged pull request 24 h and a proven absence only `CACHE_MS`, so a batch
+      // holding both spends most of its life in exactly this shape: the absence expired, every
+      // sibling still warm, and the one number reaching the network is the 404.
+      //
+      // Reading the gate as "no fresh read" there degrades the WHOLE payload — discarding the
+      // statuses the cache just supplied and reporting "…or the repository is private: set
+      // CEZ_FORGEJO_TOKEN" about a repository this driver is demonstrably reading — and it does so
+      // once a minute, forever. A `#N` on this fork naming an UPSTREAM number is the ordinary way
+      // a repo acquires a reference it does not have, so the trigger is routine.
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      vi.setSystemTime(0);
+      try {
+        const fetchMock = issuesFetch({
+          5: () => jsonResponse(refRow({ state: 'closed', pull_request: { merged: true } })),
+          6: () => jsonResponse({ message: "The target couldn't be found." }, { status: 404 }),
+        });
+        const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+        // t=0 — #5 reads as merged and proves the repo readable, so #6's anonymous 404 settles as
+        // a genuine absence. This is the case the test above already pins.
+        expect(await driver.refStatus?.({ prs: [5, 6] })).toEqual({
+          available: true,
+          prs: { 5: 'merged' },
+          issues: {},
+          recheckAfterMs: 60_000,
+        });
+
+        // t=61 s — #6's absence has expired (`CACHE_MS`), #5's `merged` has 24 h left to run. So
+        // #6 is the only miss, it 404s again, and no row is read in this batch at all.
+        vi.setSystemTime(61_000);
+        const out = await driver.refStatus?.({ prs: [5, 6] });
+
+        expect(out).toEqual({ available: true, prs: { 5: 'merged' }, issues: {}, recheckAfterMs: 60_000 });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('trusts a 404 immediately when a token WAS sent — there the answer is unambiguous', async () => {
       let calls = 0;
       const fetchMock = vi.fn().mockImplementation(() => {

@@ -2227,11 +2227,25 @@ async function forgejoRefStatus(
     if (entry) (entry.kind === 'pr' ? prs : issues)[number] = entry.status;
   };
 
+  // Did the forge give up a ROW for this repository — from the network below, or from the cache
+  // just now? That is the only evidence the repository is readable, which is what turns an
+  // anonymous 404 from ambiguous into proof. A warm hit counts, and has to: the TTL table gives a
+  // merged pull request 24 h and a proven absence only `CACHE_MS`, so a batch holding both spends
+  // most of its life with the absence expired and every sibling still warm. Demanding a FRESH read
+  // there degrades the whole payload — discarding the statuses the cache just supplied, and
+  // reporting "the repository is private" about a repo this driver is plainly reading — once a
+  // minute, forever. Only a RESOLVED entry is proof; a cached `null` is an absence and would be
+  // circular evidence for settling another one.
+  let anyRowRead = false;
+
   const misses: number[] = [];
   for (const n of wanted) {
     const hit = peekRefStatus(repoRoot, n);
     if (!hit) misses.push(n);
-    else file(n, hit.resolved);
+    else {
+      if (hit.resolved) anyRowRead = true;
+      file(n, hit.resolved);
+    }
   }
   if (misses.length === 0) {
     return { available: true, prs, issues, recheckAfterMs: refStatusBatchRecheckAfter(entries) };
@@ -2241,9 +2255,6 @@ async function forgejoRefStatus(
   // A 404 this driver could not PROVE, because no token was sent — see the deferral below. Held
   // rather than cached until the batch shows the repository was readable at all.
   const unproven: Array<{ n: number; reason: string }> = [];
-  // Did the forge answer ANY of these numbers with a row? That is the only evidence that the
-  // repository is readable, which is what turns an anonymous 404 from ambiguous into proof.
-  let anyRowRead = false;
 
   for (let i = 0; i < misses.length; i += FJ_CHECKS_CONCURRENCY) {
     const chunk = misses.slice(i, i + FJ_CHECKS_CONCURRENCY);
@@ -2314,11 +2325,12 @@ async function forgejoRefStatus(
   // resolve at all" gate `forgejoListChecks` applies to its own reads, and for the same reason: a
   // whole batch failing together is a different signal from one item failing among many.
   //
-  //  - Something was read → the repository IS readable anonymously, so those numbers really are
-  //    absent. Cache them, exactly as a token-backed 404 would have been cached.
-  //  - Nothing was read → every number 404'd with no token, which is what a private repository
-  //    looks like from here. Degrade, and carry up the http layer's own message, which already ends
-  //    in "or the repository is private: set CEZ_FORGEJO_TOKEN to authenticate".
+  //  - A row was read — over the network here, or served warm from the cache above → the repository
+  //    IS readable anonymously, so those numbers really are absent. Cache them, exactly as a
+  //    token-backed 404 would have been cached.
+  //  - No row at all → every number 404'd with no token, which is what a private repository looks
+  //    like from here. Degrade, and carry up the http layer's own message, which already ends in
+  //    "or the repository is private: set CEZ_FORGEJO_TOKEN to authenticate".
   const firstUnproven = unproven[0];
   if (firstUnproven) {
     if (!anyRowRead) {
