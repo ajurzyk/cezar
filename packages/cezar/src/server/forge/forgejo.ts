@@ -88,8 +88,8 @@ import type {
  * `github.ts`, but speaks REST directly through `forgejo-http.ts` instead of shelling out to a
  * CLI. Every method of `ForgeDriver` is real: `kind`, `detect`/`detectCached` (`server.ts:1511`
  * health and `:3214` automations-availability), `viewUrl`, `listIssues`, `listPRs`, `prStatus`,
- * `createPR`, `prMergeState`, `mergePR`, `prDiff`, `listComments` and `listChecks` — the whole
- * `/api/v1/github*` route family now reaches this driver through `resolveForgeOrGithub`
+ * `createPR`, `prMergeState`, `mergePR`, `prDiff`, `listComments`, `listChecks` and `refStatus` —
+ * the whole `/api/v1/github*` route family now reaches this driver through `resolveForgeOrGithub`
  * (`forge/index.ts`), the same seam `github.ts`'s own `createGithubDriver` answers through for a
  * GitHub-hosted or unplaceable repo.
  * This driver deliberately reuses a few things straight from `github.ts` rather than re-deriving

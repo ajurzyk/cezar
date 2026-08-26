@@ -29,8 +29,12 @@ export type ForgeKind = (typeof FORGE_KINDS)[number];
  * a human — and none of them can be derived from the others, which is why `apiUrl`/`webUrl` are
  * separate fields rather than one URL.
  *
- * Lives here (not in `config.ts`) because `types.ts` is a leaf: its only other import
- * (`RunRecord`) is type-only, so `config.ts` can pull this in without creating an import cycle.
+ * Lives here (not in `config.ts`) because `types.ts` is a leaf: every other import it has
+ * (`RunRecord` from `runs/store.ts`, and `ReferenceStatus` from `@open-mercato/cezar-contract`
+ * since #12) is type-only, so `config.ts` can pull this in without creating an import cycle. That
+ * is the test a future import has to pass — type-only, not same-package: the contract import
+ * crosses a package boundary and is still fine, because `import type` leaves nothing behind at
+ * runtime for a cycle to form through.
  */
 export const forgeSettingsSchema = z.object({
   kind: z.enum(FORGE_KINDS),

@@ -62,7 +62,8 @@ function mockPush(result: { ok: boolean; stderr?: string }): void {
 /**
  * The Forgejo driver: `kind`, `detect`/`detectCached` (the two call sites that already exist,
  * `server.ts:1511`/`:3214`), `viewUrl`, `listIssues`, `listPRs`, `prStatus`,
- * `createPR`, `prMergeState`, `mergePR` and `prDiff` are all real. `fetch` is injected via
+ * `createPR`, `prMergeState`, `mergePR`, `prDiff`, `listComments`, `listChecks` and `refStatus`
+ * are all real. `fetch` is injected via
  * `deps.fetch`; nothing here touches the network. `rebaseToWebUrl` itself is `forgejo-map.ts`'s
  * (imported there from `./forgejo-map.ts`, not re-exported here) — its own tests live in
  * `forgejo-map.test.ts`.
