@@ -5,8 +5,8 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RunStore } from '../runs/store.ts';
 import type { RunManager } from '../workflows/run.ts';
-import type { ForgeChecksResult, ForgeCommentsData } from './forge/types.ts';
-import { fetchGithub, fetchGithubChecks } from './github.ts';
+import type { ForgeChecksResult, ForgeCommentsData, ForgeRefStatusResult } from './forge/types.ts';
+import { fetchGithub, fetchGithubChecks, fetchGithubRefStatus } from './github.ts';
 import type { ForgePrDiffResult, GithubData, GithubItem } from './github.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { createApp } from './server.ts';
@@ -14,9 +14,28 @@ import { createApp } from './server.ts';
 /**
  * Route-level coverage for the shared forge seam (`resolveForgeOrGithub`, `forge/index.ts`) that
  * the `/api/v1/github*` route family is repointed at, one route at a time. Covers
- * `GET /github/prs/:number/changes`, `GET /github`, `GET /github/comments/:kind/:number` and
- * `GET /github/checks` — every route in the family now goes through the seam.
+ * `GET /github/prs/:number/changes`, `GET /github`, `GET /github/comments/:kind/:number`,
+ * `GET /github/checks` and `GET /github/ref-status` — every route in the family now goes through
+ * the seam.
  */
+
+/** Lets ONE case below hand the route a driver with no `refStatus`, which is the only way to reach
+ *  the route's "this forge cannot answer that at all" branch now that both shipped drivers
+ *  implement the method. Defaults to `false`, so every other describe block in this file sees the
+ *  real module unchanged — the factory delegates to `importOriginal` either way. */
+const stripRefStatus = vi.hoisted(() => ({ current: false }));
+vi.mock('./forge/index.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./forge/index.ts')>();
+  return {
+    ...actual,
+    resolveForgeOrGithub: (...args: Parameters<typeof actual.resolveForgeOrGithub>) => {
+      const driver = actual.resolveForgeOrGithub(...args);
+      if (!stripRefStatus.current) return driver;
+      const { refStatus: _omitted, ...withoutRefStatus } = driver;
+      return withoutRefStatus;
+    },
+  };
+});
 
 /** A self-hosted remote + repo-config `forge` declaration — the only way a config can name a
  *  forge the host table can't reveal (mirrors `github-merge-api.test.ts`'s self-hosted setup).
@@ -543,5 +562,57 @@ describe('the forge seam — GET /github/checks', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as ForgeChecksResult;
     expect(body).toEqual(expected);
+  });
+});
+
+describe('the forge seam — GET /github/ref-status (#12)', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  registerForgeSeamLifecycle(() => ({ repoRoot, store }));
+
+  afterEach(() => {
+    stripRefStatus.current = false;
+  });
+
+  it('falls back to the GitHub driver for a repo resolveForge cannot place (no remote, dry-run) — payload unchanged', async () => {
+    // The guard on BACKWARD_COMPATIBILITY.md §2: this route's shape must not move for a GitHub
+    // repo. `resolveForgeOrGithub` lands such a repo in `createGithubDriver(repoRoot, null)`, whose
+    // `refStatus` IS the function the route called directly before the seam — so the payload is
+    // compared against that function's own answer rather than against a transcribed literal.
+    process.env.CEZ_DRY_RUN = '1';
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-forge-seam-refstatus-'));
+    mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    const expected = await fetchGithubRefStatus(repoRoot, { prs: [128, 124], issues: [12] });
+
+    const app = createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test' });
+    const res = await apiRequest(app, '/api/v1/github/ref-status?prs=128,124&issues=12');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(expected);
+  });
+
+  it('degrades in the payload — never a 5xx — for a driver that does not implement refStatus', async () => {
+    // `recheckAfterMs: null` and not the five-minute retry every OTHER degrade on this route
+    // carries: a missing capability is not a forge that was briefly unreachable, so there is
+    // nothing worth scheduling. The field is still present — the cockpit reads it unconditionally.
+    stripRefStatus.current = true;
+    ({ repoRoot, store } = initForgejoRepo());
+
+    const app = createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test' });
+    const res = await apiRequest(app, '/api/v1/github/ref-status?prs=5');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ForgeRefStatusResult;
+    expect(body).toEqual({
+      available: false,
+      reason: 'reference status is unavailable for this forge',
+      recheckAfterMs: null,
+    });
+  });
+
+  it('still rejects a malformed or empty query before it ever resolves a driver', async () => {
+    ({ repoRoot, store } = initForgejoRepo());
+    const app = createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test' });
+    expect((await apiRequest(app, '/api/v1/github/ref-status?prs=abc')).status).toBe(400);
+    expect((await apiRequest(app, '/api/v1/github/ref-status')).status).toBe(400);
   });
 });

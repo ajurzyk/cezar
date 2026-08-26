@@ -172,7 +172,10 @@ import { parseRemote, resolveForge, resolveForgeOrGithub, type ForgeAvailability
 // imported here any more: the four `/api/v1/github*` routes that called them now go through the
 // forge driver (`resolveForgeOrGithub`), which reaches the same functions via the GitHub driver.
 // The ref-status family below has no driver seam yet, so it still calls `github.ts` directly.
-import { fetchGithubRefStatus, forgetRefStatus, readCachedRefStatuses, refNumberFromUrl, GithubPrNotFoundError, GH_CHECKS_MAX, GH_REF_STATUS_MAX } from './github.ts';
+// `fetchGithubRefStatus` is deliberately absent: since #12 the `/github/ref-status` route reaches
+// it through the driver seam. `forgetRefStatus`, `readCachedRefStatuses` and `refNumberFromUrl`
+// stay direct imports — they are forge-agnostic per-repo cache operations, not driver behaviour.
+import { forgetRefStatus, readCachedRefStatuses, refNumberFromUrl, GithubPrNotFoundError, GH_CHECKS_MAX, GH_REF_STATUS_MAX } from './github.ts';
 import { ensureLaunchKey } from './launch-key.ts';
 import { openInTerminal } from './open-in-terminal.ts';
 import { agentCliRunner, detectOpenTargets, openFileInDefaultApp, openInApp } from './open-in-app.ts';
@@ -4918,7 +4921,24 @@ export function createApp(deps: ServerDeps) {
         if (parsedPrs.length === 0 && parsedIssues.length === 0) {
           return c.json({ error: 'missing prs or issues query' }, 400);
         }
-        return c.json(await fetchGithubRefStatus(repoRoot, { prs: parsedPrs, issues: parsedIssues }));
+        // `resolveForgeOrGithub`, not `resolveForge`: the GitHub driver's `refStatus` IS
+        // `fetchGithubRefStatus`, so a repo with no forge (no remote, an unrecognized host,
+        // CEZ_DRY_RUN) reproduces this route's pre-seam behaviour exactly, with no second branch to
+        // express it. Same reasoning, and the same preamble, as its `/github/checks` sibling.
+        const [repoInfo, forgeSettings] = await loadForgeInputs(repoRoot);
+        const forge = resolveForgeOrGithub(repoRoot, repoInfo, forgeSettings);
+        // `recheckAfterMs: null` — a forge whose driver cannot answer this at all will not start
+        // answering in five minutes, so there is nothing for the cockpit to schedule. Every other
+        // degrade on this route carries a retry cadence because it is the FORGE that was
+        // unreachable, not the capability that was missing.
+        if (!forge.refStatus) {
+          return c.json({
+            available: false as const,
+            reason: 'reference status is unavailable for this forge',
+            recheckAfterMs: null,
+          });
+        }
+        return c.json(await forge.refStatus({ prs: parsedPrs, issues: parsedIssues }));
       },
     )
 
