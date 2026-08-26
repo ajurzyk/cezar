@@ -3,6 +3,8 @@ import {
   combinedStatusToChecks,
   computeReviewDecision,
   FJ_BODY_CAP,
+  forgejoIssueSchema,
+  forgejoRefStatusSchema,
   forgejoRepositorySchema,
   forgejoReviewSchema,
   mapChangedFileStatus,
@@ -954,5 +956,60 @@ describe('mapForgejoReview', () => {
 
   it('drops a row with no html_url — a ForgeComment cannot be built without one', () => {
     expect(mapForgejoReview(review({ html_url: null }), webUrl)).toBeNull();
+  });
+});
+
+/**
+ * The one `GET issues/{n}` read behind `refStatus` (#12). What this schema has to survive is a
+ * payload it did not design: Forgejo answers the issues endpoint for pull requests too, older
+ * servers omit fields, and a parse failure here costs the whole reference rather than one field.
+ */
+describe('forgejoRefStatusSchema', () => {
+  it('reads the kind off `pull_request`, which is what makes one read enough', () => {
+    const pr = forgejoRefStatusSchema.parse({
+      state: 'open',
+      pull_request: { merged: false, merged_at: null, draft: true, html_url: 'http://f/acme/demo/pulls/5' },
+    });
+    expect(pr.pull_request).toEqual({ merged: false, draft: true });
+
+    const issue = forgejoRefStatusSchema.parse({ state: 'closed', pull_request: null });
+    expect(issue.pull_request).toBeNull();
+  });
+
+  it('treats an omitted `pull_request` as a genuine issue — older servers leave the field out', () => {
+    expect(forgejoRefStatusSchema.parse({ state: 'open' }).pull_request).toBeUndefined();
+  });
+
+  it('survives an older server that omits `draft` — one lost rung, never a lost reference', () => {
+    // The alternative (a required boolean) would reject the whole payload and turn a PR whose draft
+    // state we merely cannot see into a reference we cannot read at all.
+    const parsed = forgejoRefStatusSchema.parse({ state: 'open', pull_request: { merged: false } });
+    expect(parsed.pull_request?.draft).toBeUndefined();
+  });
+
+  it('keeps `state` a plain string, so an unrecognized value degrades instead of throwing', () => {
+    expect(forgejoRefStatusSchema.parse({ state: 'locked' }).state).toBe('locked');
+  });
+
+  it('rejects a payload with no `state` at all — there would be nothing to derive from', () => {
+    expect(() => forgejoRefStatusSchema.parse({ pull_request: null })).toThrow();
+  });
+
+  it('is a SIBLING of forgejoIssueSchema, not a replacement — list rows keep their loose shape', () => {
+    // The reason this schema exists separately: `forgejoIssueSchema` also validates every `/issues`
+    // LIST row, where `pull_request` is `z.unknown()`. A shape this schema would reject must still
+    // parse as a list row, or tightening one read would silently drop rows from the tab.
+    const listRow = {
+      number: 5,
+      title: 'add x',
+      html_url: 'http://f/acme/demo/pulls/5',
+      created_at: '2026-08-09T10:00:00Z',
+      // `state` is present so the ref-status schema's rejection below is genuinely about
+      // `pull_request` and not about a missing field this fixture simply forgot.
+      state: 'open',
+      pull_request: 'not-an-object',
+    };
+    expect(() => forgejoIssueSchema.parse(listRow)).not.toThrow();
+    expect(() => forgejoRefStatusSchema.parse(listRow)).toThrow();
   });
 });

@@ -1,7 +1,22 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RepoInfo } from '../git.ts';
-import { forgeKindOfRemote, forgeWebRoot, parseRemote, resolveForge } from './index.ts';
+import { createForgejoDriver } from './forgejo.ts';
+import { createGithubDriver } from './github.ts';
+import { forgeKindOfRemote, forgeWebRoot, parseRemote, resolveForge, resolveForgeOrGithub } from './index.ts';
 import type { ForgeSettings } from './types.ts';
+
+/** Spies over the REAL factories — `importOriginal` still builds the driver, so every `.kind`
+ *  assertion below is unaffected; only the arguments become observable. Which root each driver is
+ *  built on is otherwise invisible from outside (it is a closure variable feeding caches and `gh`'s
+ *  cwd), and that invisibility is exactly how the #50 key drift survived a green suite. */
+vi.mock('./github.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./github.ts')>();
+  return { ...actual, createGithubDriver: vi.fn(actual.createGithubDriver) };
+});
+vi.mock('./forgejo.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./forgejo.ts')>();
+  return { ...actual, createForgejoDriver: vi.fn(actual.createForgejoDriver) };
+});
 
 /** Forge resolution (spec §"Forge-driver seam"): remote host → driver | null. */
 
@@ -261,5 +276,68 @@ describe('GitHub driver viewUrl', () => {
     ['commit', 'abc1234', 'https://github.com/acme/demo/commit/abc1234'],
   ] as const)('%s → %s', (kind, ref, expected) => {
     expect(driver.viewUrl(kind, ref)).toBe(expected);
+  });
+});
+
+/**
+ * `resolveForgeOrGithub` — the resolver five of the seven `/api/v1/github*` routes go through, and
+ * until now the only exported function in this file with no test of its own.
+ *
+ * What it pins is the root each driver is built ON. `resolveForge` ignores its caller's root and
+ * builds both drivers on `repoInfo.root`, the git top-level: that is the driver's git working
+ * directory (`gh` is spawned there) and the key of every cache it holds. Correct — except for the
+ * one cache with readers outside the driver, which is why `cacheRoots` exists and why forwarding
+ * `repoRoot` itself would be the wrong fix (#50).
+ */
+describe('resolveForgeOrGithub', () => {
+  /** A project registered BELOW its repository's top level — the shape in which the two roots are
+   *  different strings at all. `info()` above puts the git top-level at `/repo`. */
+  const projectRoot = '/repo/packages/app';
+
+  beforeEach(() => {
+    vi.mocked(createGithubDriver).mockClear();
+    vi.mocked(createForgejoDriver).mockClear();
+  });
+
+  it('builds both drivers on the documented root', () => {
+    resolveForgeOrGithub(projectRoot, info('https://github.com/acme/demo.git'));
+    expect(createGithubDriver).toHaveBeenCalledWith('/repo', { owner: 'acme', repo: 'demo' }, undefined);
+
+    resolveForgeOrGithub(projectRoot, info('ssh://git@forge.internal:2222/acme/demo.git'), forgejoSettings);
+    expect(createForgejoDriver).toHaveBeenCalledWith(
+      expect.objectContaining({ repoRoot: '/repo', owner: 'acme', repo: 'demo', refStatusRoot: undefined }),
+    );
+
+    // The `??` fallback is the one branch that DOES use the caller's root: no remote means no
+    // `repoInfo.root` worth having, and this is the path `github-ref-status-api.test.ts` exercises.
+    resolveForgeOrGithub(projectRoot, info(undefined));
+    expect(createGithubDriver).toHaveBeenLastCalledWith(projectRoot, null, undefined);
+  });
+
+  it('forwards a pinned ref-status root to whichever driver it builds, and pins nothing else', () => {
+    // The fix for #50, at the seam: the driver keeps its documented working directory, and only the
+    // one cache with readers in `server.ts` is re-keyed. A candidate that forwarded `repoRoot` as
+    // the driver root instead would move `/github`, `/github/comments`, `/github/checks` and
+    // `/github/prs/:number/changes` with it — this is what says it did not.
+    resolveForgeOrGithub(projectRoot, info('https://github.com/acme/demo.git'), undefined, {
+      refStatusRoot: projectRoot,
+    });
+    expect(createGithubDriver).toHaveBeenCalledWith('/repo', { owner: 'acme', repo: 'demo' }, {
+      refStatusRoot: projectRoot,
+    });
+
+    resolveForgeOrGithub(projectRoot, info('ssh://git@forge.internal:2222/acme/demo.git'), forgejoSettings, {
+      refStatusRoot: projectRoot,
+    });
+    expect(createForgejoDriver).toHaveBeenCalledWith(
+      expect.objectContaining({ repoRoot: '/repo', refStatusRoot: projectRoot }),
+    );
+  });
+
+  it('passes the pin through the no-forge fallback too', () => {
+    // Where both roots coincide anyway — but a fallback that silently dropped the option would make
+    // "the route pins its cache" true for some repos and not others, which is worse than either.
+    resolveForgeOrGithub(projectRoot, info(undefined), undefined, { refStatusRoot: projectRoot });
+    expect(createGithubDriver).toHaveBeenCalledWith(projectRoot, null, { refStatusRoot: projectRoot });
   });
 });

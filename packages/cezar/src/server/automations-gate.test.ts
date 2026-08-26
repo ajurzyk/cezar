@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AutomationStore } from '../automations/store.ts';
 import { WorkspaceAutomationScheduler } from '../automations/scheduler.ts';
 import { RunStore } from '../runs/store.ts';
+import { SkillsUpdateCoordinator } from '../skills-update.ts';
 import type { RunManager } from '../workflows/run.ts';
 import { createApp, startServer, type ServerDeps } from './server.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
@@ -195,22 +196,54 @@ describe('automations gate (#801)', () => {
       vi.restoreAllMocks();
     });
 
-    /** Boot on an ephemeral port, wait for `listening` to have run its warm-up, then close. */
+    /**
+     * Boot on an ephemeral port, wait for the `listening` warm-up to have made its decision, then
+     * close.
+     *
+     * Both waits below are synchronization points, not time budgets. The predecessor of this helper
+     * slept a flat 50 ms and asserted, which is a wall-clock budget for a chain that spawns
+     * processes: `server.ts:5657-5665` awaits `getRepoInfo(project.root)` per project — up to four
+     * `git` children — between the gate decision and `automationScheduler.start()`. Green in
+     * isolation, red under a loaded full-suite run, which is how it failed:
+     *
+     *     Tests  1 failed | 20 passed (21)
+     *     AssertionError: expected "start" to be called 1 times, but got 0 times
+     *
+     * and reproducible on demand by making that chain slow (300 ms before `start()` is enough).
+     *
+     * Only the ON case can be made budget-free, and it is the one that flaked: it waits for the
+     * outcome itself. The OFF case cannot — the gate's whole point is that nothing further happens,
+     * so there is no event to wait for and a grace period is the only shape available. It is not
+     * the old one, though: it begins AFTER `listProjects()` has resolved rather than having to
+     * cover it, so a gate-removal defect has the full window to beat instead of whatever was left
+     * of 50 ms. Lengthening it only costs wall clock in a passing run.
+     */
+    const OFF_GRACE_MS = 250;
+
     const boot = async (): Promise<void> => {
+      const on = process.env.CEZ_AUTOMATIONS === '1';
       const started = vi.spyOn(WorkspaceAutomationScheduler.prototype, 'start');
+      // `coordinator.start(all)` runs unconditionally one line ABOVE the flag check
+      // (`server.ts:5652`), so observing it means `listProjects()` has resolved and the gate has
+      // already decided. That is what gives the flag-OFF case a real negative rather than a hopeful
+      // one: off returns synchronously right after this call, so there is nothing left to wait for.
+      const warmed = vi.spyOn(SkillsUpdateCoordinator.prototype, 'start');
       const server = startServer(
         { repoRoot, store, manager: { isActive: () => false } as unknown as RunManager, version: '0.0.0-test' },
         0,
       );
       try {
         await new Promise<void>((resolve) => server.once('listening', () => resolve()));
-        // The warm-up chain is `listProjects().then(…)`; a macrotask turn is enough for it to run
-        // to the point where it either starts the scheduler or returns early.
-        await new Promise((resolve) => setTimeout(resolve, 50));
+        await vi.waitFor(() => expect(warmed).toHaveBeenCalledTimes(1), { timeout: 10_000, interval: 5 });
+        // On, the decision is followed by the awaited `getRepoInfo()` fan-out before `start()`.
+        // The deadline is generous on purpose: only a scheduler that never starts can exhaust it,
+        // and it costs nothing when the chain is fast.
+        if (on) await vi.waitFor(() => expect(started).toHaveBeenCalledTimes(1), { timeout: 10_000, interval: 5 });
+        else await new Promise((resolve) => setTimeout(resolve, OFF_GRACE_MS));
       } finally {
         server.close();
       }
-      expect(started).toHaveBeenCalledTimes(process.env.CEZ_AUTOMATIONS === '1' ? 1 : 0);
+      expect(started).toHaveBeenCalledTimes(on ? 1 : 0);
     };
 
     it('never starts polling while the flag is off', async () => {

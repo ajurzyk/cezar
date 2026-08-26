@@ -171,8 +171,10 @@ import { parseRemote, resolveForge, resolveForgeOrGithub, type ForgeAvailability
 // `fetchGithub`/`fetchGithubChecks`/`fetchGithubComments`/`fetchGithubPrDiff` are deliberately NOT
 // imported here any more: the four `/api/v1/github*` routes that called them now go through the
 // forge driver (`resolveForgeOrGithub`), which reaches the same functions via the GitHub driver.
-// The ref-status family below has no driver seam yet, so it still calls `github.ts` directly.
-import { fetchGithubRefStatus, forgetRefStatus, readCachedRefStatuses, refNumberFromUrl, GithubPrNotFoundError, GH_CHECKS_MAX, GH_REF_STATUS_MAX } from './github.ts';
+// `fetchGithubRefStatus` is deliberately absent: since #12 the `/github/ref-status` route reaches
+// it through the driver seam. `forgetRefStatus`, `readCachedRefStatuses` and `refNumberFromUrl`
+// stay direct imports — they are forge-agnostic per-repo cache operations, not driver behaviour.
+import { forgetRefStatus, readCachedRefStatuses, refNumberFromUrl, GithubPrNotFoundError, GH_CHECKS_MAX, GH_REF_STATUS_MAX } from './github.ts';
 import { ensureLaunchKey } from './launch-key.ts';
 import { openInTerminal } from './open-in-terminal.ts';
 import { agentCliRunner, detectOpenTargets, openFileInDefaultApp, openInApp } from './open-in-app.ts';
@@ -4918,7 +4920,32 @@ export function createApp(deps: ServerDeps) {
         if (parsedPrs.length === 0 && parsedIssues.length === 0) {
           return c.json({ error: 'missing prs or issues query' }, 400);
         }
-        return c.json(await fetchGithubRefStatus(repoRoot, { prs: parsedPrs, issues: parsedIssues }));
+        // `resolveForgeOrGithub`, not `resolveForge`: the GitHub driver's `refStatus` IS
+        // `fetchGithubRefStatus`, so a repo with no forge (no remote, an unrecognized host,
+        // CEZ_DRY_RUN) reproduces this route's pre-seam behaviour exactly, with no second branch to
+        // express it. Same reasoning, and the same preamble, as its `/github/checks` sibling.
+        const [repoInfo, forgeSettings] = await loadForgeInputs(repoRoot);
+        // `refStatusRoot: repoRoot` — the ONLY route that pins a driver cache, and the only one that
+        // has to (#50). `resolveForge` builds both drivers on `repoInfo.root` (the git top-level),
+        // but this cache is read from two places that never touch a driver — `readCachedRefStatuses`
+        // below in the runs index, and `forgetRefStatus` in the two routes that change a pull
+        // request — and all three hold `project.root`. Those are the same string only while a
+        // project is registered AT its repository's top level; below it, the writer and the readers
+        // stop meeting, so the chips never hydrate warm and a merge invalidates nothing. Every other
+        // cache these drivers hold is read only from inside them and stays on `repoInfo.root`.
+        const forge = resolveForgeOrGithub(repoRoot, repoInfo, forgeSettings, { refStatusRoot: repoRoot });
+        // `recheckAfterMs: null` — a forge whose driver cannot answer this at all will not start
+        // answering in five minutes, so there is nothing for the cockpit to schedule. Every other
+        // degrade on this route carries a retry cadence because it is the FORGE that was
+        // unreachable, not the capability that was missing.
+        if (!forge.refStatus) {
+          return c.json({
+            available: false as const,
+            reason: 'reference status is unavailable for this forge',
+            recheckAfterMs: null,
+          });
+        }
+        return c.json(await forge.refStatus({ prs: parsedPrs, issues: parsedIssues }));
       },
     )
 

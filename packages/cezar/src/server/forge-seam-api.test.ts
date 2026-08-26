@@ -1,12 +1,16 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RunStore } from '../runs/store.ts';
 import type { RunManager } from '../workflows/run.ts';
-import type { ForgeChecksResult, ForgeCommentsData } from './forge/types.ts';
-import { fetchGithub, fetchGithubChecks } from './github.ts';
+// Straight from the seam module rather than through `./github.ts`: it is the same module instance
+// (`./github.ts` re-exports it), but `__clearRefStatusCacheForTests` is test-only and deliberately
+// not part of the delegate's public surface.
+import { __clearRefStatusCacheForTests, readCachedRefStatuses } from './forge/github.ts';
+import type { ForgeChecksResult, ForgeCommentsData, ForgeRefStatusResult } from './forge/types.ts';
+import { fetchGithub, fetchGithubChecks, fetchGithubRefStatus } from './github.ts';
 import type { ForgePrDiffResult, GithubData, GithubItem } from './github.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { createApp } from './server.ts';
@@ -14,9 +18,28 @@ import { createApp } from './server.ts';
 /**
  * Route-level coverage for the shared forge seam (`resolveForgeOrGithub`, `forge/index.ts`) that
  * the `/api/v1/github*` route family is repointed at, one route at a time. Covers
- * `GET /github/prs/:number/changes`, `GET /github`, `GET /github/comments/:kind/:number` and
- * `GET /github/checks` — every route in the family now goes through the seam.
+ * `GET /github/prs/:number/changes`, `GET /github`, `GET /github/comments/:kind/:number`,
+ * `GET /github/checks` and `GET /github/ref-status` — every route in the family now goes through
+ * the seam.
  */
+
+/** Lets ONE case below hand the route a driver with no `refStatus`, which is the only way to reach
+ *  the route's "this forge cannot answer that at all" branch now that both shipped drivers
+ *  implement the method. Defaults to `false`, so every other describe block in this file sees the
+ *  real module unchanged — the factory delegates to `importOriginal` either way. */
+const stripRefStatus = vi.hoisted(() => ({ current: false }));
+vi.mock('./forge/index.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./forge/index.ts')>();
+  return {
+    ...actual,
+    resolveForgeOrGithub: (...args: Parameters<typeof actual.resolveForgeOrGithub>) => {
+      const driver = actual.resolveForgeOrGithub(...args);
+      if (!stripRefStatus.current) return driver;
+      const { refStatus: _omitted, ...withoutRefStatus } = driver;
+      return withoutRefStatus;
+    },
+  };
+});
 
 /** A self-hosted remote + repo-config `forge` declaration — the only way a config can name a
  *  forge the host table can't reveal (mirrors `github-merge-api.test.ts`'s self-hosted setup).
@@ -543,5 +566,276 @@ describe('the forge seam — GET /github/checks', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as ForgeChecksResult;
     expect(body).toEqual(expected);
+  });
+});
+
+describe('the forge seam — GET /github/ref-status (#12)', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  registerForgeSeamLifecycle(() => ({ repoRoot, store }));
+
+  afterEach(() => {
+    stripRefStatus.current = false;
+  });
+
+  it('falls back to the GitHub driver for a repo resolveForge cannot place (no remote, dry-run) — payload unchanged', async () => {
+    // The guard on BACKWARD_COMPATIBILITY.md §2: this route's shape must not move for a GitHub
+    // repo. `resolveForgeOrGithub` lands such a repo in `createGithubDriver(repoRoot, null)`, whose
+    // `refStatus` IS the function the route called directly before the seam — so the payload is
+    // compared against that function's own answer rather than against a transcribed literal.
+    process.env.CEZ_DRY_RUN = '1';
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-forge-seam-refstatus-'));
+    mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    const expected = await fetchGithubRefStatus(repoRoot, { prs: [128, 124], issues: [12] });
+
+    const app = createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test' });
+    const res = await apiRequest(app, '/api/v1/github/ref-status?prs=128,124&issues=12');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(expected);
+  });
+
+  it('routes a Forgejo repo through the seam and resolves the numbers with the Forgejo driver', async () => {
+    ({ repoRoot, store } = initForgejoRepo());
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      // ONE read per number, and it is the ISSUES endpoint for both kinds — a request the GitHub
+      // driver (which speaks graphql through `gh`) could not have made, so this being what answers
+      // proves the route went through the Forgejo driver rather than a fallback.
+      if (s.endsWith('/repos/acme/demo/issues/5')) {
+        return Promise.resolve(jsonResponse({ state: 'closed', pull_request: { merged: true } }));
+      }
+      if (s.endsWith('/repos/acme/demo/issues/12')) return Promise.resolve(jsonResponse({ state: 'open' }));
+      throw new Error(`unexpected url ${s}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const app = createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test' });
+    const res = await apiRequest(app, '/api/v1/github/ref-status?prs=5&issues=12');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ForgeRefStatusResult;
+    expect(body).toEqual({ available: true, prs: { 5: 'merged' }, issues: { 12: 'open' }, recheckAfterMs: 60_000 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('degrades to available:false with a non-empty reason when the Forgejo transport is unreachable', async () => {
+    ({ repoRoot, store } = initForgejoRepo());
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const app = createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test' });
+    const res = await apiRequest(app, '/api/v1/github/ref-status?prs=5');
+    // A driver-reported failure is an in-payload degrade, never a 5xx — and it carries the retry
+    // cadence, unlike the missing-capability case below.
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ForgeRefStatusResult;
+    expect(body.available).toBe(false);
+    if (!body.available) {
+      expect(body.reason).toBeTruthy();
+      expect(body.recheckAfterMs).toBe(5 * 60_000);
+    }
+  });
+
+  it('degrades in the payload — never a 5xx — for a driver that does not implement refStatus', async () => {
+    // `recheckAfterMs: null` and not the five-minute retry every OTHER degrade on this route
+    // carries: a missing capability is not a forge that was briefly unreachable, so there is
+    // nothing worth scheduling. The field is still present — the cockpit reads it unconditionally.
+    stripRefStatus.current = true;
+    ({ repoRoot, store } = initForgejoRepo());
+
+    const app = createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test' });
+    const res = await apiRequest(app, '/api/v1/github/ref-status?prs=5');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ForgeRefStatusResult;
+    expect(body).toEqual({
+      available: false,
+      reason: 'reference status is unavailable for this forge',
+      recheckAfterMs: null,
+    });
+  });
+
+  it('still rejects a malformed or empty query before it ever resolves a driver', async () => {
+    ({ repoRoot, store } = initForgejoRepo());
+    const app = createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test' });
+    expect((await apiRequest(app, '/api/v1/github/ref-status?prs=abc')).status).toBe(400);
+    expect((await apiRequest(app, '/api/v1/github/ref-status')).status).toBe(400);
+  });
+
+  /**
+   * The route is where the dry-run regression actually showed: before the seam it called
+   * `fetchGithubRefStatus` for EVERY repo, so a Forgejo project offline got
+   * `{available: true, …, recheckAfterMs: 60000}` and the neutral chip. Routing it through the
+   * driver briefly turned that into `available: false`, which the cockpit renders as
+   * "Status unavailable" and never rechecks. `available` is the assertion that matters — the
+   * driver-level suite pins which statuses come back.
+   */
+  it('answers a Forgejo repo from the fixtures under CEZ_DRY_RUN=1, never with a degrade', async () => {
+    process.env.CEZ_DRY_RUN = '1';
+    ({ repoRoot, store } = initForgejoRepo());
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const app = createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test' });
+    const res = await apiRequest(app, '/api/v1/github/ref-status?prs=777,764&issues=24');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ForgeRefStatusResult;
+    expect(body.available).toBe(true);
+    if (body.available) {
+      expect(body.prs[764]).toBe('draft');
+      expect(body.issues[24]).toBe('open');
+      // Open and not a draft — absent offline exactly as it is absent live.
+      expect(body.prs[777]).toBeUndefined();
+      expect(body.recheckAfterMs).toBe(60_000);
+    }
+    // Dry-run means the demo never reaches the configured apiUrl.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The ref-status cache KEY, across the writer and both readers (#50).
+ *
+ * Every other fixture in this file runs `git init` in the very directory it hands `createApp`, so
+ * `project.root` and the git top-level are the same string and no key can drift. That is why the
+ * whole suite stayed green through the drift: the shape in which the two roots differ simply had
+ * no fixture. `shouldRegisterProject` (`workspace/projects.ts:115-120`) rejects only `$HOME` and
+ * task worktrees, so a project registered at a SUBDIRECTORY of its repository is allowed — and
+ * there the route's driver (built on `repoInfo.root`) and the two readers in `server.ts`
+ * (`readCachedRefStatuses` at `:5478`, `forgetRefStatus` at `:4227`/`:4975`, both on
+ * `project.root`) are two different strings.
+ *
+ * Three cases: the read half, the invalidation half, and the no-regression case that pins every
+ * project which exists today.
+ */
+describe('the forge seam — one ref-status cache key (#50)', () => {
+  let topLevel: string;
+  let projectRoot: string;
+  let store: RunStore;
+  const previousDryRun = process.env.CEZ_DRY_RUN;
+
+  /** `git init` at `<tmp>`, the PROJECT at `<tmp>/<subdir>` — or at `<tmp>` itself when `subdir` is
+   *  empty, which is the shape every other block here uses. Deliberately NOT `initForgejoRepo`
+   *  (which makes the two roots identical by construction) and deliberately NOT `registerProject()`
+   *  (which writes to the workspace registry this harness does not use — `createApp`'s `repoRoot`
+   *  becomes `bootContext.root` verbatim, `server.ts:1050`/`:1180`).
+   *
+   *  `realpathSync` on the temp dir because `git rev-parse --show-toplevel` answers a canonical
+   *  path: on a platform where the temp dir is reached through a symlink, an un-resolved literal
+   *  would make the two roots differ for a reason that has nothing to do with this issue. */
+  function initForgejoRepoBelow(subdir: string): void {
+    topLevel = realpathSync(mkdtempSync(join(tmpdir(), 'cez-forge-seam-refkey-')));
+    execFileSync('git', ['init', '-b', 'main'], { cwd: topLevel });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: topLevel });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: topLevel });
+    execFileSync('git', ['commit', '--allow-empty', '-m', 'init'], { cwd: topLevel });
+    execFileSync('git', ['remote', 'add', 'origin', 'ssh://git@forge.internal:2222/acme/demo.git'], { cwd: topLevel });
+    projectRoot = subdir ? join(topLevel, subdir) : topLevel;
+    mkdirSync(join(projectRoot, '.ai/cezar'), { recursive: true });
+    writeFileSync(
+      join(projectRoot, '.ai/cezar', 'config.json'),
+      JSON.stringify({ forge: { kind: 'forgejo', apiUrl: 'http://forge.internal', webUrl: 'http://forge.internal' } }),
+      'utf8',
+    );
+    store = RunStore.open(join(projectRoot, '.ai/cezar'));
+  }
+
+  beforeEach(() => {
+    delete process.env.CEZ_DRY_RUN;
+    // These cases assert on cache CONTENT, so they must not inherit an entry another block in this
+    // file wrote (its roots differ, but the invariant under test is "nothing is warm that this test
+    // did not warm").
+    __clearRefStatusCacheForTests();
+  });
+
+  afterEach(() => {
+    store.flush();
+    rmSync(topLevel, { recursive: true, force: true });
+    vi.unstubAllGlobals();
+    __clearRefStatusCacheForTests();
+    if (previousDryRun === undefined) delete process.env.CEZ_DRY_RUN;
+    else process.env.CEZ_DRY_RUN = previousDryRun;
+  });
+
+  it('ref-status writes and reads one key when the project root is below the repository top level', async () => {
+    // The runs index hydrates its chips with `readCachedRefStatuses(project.root, …)` and never
+    // asks the forge. If the route wrote under a different root, that reader is permanently cold —
+    // a warm chip never appears, for a GitHub-hosted project just as much as a Forgejo one.
+    initForgejoRepoBelow('packages/app');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: URL | string) => {
+        if (String(url).endsWith('/repos/acme/demo/issues/5')) {
+          return Promise.resolve(jsonResponse({ state: 'closed', pull_request: { merged: true } }));
+        }
+        throw new Error(`unexpected url ${String(url)}`);
+      }),
+    );
+
+    const app = createApp({ repoRoot: projectRoot, store, manager: {} as RunManager, version: '0.0.0-test' });
+    const res = await apiRequest(app, '/api/v1/github/ref-status?prs=5');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ available: true, prs: { 5: 'merged' }, issues: {}, recheckAfterMs: null });
+
+    expect(readCachedRefStatuses(projectRoot, [5])).toEqual({ prs: { 5: 'merged' }, issues: {} });
+  });
+
+  it('a merge invalidates the entry the route wrote when the project root is below the top level', async () => {
+    // The other reader, and the one a cache-content assertion cannot separate from the case above:
+    // this asks the ROUTE whether the entry survived, by counting reads of the forge. A stale entry
+    // here means a pull request the user watched this server merge keeps painting its pre-merge
+    // status for up to `REF_STATUS_MERGED_TTL` — 24 h.
+    initForgejoRepoBelow('packages/app');
+    const issueReads = vi.fn().mockImplementation((url: URL | string) => {
+      if (String(url).endsWith('/repos/acme/demo/issues/9')) {
+        return Promise.resolve(jsonResponse({ state: 'open', pull_request: { merged: false, draft: true } }));
+      }
+      throw new Error(`unexpected url ${String(url)}`);
+    });
+    vi.stubGlobal('fetch', issueReads);
+
+    const app = createApp({ repoRoot: projectRoot, store, manager: {} as RunManager, version: '0.0.0-test' });
+    expect((await apiRequest(app, '/api/v1/github/ref-status?prs=9')).status).toBe(200);
+    expect(issueReads).toHaveBeenCalledTimes(1);
+    // Warm: the driver serves its own write, which proves nothing about the readers yet — it is the
+    // control for the count below.
+    expect((await apiRequest(app, '/api/v1/github/ref-status?prs=9')).status).toBe(200);
+    expect(issueReads).toHaveBeenCalledTimes(1);
+
+    // `CEZ_DRY_RUN` only for the merge: `forgejoPrMergeState` and `forgejoMergePR` both answer from
+    // fixtures under it (`forgejo.ts:1189`, `:1529`), so the whole eligibility ladder runs without
+    // transcribing Forgejo's five preflight endpoints — while the ref-status calls above and below
+    // stay live, because a dry run deliberately caches nothing and could not have warmed anything.
+    process.env.CEZ_DRY_RUN = '1';
+    const state = await apiRequest(app, '/api/v1/github/prs/9/merge-state?refresh=1');
+    const { mergeState } = (await state.json()) as { mergeState: { headSha: string } };
+    const merged = await apiRequest(app, '/api/v1/github/prs/9/merge', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: 'http://127.0.0.1:4321' },
+      body: JSON.stringify({ method: 'squash', expectedHeadSha: mergeState.headSha }),
+    });
+    expect(merged.status).toBe(200);
+    delete process.env.CEZ_DRY_RUN;
+
+    expect((await apiRequest(app, '/api/v1/github/ref-status?prs=9')).status).toBe(200);
+    expect(issueReads).toHaveBeenCalledTimes(2);
+  });
+
+  it('a project root that is the repository top level keeps its existing key', async () => {
+    // Every project in every other fixture, and the overwhelming majority of real ones. The fix
+    // must not move this key: it is what `runs-index-api.test.ts:347`/`:369` seed against.
+    initForgejoRepoBelow('');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: URL | string) => {
+        if (String(url).endsWith('/repos/acme/demo/issues/5')) {
+          return Promise.resolve(jsonResponse({ state: 'closed', pull_request: { merged: true } }));
+        }
+        throw new Error(`unexpected url ${String(url)}`);
+      }),
+    );
+
+    const app = createApp({ repoRoot: projectRoot, store, manager: {} as RunManager, version: '0.0.0-test' });
+    expect((await apiRequest(app, '/api/v1/github/ref-status?prs=5')).status).toBe(200);
+    expect(readCachedRefStatuses(projectRoot, [5])).toEqual({ prs: { 5: 'merged' }, issues: {} });
   });
 });

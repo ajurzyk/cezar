@@ -1,3 +1,4 @@
+import type { ReferenceStatus } from '@open-mercato/cezar-contract';
 import { z } from 'zod';
 import type { RunRecord } from '../../runs/store.ts';
 
@@ -28,8 +29,12 @@ export type ForgeKind = (typeof FORGE_KINDS)[number];
  * a human — and none of them can be derived from the others, which is why `apiUrl`/`webUrl` are
  * separate fields rather than one URL.
  *
- * Lives here (not in `config.ts`) because `types.ts` is a leaf: its only other import
- * (`RunRecord`) is type-only, so `config.ts` can pull this in without creating an import cycle.
+ * Lives here (not in `config.ts`) because `types.ts` is a leaf: every other import it has
+ * (`RunRecord` from `runs/store.ts`, and `ReferenceStatus` from `@open-mercato/cezar-contract`
+ * since #12) is type-only, so `config.ts` can pull this in without creating an import cycle. That
+ * is the test a future import has to pass — type-only, not same-package: the contract import
+ * crosses a package boundary and is still fine, because `import type` leaves nothing behind at
+ * runtime for a cycle to form through.
  */
 export const forgeSettingsSchema = z.object({
   kind: z.enum(FORGE_KINDS),
@@ -42,6 +47,30 @@ export const forgeSettingsSchema = z.object({
 });
 
 export type ForgeSettings = z.infer<typeof forgeSettingsSchema>;
+
+/**
+ * Which root a driver keys a SHARED cache by, when that is not its own `repoRoot` (#50).
+ *
+ * A driver's `repoRoot` is its git working directory — the cwd `gh` is spawned in — and
+ * `resolveForge` builds both drivers on `repoInfo.root`, the git top-level. Every cache inside a
+ * driver is keyed by that same root, which is correct precisely because nothing outside the driver
+ * reads those caches: writer and reader are the same file and cannot disagree.
+ *
+ * The ref-status cache is the one exception, and this option exists for it alone. It has three
+ * call sites in `server.ts` that never touch a driver — `readCachedRefStatuses` (`:5478`, the runs
+ * index hydrating chips) and `forgetRefStatus` (`:4227`, `:4975`) — and all three hold
+ * `project.root`. A project registered BELOW its repository's top level (which
+ * `shouldRegisterProject` allows) makes the two roots different strings, and the writer and those
+ * readers stop meeting: the chips never hydrate warm and a merge invalidates nothing.
+ *
+ * So the rule for a future cache is not "pick a root" — it is: a cache read only from inside a
+ * driver stays on `repoRoot` and needs nothing here; a cache with a reader in `server.ts` names
+ * that reader's root here, next to `refStatusRoot`.
+ */
+export interface ForgeDriverCacheRoots {
+  /** Root for the shared ref-status cache. Defaults to the driver's own `repoRoot`. */
+  refStatusRoot?: string;
+}
 
 /** Availability probe result — mirrors the tab's quiet degradation contract:
  *  no CLI, no remote, offline all land on `available:false` + a human hint. */
@@ -217,6 +246,27 @@ export type ForgeChecksResult =
   | { available: true; checks: Record<number, 'passing' | 'failing' | 'pending' | null> }
   | { available: false; reason: string };
 
+/** Result of `refStatus` — a discriminated union mirroring `GithubRefStatusData` (`forge/github.ts`,
+ *  itself mirroring `githubRefStatusDataSchema`), same precedent as `ForgeChecksResult` above.
+ *
+ *  `recheckAfterMs` is REQUIRED in BOTH branches, unlike every other result type here: the
+ *  cockpit's whole refresh policy for these chips is "ask again when the server says to" and it
+ *  keeps no table of its own (BACKWARD_COMPATIBILITY.md §2), so a driver implementing this method
+ *  owes a cadence and not just statuses. `null` is a legal value and means "nothing in this answer
+ *  can change; do not schedule anything" — it is not the same as omitting the field.
+ *
+ *  A number the forge does not know is **absent** from its map rather than present with a fallback:
+ *  absent means "nothing is known", which the cockpit paints as the neutral chip. Collapsing that
+ *  into a status would let "we could not ask" render as "nothing is wrong". */
+export type ForgeRefStatusResult =
+  | {
+      available: true;
+      prs: Record<number, ReferenceStatus>;
+      issues: Record<number, ReferenceStatus>;
+      recheckAfterMs: number | null;
+    }
+  | { available: false; reason: string; recheckAfterMs: number | null };
+
 export type ForgeMergeMethod = 'merge' | 'squash' | 'rebase';
 
 export interface ForgePrCheck {
@@ -333,6 +383,11 @@ export interface ForgeDriver {
   listComments?(kind: 'issue' | 'pr', number: number, opts?: { refresh?: boolean }): Promise<ForgeCommentsData>;
   /** Batched CI-status glyphs for the given PR numbers (lazy hydration for on-screen rows, #664). */
   listChecks?(numbers: number[]): Promise<ForgeChecksResult>;
+  /** Batched reference status for the `#N` chips a task table paints. The two lists are the
+   *  caller's GUESS at each number's kind; what comes back is filed by what the forge says each
+   *  number actually IS, which is why a chip whose kind the cockpit guessed wrong still gets the
+   *  right status. Never throws — an unreachable forge degrades in the payload. */
+  refStatus?(input: { prs?: number[]; issues?: number[] }): Promise<ForgeRefStatusResult>;
   /** Web URL for a ref on the forge, or null when the remote isn't parseable. */
   viewUrl(kind: ForgeRefKind, ref: string | number): string | null;
 }

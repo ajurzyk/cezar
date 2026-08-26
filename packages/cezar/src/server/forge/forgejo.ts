@@ -27,12 +27,14 @@ import {
   mapForgejoPull,
   mapForgejoReview,
   mergeMethodsFromRepository,
+  forgejoRefStatusSchema,
   normalizeForgejoMergeState,
   rebaseToWebUrl,
   type ForgejoBranchInfo,
   type ForgejoChangedFile,
   type ForgejoLabelListener,
   type ForgejoPull,
+  type ForgejoRefStatusRow,
   type ForgejoRepository,
 } from './forgejo-map.ts';
 // `buildPrBody` and `mergePreflightAllowed` are the two things this driver reuses FROM `github.ts`
@@ -41,6 +43,23 @@ import {
 // pure and forge-agnostic — both `ForgePrMergeState` fields it reads are already computed by
 // `normalizeForgejoMergeState` above. Neither import touches `github.ts`'s own driver logic.
 import { buildPrBody, mergePreflightAllowed } from './github.ts';
+// The ref-status cache seam (#12, spec `2026-08-14-forge-seam-closure.md` Stage C). Also FROM
+// `github.ts`, and for a reason worth stating: what this driver needs is the CACHE, which is keyed
+// by `repoRoot` and whose TTL table is pure — per-repo infrastructure that file happens to house,
+// not GitHub behaviour. Importing rather than extracting keeps the fork's delta against upstream to
+// the exported symbols; `forge/shared/ref-status-cache.ts` is the first thing to pull out once a
+// third driver exists, and this makes that a move rather than a rewrite (Invariants §4).
+//
+// `deriveIssueReferenceStatus` is reused rather than re-derived — the issue ladder is pure, and a
+// second copy would be a second vocabulary to keep in step.
+import {
+  deriveIssueReferenceStatus,
+  GH_REF_STATUS_MAX,
+  peekRefStatus,
+  refStatusBatchRecheckAfter,
+  rememberRefStatus,
+} from './github.ts';
+import type { ReferenceStatus, ResolvedReference } from './github.ts';
 import type {
   DraftPrInput,
   DraftPrOutcome,
@@ -60,6 +79,7 @@ import type {
   ForgePrStatus,
   ForgePrStatusResult,
   ForgeRefKind,
+  ForgeRefStatusResult,
   ForgeSettings,
 } from './types.ts';
 
@@ -68,8 +88,8 @@ import type {
  * `github.ts`, but speaks REST directly through `forgejo-http.ts` instead of shelling out to a
  * CLI. Every method of `ForgeDriver` is real: `kind`, `detect`/`detectCached` (`server.ts:1511`
  * health and `:3214` automations-availability), `viewUrl`, `listIssues`, `listPRs`, `prStatus`,
- * `createPR`, `prMergeState`, `mergePR`, `prDiff`, `listComments` and `listChecks` — the whole
- * `/api/v1/github*` route family now reaches this driver through `resolveForgeOrGithub`
+ * `createPR`, `prMergeState`, `mergePR`, `prDiff`, `listComments`, `listChecks` and `refStatus` —
+ * the whole `/api/v1/github*` route family now reaches this driver through `resolveForgeOrGithub`
  * (`forge/index.ts`), the same seam `github.ts`'s own `createGithubDriver` answers through for a
  * GitHub-hosted or unplaceable repo.
  * This driver deliberately reuses a few things straight from `github.ts` rather than re-deriving
@@ -85,6 +105,9 @@ export interface ForgejoDriverCtx {
   owner: string;
   repo: string;
   settings: ForgeSettings;
+  /** Root for the shared ref-status cache, when it is not `repoRoot` — see
+   *  `ForgeDriverCacheRoots` in `types.ts` for why that one cache has the exception (#50). */
+  refStatusRoot?: string;
 }
 
 const CACHE_MS = 60_000;
@@ -2114,8 +2137,311 @@ async function forgejoListChecks(
   return { available: true, checks };
 }
 
+/** A forge that could not be reached is worth retrying, and worth not hammering — the same five
+ *  minutes, for the same reason, as `github.ts`'s own `REF_STATUS_RETRY_MS`. Kept here rather than
+ *  imported: it is a cadence THIS transport owes, not part of the cache policy the seam shares. */
+const FJ_REF_STATUS_RETRY_MS = 5 * 60_000;
+
+/**
+ * What one `GET issues/{n}` payload can honestly say about a number (#12).
+ *
+ * `undefined` means "this number resolved, and there is no honest word for it" — an OPEN,
+ * NON-DRAFT pull request. That is deliberate, and it is where this ladder stops rather than where
+ * it fails. `derivePrReferenceStatus` reads `checks` and `reviewDecision` before it will say
+ * `ready`, and this payload carries neither; feeding it `checks: null, reviewDecision: null`
+ * answers `ready` for EVERY open non-draft PR — including one whose CI is red and one whose
+ * reviewer asked for changes. `ready` is documented as "no failing or running checks, and no review
+ * the forge is still waiting on", so that would not be a degradation, it would be the chip
+ * asserting the opposite of the truth. The contract's own rule for a number nothing is known about
+ * is that it stays ABSENT and the chip renders neutral, which is the honest answer here.
+ *
+ * Filling the upper rungs costs `pulls/{n}` + `commits/{sha}/status` + `pulls/{n}/reviews` per
+ * number, against a route that accepts up to 100 numbers per kind. This driver already has all
+ * three helpers; spending them is a follow-up with its own budget question (spec, "Remaining
+ * holes"), not a line item here.
+ *
+ * The issue ladder goes through `deriveIssueReferenceStatus` with `stateReason: null`, and the
+ * consequence is worth stating rather than silently inheriting: Forgejo has no state-reason
+ * concept, so `not-planned` is unreachable and every closed issue reads `completed`. The vocabulary
+ * keeps those two apart precisely because they are opposite outcomes ("we did it" vs "we won't") —
+ * on this forge the distinction simply is not in the data.
+ */
+function refStatusFromRow(row: ForgejoRefStatusRow): ResolvedReference | undefined {
+  if (row.pull_request != null) {
+    if (row.pull_request.merged === true) return { kind: 'pr', status: 'merged' };
+    if (row.state.toLowerCase() === 'closed') return { kind: 'pr', status: 'closed' };
+    // `pull_request.draft` on a live instance (Forgejo `15.0.3+gitea-1.22.0`) — so the draft rung
+    // comes free from this one read, and the `WIP:`-prefix fallback `stripWipTitle` implements for
+    // the LIST rows is not needed here.
+    if (row.pull_request.draft === true) return { kind: 'pr', status: 'draft' };
+    return undefined; // open, not a draft — see this function's own doc comment
+  }
+  return { kind: 'issue', status: deriveIssueReferenceStatus({ state: row.state, stateReason: null }) };
+}
+
+/** One kind's request list, deduped and bounded by the same ceiling the route enforces — the
+ *  Forgejo half of `sanitizeRefNumbers` (`github.ts`). */
+function capRefNumbers(numbers: number[] | undefined): number[] {
+  return [...new Set(numbers ?? [])].filter((n) => Number.isInteger(n) && n > 0).slice(0, GH_REF_STATUS_MAX);
+}
+
+/**
+ * `CEZ_DRY_RUN=1` — statuses from the fixture catalog, so the offline demo paints real chips (#12).
+ *
+ * This used to degrade to `{ available: false, … }` instead, on the stated grounds that doing so
+ * "reproduces what a Forgejo project's chips did before this method existed". It does not, and the
+ * two payloads are different UI states rather than the same one. Before the seam the route called
+ * `fetchGithubRefStatus` for EVERY repo, Forgejo-configured included, whose own dry-run branch
+ * answers from `mockGithubRefStatus`; measured, that is:
+ *
+ *   {"available":true,"prs":{},"issues":{},"recheckAfterMs":60000}
+ *
+ * which `queries.ts` maps to `state: 'unknown'` — the neutral chip, rechecked every minute. An
+ * `available: false` payload maps to `state: 'unavailable'`, which `reference-chip.tsx` renders
+ * with the headline "Status unavailable", and a `null` cadence becomes `Infinity`, so the chip
+ * never refreshes for the life of the session. Degrading turned every reference chip in a Forgejo
+ * demo into an error state — against AGENTS.md's "`CEZ_DRY_RUN=1` fakes every network answer", and
+ * against the four dry-run fixtures this file already carries.
+ *
+ * The answers walk the SAME ladder `refStatusFromRow` walks live, because `DryRunForgejoRow` already
+ * carries `isDraft` — the one field that ladder needs. So an open, non-draft pull request is ABSENT
+ * here exactly as it is absent live: a demo must not show a status the live path would refuse to
+ * assert. Nothing is written to the shared cache — `readCachedRefStatuses` serves real projects too,
+ * and a fixture leaking into it would outlive the demo describing a repository nobody read.
+ */
+function dryRunForgejoRefStatus(input: { prs?: number[]; issues?: number[] }): ForgeRefStatusResult {
+  const byNumber = new Map(DRY_RUN_FORGEJO_ROWS.map((row) => [row.number, row] as const));
+  const prs: Record<number, ReferenceStatus> = {};
+  const issues: Record<number, ReferenceStatus> = {};
+  const entries: (ResolvedReference | null)[] = [];
+  for (const n of new Set([...capRefNumbers(input.prs), ...capRefNumbers(input.issues)])) {
+    const row = byNumber.get(n);
+    // A number the catalog does not carry stays absent, the same as one the live instance 404s on.
+    if (!row) {
+      entries.push(null);
+      continue;
+    }
+    // Every catalog row is OPEN — there is no closed or merged fixture — so the ladder reduces to
+    // the two rungs those rows can reach, through the same helper the live path uses for issues.
+    const entry: ResolvedReference | null =
+      row.kind === 'pr'
+        ? row.isDraft
+          ? { kind: 'pr', status: 'draft' }
+          : null // open, not a draft — absent, exactly as `refStatusFromRow` leaves it
+        : { kind: 'issue', status: deriveIssueReferenceStatus({ state: 'open', stateReason: null }) };
+    entries.push(entry);
+    if (entry) (entry.kind === 'pr' ? prs : issues)[n] = entry.status;
+  }
+  // `refStatusBatchRecheckAfter` over the same entries the live path would hand it, so the demo's
+  // cadence is computed by the one table rather than pinned to a literal here.
+  return { available: true, prs, issues, recheckAfterMs: refStatusBatchRecheckAfter(entries) };
+}
+
+/**
+ * Batched reference status for a Forgejo repo — the driver half of #12.
+ *
+ * One `GET /repos/{owner}/{repo}/issues/{n}` per number: Forgejo answers that endpoint for pull
+ * requests too and the payload carries a `pull_request` member, so ONE read settles both what a
+ * number IS and what state it is in. That is the same rule the GitHub path follows through
+ * `issueOrPullRequest` — the kind is the forge's answer, never the caller's guess — which is why
+ * the two request lists are merged into one set of numbers here and the answers are filed by what
+ * each number turned out to BE.
+ *
+ * **Failed is not absent.** A `404` is the instance's own proven "no such number" and is cached as
+ * one. Anything else — transport failure, 5xx, 401/403 — caches NOTHING and degrades the whole
+ * payload, on the same five-minute retry the GitHub path uses. An outage cached as "that reference
+ * is bogus" is the defect that rule exists to prevent. The degrade is whole-payload rather than
+ * per-number for the same reason `fetchGithubRefStatus` degrades: a number we could not reach must
+ * not be indistinguishable, in a `number -> status` map, from one that does not exist.
+ *
+ * The cache is `github.ts`'s `refStatusCache`, reached through the seam — one cache, one TTL table,
+ * shared with the synchronous `readCachedRefStatuses` the runs index reads. A warm entry is never
+ * re-queried, and everything this function resolves is written back so that reader sees it.
+ *
+ * **That cache is keyed by a root ALONE**, unlike all six caches above it in this file
+ * (`listCacheKey`, `prStatusCacheKey`, `mergeStateCacheKey`, `prDiffCacheKey`, `commentsCacheKey`,
+ * `checksCacheKey`), which each carry `apiBase` so a repository pointed at a different instance
+ * cannot be served the old one's answers. The discriminator is absent here because it CANNOT be
+ * added: sharing this cache is the point — `readCachedRefStatuses(project.root, …)` is how the runs
+ * index gets Forgejo statuses at all, and that reader knows only the root, so an `apiBase` in the
+ * key would make every entry this driver writes permanently invisible to it. And the root it is
+ * keyed by is that reader's — `cacheRoot`, not this driver's `repoRoot`, which is the same
+ * sentence read the other way round (#50). The cost is real and
+ * unmitigated: change a project's `config.forge.apiUrl` to another instance and stale answers are
+ * served until they expire — up to `REF_STATUS_MERGED_TTL` (24 h) for a merged pull request.
+ * Invalidating the repo's entries when `config.forge` changes is the fix if that ever bites.
+ *
+ * Fan-out is bounded by the same `FJ_CHECKS_CONCURRENCY` chunking `forgejoListChecks` uses — never
+ * an unbounded `Promise.all` over a hundred numbers at a self-hosted instance, and the request list
+ * itself is capped per kind by `capRefNumbers` rather than trusting the route to have done it.
+ *
+ * `CEZ_DRY_RUN=1` answers from the catalog (`dryRunForgejoRefStatus`), like every sibling in this
+ * file — see that function for why degrading here was wrong.
+ */
+async function forgejoRefStatus(
+  // The SHARED cache's root, not this driver's git working directory — the only thing this
+  // function does with a root is key `refStatusCache`, and `server.ts`'s two readers of that cache
+  // hold `project.root` (#50, and `ForgeDriverCacheRoots` in `types.ts`). Named for what it is so
+  // a future edit cannot quietly reach for the driver's `repoRoot` again.
+  cacheRoot: string,
+  http: ForgejoHttp,
+  owner: string,
+  repo: string,
+  input: { prs?: number[]; issues?: number[] },
+): Promise<ForgeRefStatusResult> {
+  if (process.env.CEZ_DRY_RUN === '1') return dryRunForgejoRefStatus(input);
+  // Bounded HERE, not only route-side. `fetchGithubRefStatus` sanitizes its own lists
+  // (`sanitizeRefNumbers` ends in the same `.slice`), and `refStatus` is a public `ForgeDriver`
+  // method: relying on `parseRefNumbers`' cap would leave two implementations of one interface
+  // disagreeing about whether they defend themselves — a direct caller passing a thousand numbers
+  // would cost 100 reads on one driver and a thousand on this one. Per KIND before the merge, so
+  // the ceiling matches the route's and a caller cannot spend the pull-request budget on issues.
+  const wanted = [...new Set([...capRefNumbers(input.prs), ...capRefNumbers(input.issues)])];
+
+  const prs: Record<number, ReferenceStatus> = {};
+  const issues: Record<number, ReferenceStatus> = {};
+  // Every reference in the answer, resolved or not — what the shared cadence is computed from.
+  const entries: (ResolvedReference | null)[] = [];
+  const file = (number: number, entry: ResolvedReference | null) => {
+    entries.push(entry);
+    if (entry) (entry.kind === 'pr' ? prs : issues)[number] = entry.status;
+  };
+
+  // Did the forge give up a ROW for this repository — from the network below, or from the cache
+  // just now? That is the only evidence the repository is readable, which is what turns an
+  // anonymous 404 from ambiguous into proof. A warm hit counts, and has to: the TTL table gives a
+  // merged pull request 24 h and a proven absence only `CACHE_MS`, so a batch holding both spends
+  // most of its life with the absence expired and every sibling still warm. Demanding a FRESH read
+  // there degrades the whole payload — discarding the statuses the cache just supplied, and
+  // reporting "the repository is private" about a repo this driver is plainly reading — once a
+  // minute, forever. Only a RESOLVED entry is proof; a cached `null` is an absence and would be
+  // circular evidence for settling another one.
+  //
+  // KNOWN LIMIT, and it follows from that last sentence: an open non-draft PR is cached as a bare
+  // `null` too (see the write below — deliberately, since a proven absence and "resolved, nothing
+  // honest to say" mean the same thing to every READER of this cache), so a row that really was
+  // read is indistinguishable here from one that was not. A public repo, no token, whose warm
+  // entries are all open non-draft PRs — the dominant case, by that write's own comment — plus one
+  // number that does not exist will therefore still degrade with the "…or the repository is
+  // private" hint. Narrow: any issue, or any merged/closed/draft PR, in the same batch clears the
+  // gate, and it self-heals on the next fresh read. Closing it properly means widening the cached
+  // value beyond `ResolvedReference | null`, which is a change to the shared seam, not to this
+  // driver.
+  let anyRowRead = false;
+
+  const misses: number[] = [];
+  for (const n of wanted) {
+    const hit = peekRefStatus(cacheRoot, n);
+    if (!hit) misses.push(n);
+    else {
+      if (hit.resolved) anyRowRead = true;
+      file(n, hit.resolved);
+    }
+  }
+  if (misses.length === 0) {
+    return { available: true, prs, issues, recheckAfterMs: refStatusBatchRecheckAfter(entries) };
+  }
+
+  const repoPrefix = repoPath(owner, repo);
+  // A 404 this driver could not PROVE, because no token was sent — see the deferral below. Held
+  // rather than cached until the batch shows the repository was readable at all.
+  const unproven: Array<{ n: number; reason: string }> = [];
+
+  for (let i = 0; i < misses.length; i += FJ_CHECKS_CONCURRENCY) {
+    const chunk = misses.slice(i, i + FJ_CHECKS_CONCURRENCY);
+    const results = await Promise.all(
+      chunk.map(
+        async (
+          n,
+        ): Promise<
+          | { n: number; entry: ResolvedReference | null }
+          | { n: number; reason: string; unproven?: true }
+        > => {
+          try {
+            const row = forgejoRefStatusSchema.parse(await http.getJson(`${repoPrefix}/issues/${n}`));
+            // `undefined` is "resolved, but nothing honest to say" (an open non-draft PR). It is
+            // cached as a `null` — the same short TTL and the same neutral chip a proven absence
+            // gets, which is the whole of what either one means to every reader of this cache. Not
+            // caching it would re-query every open pull request in a table on every single repaint,
+            // which is the dominant case.
+            return { n, entry: refStatusFromRow(row) ?? null };
+          } catch (err) {
+            if (err instanceof ForgejoHttpError && err.status === 404) {
+              // A 404 is the instance's proven "no such number" — but ONLY once a token is in play.
+              // `forgejo-http.ts` documents this, measured live: a PRIVATE repository answers an
+              // ANONYMOUS request with a 404 whose body is byte-identical to a repository that does
+              // not exist. Every sibling 404-as-proven site in this file is reached through a
+              // repo-level read that would already have degraded (`forgejoListChecks` walks
+              // `pulls?state=open` first); `refStatus` is the only one whose very first request is
+              // per-number, so without this an entire private repo would cache as "none of these
+              // references exist" and the token hint the http layer built would never be seen.
+              if (http.hasToken()) return { n, entry: null };
+              return { n, reason: describeError(err), unproven: true };
+            }
+            return { n, reason: describeError(err) };
+          }
+        },
+      ),
+    );
+
+    // Cache every number this chunk DID resolve before acting on any failure in it — those reads
+    // already happened and their answers are good, so the next request costs only what failed.
+    // Same "the successes are cached either way" rule `fetchGithubRefStatus` follows.
+    let failure: string | undefined;
+    for (const result of results) {
+      if ('reason' in result) {
+        if (result.unproven) {
+          unproven.push({ n: result.n, reason: result.reason });
+          continue;
+        }
+        failure ??= result.reason;
+        continue;
+      }
+      anyRowRead = true;
+      file(result.n, result.entry);
+      rememberRefStatus(cacheRoot, result.n, result.entry);
+    }
+    // A genuine failure ends the whole answer rather than blanking one number: in a
+    // `number -> status` map, a number we could not ask about is indistinguishable from one that
+    // does not exist, and the cockpit would paint "not on this repository" over a perfectly good
+    // PR. Stopping here also spares the remaining chunks — serializing them against a forge that
+    // just failed would multiply the wait (up to `FJ_TIMEOUT_MS` per number) for an answer that is
+    // already unavailable.
+    if (failure !== undefined) {
+      return { available: false, reason: failure, recheckAfterMs: FJ_REF_STATUS_RETRY_MS };
+    }
+  }
+
+  // The deferred anonymous 404s, settled by what the rest of the batch proved. Same "did anything
+  // resolve at all" gate `forgejoListChecks` applies to its own reads, and for the same reason: a
+  // whole batch failing together is a different signal from one item failing among many.
+  //
+  //  - A row was read — over the network here, or served warm from the cache above → the repository
+  //    IS readable anonymously, so those numbers really are absent. Cache them, exactly as a
+  //    token-backed 404 would have been cached.
+  //  - No row at all → every number 404'd with no token, which is what a private repository looks
+  //    like from here. Degrade, and carry up the http layer's own message, which already ends in
+  //    "or the repository is private: set CEZ_FORGEJO_TOKEN to authenticate".
+  const firstUnproven = unproven[0];
+  if (firstUnproven) {
+    if (!anyRowRead) {
+      return { available: false, reason: firstUnproven.reason, recheckAfterMs: FJ_REF_STATUS_RETRY_MS };
+    }
+    for (const { n } of unproven) {
+      file(n, null);
+      rememberRefStatus(cacheRoot, n, null);
+    }
+  }
+
+  return { available: true, prs, issues, recheckAfterMs: refStatusBatchRecheckAfter(entries) };
+}
+
 export function createForgejoDriver(ctx: ForgejoDriverCtx, deps?: ForgejoHttpDeps): ForgeDriver {
   const { repoRoot, owner, repo, settings } = ctx;
+  // Only the ref-status cache may be pinned to another root, and only because it has readers
+  // outside this driver — see `ForgeDriverCacheRoots` (`types.ts`). Every Forgejo cache above keys
+  // by `repoRoot\0apiBase\0…` and is read only here.
+  const refStatusRoot = ctx.refStatusRoot ?? repoRoot;
   const http = createForgejoHttp(settings.apiUrl, deps);
   const webUrl = settings.webUrl;
   const sleep = deps?.sleep ?? defaultSleep;
@@ -2143,6 +2469,8 @@ export function createForgejoDriver(ctx: ForgejoDriverCtx, deps?: ForgejoHttpDep
       forgejoListComments(repoRoot, http, owner, repo, webUrl, kind, number, opts),
 
     listChecks: (numbers: number[]) => forgejoListChecks(repoRoot, http, owner, repo, numbers),
+
+    refStatus: (input: { prs?: number[]; issues?: number[] }) => forgejoRefStatus(refStatusRoot, http, owner, repo, input),
 
     viewUrl: (kind: ForgeRefKind, ref: string | number): string => forgejoViewUrl(webUrl, owner, repo, kind, ref),
   };

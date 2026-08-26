@@ -29,7 +29,12 @@ import {
   derivePrReferenceStatus,
   deriveIssueReferenceStatus,
   __clearRefStatusCacheForTests,
+  __seedRefStatusCacheForTests,
   forgetRefStatus,
+  peekRefStatus,
+  readCachedRefStatuses,
+  refStatusBatchRecheckAfter,
+  rememberRefStatus,
   refNumberFromUrl,
   fetchGithub,
   GH_CHECKS_MAX,
@@ -2425,6 +2430,135 @@ describe('fetchGithubRefStatus', () => {
     expect(out.available).toBe(false);
     if (out.available) throw new Error('expected unavailable');
     expect(out.reason).toContain('gh CLI not found');
+  });
+});
+
+/**
+ * The ref-status cache seam a SECOND driver fills (#12, spec Stage C). The cache, its TTL table and
+ * the synchronous warm read stay here — they are per-repo infrastructure, not GitHub behaviour —
+ * and only these three symbols cross the seam. Each one is here because nothing already exported
+ * could serve it: `readCachedRefStatuses` folds a proven absence into "absent", the write was inline
+ * in `fetchGithubRefStatus` together with the eviction that bounds the map, and the batch cadence
+ * was private.
+ */
+describe('the ref-status cache seam (#12)', () => {
+  beforeEach(() => {
+    __clearRefStatusCacheForTests();
+  });
+
+  describe('peekRefStatus', () => {
+    it('tells a cached "no such number" apart from a cache miss', () => {
+      // The whole reason this is not `readCachedRefStatuses`: that one answers "absent" for both,
+      // so a driver reading through it would re-query a number the forge has already denied, on
+      // every single repaint, forever.
+      rememberRefStatus('/repo/peek', 7, null);
+      expect(peekRefStatus('/repo/peek', 7)).toEqual({ resolved: null });
+      expect(peekRefStatus('/repo/peek', 8)).toBeUndefined();
+    });
+
+    it('answers a resolved entry, and stops answering once its own TTL expires', () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        rememberRefStatus('/repo/peek-ttl', 7, { kind: 'pr', status: 'ready' });
+        rememberRefStatus('/repo/peek-ttl', 8, { kind: 'pr', status: 'merged' });
+        expect(peekRefStatus('/repo/peek-ttl', 7)).toEqual({ resolved: { kind: 'pr', status: 'ready' } });
+
+        vi.advanceTimersByTime(61_000);
+        // `ready` is the short TTL — a miss again, so the driver goes and asks.
+        expect(peekRefStatus('/repo/peek-ttl', 7)).toBeUndefined();
+        // `merged` is the 24h one, and it is the SAME table `readCachedRefStatuses` serves by. A
+        // driver inventing its own would silently disagree about the freshness of the same row.
+        expect(peekRefStatus('/repo/peek-ttl', 8)).toEqual({ resolved: { kind: 'pr', status: 'merged' } });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keys by repoRoot, so two projects each having a #42 never collide', () => {
+      rememberRefStatus('/repo/a', 42, { kind: 'issue', status: 'open' });
+      expect(peekRefStatus('/repo/b', 42)).toBeUndefined();
+    });
+  });
+
+  describe('rememberRefStatus', () => {
+    it('writes an entry the synchronous reader then serves', () => {
+      // The seam's other half: a second driver's answers must reach the runs index, which reads
+      // this cache and nothing else.
+      rememberRefStatus('/repo/remember', 7, { kind: 'pr', status: 'draft' });
+      rememberRefStatus('/repo/remember', 8, { kind: 'issue', status: 'completed' });
+      expect(readCachedRefStatuses('/repo/remember', [7, 8])).toEqual({
+        prs: { 7: 'draft' },
+        issues: { 8: 'completed' },
+      });
+    });
+
+    it('EVICTS, so a driver filling it cannot grow the map without bound', () => {
+      // Not "sets". The eviction used to live inline in `fetchGithubRefStatus`, so an exported
+      // plain setter would have handed the second driver an unbounded map.
+      for (let n = 1; n <= 520; n += 1) rememberRefStatus('/repo/evict', n, { kind: 'issue', status: 'open' });
+      expect(peekRefStatus('/repo/evict', 1)).toBeUndefined(); // oldest, dropped
+      expect(peekRefStatus('/repo/evict', 520)).toEqual({ resolved: { kind: 'issue', status: 'open' } });
+    });
+  });
+
+  describe('refStatusBatchRecheckAfter', () => {
+    it('answers the soonest any single entry could differ', () => {
+      expect(refStatusBatchRecheckAfter([{ kind: 'pr', status: 'merged' }])).toBeNull();
+      expect(refStatusBatchRecheckAfter([{ kind: 'issue', status: 'completed' }])).toBe(10 * 60_000);
+      expect(refStatusBatchRecheckAfter([{ kind: 'pr', status: 'ready' }])).toBe(60_000);
+      // Mixed: the immutable one contributes nothing, the shortest wins.
+      expect(
+        refStatusBatchRecheckAfter([
+          { kind: 'pr', status: 'merged' },
+          { kind: 'issue', status: 'completed' },
+          { kind: 'pr', status: 'ready' },
+        ]),
+      ).toBe(60_000);
+    });
+
+    it('treats a proven absence as the short cadence, not as immutable', () => {
+      // A not-yet-created PR looks exactly like a wrong number, and re-asking is cheap.
+      expect(refStatusBatchRecheckAfter([null])).toBe(60_000);
+    });
+
+    it('answers null for an empty batch — nothing to schedule', () => {
+      expect(refStatusBatchRecheckAfter([])).toBeNull();
+    });
+  });
+
+  it('is the same cache `__seedRefStatusCacheForTests` and `forgetRefStatus` already act on', () => {
+    // One cache, one policy. If these drifted apart, an invalidation after a merge would leave the
+    // driver-written entry standing and every chip would keep showing the pre-merge status.
+    __seedRefStatusCacheForTests('/repo/one-cache', [[7, { kind: 'pr', status: 'ready' }]]);
+    expect(peekRefStatus('/repo/one-cache', 7)).toEqual({ resolved: { kind: 'pr', status: 'ready' } });
+    forgetRefStatus('/repo/one-cache', 7);
+    expect(peekRefStatus('/repo/one-cache', 7)).toBeUndefined();
+  });
+});
+
+describe('createGithubDriver — refStatus (#12)', () => {
+  beforeEach(() => {
+    vi.stubEnv('CEZ_DRY_RUN', '');
+    execFileMock.mockReset();
+    __clearRefStatusCacheForTests();
+    __clearRepoHandleCacheForTests();
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('answers through the same `fetchGithubRefStatus` the route used to call directly', async () => {
+    execFileMock.mockImplementation((...args: unknown[]) => {
+      const argv = args[1] as string[];
+      const cb = args[args.length - 1] as (e: unknown, r: unknown) => void;
+      const reply = JSON.stringify({
+        data: { repository: { r0: { __typename: 'Issue', state: 'CLOSED', stateReason: 'NOT_PLANNED' } } },
+      });
+      cb(null, { stdout: argv[0] === 'repo' ? 'owner/n\n' : reply, stderr: '' });
+    });
+    const driver = createGithubDriver('/repo/driver-ref-status', null);
+    const out = await driver.refStatus?.({ issues: [12] });
+    expect(out).toEqual({ available: true, prs: {}, issues: { 12: 'not-planned' }, recheckAfterMs: 10 * 60_000 });
   });
 });
 
