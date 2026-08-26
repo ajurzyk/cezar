@@ -116,4 +116,5 @@ that no section body is empty.
 ### Phase 4: CI, labels, and the acceptance checks
 
 - [x] 4.1 CI-run and label operations, 42-heading parity — 3bb73a8a
-- [ ] 4.2 Full gate, PR, labels, review pass
+- [x] 4.2 Full gate, PR, labels, review pass — 7b633f69
+- [x] Post-review fix: `get-required-checks` and `ensure_label` degrade inside the descriptor instead of relying on the caller — 7b633f69
