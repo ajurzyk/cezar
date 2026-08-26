@@ -152,15 +152,14 @@ tea_api() {
 # come back short, the walk stop early, and every label past it report as
 # missing — at which point `apply_label` logs "not defined in this repo" and
 # returns 0. That silent, wrong skip is the exact failure this walk exists to
-# prevent, so it must not re-enter through the termination condition. One extra
-# request per call buys the loop its independence from a server setting.
-# Stopping on the empty page means the walk trusts the server to honour `page`.
-# It mostly can — but "mostly" is not a termination condition, and a server that
-# ignored `page` would spin this loop against the network forever, which is a
-# worse failure than the truncation it replaces. So the walk is bounded, and
-# hitting the bound is REPORTED rather than treated as the end of the list: at
-# 50 per page it is 5000 labels, which no taxonomy reaches, so the bound can only
-# mean the paging contract is not being kept.
+# prevent, so it must not re-enter through the termination condition.
+#
+# The empty page trusts the server to honour `page` instead, which is the safer
+# of the two assumptions but still one — so the walk is BOUNDED, and hitting the
+# bound is reported rather than treated as the end of the list. At 50 per page it
+# is 5000 labels, which no taxonomy reaches, so the bound can only ever mean the
+# paging contract is not being kept, and reporting that beats both spinning
+# against the network forever and silently truncating.
 TRACKER_LABEL_PAGES=${TRACKER_LABEL_PAGES:-100}
 tracker_labels_json() {
   _page=1; _all='[]'
