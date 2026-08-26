@@ -41,6 +41,8 @@ import {
 // pure and forge-agnostic — both `ForgePrMergeState` fields it reads are already computed by
 // `normalizeForgejoMergeState` above. Neither import touches `github.ts`'s own driver logic.
 import { buildPrBody, mergePreflightAllowed } from './github.ts';
+import { ensureForgejoLabels } from './forgejo-labels.ts';
+import { PIPELINE_LABEL_TAXONOMY } from './label-taxonomy.ts';
 import type {
   DraftPrInput,
   DraftPrOutcome,
@@ -49,6 +51,8 @@ import type {
   ForgeComment,
   ForgeCommentsData,
   ForgeDriver,
+  ForgeEnsureLabelsInput,
+  ForgeEnsureLabelsResult,
   ForgeItem,
   ForgeListOptions,
   ForgeListResult,
@@ -2114,6 +2118,63 @@ async function forgejoListChecks(
   return { available: true, checks };
 }
 
+/**
+ * The driver half of label provisioning (#47) — the guard and the dry-run short-circuit. The
+ * provisioning itself lives in `forgejo-labels.ts`, which knows nothing about drivers.
+ *
+ * ORDER IS LOAD-BEARING: the target guard runs BEFORE the dry-run check. A caller aiming at the
+ * wrong repository has made a mistake worth hearing about whether or not this happens to be a dry
+ * run, and a dry run that answered `ok: true` to a mismatched target would teach exactly the habit
+ * the guard exists to prevent.
+ *
+ * The guard itself is the Forgejo-side equivalent of what PR #16 (`381fb10e`) fixed for the GitHub
+ * script. There, two independent mechanisms could aim cezar's taxonomy at somebody else's
+ * repository — the ambient working directory, and `gh` preferring an `upstream` remote over
+ * `origin`, which on a fork answers with the PARENT. `labels-sync.sh` closed both by naming the
+ * target explicitly, from its OWN checkout's `origin`. This path cannot copy that construction,
+ * because its whole purpose is to provision a repository that is NOT cezar's own — so it names the
+ * target explicitly and then refuses when the name does not match what the project's remote
+ * resolved to. `owner`/`repo` here come from `parseRemote(repoInfo.remote)` in `forge/index.ts`;
+ * no ambient directory and no remote-preference heuristic participates.
+ *
+ * Under `CEZ_DRY_RUN=1` nothing is read and nothing is written — not even the listing. That is the
+ * same fixture doctrine as every other method (#26), and `dryRun: true` on the result is what stops
+ * `complete: true` from being mistaken for a fact about a real repository.
+ */
+async function ensureForgejoLabelTaxonomy(
+  http: ForgejoHttp,
+  owner: string,
+  repo: string,
+  input: ForgeEnsureLabelsInput,
+): Promise<ForgeEnsureLabelsResult> {
+  const resolved = `${owner}/${repo}`;
+  if (input.target !== resolved) {
+    return {
+      ok: false,
+      error:
+        `refusing to provision labels: asked for '${input.target}', but this project's origin remote resolves to ` +
+        `'${resolved}' — the target must be named explicitly and must match, so a stale view cannot write into ` +
+        'another repository',
+    };
+  }
+  if (process.env.CEZ_DRY_RUN === '1') {
+    return {
+      ok: true,
+      target: resolved,
+      checkOnly: true,
+      dryRun: true,
+      complete: true,
+      created: [],
+      present: PIPELINE_LABEL_TAXONOMY.map((label) => label.name),
+      missing: [],
+      drifted: [],
+    };
+  }
+  return ensureForgejoLabels(http, { owner, repo }, PIPELINE_LABEL_TAXONOMY, {
+    ...(input.checkOnly !== undefined ? { checkOnly: input.checkOnly } : {}),
+  });
+}
+
 export function createForgejoDriver(ctx: ForgejoDriverCtx, deps?: ForgejoHttpDeps): ForgeDriver {
   const { repoRoot, owner, repo, settings } = ctx;
   const http = createForgejoHttp(settings.apiUrl, deps);
@@ -2143,6 +2204,8 @@ export function createForgejoDriver(ctx: ForgejoDriverCtx, deps?: ForgejoHttpDep
       forgejoListComments(repoRoot, http, owner, repo, webUrl, kind, number, opts),
 
     listChecks: (numbers: number[]) => forgejoListChecks(repoRoot, http, owner, repo, numbers),
+
+    ensureLabels: (input: ForgeEnsureLabelsInput) => ensureForgejoLabelTaxonomy(http, owner, repo, input),
 
     viewUrl: (kind: ForgeRefKind, ref: string | number): string => forgejoViewUrl(webUrl, owner, repo, kind, ref),
   };

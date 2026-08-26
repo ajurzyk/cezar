@@ -14,6 +14,7 @@ import {
   LoaderCircleIcon,
   RefreshCwIcon,
   SearchIcon,
+  TagsIcon,
   TagIcon,
   TriangleAlertIcon,
 } from 'lucide-react'
@@ -22,7 +23,7 @@ import { useParams } from 'react-router'
 
 import { Link, Navigate } from '@/lib/project-router'
 
-import { getGithub, getGithubComments, getGithubPrChanges, getGithubPrMergeState, mergeGithubPr, putUiState } from '@/api/client'
+import { getGithub, getGithubComments, getGithubPrChanges, getGithubPrMergeState, mergeGithubPr, putUiState, syncForgeLabels } from '@/api/client'
 import { queryKeys, useGithub, useGithubChecks, useGithubComments, useGithubPrChanges, useHealth, useSkills, useUiState, useWorkflows } from '@/api/queries'
 import type {
   GithubComment,
@@ -53,6 +54,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { toast } from '@/components/ui/toaster'
 import { shortAge } from '@/lib/format'
 import { forgeChecksUrl, forgeHint, forgeIcon, forgeLabel, type ForgeKind } from '@/lib/forge-label'
+import { labelSyncAction } from '@/lib/forge-label-sync'
 import { githubTaskPrompt } from '@/lib/github-task'
 import { orderSkillsByUsage } from '@/lib/skills'
 import { useForgeKind, useForgeKindStatus } from '@/lib/use-forge-kind'
@@ -128,6 +130,9 @@ export function GithubRoute({ view, changes = false }: { view: GithubView; chang
   // condition `visibleNavItems` puts on the nav item. The poller only speaks `gh`, so on a
   // Forgejo project this shortcut would lead somewhere that can never run.
   const automationsAvailable = useHealth().data?.capabilities?.automations === true
+  // The forge DTO itself, for the label-provisioning action (#47) — `labelSyncAction` reads
+  // `available`/`reason` off it, which `forgeKind` alone cannot carry.
+  const forgeInfo = useHealth().data?.forge ?? null
   // What to CALL the forge on this screen (spec 2026-08-14-forgejo-forge-support §"Stage 4").
   // The route, the endpoints and the payload are forge-agnostic already — only the words the
   // user reads were hardcoded to one forge.
@@ -232,6 +237,30 @@ export function GithubRoute({ view, changes = false }: { view: GithubView; chang
     onError: (error) => toast(error.message, { tone: 'danger' }),
   })
 
+  /**
+   * Label provisioning (#47) — put the pipeline taxonomy in place on this project's forge.
+   *
+   * The target is passed in from `labelSyncAction`, never derived here. The server refuses a
+   * target that does not match what the project's `origin` resolves to, and threading the value
+   * through the policy is what keeps the click and the disabled-state reasoning reading the same
+   * `owner/repo` rather than two independently-computed ones.
+   *
+   * The toast reports the counts because the interesting outcomes are not failures: a repository
+   * whose labels were already there answers "0 created", and drift is left ALONE by design, so
+   * naming the drifted labels is the only place a human learns they exist.
+   */
+  const labelSync = useMutation({
+    mutationFn: (target: string) => syncForgeLabels({ target }),
+    onSuccess: (data) => {
+      const parts = [`${data.created.length} created`, `${data.present.length} already present`]
+      if (data.drifted.length > 0) {
+        parts.push(`${data.drifted.length} left untouched (${data.drifted.map((label) => label.name).join(', ')})`)
+      }
+      toast(`${data.target}: ${parts.join(', ')}${data.dryRun ? ' (dry run — nothing was written)' : ''}`)
+    },
+    onError: (error) => toast(error instanceof Error ? error.message : String(error), { tone: 'danger' }),
+  })
+
   // Pickers + queued-run bookkeeping live at the route so they survive switching items
   // (legacy parity) — see HandToAgent's doc block. Initial value comes from the localStorage
   // "remembered last selection" (#408): a repeat hand-off is one action, and it now survives a
@@ -327,6 +356,11 @@ export function GithubRoute({ view, changes = false }: { view: GithubView; chang
     )
   }
 
+  // One decision for both the button's existence and what a press will target — computed here,
+  // after the availability early return, so `gh.repo` is the answered value rather than a
+  // still-loading undefined.
+  const syncAction = labelSyncAction({ forge: forgeInfo, repo: gh.repo, pending: labelSync.isPending })
+
   const allItems = view === 'issues' ? gh.issues : gh.prs
   const labelColors = gh.labelColors ?? {}
   const labelOptions = allLabels(allItems)
@@ -396,6 +430,30 @@ export function GithubRoute({ view, changes = false }: { view: GithubView; chang
               />
               {gh.syncedAt ? `synced ${shortAge(gh.syncedAt)} ago` : 'refresh'}
             </button>
+            {/* Placed AFTER the refresh chip on purpose: the `ml-auto` that pushes this cluster
+                right is owned by the automations link, and inherited by the refresh chip when the
+                link is gated away. Slotting anything between them would move that class onto a
+                different element and re-flow the header — the exact defect the comment on the
+                refresh chip records. Rendered only where it can do something (Forgejo), so the
+                GitHub path costs zero pixels; see `forge-label-sync.ts`. */}
+            {syncAction.visible ? (
+              <button
+                type="button"
+                data-slot="gh-sync-labels"
+                title={syncAction.enabled ? `Provision the pipeline label taxonomy on ${syncAction.target}` : syncAction.reason}
+                disabled={!syncAction.enabled}
+                onClick={() => {
+                  if (syncAction.enabled) labelSync.mutate(syncAction.target)
+                }}
+                className="flex shrink-0 items-center gap-1 rounded-full border border-border px-1.5 py-px text-[10px] font-medium text-soft-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-55"
+              >
+                <TagsIcon
+                  aria-hidden="true"
+                  className={cn('size-[9px]', labelSync.isPending && 'motion-safe:animate-pulse')}
+                />
+                {syncAction.label}
+              </button>
+            ) : null}
           </div>
           <div data-slot="gh-tabs" className="mt-2.5 flex items-end gap-1">
             <TabLink to="/github" active={view === 'issues'} onClick={() => saveGithubView('issues')}>

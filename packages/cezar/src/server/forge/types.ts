@@ -308,6 +308,66 @@ export interface DraftPrInput {
   handoffText: string;
 }
 
+/** One label as the pipeline taxonomy declares it. `color` is six lowercase hex digits with NO
+ *  leading `#` — see `label-taxonomy.ts` for why that spelling is the stored one. */
+export interface ForgeLabelSpec {
+  name: string;
+  color: string;
+  description: string;
+}
+
+/** A label the forge already carries under a taxonomy name, but with a different colour or
+ *  description. Reported, never repaired: provisioning is create-only. */
+export interface ForgeLabelDrift extends ForgeLabelSpec {
+  wantColor: string;
+  wantDescription: string;
+}
+
+export interface ForgeEnsureLabelsInput {
+  /**
+   * `owner/repo`, REQUIRED, and compared byte-exact against the target the driver resolved from
+   * the project's own `origin` remote.
+   *
+   * There is no default, and that is the point. PR #16 (`381fb10e`) closed two ways of aiming a
+   * taxonomy at the wrong repository — an ambient working directory, and `gh` preferring an
+   * `upstream` remote over `origin`, which answers with the PARENT of a fork — by naming the
+   * target explicitly. An explicit target nobody CHECKS is decoration, so a mismatch here is a
+   * refusal rather than a correction: a stale cockpit tab or a switched project must not write
+   * into whichever repository the driver happens to point at.
+   */
+  target: string;
+  /** Report what is missing, create nothing — the `labels-sync.sh --check` equivalent. */
+  checkOnly?: boolean;
+}
+
+/**
+ * The outcome of one provisioning pass. `created + present + drifted + missing` covers the whole
+ * taxonomy exactly once.
+ *
+ * `complete` is the exit-code equivalent: `labels-sync.sh --check` exits 0 when the taxonomy is
+ * complete and 1 when anything is missing, and neither a driver call nor an HTTP action has an
+ * exit code to carry that with. Drift does NOT make a repository incomplete — the label exists, so
+ * the pipeline can address it; it is reported so a human can decide, not treated as a hole.
+ */
+export type ForgeEnsureLabelsResult =
+  | {
+      ok: true;
+      /** The `owner/repo` actually acted on — echoed so a caller can PROVE the target rather than
+       *  infer it from the absence of an error. */
+      target: string;
+      checkOnly: boolean;
+      /** `CEZ_DRY_RUN=1`: nothing was read and nothing was written. */
+      dryRun: boolean;
+      complete: boolean;
+      created: string[];
+      /** Present with a byte-identical colour and description. */
+      present: string[];
+      /** Absent and not created — always empty after a successful write pass. */
+      missing: string[];
+      drifted: ForgeLabelDrift[];
+    }
+  | { ok: false; error: string };
+
 export interface ForgeDriver {
   readonly kind: ForgeKind;
   /** Cheap, cached availability probe. May shell out (used by the GitHub tab). */
@@ -333,6 +393,18 @@ export interface ForgeDriver {
   listComments?(kind: 'issue' | 'pr', number: number, opts?: { refresh?: boolean }): Promise<ForgeCommentsData>;
   /** Batched CI-status glyphs for the given PR numbers (lazy hydration for on-screen rows, #664). */
   listChecks?(numbers: number[]): Promise<ForgeChecksResult>;
+  /**
+   * Put the pipeline label taxonomy in place on the target repository (#47). Create-only: never
+   * deletes, renames or recolours, so a project's own backlog taxonomy (`epic/*`, `type/*`) is
+   * never at risk. Never throws.
+   *
+   * OPTIONAL, and the GitHub driver deliberately does not implement it. GitHub's taxonomy is
+   * provisioned by `.ai/scripts/labels-sync.sh`, which this seam leaves byte for byte — including
+   * its case-mismatch failure, which has no analogue on Forgejo (label names there are
+   * case-SENSITIVE, so `Bug` and `bug` simply coexist). A caller that finds this member absent
+   * must say so rather than reach for a fallback driver; see the route's own comment.
+   */
+  ensureLabels?(input: ForgeEnsureLabelsInput): Promise<ForgeEnsureLabelsResult>;
   /** Web URL for a ref on the forge, or null when the remote isn't parseable. */
   viewUrl(kind: ForgeRefKind, ref: string | number): string | null;
 }
