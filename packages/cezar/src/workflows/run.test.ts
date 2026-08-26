@@ -11,8 +11,8 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import type { ContentBlock } from '../core/agent-runner.ts';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { AgentRunSpec, ContentBlock } from '../core/agent-runner.ts';
 import type { UiEvent } from '../core/ui-events.ts';
 import { createWorktree } from '../git-worktree.ts';
 import { RunStore, type RunRecord, type StepState } from '../runs/store.ts';
@@ -33,6 +33,44 @@ type UsageAccountingHarness = {
 
 const run = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
+
+/**
+ * The seam #48 needs and the engine did not have: `timeoutMs` is consumed
+ * INSIDE the runner (`claude-cli-runner.ts` arms a `setTimeout` with it), so it
+ * never reaches the CLI's argv and the `CEZ_MOCK_ARGS_FILE` trick every other
+ * wiring suite here uses is blind to it.
+ *
+ * The recorder DELEGATES — it forwards each call to the real runner the factory
+ * would have built and only remembers the spec on the way past — so every other
+ * case in this file runs against exactly the runner it ran against before.
+ */
+const runnerSpecs = vi.hoisted(() => [] as AgentRunSpec[]);
+
+vi.mock('../core/runner-factory.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../core/runner-factory.ts')>();
+  return {
+    ...actual,
+    createRunner: (backend: Parameters<typeof actual.createRunner>[0]) => {
+      const real = actual.createRunner(backend);
+      return {
+        backend: real.backend,
+        run: (spec: AgentRunSpec, onEvent?: Parameters<typeof real.run>[1]) => {
+          runnerSpecs.push(spec);
+          return real.run(spec, onEvent);
+        },
+        startSession: (
+          spec: AgentRunSpec,
+          onEvent?: Parameters<typeof real.startSession>[1],
+          opts?: Parameters<typeof real.startSession>[2],
+        ) => {
+          runnerSpecs.push(spec);
+          return real.startSession(spec, onEvent, opts);
+        },
+        interrupt: () => real.interrupt(),
+      };
+    },
+  };
+});
 
 const TURN_TEXT =
   "I'll catch the AuthError in the login handler so wrong passwords answer 401.\n\nDetails follow.";
@@ -1930,4 +1968,90 @@ describe('registry /skill expansion survives a continuation (#811)', () => {
     );
     expect(echoed?.text).toContain('/compact please');
   }, 40_000);
+});
+
+/**
+ * #48 — a step's declared wall clock has to survive the whole way to the
+ * runner. Everything between the YAML and `setTimeout` is a place it can be
+ * dropped without an error: the schema, the compact-form guard, the contract
+ * mirror, and this call site. The schema half is pinned in `types.test.ts`;
+ * this suite pins the call site, and the second case pins the invariant the
+ * field must NOT disturb — the workflow's last agent step stays interactive
+ * with no wall clock at all, because the idle timer rules there instead.
+ */
+describe("an agent step's declared wall clock reaches the runner (#48)", () => {
+  let repoRoot: string;
+  let store: RunStore;
+  let manager: RunManager;
+  const savedEnv: Record<string, string | undefined> = {};
+
+  // Unique to this suite's task text, so the recorder's entries can be told
+  // apart from any other suite's — the mock is file-wide.
+  const PROBE = 'wall-clock-probe';
+
+  const workflow: WorkflowDef = {
+    name: 'wall-clock-test',
+    source: 'built-in',
+    steps: [
+      // Not the last step → autonomous → the declared cap applies.
+      { id: 'implement', prompt: `{{task}}`, timeoutMinutes: 90 },
+      { id: 'verify', command: 'true' },
+      // Last step AND the last agent step → interactive → `timeoutMs: 0`,
+      // even though it declares a cap of its own.
+      { id: 'wrap', prompt: `{{task}}`, timeoutMinutes: 90 },
+    ],
+  };
+
+  beforeAll(async () => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-48-wall-clock-'));
+    savedEnv.CEZ_DRY_RUN = process.env.CEZ_DRY_RUN;
+    process.env.CEZ_DRY_RUN = '1';
+    await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
+    writeFileSync(join(repoRoot, 'a.txt'), 'one\n');
+    await run('git', ['add', '-A'], { cwd: repoRoot });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repoRoot });
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot);
+
+    // `mock:done` ends the interactive last step's turn with CEZ:DONE so the
+    // run reaches a terminal status instead of parking at `waiting`.
+    const record = manager.startRun(workflow, {
+      task: `mock:done ${PROBE} do the work`,
+      worktree: false,
+    });
+    const terminal = new Set(['done', 'review', 'failed', 'cancelled']);
+    const deadline = Date.now() + 30_000;
+    while (!terminal.has(store.getRun(record.id)?.status ?? '')) {
+      if (Date.now() > deadline) throw new Error('run did not finish in time');
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(store.getRun(record.id)?.steps.map((s) => s.status)).toEqual(['done', 'done', 'done']);
+  }, 60_000);
+
+  afterAll(() => {
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  const probed = (): AgentRunSpec[] => runnerSpecs.filter((s) => s.userPrompt.includes(PROBE));
+
+  it("an agent step's timeoutMinutes reaches the runner as timeoutMs", () => {
+    const specs = probed();
+    expect(specs.length).toBe(2);
+    // 90 minutes, in the millisecond unit the runner arms its timer with — and
+    // NOT `undefined`, which is what the old `interactive ? 0 : undefined`
+    // handed every autonomous step regardless of what it declared.
+    expect(specs[0]?.timeoutMs).toBe(90 * 60_000);
+  });
+
+  it('the last agent step ignores timeoutMinutes and still gets timeoutMs 0', () => {
+    // A cap on an interactive session would kill a run that is merely waiting
+    // for the user. `timeoutMinutes` is an opt-up for autonomous steps; it must
+    // not become a way to re-arm the wall clock on the one step that has none.
+    expect(probed()[1]?.timeoutMs).toBe(0);
+  });
 });

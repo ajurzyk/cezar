@@ -131,6 +131,45 @@ describe('a teardown cezar initiated', () => {
   }, 15_000);
 });
 
+/** A stand-in `claude` whose streams and signals the test drives by hand.
+ *  Module scope because two suites need it: the escalation cases below (fake
+ *  timers, no result awaited) and the timeout-diagnostics cases at the end of
+ *  the file (real timers, result awaited). */
+function signallableChild(): {
+  child: ChildProcessWithoutNullStreams;
+  /** The same stream as `child.stdout`, kept at its concrete type: the child is
+   *  cast to `ChildProcessWithoutNullStreams`, where `stdout` is a `Readable`
+   *  and has no `write`. */
+  stdout: PassThrough;
+  signals: NodeJS.Signals[];
+  exit: (code: number) => void;
+} {
+  const signals: NodeJS.Signals[] = [];
+  const emitter = new EventEmitter();
+  const stdout = new PassThrough();
+  const child = Object.assign(emitter, {
+    stdin: new PassThrough(),
+    stdout,
+    stderr: new PassThrough(),
+    exitCode: null as number | null,
+    signalCode: null as NodeJS.Signals | null,
+    killed: false,
+    pid: 4242,
+    // Node's semantics: delivery flips `killed`; a CLI with its own handler
+    // keeps running with `exitCode` still null.
+    kill: (signal: NodeJS.Signals) => {
+      signals.push(signal);
+      Object.assign(child, { killed: true });
+      return true;
+    },
+  }) as unknown as ChildProcessWithoutNullStreams;
+  const exit = (code: number) => {
+    Object.assign(child, { exitCode: code });
+    emitter.emit('exit', code, null);
+  };
+  return { child, stdout, signals, exit };
+}
+
 /**
  * #844 — the watchdogs used to ask `!child.killed` before escalating, but Node
  * sets `killed` the moment a signal is *delivered*. claude installs its own
@@ -139,36 +178,6 @@ describe('a teardown cezar initiated', () => {
  * teardown. The escalation now follows real termination instead.
  */
 describe('SIGTERM→SIGKILL escalation for a CLI that survives SIGTERM', () => {
-  function signallableChild(): {
-    child: ChildProcessWithoutNullStreams;
-    signals: NodeJS.Signals[];
-    exit: (code: number) => void;
-  } {
-    const signals: NodeJS.Signals[] = [];
-    const emitter = new EventEmitter();
-    const child = Object.assign(emitter, {
-      stdin: new PassThrough(),
-      stdout: new PassThrough(),
-      stderr: new PassThrough(),
-      exitCode: null as number | null,
-      signalCode: null as NodeJS.Signals | null,
-      killed: false,
-      pid: 4242,
-      // Node's semantics: delivery flips `killed`; a CLI with its own handler
-      // keeps running with `exitCode` still null.
-      kill: (signal: NodeJS.Signals) => {
-        signals.push(signal);
-        Object.assign(child, { killed: true });
-        return true;
-      },
-    }) as unknown as ChildProcessWithoutNullStreams;
-    const exit = (code: number) => {
-      Object.assign(child, { exitCode: code });
-      emitter.emit('exit', code, null);
-    };
-    return { child, signals, exit };
-  }
-
   function withFakeChild(run: (fake: ReturnType<typeof signallableChild>) => void): void {
     const fake = signallableChild();
     spawnHook.override = () => fake.child;
@@ -276,4 +285,131 @@ describe('ClaudeCliRunner token usage', () => {
       rmSync(cwd, { force: true, recursive: true });
     }
   });
+});
+
+/**
+ * #48 — what a wall-clock kill leaves behind.
+ *
+ * `handleClaudeMessage` returns 0 for every assistant frame on purpose
+ * (upstream #716: the terminal `result` frame already aggregates them), so the
+ * `if (delta > 0)` branch never fires before that frame and no `token-usage`
+ * event is ever emitted. A killed step therefore reports `tokensUsed: 0` and no
+ * cost — byte-identical to a step that did nothing. Measured on the run that
+ * prompted this: 30 minutes, 198 tool calls, `grep -c '"type":"token-usage"'`
+ * → 0.
+ *
+ * The runner already knows better — `sawUsage` is false and it emits a note for
+ * exactly this — but the timeout path returns before that line is reachable.
+ *
+ * These cases drive the fake child on REAL timers with a short cap, because
+ * unlike the escalation suite above they await `session.result`, which means
+ * the NDJSON reader and `waitForExit` both have to make real progress.
+ */
+describe('what a wall-clock timeout reports (#48)', () => {
+  const TIMEOUT_MS = 400;
+  const LOST_ACCOUNTING = 'token accounting lost — the step was killed before its result frame';
+
+  async function waitUntil(predicate: () => boolean, label: string): Promise<void> {
+    const deadline = Date.now() + 5_000;
+    while (!predicate()) {
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
+      await new Promise((r) => setTimeout(r, 5));
+    }
+  }
+
+  /** Feed `frames` to the child, wait for `consumed` to prove they were read
+   *  BEFORE the wall clock fires, then let the clock fire and the child exit. */
+  async function eventsFromTimedOutSession(
+    frames: unknown[],
+    consumed: (events: AgentEvent[]) => boolean,
+  ): Promise<AgentEvent[]> {
+    const fake = signallableChild();
+    spawnHook.override = () => fake.child;
+    const events: AgentEvent[] = [];
+    try {
+      const session = new ClaudeCliRunner({ bin: 'claude', timeoutMs: TIMEOUT_MS }).startSession(
+        { userPrompt: 'do it', cwd: process.cwd() },
+        (event) => events.push(event),
+      );
+      for (const frame of frames) fake.stdout.write(`${JSON.stringify(frame)}\n`);
+      // A frame still unread when the clock fires would silently weaken the
+      // assertion below, so prove it landed first rather than hoping it did.
+      await waitUntil(() => consumed(events), 'the seeded frames to be consumed');
+      await waitUntil(() => fake.signals.includes('SIGTERM'), 'the wall clock to fire');
+      // claude installs its own SIGTERM handler and exits 143 rather than dying
+      // from the signal — the same shape `isSignalTerminationExit` covers.
+      fake.exit(143);
+      await session.result;
+    } finally {
+      spawnHook.override = null;
+    }
+    return events;
+  }
+
+  const assistantWithToolCalls = (n: number) => ({
+    type: 'assistant',
+    message: {
+      content: Array.from({ length: n }, (_, i) => ({
+        type: 'tool_use',
+        id: `toolu_${i}`,
+        name: 'Bash',
+        input: { command: 'true' },
+      })),
+    },
+  });
+
+  it('a timed-out session reports that its accounting was lost', async () => {
+    const events = await eventsFromTimedOutSession(
+      [assistantWithToolCalls(1)],
+      (e) => e.some((event) => event.type === 'tool-call'),
+    );
+
+    expect(events.some((e) => e.type === 'error' && e.message.includes('timed out after'))).toBe(true);
+    // Exact text, so the note and this assertion cannot drift apart.
+    expect(events.some((e) => e.type === 'note' && e.message === LOST_ACCOUNTING)).toBe(true);
+    expect(events.some((e) => e.type === 'token-usage')).toBe(false);
+  }, 15_000);
+
+  it('a timeout after a result frame does not claim the accounting was lost', async () => {
+    // A multi-turn session whose FIRST turn settled normally: the result frame
+    // carried the aggregate usage, so nothing was lost when the clock later
+    // killed the session mid-second-turn. Claiming otherwise would be a lie in
+    // exactly the path the note is least able to be checked by hand.
+    const events = await eventsFromTimedOutSession(
+      [
+        {
+          type: 'result',
+          subtype: 'success',
+          result: 'first turn done',
+          usage: { input_tokens: 1_270, output_tokens: 185 },
+        },
+      ],
+      (e) => e.some((event) => event.type === 'turn-end'),
+    );
+
+    expect(events.some((e) => e.type === 'token-usage')).toBe(true);
+    expect(events.some((e) => e.type === 'error' && e.message.includes('timed out after'))).toBe(true);
+    expect(events.some((e) => e.type === 'note' && e.message === LOST_ACCOUNTING)).toBe(false);
+  }, 15_000);
+
+  it('the timeout message names how many tool calls were observed', async () => {
+    // The whole point: `timed out after 30m and was killed` cannot tell a hung
+    // agent (0 tool calls) from a busy one (198) — the two need opposite fixes.
+    const events = await eventsFromTimedOutSession(
+      [assistantWithToolCalls(3)],
+      (e) => e.filter((event) => event.type === 'tool-call').length === 3,
+    );
+
+    const error = events.find((e) => e.type === 'error');
+    expect(error?.message).toContain('(3 tool calls observed)');
+  }, 15_000);
+
+  it('says "1 tool call" rather than "1 tool calls"', async () => {
+    const events = await eventsFromTimedOutSession(
+      [assistantWithToolCalls(1)],
+      (e) => e.some((event) => event.type === 'tool-call'),
+    );
+
+    expect(events.find((e) => e.type === 'error')?.message).toContain('(1 tool call observed)');
+  }, 15_000);
 });

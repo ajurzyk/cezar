@@ -471,6 +471,7 @@ steps:
     # model: opus                # optional per-step model override
     # runner: codex              # optional per-step backend: claude · codex · opencode · pi
     # allowedTools: [Read, Edit, Write, Grep, Glob, Bash]
+    # timeoutMinutes: 90         # optional wall clock for THIS step (1–240)
   - id: verify
     name: Verify
     command: "npm test"          # a check step: exit 0 passes
@@ -482,6 +483,14 @@ steps:
 `{{task}}` is replaced with the task text you typed. When a check fails and loops
 back, its failing output is appended to the retried agent's prompt so the next
 attempt can see what broke.
+
+An agent step runs under a 30-minute wall clock by default, and being killed by
+it is recorded as a **step failure** — which stops everything after it in the
+chain. Give a step that legitimately runs long its own `timeoutMinutes`
+(1–240). Two things it does not do: it never applies to a check step (that is a
+shell command, so its duration is the shell's business), and it is ignored on
+the workflow's last agent step, which stays open for follow-ups under the idle
+timer rather than a wall clock.
 
 Prefer skills over steps? A workflow can also be written in the portable
 shorthand — an ordered list of skill names, each becoming one agent step:
