@@ -4,6 +4,7 @@ import { lstat, readdir, readFile, rm, stat } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 import { resolveTaskDiffBase } from './git-diff-base.ts';
 import { isSafeGitRef } from './git-refs.ts';
+import { provisionPipeline, type SeamOutcome } from './pipeline-seam.ts';
 
 /**
  * Git worktree per task (spec 006). Each run gets its own branch
@@ -134,6 +135,27 @@ function canonicalPath(path: string): string {
  * uncommitted work.
  */
 export async function createWorktree(
+  repoRoot: string,
+  runId: string,
+  baseBranch: string,
+): Promise<WorktreeInfo> {
+  const info = await attachWorktree(repoRoot, runId, baseBranch);
+  // Deliver the repo's provisioned agent pipeline into the fresh worktree, hidden
+  // from git there (#46). This is the one choke point every worktree passes
+  // through — the run flow and retention's reattach both land here — and it is a
+  // no-op for a repository that provisions nothing, which is every repository
+  // that carries its own committed pipeline. Never fatal: a run without a tracker
+  // descriptor degrades, a run whose branch grew pipeline files does not.
+  const seam = await provisionPipeline(repoRoot, info.path).catch(
+    (err: unknown): SeamOutcome => ({ status: 'refused', reason: String(err) }),
+  );
+  if (seam.status === 'refused') {
+    console.warn(`[cezar] pipeline not delivered to ${info.path}: ${seam.reason}`);
+  }
+  return info;
+}
+
+async function attachWorktree(
   repoRoot: string,
   runId: string,
   baseBranch: string,
