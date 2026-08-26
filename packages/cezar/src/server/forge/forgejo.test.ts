@@ -2716,8 +2716,8 @@ describe('refStatus (#12)', () => {
   /** Answers `issues/{n}` from a table, and throws on any OTHER url — so a case that accidentally
    *  reached `pulls/{n}` or `commits/{sha}/status` fails loudly instead of quietly costing reads
    *  this ladder is specified not to spend. */
-  function issuesFetch(byNumber: Record<number, () => Response>): ReturnType<typeof vi.fn> {
-    return vi.fn().mockImplementation((url: URL | string) => {
+  function issuesFetch(byNumber: Record<number, () => Response>) {
+    return vi.fn().mockImplementation((url: URL | string): Promise<Response> => {
       const s = String(url);
       const m = /\/repos\/acme\/demo\/issues\/(\d+)$/.exec(s);
       const answer = m ? byNumber[Number(m[1])] : undefined;
