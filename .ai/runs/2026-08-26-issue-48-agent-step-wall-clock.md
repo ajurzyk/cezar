@@ -94,3 +94,9 @@ PR: #54
 - [x] 4.1 Full validation gate green, both counts quoted — 337 files / 6662 tests, all five commands exit 0
 - [x] 4.2 Mutation check per guard, red output pasted into the PR body — 11 guards, all red under their restored bug
 - [x] 4.3 PR body, labels, summary comment — fb97ec3e
+
+### Phase 5: Review pass (`/code-review` at high — `om-auto-review-pr` is not installed here)
+
+- [x] 5.1 Client mirror `skillStack` + `workflowYaml` carry `timeoutMinutes` (found by review) — 4011a6d1
+- [x] 5.2 README documents the field and its two exemptions — 4011a6d1
+- [x] 5.3 Gate re-run green after the fixes — 337 files / 6664 tests, all five commands exit 0
