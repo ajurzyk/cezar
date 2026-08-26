@@ -195,12 +195,20 @@ describe('pipeline delivery seam (#46)', () => {
   });
 
   it('is idempotent across the restarts a run survives', async () => {
+    const userExcludes = join(root, 'user-excludes');
+    writeFileSync(userExcludes, 'scratch-*.log\n');
+    await git(repo, ['config', 'core.excludesFile', userExcludes]);
     provision('.ai/trackers/forgejo.md', '# descriptor\n');
 
     const first = await provisionPipeline(repo, worktree);
     const second = await provisionPipeline(repo, worktree);
 
     expect(second).toEqual(first);
+    expect(await status(worktree)).toBe('');
+    // The second pass must inherit the USER's excludes, not the file the first
+    // pass installed — otherwise re-provisioning silently un-ignores everything
+    // the developer ignores, and only from the second run onward.
+    writeFileSync(join(worktree, 'scratch-run.log'), 'noise\n');
     expect(await status(worktree)).toBe('');
   });
 });

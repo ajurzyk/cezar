@@ -195,9 +195,12 @@ export async function provisionPipeline(
   }
   const excludesPath = join(gitDir.stdout.trim(), EXCLUDES_FILE);
 
-  // Read what is in force BEFORE we take the setting over, so re-running the
-  // seam inherits the user's file and not the one we wrote last time.
-  const inheritedPath = await effectiveExcludesFile(worktreePath);
+  // Ask the MAIN worktree, not this one. Asking this one works exactly once: the
+  // second call would find the file the first call installed, and inherit our own
+  // header instead of the user's patterns — silently un-ignoring everything they
+  // ignore, from the second provision onward. `config.worktree` is per-worktree,
+  // so it is invisible from `repoRoot`, which is what makes that reading stable.
+  const inheritedPath = await effectiveExcludesFile(repoRoot);
   const inherited =
     inheritedPath === excludesPath ? '' : await readFile(inheritedPath, 'utf8').catch(() => '');
 
