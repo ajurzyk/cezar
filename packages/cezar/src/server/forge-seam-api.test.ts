@@ -591,6 +591,47 @@ describe('the forge seam — GET /github/ref-status (#12)', () => {
     expect(await res.json()).toEqual(expected);
   });
 
+  it('routes a Forgejo repo through the seam and resolves the numbers with the Forgejo driver', async () => {
+    ({ repoRoot, store } = initForgejoRepo());
+    const fetchMock = vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      // ONE read per number, and it is the ISSUES endpoint for both kinds — a request the GitHub
+      // driver (which speaks graphql through `gh`) could not have made, so this being what answers
+      // proves the route went through the Forgejo driver rather than a fallback.
+      if (s.endsWith('/repos/acme/demo/issues/5')) {
+        return Promise.resolve(jsonResponse({ state: 'closed', pull_request: { merged: true } }));
+      }
+      if (s.endsWith('/repos/acme/demo/issues/12')) return Promise.resolve(jsonResponse({ state: 'open' }));
+      throw new Error(`unexpected url ${s}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const app = createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test' });
+    const res = await apiRequest(app, '/api/v1/github/ref-status?prs=5&issues=12');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ForgeRefStatusResult;
+    expect(body).toEqual({ available: true, prs: { 5: 'merged' }, issues: { 12: 'open' }, recheckAfterMs: 60_000 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('degrades to available:false with a non-empty reason when the Forgejo transport is unreachable', async () => {
+    ({ repoRoot, store } = initForgejoRepo());
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const app = createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test' });
+    const res = await apiRequest(app, '/api/v1/github/ref-status?prs=5');
+    // A driver-reported failure is an in-payload degrade, never a 5xx — and it carries the retry
+    // cadence, unlike the missing-capability case below.
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ForgeRefStatusResult;
+    expect(body.available).toBe(false);
+    if (!body.available) {
+      expect(body.reason).toBeTruthy();
+      expect(body.recheckAfterMs).toBe(5 * 60_000);
+    }
+  });
+
   it('degrades in the payload — never a 5xx — for a driver that does not implement refStatus', async () => {
     // `recheckAfterMs: null` and not the five-minute retry every OTHER degrade on this route
     // carries: a missing capability is not a forge that was briefly unreachable, so there is
