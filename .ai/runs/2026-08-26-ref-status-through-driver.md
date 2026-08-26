@@ -118,6 +118,8 @@ for scope creep.
 
 ## Progress
 
+PR: #45
+
 > Convention: `- [ ]` pending, `- [x]` done. Append ` — <commit sha>` when a step lands. Do not rename step titles.
 
 ### Phase 1: The seam and the GitHub side
@@ -134,4 +136,4 @@ for scope creep.
 
 ### Phase 3: Gate
 
-- [ ] 3.1 Full validation gate
+- [x] 3.1 Full validation gate — 65b9b879 (gate run, no code change)
