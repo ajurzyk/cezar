@@ -2976,8 +2976,9 @@ export class RunManager {
           env: stepProfile.env,
           model: backendModel,
           sessionId,
-          // Interactive sessions have no wall clock — the idle timer rules.
-          timeoutMs: interactive ? 0 : undefined,
+          // Interactive sessions have no wall clock — the idle timer rules;
+          // an autonomous step gets the one it declared, or the runner default.
+          timeoutMs: stepTimeoutMs(step, interactive),
         },
         onEvent,
         {
@@ -3525,6 +3526,28 @@ export class RunManager {
     emit({ type: 'step-end', stepId, status, ...(error ? { error } : {}) });
     appendHandoffHeartbeat(this.dataDir, runId, `step "${stepId}" complete — status=${status}`);
   }
+}
+
+/**
+ * The wall clock an agent step's session runs under, in the millisecond unit
+ * every runner's `spec.timeoutMs` speaks (#48).
+ *
+ *  - `0` for an interactive session — the workflow's last agent step stays open
+ *    for follow-ups, so a wall clock there would kill a run that is only waiting
+ *    for the user. The idle timer rules instead, and a declared
+ *    `timeoutMinutes` does not get to re-arm it.
+ *  - the step's own `timeoutMinutes`, when it declares one.
+ *  - `undefined` otherwise, which leaves the runner on its own default
+ *    (`DEFAULT_RUN_TIMEOUT_MS`, 30 minutes). Deliberately not `Infinity`: the
+ *    default is a safety net against a hung agent, and this field is an opt-UP
+ *    from it, not its removal.
+ *
+ * The three sibling runners honour `spec.timeoutMs` too, so they inherit this
+ * with no change of their own.
+ */
+export function stepTimeoutMs(step: WorkflowStepDef, interactive: boolean): number | undefined {
+  if (interactive) return 0;
+  return step.timeoutMinutes === undefined ? undefined : step.timeoutMinutes * 60_000;
 }
 
 function findLastAgentStepIndex(workflow: WorkflowDef): number {
