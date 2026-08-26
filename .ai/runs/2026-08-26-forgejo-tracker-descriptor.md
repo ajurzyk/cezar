@@ -104,16 +104,16 @@ that no section body is empty.
 
 ### Phase 2: the descriptor's spine and its test harness
 
-- [ ] 2.1 Prerequisites, Conventions, guards, Identity operations
-- [ ] 2.2 Descriptor-driven hermetic test harness
+- [x] 2.1 Prerequisites, Conventions, guards, Identity operations — 3bb73a8a
+- [x] 2.2 Descriptor-driven hermetic test harness — 3bb73a8a
 
 ### Phase 3: issue, pull-request and review operations
 
-- [ ] 3.1 Issue operations
-- [ ] 3.2 Pull-request operations, mark-pr-ready readback, review dictionary
-- [ ] 3.3 attach-image-evidence
+- [x] 3.1 Issue operations — 3bb73a8a
+- [x] 3.2 Pull-request operations, mark-pr-ready readback, review dictionary — 3bb73a8a
+- [x] 3.3 attach-image-evidence — 3bb73a8a
 
 ### Phase 4: CI, labels, and the acceptance checks
 
-- [ ] 4.1 CI-run and label operations, 42-heading parity
+- [x] 4.1 CI-run and label operations, 42-heading parity — 3bb73a8a
 - [ ] 4.2 Full gate, PR, labels, review pass
