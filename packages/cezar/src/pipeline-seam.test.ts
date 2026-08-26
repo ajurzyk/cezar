@@ -194,6 +194,33 @@ describe('pipeline delivery seam (#46)', () => {
     expect(readFileSync(join(repo, '.git', 'config'), 'utf8')).not.toContain('worktreeConfig');
   });
 
+  it('refuses, rather than reporting delivered, when a file cannot be written', async () => {
+    // The verification that follows the copy loop is `git status --porcelain` over
+    // the delivered paths — and those paths are on the excludes list this function
+    // just installed, so a path that was never written and a path that was written
+    // successfully produce byte-identical output: nothing. Measured on git 2.47.3:
+    //
+    //   $ git -C wt status --porcelain -- never-written.md
+    //   (no output)
+    //
+    // So that check can only ever catch the VISIBLE failure, never the missing one.
+    // A swallowed copy error therefore reads as success, the run proceeds believing
+    // it has a descriptor, and the om-* preflight then reruns om-setup-agent-pipeline
+    // — which installs the pipeline by COMMITTING it into the repository under work.
+    // That is the one outcome this module exists to prevent, reached through a
+    // success report, so the copy failure has to be reported by the copy loop.
+    provision('.ai/trackers/forgejo.md', '# descriptor\n');
+    // A plain file where the pipeline needs a directory: mkdir fails EEXIST and the
+    // copy then fails ENOTDIR. Ordinary, and uid-independent.
+    mkdirSync(join(worktree, '.ai'), { recursive: true });
+    writeFileSync(join(worktree, '.ai/trackers'), 'not a directory\n');
+
+    const outcome = await provisionPipeline(repo, worktree);
+
+    expect(outcome.status).toBe('refused');
+    expect(outcome).toHaveProperty('reason', expect.stringContaining('.ai/trackers/forgejo.md'));
+  });
+
   it('is idempotent across the restarts a run survives', async () => {
     const userExcludes = join(root, 'user-excludes');
     writeFileSync(userExcludes, 'scratch-*.log\n');

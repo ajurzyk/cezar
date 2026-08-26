@@ -274,6 +274,9 @@ describe('forgejo tracker descriptor (#46)', () => {
       ['http://forge.example:8929/ajr/orakton.git', 'ajr/orakton'],
       ['git@forge.example:ajr/orakton.git', 'ajr/orakton'],
       ['http://user:pw@forge.example:8929/ajr/orakton', 'ajr/orakton'],
+      // `%.git` before `%/` leaves `ajr/orakton.git`, which still matches the
+      // `*/*` case and is returned as though it were a repository handle.
+      ['http://forge.example:8929/ajr/orakton.git/', 'ajr/orakton'],
     ])('derives %s from origin itself', async (url, expected) => {
       expect((await remote(url)).stdout).toBe(expected);
     });
@@ -330,6 +333,7 @@ describe('forgejo tracker descriptor (#46)', () => {
       case "$endpoint" in
         */labels\\?page=1*) reply 200 "$(seq 1 50   | sed 's/.*/{"name":"label-&"}/' | paste -sd, - | sed 's/^/[/;s/$/]/')" ;;
         */labels\\?page=2*) reply 200 "$(seq 51 ${total} | sed 's/.*/{"name":"label-&"}/' | paste -sd, - | sed 's/^/[/;s/$/]/')" ;;
+        */labels\\?page=*)  reply 200 '[]' ;;
       esac`;
 
     it('walks every page, so a label past the first 50 is not reported missing', async () => {
@@ -352,8 +356,46 @@ describe('forgejo tracker descriptor (#46)', () => {
       expect(result.stdout.trim()).toBe('FOUND');
     });
 
+    it('walks past a SHORT page, which is not the end of the list', async () => {
+      // `[ "$_n" -lt 50 ] && break` reads like "that was the last page" and is
+      // really "the server returned fewer than we asked for". `limit` is clamped
+      // to the instance's MAX_RESPONSE_ITEMS (`tea api /settings/api` on the
+      // tested instance: max_response_items 50, default_paging_num 30), so an
+      // administrator who lowers it makes page one come back short — and every
+      // label past it then reports as missing, which apply_label turns into a
+      // silent "not defined in this repo" skip. Only an EMPTY page ends a list.
+      stubTea(`
+        case "$endpoint" in
+          */labels\\?page=1*) reply 200 '[{"name":"label-a"},{"name":"label-b"}]' ;;
+          */labels\\?page=2*) reply 200 '[{"name":"label-c"}]' ;;
+          */labels\\?page=*)  reply 200 '[]' ;;
+        esac`);
+
+      const result = await run('label_exists label-c && echo FOUND');
+
+      expect(result.stdout.trim()).toBe('FOUND');
+    });
+
+    it('reports a server that ignores ?page= instead of walking it forever', async () => {
+      // Stopping only on the empty page trusts the server to paginate. A server
+      // that does not would spin the walk against the network with no ceiling,
+      // which is a worse failure than the truncation that condition replaced —
+      // so the walk is bounded and hitting the bound is an error, never "the end".
+      stubTea("case \"$endpoint\" in */labels\\?page=*) reply 200 '[{\"name\":\"same\"}]' ;; esac");
+
+      const result = await run('tracker_labels_json', { TRACKER_LABEL_PAGES: '3' });
+
+      expect(result.code).not.toBe(0);
+      expect(result.stderr).toContain('not honouring ?page=');
+      expect(result.calls).toHaveLength(3);
+    });
+
     it('degrades to a logged skip for a label the repository does not define', async () => {
-      stubTea('case "$endpoint" in */labels\\?page=*) reply 200 \'[{"name":"bug"}]\' ;; esac');
+      stubTea(`
+        case "$endpoint" in
+          */labels\\?page=1*) reply 200 '[{"name":"bug"}]' ;;
+          */labels\\?page=*)  reply 200 '[]' ;;
+        esac`);
 
       const result = await run('apply_label needs-qa 12');
 
@@ -482,6 +524,53 @@ describe('forgejo tracker descriptor (#46)', () => {
       });
     });
 
+    it('get-issue names the comment COUNT a count, because that is what Forgejo answers', async () => {
+      // github.md's `comments` is the comment ARRAY; Forgejo's is an integer
+      // (measured on ajr/cezar-qa: {"number":2,"comments":0}, type number).
+      // Passing it through under github's name hands a caller scanning for the
+      // 🤖 claim comment a number, so the shapes are kept distinguishable.
+      stubTea(
+        'reply 200 \'{"number":46,"title":"t","body":"b","state":"open","user":{"login":"ajr"},' +
+          '"html_url":"http://f/i/46","labels":[],"assignees":[{"login":"cezar-bot"}],"comments":7,"pull_request":null}\'',
+      );
+
+      const parsed = JSON.parse((await run(operation('get-issue'), { ISSUE: '46' })).stdout);
+
+      expect(parsed.commentCount).toBe(7);
+      expect(parsed).not.toHaveProperty('comments');
+      // The claim protocol's other two signals still come back from this one
+      // operation, which is what keeps a lock detectable without the comment list.
+      expect(parsed.assignees).toEqual(['cezar-bot']);
+    });
+
+    it('create-issue resolves label ids across pages, and names the ones it could not', async () => {
+      // A single `?limit=50` here would answer "not defined in this repo" for the
+      // 51st label — the same silent, wrong skip the label guard pages to avoid.
+      const bodyFile = join(box, 'body.md');
+      writeFileSync(bodyFile, 'body\n');
+      stubTea(`
+        case "$endpoint" in
+          */labels\\?page=1*) reply 200 '[{"id":1,"name":"bug"}]' ;;
+          */labels\\?page=2*) reply 200 '[{"id":2,"name":"needs-qa"}]' ;;
+          */labels\\?page=*)  reply 200 '[]' ;;
+          */issues)           reply 201 '{"html_url":"http://f/i/47"}' ;;
+        esac`);
+
+      const result = await run(operation('create-issue'), {
+        ISSUE: '47',
+        TITLE: 'a title',
+        LOGIN: 'cezar-bot',
+        LABELS: 'bug,needs-qa,no-such-label',
+        BODY_FILE: bodyFile,
+      });
+
+      expect(result.code).toBe(0);
+      const post = result.calls.find((call) => call.includes('POST'));
+      expect(post).toContain('labels=[1,2]');
+      // The log the operation's contract promises, which it did not emit.
+      expect(result.stdout).toContain('Skipping labels not defined in this repo: no-such-label');
+    });
+
     it('comment-issue sends a multi-line body through a file, never a command line', async () => {
       const bodyFile = join(box, 'body.md');
       writeFileSync(bodyFile, '# heading\n\nline one\nline two\n');
@@ -563,11 +652,20 @@ describe('forgejo tracker descriptor (#46)', () => {
       '"labels":[{"name":"review"}],"assignees":[],"created_at":"2026-08-26T10:00:00Z",' +
       '"merged_at":null,"closed_at":null,"additions":12,"changed_files":3}';
 
+    /** The PR route plus the reviews route, which `get-pr` now also reads. */
+    const stubPr = (prJson: string, reviewsJson = '[]'): void =>
+      stubTea(`
+        case "$endpoint" in
+          */pulls/51/reviews) reply 200 '${reviewsJson}' ;;
+          */pulls/51)         reply 200 '${prJson}' ;;
+        esac`);
+
     it('get-pr serializes state the way TEMPLATE.md requires, not the way Forgejo answers', async () => {
-      stubTea(`reply 200 '${PR_JSON}'`);
+      stubPr(PR_JSON);
 
       const result = await run(operation('get-pr'), { PR: '51' });
 
+      expect(result.code).toBe(0);
       expect(JSON.parse(result.stdout)).toMatchObject({
         number: 51,
         state: 'OPEN',
@@ -580,11 +678,95 @@ describe('forgejo tracker descriptor (#46)', () => {
     });
 
     it('get-pr reports a merged PR as MERGED, which no Forgejo field says on its own', async () => {
-      stubTea(`reply 200 '${PR_JSON.replace('"merged":false', '"merged":true').replace('"state":"open"', '"state":"closed"')}'`);
+      stubPr(
+        PR_JSON.replace('"merged":false', '"merged":true').replace('"state":"open"', '"state":"closed"'),
+      );
 
       const result = await run(operation('get-pr'), { PR: '51' });
 
+      expect(result.code).toBe(0);
       expect(JSON.parse(result.stdout).state).toBe('MERGED');
+    });
+
+    it('get-pr answers every field skills request, so an omission is not found as a null', async () => {
+      // The field list github.md documents IS the contract — om-auto-review-pr
+      // step 2 names these. Nine of them were once silently absent from the
+      // serialization while the prose accounted for two, which is the shape of
+      // bug a key-set assertion catches and a per-field assertion does not.
+      stubPr(PR_JSON);
+
+      const result = await run(operation('get-pr'), { PR: '51' });
+
+      expect(Object.keys(JSON.parse(result.stdout)).sort()).toEqual(
+        [
+          'additions', 'assignees', 'author', 'baseRefName', 'baseRefOid', 'body',
+          'changedFiles', 'closedAt', 'commentCount', 'createdAt', 'headRefName',
+          'headRefOid', 'headRepository', 'headRepositoryOwner', 'isCrossRepository',
+          'isDraft', 'labels', 'latestReviews', 'maintainerCanModify', 'mergeCommit',
+          'mergeStateStatus', 'mergeable', 'mergedAt', 'number', 'reviews', 'state',
+          'title', 'url',
+        ].sort(),
+      );
+    });
+
+    it('get-pr reports a head that cannot merge in the words step 4a actually tests', async () => {
+      // Forgejo answers a boolean. Passing it through under github.md's NAME
+      // leaves `mergeable: false`, which is neither "CONFLICTING" nor "DIRTY", so
+      // om-auto-review-pr step 4a never fires and a conflicted head is reviewed,
+      // fixed and pushed as though it merged cleanly.
+      stubPr(PR_JSON.replace('"mergeable":true', '"mergeable":false'));
+
+      const result = await run(operation('get-pr'), { PR: '51' });
+
+      const pr = JSON.parse(result.stdout);
+      expect(pr.mergeable).toBe('CONFLICTING');
+      expect(pr.mergeStateStatus).toBe('DIRTY');
+    });
+
+    it('get-pr calls a mergeable head UNKNOWN rather than CLEAN, which it cannot know', async () => {
+      // Forgejo exposes one bit. "Not conflicting" is not "ready to merge": it
+      // says nothing about behind/blocked/unstable, and a skill must not read
+      // this descriptor's ignorance as a green light.
+      stubPr(PR_JSON);
+
+      const pr = JSON.parse((await run(operation('get-pr'), { PR: '51' })).stdout);
+      expect(pr.mergeable).toBe('MERGEABLE');
+      expect(pr.mergeStateStatus).toBe('UNKNOWN');
+    });
+
+    it('get-pr carries the reviews om-auto-review-pr needs to tell a re-review from a review', async () => {
+      stubPr(
+        PR_JSON,
+        JSON.stringify([
+          { state: 'REQUEST_CHANGES', dismissed: false, user: { login: 'ajr' }, body: 'first pass', submitted_at: '2026-08-26T10:00:00Z' },
+          { state: 'APPROVED', dismissed: false, user: { login: 'ajr' }, body: 'now good', submitted_at: '2026-08-26T12:00:00Z' },
+          { state: 'PENDING', dismissed: false, user: { login: 'other' }, body: 'draft', submitted_at: '2026-08-26T13:00:00Z' },
+        ]),
+      );
+
+      const pr = JSON.parse((await run(operation('get-pr'), { PR: '51' })).stdout);
+
+      // PENDING is an unsubmitted draft, not a verdict, so it is not a review.
+      expect(pr.reviews.map((r: { state: string }) => r.state)).toEqual([
+        'CHANGES_REQUESTED',
+        'APPROVED',
+      ]);
+      // latestReviews is the newest submitted review per author.
+      expect(pr.latestReviews).toEqual([
+        { author: 'ajr', body: 'now good', submittedAt: '2026-08-26T12:00:00Z', state: 'APPROVED' },
+      ]);
+    });
+
+    it('get-pr never lets an unknown review state read as APPROVED', async () => {
+      stubPr(
+        PR_JSON,
+        JSON.stringify([
+          { state: 'SOME_FUTURE_STATE', dismissed: false, user: { login: 'ajr' }, body: '', submitted_at: '2026-08-26T10:00:00Z' },
+        ]),
+      );
+
+      const pr = JSON.parse((await run(operation('get-pr'), { PR: '51' })).stdout);
+      expect(pr.reviews[0].state).toBe('UNRECOGNIZED');
     });
 
     it('create-pr sends the WIP prefix for a draft and proves the instance took it', async () => {
@@ -1035,6 +1217,7 @@ describe('forgejo tracker descriptor (#46)', () => {
         case "$endpoint" in
           */labels\\?page=1*) reply 200 "$(seq 1 50 | sed 's/.*/{"name":"l&"}/' | paste -sd, - | sed 's/^/[/;s/$/]/')" ;;
           */labels\\?page=2*) reply 200 '[{"name":"l51"}]' ;;
+          */labels\\?page=*)  reply 200 '[]' ;;
         esac`);
 
       const result = await run(operation('list-labels'));

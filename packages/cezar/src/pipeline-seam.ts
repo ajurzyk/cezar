@@ -236,20 +236,61 @@ export async function provisionPipeline(
     };
   }
 
+  // A copy that fails must be reported by the copy, because nothing downstream
+  // can see it: the check below asks git about paths this function has just put
+  // on the excludes list, and git says exactly the same nothing about a path
+  // that was never written as about one that was written and hidden. Measured on
+  // git 2.47.3:
+  //
+  //     $ git -C wt status --porcelain -- never-written.md
+  //     (no output)
+  //
+  // Swallowing the error here would therefore report `delivered` for a descriptor
+  // that is not there — and a run that believes it has a descriptor reruns
+  // `om-setup-agent-pipeline`, which installs one by COMMITTING it into the
+  // repository under work. Reachable without anything exotic: a plain file where
+  // a directory is needed (EEXIST, then ENOTDIR), a symlinked directory in the
+  // provision tree (`walk` records it as a file, `copyFile` follows it and gets
+  // EISDIR), a permission error, ENOSPC.
+  const unwritten: string[] = [];
   for (const path of deliverable) {
     const target = join(worktreePath, path);
-    await mkdir(dirname(target), { recursive: true }).catch(() => undefined);
     // Copy rather than symlink: a symlink is itself a path git reports, and it
     // would dangle the moment the worktree outlived its source.
-    await copyFile(join(sourceDir, path), target).catch(() => undefined);
+    const written = await mkdir(dirname(target), { recursive: true })
+      .then(() => copyFile(join(sourceDir, path), target))
+      .then(() => true)
+      .catch(() => false);
+    if (!written) unwritten.push(path);
   }
 
-  // Verify what actually landed, not what we intended to land. A copy that
-  // failed above must not be reported as delivered, and a path that turns out
-  // visible after the fact is withdrawn rather than left in the branch's way.
+  /**
+   * Withdraw the whole delivery: a half-delivered pipeline is worse than none.
+   * `force` only swallows ENOENT, and this runs on the path where the filesystem
+   * is already odd — a plain file where a directory belongs makes `rm` fail
+   * ENOTDIR on the child. Withdrawal must not turn a reportable refusal into a
+   * thrown error, so every removal is best-effort.
+   */
+  const withdraw = async (): Promise<void> => {
+    for (const path of deliverable) {
+      await rm(join(worktreePath, path), { force: true }).catch(() => undefined);
+    }
+  };
+
+  if (unwritten.length > 0) {
+    await withdraw();
+    return {
+      status: 'refused',
+      reason: `could not write ${unwritten.join(', ')} into the worktree`,
+    };
+  }
+
+  // Verify what actually landed is invisible, not merely that we meant it to be.
+  // This catches the other direction — a path git can still see after the fact —
+  // which is withdrawn rather than left in the branch's way.
   const after = await git(worktreePath, ['status', '--porcelain', '--', ...deliverable]);
   if (after.stdout.trim()) {
-    for (const path of deliverable) await rm(join(worktreePath, path), { force: true });
+    await withdraw();
     return {
       status: 'refused',
       reason: `git reported the delivered pipeline after writing it: ${after.stdout.trim()}`,

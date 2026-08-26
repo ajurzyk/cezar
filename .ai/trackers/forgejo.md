@@ -106,7 +106,10 @@ tracker_repo() {
   esac
   url=${url#*@}                                 # userinfo
   url=${url#*/}                                 # host[:port]
-  url=${url%.git}; url=${url%/}
+  # Trailing slash first: the other order leaves `…/ajr/orakton.git/` as
+  # `ajr/orakton.git`, which then passes the `*/*` case below and is returned as
+  # a repository handle.
+  url=${url%/}; url=${url%.git}; url=${url%/}
   case "$url" in
     */*/*|*/) echo "tracker_repo: '$url' is not owner/name (from $(git config --get remote.origin.url))" >&2; return 1 ;;
     */*) printf '%s' "$url" ;;
@@ -138,21 +141,43 @@ tea_api() {
 }
 
 # --- label guards ----------------------------------------------------------
-# Every label name in the target repo, one per line. The loop is not optional:
-# `tea api` has no --paginate and a page is capped at 50 on this instance.
-tracker_labels() {
-  _page=1
-  while :; do
+# Every label OBJECT in the target repo, as one JSON array. The loop is not
+# optional: `tea api` has no --paginate and a page is capped (this instance:
+# `tea api /settings/api` → max_response_items 50, default_paging_num 30).
+#
+# The loop stops on an EMPTY page and on nothing else. Stopping on a SHORT page
+# instead — `[ "$_n" -lt 50 ] && break` — reads as the same thing and is not: it
+# assumes the server honours `limit=50`, and `limit` is clamped to the instance's
+# MAX_RESPONSE_ITEMS. An administrator who lowered that below 50 makes page one
+# come back short, the walk stop early, and every label past it report as
+# missing — at which point `apply_label` logs "not defined in this repo" and
+# returns 0. That silent, wrong skip is the exact failure this walk exists to
+# prevent, so it must not re-enter through the termination condition. One extra
+# request per call buys the loop its independence from a server setting.
+# Stopping on the empty page means the walk trusts the server to honour `page`.
+# It mostly can — but "mostly" is not a termination condition, and a server that
+# ignored `page` would spin this loop against the network forever, which is a
+# worse failure than the truncation it replaces. So the walk is bounded, and
+# hitting the bound is REPORTED rather than treated as the end of the list: at
+# 50 per page it is 5000 labels, which no taxonomy reaches, so the bound can only
+# mean the paging contract is not being kept.
+TRACKER_LABEL_PAGES=${TRACKER_LABEL_PAGES:-100}
+tracker_labels_json() {
+  _page=1; _all='[]'
+  while [ "$_page" -le "$TRACKER_LABEL_PAGES" ]; do
     _body=$(tea_api "/repos/{owner}/{repo}/labels?page=${_page}&limit=50") || return 1
     _n=$(printf '%s' "$_body" | jq 'length')
-    if [ "$_n" -eq 0 ]; then break; fi
-    printf '%s' "$_body" | jq -r '.[].name'
-    # `[ … ] && break` would be a `set -e` trap: on the false branch the AND-OR
-    # list itself exits non-zero and takes the whole script with it.
-    if [ "$_n" -lt 50 ]; then break; fi
+    if [ "$_n" -eq 0 ]; then printf '%s' "$_all"; return 0; fi
+    _all=$(printf '%s\n%s' "$_all" "$_body" | jq -sc 'add')
     _page=$((_page + 1))
   done
+  echo "tracker_labels: still receiving labels after $TRACKER_LABEL_PAGES pages; this instance is not honouring ?page= and the taxonomy cannot be read reliably" >&2
+  return 1
 }
+
+# The same walk, names only, one per line. Under `set -o pipefail` a failed walk
+# propagates through the pipe, which is what lets `label_exists` answer 2.
+tracker_labels() { tracker_labels_json | jq -r '.[].name'; }
 
 # NOT `tracker_labels | grep -Fxq "$1"`: grep -q exits on the first match, the
 # producer takes SIGPIPE, and under `set -o pipefail` a label that DOES exist
@@ -215,6 +240,23 @@ set_pipeline_label() {
 # --- serialization ---------------------------------------------------------
 # TEMPLATE.md fixes the skill-facing shape; Forgejo answers something else.
 # One place does the mapping so no operation re-derives it.
+#
+# `mergeable` and `mergeStateStatus` are the fields skills read to decide whether
+# a head can merge, and passing Forgejo's raw boolean through under github.md's
+# NAME would be worse than omitting it: `om-auto-review-pr` step 4a tests
+# `mergeable == "CONFLICTING"` / `mergeStateStatus == "DIRTY"`, and a `false`
+# satisfies neither, so a conflicted head would be reviewed, fixed and pushed as
+# though it merged cleanly. Forgejo exposes one bit here, so DIRTY is the only
+# merge state this descriptor can assert; everything else is UNKNOWN rather than
+# CLEAN, because Forgejo does not say whether the PR is behind, blocked or
+# unstable, and a skill must not read our ignorance as a green light.
+#
+# `comments` is deliberately NOT in this object. Forgejo's `comments` is an
+# integer count (measured on ajr/cezar-qa: `{"number":2,"comments":0}`, type
+# number), where github.md answers the comment ARRAY — so mapping it through
+# under the same name hands a consumer scanning for a `🤖` claim comment a
+# number. It is exposed as `commentCount`, and the list comes from
+# **list-issue-comments**.
 normalize_pr() {
   jq '{
     number, title, url: .html_url, body: (.body // ""),
@@ -223,9 +265,16 @@ normalize_pr() {
     baseRefName: .base.ref, baseRefOid: .base.sha,
     headRefName: .head.ref, headRefOid: .head.sha,
     headRepository: (.head.repo.full_name // null),
+    headRepositoryOwner: (.head.repo.owner.login // null),
     isCrossRepository: ((.head.repo.full_name // "") != (.base.repo.full_name // "")),
-    mergeable: .mergeable,
+    maintainerCanModify: .allow_maintainer_edit,
+    mergeable: (if .mergeable == true then "MERGEABLE"
+                elif .mergeable == false then "CONFLICTING"
+                else "UNKNOWN" end),
+    mergeStateStatus: (if .mergeable == false then "DIRTY" else "UNKNOWN" end),
+    mergeCommit: .merge_commit_sha,
     labels: [.labels[]?.name], assignees: [.assignees[]?.login],
+    commentCount: .comments,
     createdAt: .created_at, mergedAt: .merged_at, closedAt: .closed_at,
     additions: .additions, changedFiles: .changed_files
   }'
@@ -242,26 +291,43 @@ normalize_pr() {
 #
 # A state outside the dictionary must NEVER become approved: it resolves to
 # review-required and is flagged, following forgejo-map.ts:482.
+# The dictionary itself, written ONCE and interpolated by its three consumers.
+# A contract copied per call site is a contract that drifts per call site, and a
+# state that drifts to the wrong side here approves a PR nobody approved.
+REVIEW_STATE_JQ='if   .dismissed                   then "DISMISSED"
+                 elif .state == "APPROVED"         then "APPROVED"
+                 elif .state == "REQUEST_CHANGES"  then "CHANGES_REQUESTED"
+                 elif .state == "COMMENT"          then "COMMENTED"
+                 else "UNRECOGNIZED" end'
+# A review that has not been submitted is not a verdict: PENDING is the author's
+# own unsubmitted draft and REQUEST_REVIEW is an invitation, so both are dropped
+# before anything counts them.
+REVIEW_SUBMITTED_JQ='select(.state != "PENDING" and .state != "REQUEST_REVIEW" and .state != "")'
+
 review_state() {   # stdin: a Forgejo review object → the TEMPLATE.md state
-  jq -r 'if   .dismissed        then "DISMISSED"
-         elif .state == "APPROVED"        then "APPROVED"
-         elif .state == "REQUEST_CHANGES" then "CHANGES_REQUESTED"
-         elif .state == "COMMENT"         then "COMMENTED"
-         else "UNRECOGNIZED" end'
+  jq -r "$REVIEW_STATE_JQ"
+}
+
+# stdin: a Forgejo /pulls/{n}/reviews array → {reviews, latestReviews} in the
+# TEMPLATE.md shape. get-pr needs these as fields: om-auto-review-pr step 3 reads
+# `reviews` (falling back to `latestReviews`) to tell a review from a re-review,
+# and step 2b mines the bodies for feedback already on the PR. `review_decision`
+# reads the same route but answers only a decision string, so it cannot stand in.
+# `latestReviews` is the newest submitted review per author, as github.md answers.
+pr_reviews() {
+  jq -c "[ .[] | $REVIEW_SUBMITTED_JQ
+         | { author: .user.login, body: (.body // \"\"), submittedAt: .submitted_at,
+             state: ($REVIEW_STATE_JQ) } ]
+         | { reviews: ., latestReviews: (group_by(.author) | map(max_by(.submittedAt))) }"
 }
 
 review_decision() {   # $1 = PR number → {decision, unrecognized}
-  tea_api "/repos/{owner}/{repo}/pulls/$1/reviews" | jq -c '
-    [ .[] | select(.state != "PENDING" and .state != "REQUEST_REVIEW" and .state != "")
-          | if .dismissed then "DISMISSED"
-            elif .state == "APPROVED"        then "APPROVED"
-            elif .state == "REQUEST_CHANGES" then "CHANGES_REQUESTED"
-            elif .state == "COMMENT"         then "COMMENTED"
-            else "UNRECOGNIZED" end ] as $states
-    | if   ($states | index("UNRECOGNIZED")) then {decision:"review-required", unrecognized:true}
-      elif ($states | index("CHANGES_REQUESTED")) then {decision:"changes-requested", unrecognized:false}
-      elif ($states | index("APPROVED")) then {decision:"approved", unrecognized:false}
-      else {decision:"review-required", unrecognized:false} end'
+  tea_api "/repos/{owner}/{repo}/pulls/$1/reviews" | jq -c "
+    [ .[] | $REVIEW_SUBMITTED_JQ | ($REVIEW_STATE_JQ) ] as \$states
+    | if   (\$states | index(\"UNRECOGNIZED\")) then {decision:\"review-required\", unrecognized:true}
+      elif (\$states | index(\"CHANGES_REQUESTED\")) then {decision:\"changes-requested\", unrecognized:false}
+      elif (\$states | index(\"APPROVED\")) then {decision:\"approved\", unrecognized:false}
+      else {decision:\"review-required\", unrecognized:false} end"
 }
 ```
 
@@ -326,9 +392,10 @@ tea_api "/repos/{owner}/{repo}/issues/${ISSUE}" | jq '{
   number, title, body: (.body // ""), state: (.state | ascii_upcase),
   author: .user.login, url: .html_url,
   labels: [.labels[]?.name], assignees: [.assignees[]?.login],
-  comments: .comments, isPullRequest: (.pull_request != null)
+  commentCount: .comments, isPullRequest: (.pull_request != null)
 }'
 ```
+**`commentCount` is a count, and it is named that way on purpose.** `github.md`'s `comments` is the comment **array**; Forgejo's is an integer (measured on `ajr/cezar-qa`: `{"number": 2, "comments": 0}`, type `number`). Mapping it through under github's name would hand a caller scanning for the `🤖` claim comment a number that quietly satisfies a truthiness test, so the shapes are kept distinguishable and the list has its own operation: **list-issue-comments**. The claim protocol's other two signals — the assignee and the `in-progress` label — are both in the object above, so a lock stays detectable from this operation alone.
 
 #### search-issues
 Query (text, state) → matching issues. `type=issues` keeps pull requests out of the result; drop it to search both.
@@ -339,9 +406,20 @@ tea_api "/repos/{owner}/{repo}/issues?state=${STATE:-open}&type=issues&q=$(print
 
 #### create-issue
 Title, body, assignee, labels → created issue URL. Labels are passed as **ids** here (Forgejo's create endpoint takes ids, unlike the add-label endpoint which takes names), so they are resolved first; an unknown one is skipped with a log rather than failing the create.
+
+The lookup walks the taxonomy through `tracker_labels_json` for the reason the Label guards section gives: a single `?limit=50` would answer "not defined in this repo" for the 51st label, silently and wrongly, and this operation has no more right to that bug than the guard does. The walk is captured once and read twice, so pagination costs no extra round trip per label.
 ```bash
-LABEL_IDS=$(tea_api '/repos/{owner}/{repo}/labels?limit=50' \
-  | jq -c --arg want "$LABELS" '($want | split(",")) as $w | [.[] | select(.name as $n | $w | index($n)) | .id]')
+ALL_LABELS=$(tracker_labels_json) || exit 1
+LABEL_IDS=$(printf '%s' "$ALL_LABELS" \
+  | jq -c --arg want "$LABELS" '($want | if . == "" then [] else split(",") end) as $w
+                                | [.[] | select(.name as $n | $w | index($n)) | .id]')
+# The log the contract promises. A label silently missing from a created issue is
+# a pipeline state nobody set, discovered much later than here.
+UNKNOWN=$(printf '%s' "$ALL_LABELS" \
+  | jq -r --arg want "$LABELS" '[.[].name] as $have
+                                | ($want | if . == "" then [] else split(",") end)
+                                | map(select(. as $n | $have | index($n) | not)) | join(", ")')
+[ -z "$UNKNOWN" ] || echo "Skipping labels not defined in this repo: $UNKNOWN"
 tea_api -X POST '/repos/{owner}/{repo}/issues' \
   -f "title=${TITLE}" -F "body=@${BODY_FILE}" \
   -F "assignees=$(jq -nc --arg a "$LOGIN" '[$a]')" -F "labels=${LABEL_IDS}" \
@@ -406,9 +484,31 @@ tea_api -X PATCH "/repos/{owner}/{repo}/issues/comments/${COMMENT_ID}" -F "body=
 #### get-pr
 `{prNumber}`, field list → PR data, serialized as `TEMPLATE.md` requires (`OPEN`/`CLOSED`/`MERGED`, ISO-8601 timestamps) rather than as Forgejo answers.
 ```bash
-tea_api "/repos/{owner}/{repo}/pulls/${PR}" | normalize_pr
+# ONE object, as github.md answers — `reviews` / `latestReviews` merely live on
+# their own route here, which is this descriptor's problem and not the caller's.
+# A caller that never reads reviews can run the first line alone and skip the
+# second request; anything that reads them must not have to merge two blobs.
+PR_OBJECT=$(tea_api "/repos/{owner}/{repo}/pulls/${PR}" | normalize_pr) || exit 1
+PR_REVIEWS=$(tea_api "/repos/{owner}/{repo}/pulls/${PR}/reviews" | pr_reviews) || exit 1
+printf '%s\n%s' "$PR_OBJECT" "$PR_REVIEWS" | jq -sc 'add'
 ```
-Two fields skills request from `github.md` have no Forgejo equivalent and are absent rather than faked: `mergeStateStatus` (Forgejo exposes only the `mergeable` boolean) and `reviewDecision` — for which **review-pr**'s `review_decision` helper is the replacement, because it makes the unrecognized-state case explicit instead of hiding it in a field.
+
+**What this answers, against the field list `github.md` documents.** The list is not a suggestion — skills name these fields — so every one is accounted for here rather than left to be discovered as a `null`:
+
+| Field | Here |
+|---|---|
+| `number`, `title`, `url`, `body`, `state`, `author`, `isDraft` | `normalize_pr`, `state` as `OPEN`/`CLOSED`/`MERGED` |
+| `baseRefName`, `baseRefOid`, `headRefName`, `headRefOid` | `normalize_pr` |
+| `headRepository`, `headRepositoryOwner`, `isCrossRepository` | `normalize_pr` |
+| `maintainerCanModify` | `normalize_pr`, from `allow_maintainer_edit` |
+| `mergeable`, `mergeStateStatus` | `normalize_pr`, mapped — see the helper's note on why the raw boolean must not pass through under these names |
+| `labels`, `assignees` | `normalize_pr` |
+| `createdAt`, `mergedAt`, `closedAt`, `mergeCommit`, `additions`, `changedFiles` | `normalize_pr` |
+| `reviews`, `latestReviews` | the second call, through `pr_reviews` |
+| `comments` | **not** in `normalize_pr`. Forgejo's `comments` is an integer count, not the array `github.md` answers, so it is exposed as `commentCount` and the list comes from **list-issue-comments** |
+| `commits` | **get-pr-files** answers the changed files; a commit list is `/repos/{owner}/{repo}/pulls/${PR}/commits`, not folded in here because no skill in the collection reads it |
+| `reviewDecision` | genuinely absent. `review_decision` is the replacement, and it is better than the field: it makes the unrecognized-state case explicit instead of hiding it behind a value |
+| `closingIssuesReferences` | genuinely absent — Forgejo resolves `Fixes #n` at merge time and exposes no parsed list. Read the body |
 
 #### list-prs
 State/search filters, field list, limit → PRs.
@@ -698,7 +798,7 @@ Name, color, description. Never delete, rename, or recolor existing labels.
 tea_api -X POST '/repos/{owner}/{repo}/labels' \
   -f "name=${LABEL}" -f "color=${COLOR}" -f "description=${DESCRIPTION}" | jq -r '.name'
 ```
-The color is sent with a leading `#`; Forgejo stores it without one (measured: `-f 'color=#ededed'` → `201`, `"color":"ededed"`). A consumer comparing colors must compare the stored form.
+Forgejo accepts the color with or without a leading `#` and stores it **without** one, so a consumer comparing colors must compare the stored form. Both measured on `ajr/cezar-qa`, probes deleted afterwards: `-f 'color=#ededed'` → `201`, `"color":"ededed"`; `-f 'color=0366d6'` → `201`, `"color":"0366d6"`. The bare form is what this file sends, here and from every `ensure_label` call below.
 
 #### ensure-label-taxonomy
 Create every label from the config's taxonomy that does not exist yet (skip ones that already exist per **list-labels**). Existence is checked against the full paginated list, so re-running on a repo with a large taxonomy does not re-create the labels past the first page.

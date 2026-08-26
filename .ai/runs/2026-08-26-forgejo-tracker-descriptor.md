@@ -118,3 +118,8 @@ that no section body is empty.
 - [x] 4.1 CI-run and label operations, 42-heading parity — 3bb73a8a
 - [x] 4.2 Full gate, PR, labels, review pass — 7b633f69
 - [x] Post-review fix: `get-required-checks` and `ensure_label` degrade inside the descriptor instead of relying on the caller — 7b633f69
+- [x] Second review pass (`om-auto-review-pr`, independent context): two majors fixed — the seam reported a
+  failed copy as `delivered` because the check meant to catch it is blind to a missing ignored path, and
+  `get-pr`/`get-issue` dropped or reshaped nine of the fields the `om-*` skills request. Plus two minors
+  (label paging coupled to the instance honouring `limit`, `create-issue`'s unpaginated lookup) and three
+  nits. Every fix pinned by a case verified red against the restored original bug.
