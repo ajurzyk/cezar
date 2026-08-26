@@ -27,6 +27,11 @@ export function skillStack(steps: readonly WorkflowStepDef[]): string[] | null {
     if (s.prompt !== undefined && s.prompt !== '{{task}}') return null
     if (s.name !== undefined && s.name !== s.skill) return null
     if (s.model || s.runner || s.allowedTools || s.bashAllowlist || s.onFail) return null
+    // A per-step wall clock (#48) has nowhere to live in the compact form, so a
+    // step carrying one is "richer" here exactly as it is on the server. Without
+    // this line the canvas posts `{ skills: [...] }`, the server's own guard is
+    // never consulted, and the cap is written away with no error.
+    if (s.timeoutMinutes !== undefined) return null
     skills.push(s.skill)
   }
   return skills.length ? skills : null
@@ -117,6 +122,7 @@ export function workflowYaml(
       if (s.runner) lines.push(`    runner: ${yamlScalar(s.runner)}`)
       if (s.allowedTools) lines.push(`    allowedTools: [${s.allowedTools.map(yamlScalar).join(', ')}]`)
       if (s.bashAllowlist) lines.push(`    bashAllowlist: [${s.bashAllowlist.map(yamlScalar).join(', ')}]`)
+      if (s.timeoutMinutes !== undefined) lines.push(`    timeoutMinutes: ${s.timeoutMinutes}`)
       if (s.command) lines.push(...yamlBlock('command', s.command, 4))
       if (s.onFail) {
         lines.push('    onFail:', `      retry: ${yamlScalar(s.onFail.retry)}`, `      max: ${s.onFail.max ?? 2}`)

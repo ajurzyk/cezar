@@ -51,6 +51,7 @@ describe('skillStack', () => {
     ['a per-step runner', { ...stackStep('a'), runner: 'codex' }],
     ['an onFail loop', { ...stackStep('a'), onFail: { retry: 'a', max: 2 } }],
     ['a plain prompt step (no skill)', { id: 'p', prompt: '{{task}}' }],
+    ['a per-step wall clock', { ...stackStep('a'), timeoutMinutes: 90 }],
   ])('anything richer — %s — forces the full steps form', (_reason, step) => {
     expect(skillStack([stackStep('x'), step])).toBeNull()
   })
@@ -125,6 +126,25 @@ describe('workflowYaml', () => {
       name: 'My Flow',
       description: 'Checks then commit style.',
       skills: ['test-conventions', 'commit-style'],
+    })
+  })
+
+  // #48 — the field the cockpit was silently dropping. The compact `skills:`
+  // form has nowhere to write a per-step cap, so a workflow that declares one
+  // MUST serialize as full `steps:` and MUST carry the field there. Missing
+  // either half loses the cap on Save/Copy/Export with no error at all.
+  it('carries a per-step timeoutMinutes into the full steps form', () => {
+    const steps: WorkflowStepDef[] = [
+      { ...stackStep('implement'), timeoutMinutes: 90 },
+      { ...stackStep('review') },
+    ]
+    expect(parse(workflowYaml('long-run', '', steps))).toEqual({
+      name: 'long-run',
+      steps: [
+        // `name` is omitted by the emitter whenever it equals `id`.
+        { id: 'implement', skill: 'implement', prompt: '{{task}}', timeoutMinutes: 90 },
+        { id: 'review', skill: 'review', prompt: '{{task}}' },
+      ],
     })
   })
 
