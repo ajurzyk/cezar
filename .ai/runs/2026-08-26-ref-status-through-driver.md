@@ -155,3 +155,34 @@ The re-read found two defects, both introduced by 4.1's own fix:
 - [x] 5.1 Settle an anonymous 404 against warm cache evidence, not only a fresh read — 67022ae1
 - [x] 5.2 Drop the stale "the ref-status family has no driver seam yet" line the seam made false — 8eec8f2d
 - [x] 5.3 Re-run the full gate after the fixes — 67022ae1 (gate run, no code change)
+
+### Phase 6: Independent review pass (om-auto-review-pr, fresh context)
+
+The first review of this PR by a context that did not write any of it — Phase 4 was the review
+engine run by the authoring session, and Phase 5 was that session reviewing its own two fixes. It
+reviewed the whole diff against `main`, not just the newest commits, and it verified its one
+substantive claim by measurement rather than by reading.
+
+Verdict: **changes requested**, one major and three minors, no blockers. GitHub refuses
+`--request-changes` on a self-authored PR, so the report was posted as a comment and the pipeline
+label moved to `changes-requested` regardless.
+
+The major: the dry-run branch added by 4.1 degraded to `available: false`, on the stated grounds
+that this "reproduces what a Forgejo project's chips did before this method existed". Measured, it
+does not — pre-seam the route called `fetchGithubRefStatus` for every repo, whose dry-run branch
+answers `{available: true, prs: {}, issues: {}, recheckAfterMs: 60000}`. Those are different UI
+states: `available: true` with the number absent is `state: 'unknown'` (the neutral chip, rechecked
+each minute), while `available: false` is `state: 'unavailable'` — headline "Status unavailable" —
+whose `null` cadence becomes `Infinity`, so the chip never refreshes again. Every reference chip in
+an offline Forgejo demo had become an error state, against `AGENTS.md`'s own "`CEZ_DRY_RUN=1` fakes
+every network answer" and the four dry-run fixtures this driver already carries.
+
+- [x] 6.1 Answer dry-run from the fixture catalog on the live ladder, cache nothing — aa6353f1
+- [x] 6.2 Cap the request list per kind in the driver, as `sanitizeRefNumbers` does — aa6353f1
+- [x] 6.3 Name the two known limits the prose had left out: a cached `null` cannot prove
+      readability (so the anonymous-404 gate has a narrow residual), and the shared cache drops the
+      `apiBase` discriminator all six sibling caches carry — aa6353f1
+- [x] 6.4 Re-run the full gate after the fixes — aa6353f1 (gate run, no code change)
+
+Both new guards were mutation-checked by restoring the exact original defect: the dry-run degrade
+fails 3 of the new cases, and dropping the `.slice` fails the cap case.
