@@ -1,7 +1,7 @@
 import type { RepoInfo } from '../git.ts';
 import { createForgejoDriver } from './forgejo.ts';
 import { createGithubDriver } from './github.ts';
-import type { ForgeDriver, ForgeKind, ForgeSettings } from './types.ts';
+import type { ForgeDriver, ForgeDriverCacheRoots, ForgeKind, ForgeSettings } from './types.ts';
 
 /**
  * Forge resolution (cockpit-ui redesign spec §"Forge-driver seam"): map the
@@ -161,8 +161,18 @@ export function forgeWebRoot(remote: string | undefined, forge?: ForgeSettings):
 }
 
 /** Remote host (or, for a host the table can't reveal, a repo-config `ForgeSettings`) → driver |
- *  null. GitLab lands here later as one more host-table case. */
-export function resolveForge(repoInfo: RepoInfo | null, forge?: ForgeSettings): ForgeDriver | null {
+ *  null. GitLab lands here later as one more host-table case.
+ *
+ *  Both drivers are built on `repoInfo.root`, the git top-level — that is the driver's git working
+ *  directory and the key of every cache inside it. `cacheRoots` is the one documented way out, and
+ *  it exists for the single cache that has readers outside a driver: see `ForgeDriverCacheRoots`
+ *  (`types.ts`) for the rule, and `resolveForgeOrGithub` below for the only caller that passes it.
+ *  Omitting it leaves every call site byte-identical (#50). */
+export function resolveForge(
+  repoInfo: RepoInfo | null,
+  forge?: ForgeSettings,
+  cacheRoots?: ForgeDriverCacheRoots,
+): ForgeDriver | null {
   if (!repoInfo?.remote) return null;
   const parsed = parseRemote(repoInfo.remote);
   if (!parsed) return null;
@@ -170,14 +180,20 @@ export function resolveForge(repoInfo: RepoInfo | null, forge?: ForgeSettings): 
   if (kind === 'github') {
     // Reachable only from the host table — `classifyForgeKind` never answers 'github' for a repo
     // config — so `parsed.host` is github.com here and the driver's hardwired base is correct.
-    return createGithubDriver(repoInfo.root, { owner: parsed.owner, repo: parsed.repo });
+    return createGithubDriver(repoInfo.root, { owner: parsed.owner, repo: parsed.repo }, cacheRoots);
   }
   if (kind === 'forgejo') {
     // Guard is defensive, not load-bearing: `classifyForgeKind` only ever returns 'forgejo' when a
     // repo-config `forge` was supplied (the host table has no forgejo entries), so `forge` is
     // always defined on this branch — the `? :` just keeps the compiler's flow analysis honest.
     return forge
-      ? createForgejoDriver({ repoRoot: repoInfo.root, owner: parsed.owner, repo: parsed.repo, settings: forge })
+      ? createForgejoDriver({
+          repoRoot: repoInfo.root,
+          owner: parsed.owner,
+          repo: parsed.repo,
+          settings: forge,
+          refStatusRoot: cacheRoots?.refStatusRoot,
+        })
       : null;
   }
   return null;
@@ -198,12 +214,22 @@ export function resolveForge(repoInfo: RepoInfo | null, forge?: ForgeSettings): 
  *
  *  Health and automations keep calling `resolveForge` directly — for them `null` means "no forge",
  *  and answering with a GitHub driver would invent a forge the repo does not have. */
-export function resolveForgeOrGithub(repoRoot: string, repoInfo: RepoInfo | null, forge?: ForgeSettings): ForgeDriver {
-  return resolveForge(repoInfo, forge) ?? createGithubDriver(repoRoot, null);
+export function resolveForgeOrGithub(
+  repoRoot: string,
+  repoInfo: RepoInfo | null,
+  forge?: ForgeSettings,
+  cacheRoots?: ForgeDriverCacheRoots,
+): ForgeDriver {
+  // `repoRoot` is NOT forwarded as a cache root, deliberately: it would re-key `/github` (`:4843`),
+  // `/github/comments` (`:4875`), `/github/checks` (`:4901`) and `/github/prs/:number/changes`
+  // (`:5001`) as a side effect of fixing ref-status, and none of those caches has a reader outside
+  // its driver to disagree with. A caller that needs a cache pinned says so, by name (#50).
+  return resolveForge(repoInfo, forge, cacheRoots) ?? createGithubDriver(repoRoot, null, cacheRoots);
 }
 
 export type {
   ForgeDriver,
+  ForgeDriverCacheRoots,
   ForgeAvailability,
   ForgeItem,
   ForgeKind,

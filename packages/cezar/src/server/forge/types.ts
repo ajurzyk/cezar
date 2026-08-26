@@ -44,6 +44,30 @@ export const forgeSettingsSchema = z.object({
 
 export type ForgeSettings = z.infer<typeof forgeSettingsSchema>;
 
+/**
+ * Which root a driver keys a SHARED cache by, when that is not its own `repoRoot` (#50).
+ *
+ * A driver's `repoRoot` is its git working directory — the cwd `gh` is spawned in — and
+ * `resolveForge` builds both drivers on `repoInfo.root`, the git top-level. Every cache inside a
+ * driver is keyed by that same root, which is correct precisely because nothing outside the driver
+ * reads those caches: writer and reader are the same file and cannot disagree.
+ *
+ * The ref-status cache is the one exception, and this option exists for it alone. It has three
+ * call sites in `server.ts` that never touch a driver — `readCachedRefStatuses` (`:5478`, the runs
+ * index hydrating chips) and `forgetRefStatus` (`:4227`, `:4975`) — and all three hold
+ * `project.root`. A project registered BELOW its repository's top level (which
+ * `shouldRegisterProject` allows) makes the two roots different strings, and the writer and those
+ * readers stop meeting: the chips never hydrate warm and a merge invalidates nothing.
+ *
+ * So the rule for a future cache is not "pick a root" — it is: a cache read only from inside a
+ * driver stays on `repoRoot` and needs nothing here; a cache with a reader in `server.ts` names
+ * that reader's root here, next to `refStatusRoot`.
+ */
+export interface ForgeDriverCacheRoots {
+  /** Root for the shared ref-status cache. Defaults to the driver's own `repoRoot`. */
+  refStatusRoot?: string;
+}
+
 /** Availability probe result — mirrors the tab's quiet degradation contract:
  *  no CLI, no remote, offline all land on `available:false` + a human hint. */
 export interface ForgeAvailability {

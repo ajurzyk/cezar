@@ -105,6 +105,9 @@ export interface ForgejoDriverCtx {
   owner: string;
   repo: string;
   settings: ForgeSettings;
+  /** Root for the shared ref-status cache, when it is not `repoRoot` — see
+   *  `ForgeDriverCacheRoots` in `types.ts` for why that one cache has the exception (#50). */
+  refStatusRoot?: string;
 }
 
 const CACHE_MS = 60_000;
@@ -2255,13 +2258,15 @@ function dryRunForgejoRefStatus(input: { prs?: number[]; issues?: number[] }): F
  * shared with the synchronous `readCachedRefStatuses` the runs index reads. A warm entry is never
  * re-queried, and everything this function resolves is written back so that reader sees it.
  *
- * **That cache is keyed by `repoRoot` ALONE**, unlike all six caches above it in this file
+ * **That cache is keyed by a root ALONE**, unlike all six caches above it in this file
  * (`listCacheKey`, `prStatusCacheKey`, `mergeStateCacheKey`, `prDiffCacheKey`, `commentsCacheKey`,
  * `checksCacheKey`), which each carry `apiBase` so a repository pointed at a different instance
  * cannot be served the old one's answers. The discriminator is absent here because it CANNOT be
  * added: sharing this cache is the point — `readCachedRefStatuses(project.root, …)` is how the runs
  * index gets Forgejo statuses at all, and that reader knows only the root, so an `apiBase` in the
- * key would make every entry this driver writes permanently invisible to it. The cost is real and
+ * key would make every entry this driver writes permanently invisible to it. And the root it is
+ * keyed by is that reader's — `cacheRoot`, not this driver's `repoRoot`, which is the same
+ * sentence read the other way round (#50). The cost is real and
  * unmitigated: change a project's `config.forge.apiUrl` to another instance and stale answers are
  * served until they expire — up to `REF_STATUS_MERGED_TTL` (24 h) for a merged pull request.
  * Invalidating the repo's entries when `config.forge` changes is the fix if that ever bites.
@@ -2274,7 +2279,11 @@ function dryRunForgejoRefStatus(input: { prs?: number[]; issues?: number[] }): F
  * file — see that function for why degrading here was wrong.
  */
 async function forgejoRefStatus(
-  repoRoot: string,
+  // The SHARED cache's root, not this driver's git working directory — the only thing this
+  // function does with a root is key `refStatusCache`, and `server.ts`'s two readers of that cache
+  // hold `project.root` (#50, and `ForgeDriverCacheRoots` in `types.ts`). Named for what it is so
+  // a future edit cannot quietly reach for the driver's `repoRoot` again.
+  cacheRoot: string,
   http: ForgejoHttp,
   owner: string,
   repo: string,
@@ -2322,7 +2331,7 @@ async function forgejoRefStatus(
 
   const misses: number[] = [];
   for (const n of wanted) {
-    const hit = peekRefStatus(repoRoot, n);
+    const hit = peekRefStatus(cacheRoot, n);
     if (!hit) misses.push(n);
     else {
       if (hit.resolved) anyRowRead = true;
@@ -2390,7 +2399,7 @@ async function forgejoRefStatus(
       }
       anyRowRead = true;
       file(result.n, result.entry);
-      rememberRefStatus(repoRoot, result.n, result.entry);
+      rememberRefStatus(cacheRoot, result.n, result.entry);
     }
     // A genuine failure ends the whole answer rather than blanking one number: in a
     // `number -> status` map, a number we could not ask about is indistinguishable from one that
@@ -2420,7 +2429,7 @@ async function forgejoRefStatus(
     }
     for (const { n } of unproven) {
       file(n, null);
-      rememberRefStatus(repoRoot, n, null);
+      rememberRefStatus(cacheRoot, n, null);
     }
   }
 
@@ -2429,6 +2438,10 @@ async function forgejoRefStatus(
 
 export function createForgejoDriver(ctx: ForgejoDriverCtx, deps?: ForgejoHttpDeps): ForgeDriver {
   const { repoRoot, owner, repo, settings } = ctx;
+  // Only the ref-status cache may be pinned to another root, and only because it has readers
+  // outside this driver — see `ForgeDriverCacheRoots` (`types.ts`). Every Forgejo cache above keys
+  // by `repoRoot\0apiBase\0…` and is read only here.
+  const refStatusRoot = ctx.refStatusRoot ?? repoRoot;
   const http = createForgejoHttp(settings.apiUrl, deps);
   const webUrl = settings.webUrl;
   const sleep = deps?.sleep ?? defaultSleep;
@@ -2457,7 +2470,7 @@ export function createForgejoDriver(ctx: ForgejoDriverCtx, deps?: ForgejoHttpDep
 
     listChecks: (numbers: number[]) => forgejoListChecks(repoRoot, http, owner, repo, numbers),
 
-    refStatus: (input: { prs?: number[]; issues?: number[] }) => forgejoRefStatus(repoRoot, http, owner, repo, input),
+    refStatus: (input: { prs?: number[]; issues?: number[] }) => forgejoRefStatus(refStatusRoot, http, owner, repo, input),
 
     viewUrl: (kind: ForgeRefKind, ref: string | number): string => forgejoViewUrl(webUrl, owner, repo, kind, ref),
   };

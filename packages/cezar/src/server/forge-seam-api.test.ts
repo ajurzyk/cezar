@@ -1,10 +1,14 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RunStore } from '../runs/store.ts';
 import type { RunManager } from '../workflows/run.ts';
+// Straight from the seam module rather than through `./github.ts`: it is the same module instance
+// (`./github.ts` re-exports it), but `__clearRefStatusCacheForTests` is test-only and deliberately
+// not part of the delegate's public surface.
+import { __clearRefStatusCacheForTests, readCachedRefStatuses } from './forge/github.ts';
 import type { ForgeChecksResult, ForgeCommentsData, ForgeRefStatusResult } from './forge/types.ts';
 import { fetchGithub, fetchGithubChecks, fetchGithubRefStatus } from './github.ts';
 import type { ForgePrDiffResult, GithubData, GithubItem } from './github.ts';
@@ -685,5 +689,153 @@ describe('the forge seam — GET /github/ref-status (#12)', () => {
     }
     // Dry-run means the demo never reaches the configured apiUrl.
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The ref-status cache KEY, across the writer and both readers (#50).
+ *
+ * Every other fixture in this file runs `git init` in the very directory it hands `createApp`, so
+ * `project.root` and the git top-level are the same string and no key can drift. That is why the
+ * whole suite stayed green through the drift: the shape in which the two roots differ simply had
+ * no fixture. `shouldRegisterProject` (`workspace/projects.ts:115-120`) rejects only `$HOME` and
+ * task worktrees, so a project registered at a SUBDIRECTORY of its repository is allowed — and
+ * there the route's driver (built on `repoInfo.root`) and the two readers in `server.ts`
+ * (`readCachedRefStatuses` at `:5478`, `forgetRefStatus` at `:4227`/`:4975`, both on
+ * `project.root`) are two different strings.
+ *
+ * Three cases: the read half, the invalidation half, and the no-regression case that pins every
+ * project which exists today.
+ */
+describe('the forge seam — one ref-status cache key (#50)', () => {
+  let topLevel: string;
+  let projectRoot: string;
+  let store: RunStore;
+  const previousDryRun = process.env.CEZ_DRY_RUN;
+
+  /** `git init` at `<tmp>`, the PROJECT at `<tmp>/<subdir>` — or at `<tmp>` itself when `subdir` is
+   *  empty, which is the shape every other block here uses. Deliberately NOT `initForgejoRepo`
+   *  (which makes the two roots identical by construction) and deliberately NOT `registerProject()`
+   *  (which writes to the workspace registry this harness does not use — `createApp`'s `repoRoot`
+   *  becomes `bootContext.root` verbatim, `server.ts:1050`/`:1180`).
+   *
+   *  `realpathSync` on the temp dir because `git rev-parse --show-toplevel` answers a canonical
+   *  path: on a platform where the temp dir is reached through a symlink, an un-resolved literal
+   *  would make the two roots differ for a reason that has nothing to do with this issue. */
+  function initForgejoRepoBelow(subdir: string): void {
+    topLevel = realpathSync(mkdtempSync(join(tmpdir(), 'cez-forge-seam-refkey-')));
+    execFileSync('git', ['init', '-b', 'main'], { cwd: topLevel });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: topLevel });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: topLevel });
+    execFileSync('git', ['commit', '--allow-empty', '-m', 'init'], { cwd: topLevel });
+    execFileSync('git', ['remote', 'add', 'origin', 'ssh://git@forge.internal:2222/acme/demo.git'], { cwd: topLevel });
+    projectRoot = subdir ? join(topLevel, subdir) : topLevel;
+    mkdirSync(join(projectRoot, '.ai/cezar'), { recursive: true });
+    writeFileSync(
+      join(projectRoot, '.ai/cezar', 'config.json'),
+      JSON.stringify({ forge: { kind: 'forgejo', apiUrl: 'http://forge.internal', webUrl: 'http://forge.internal' } }),
+      'utf8',
+    );
+    store = RunStore.open(join(projectRoot, '.ai/cezar'));
+  }
+
+  beforeEach(() => {
+    delete process.env.CEZ_DRY_RUN;
+    // These cases assert on cache CONTENT, so they must not inherit an entry another block in this
+    // file wrote (its roots differ, but the invariant under test is "nothing is warm that this test
+    // did not warm").
+    __clearRefStatusCacheForTests();
+  });
+
+  afterEach(() => {
+    store.flush();
+    rmSync(topLevel, { recursive: true, force: true });
+    vi.unstubAllGlobals();
+    __clearRefStatusCacheForTests();
+    if (previousDryRun === undefined) delete process.env.CEZ_DRY_RUN;
+    else process.env.CEZ_DRY_RUN = previousDryRun;
+  });
+
+  it('ref-status writes and reads one key when the project root is below the repository top level', async () => {
+    // The runs index hydrates its chips with `readCachedRefStatuses(project.root, …)` and never
+    // asks the forge. If the route wrote under a different root, that reader is permanently cold —
+    // a warm chip never appears, for a GitHub-hosted project just as much as a Forgejo one.
+    initForgejoRepoBelow('packages/app');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: URL | string) => {
+        if (String(url).endsWith('/repos/acme/demo/issues/5')) {
+          return Promise.resolve(jsonResponse({ state: 'closed', pull_request: { merged: true } }));
+        }
+        throw new Error(`unexpected url ${String(url)}`);
+      }),
+    );
+
+    const app = createApp({ repoRoot: projectRoot, store, manager: {} as RunManager, version: '0.0.0-test' });
+    const res = await apiRequest(app, '/api/v1/github/ref-status?prs=5');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ available: true, prs: { 5: 'merged' }, issues: {}, recheckAfterMs: null });
+
+    expect(readCachedRefStatuses(projectRoot, [5])).toEqual({ prs: { 5: 'merged' }, issues: {} });
+  });
+
+  it('a merge invalidates the entry the route wrote when the project root is below the top level', async () => {
+    // The other reader, and the one a cache-content assertion cannot separate from the case above:
+    // this asks the ROUTE whether the entry survived, by counting reads of the forge. A stale entry
+    // here means a pull request the user watched this server merge keeps painting its pre-merge
+    // status for up to `REF_STATUS_MERGED_TTL` — 24 h.
+    initForgejoRepoBelow('packages/app');
+    const issueReads = vi.fn().mockImplementation((url: URL | string) => {
+      if (String(url).endsWith('/repos/acme/demo/issues/9')) {
+        return Promise.resolve(jsonResponse({ state: 'open', pull_request: { merged: false, draft: true } }));
+      }
+      throw new Error(`unexpected url ${String(url)}`);
+    });
+    vi.stubGlobal('fetch', issueReads);
+
+    const app = createApp({ repoRoot: projectRoot, store, manager: {} as RunManager, version: '0.0.0-test' });
+    expect((await apiRequest(app, '/api/v1/github/ref-status?prs=9')).status).toBe(200);
+    expect(issueReads).toHaveBeenCalledTimes(1);
+    // Warm: the driver serves its own write, which proves nothing about the readers yet — it is the
+    // control for the count below.
+    expect((await apiRequest(app, '/api/v1/github/ref-status?prs=9')).status).toBe(200);
+    expect(issueReads).toHaveBeenCalledTimes(1);
+
+    // `CEZ_DRY_RUN` only for the merge: `forgejoPrMergeState` and `forgejoMergePR` both answer from
+    // fixtures under it (`forgejo.ts:1189`, `:1529`), so the whole eligibility ladder runs without
+    // transcribing Forgejo's five preflight endpoints — while the ref-status calls above and below
+    // stay live, because a dry run deliberately caches nothing and could not have warmed anything.
+    process.env.CEZ_DRY_RUN = '1';
+    const state = await apiRequest(app, '/api/v1/github/prs/9/merge-state?refresh=1');
+    const { mergeState } = (await state.json()) as { mergeState: { headSha: string } };
+    const merged = await apiRequest(app, '/api/v1/github/prs/9/merge', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: 'http://127.0.0.1:4321' },
+      body: JSON.stringify({ method: 'squash', expectedHeadSha: mergeState.headSha }),
+    });
+    expect(merged.status).toBe(200);
+    delete process.env.CEZ_DRY_RUN;
+
+    expect((await apiRequest(app, '/api/v1/github/ref-status?prs=9')).status).toBe(200);
+    expect(issueReads).toHaveBeenCalledTimes(2);
+  });
+
+  it('a project root that is the repository top level keeps its existing key', async () => {
+    // Every project in every other fixture, and the overwhelming majority of real ones. The fix
+    // must not move this key: it is what `runs-index-api.test.ts:347`/`:369` seed against.
+    initForgejoRepoBelow('');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: URL | string) => {
+        if (String(url).endsWith('/repos/acme/demo/issues/5')) {
+          return Promise.resolve(jsonResponse({ state: 'closed', pull_request: { merged: true } }));
+        }
+        throw new Error(`unexpected url ${String(url)}`);
+      }),
+    );
+
+    const app = createApp({ repoRoot: projectRoot, store, manager: {} as RunManager, version: '0.0.0-test' });
+    expect((await apiRequest(app, '/api/v1/github/ref-status?prs=5')).status).toBe(200);
+    expect(readCachedRefStatuses(projectRoot, [5])).toEqual({ prs: { 5: 'merged' }, issues: {} });
   });
 });

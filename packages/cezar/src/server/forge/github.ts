@@ -10,6 +10,7 @@ import type {
   ForgeComment,
   ForgeCommentsData,
   ForgeDriver,
+  ForgeDriverCacheRoots,
   ForgeItem,
   ForgeListResult,
   ForgeMergeInput,
@@ -1742,6 +1743,12 @@ function hasResolvedRepository(stdout: string): boolean {
 export async function fetchGithubRefStatus(
   repoRoot: string,
   input: { prs?: number[]; issues?: number[] },
+  // Which root the SHARED cache is keyed by — `repoRoot` unless a caller opts out (#50). The two
+  // are separate parameters because they answer different questions: `repoRoot` is the git working
+  // directory `gh` is spawned in, while this one has to match what `server.ts`'s two readers hold
+  // (`readCachedRefStatuses` at `:5478`, `forgetRefStatus` at `:4227`/`:4975` — all three
+  // `project.root`). They coincide for every caller that is not the ref-status route.
+  cacheRoot: string = repoRoot,
 ): Promise<GithubRefStatusData> {
   const asPrs = sanitizeRefNumbers(input.prs);
   const asIssues = sanitizeRefNumbers(input.issues);
@@ -1757,7 +1764,7 @@ export async function fetchGithubRefStatus(
   };
   const misses: number[] = [];
   for (const n of wanted) {
-    const hit = peekRefStatus(repoRoot, n);
+    const hit = peekRefStatus(cacheRoot, n);
     if (!hit) misses.push(n);
     else file(n, hit.resolved);
   }
@@ -1781,7 +1788,7 @@ export async function fetchGithubRefStatus(
       // read before the request was assembled, which would age a slow query's results by its own
       // duration and shorten the TTL of exactly the answers that cost the most to get. It also
       // evicts, which is why the bound is not re-applied separately below.
-      rememberRefStatus(repoRoot, n, entry);
+      rememberRefStatus(cacheRoot, n, entry);
     }
     // Anything unasked makes the whole answer `unavailable`, deliberately. The alternative is a
     // payload where a number we could not reach is indistinguishable from one that does not exist,
@@ -2542,7 +2549,16 @@ const GH_PR_STATES: Record<string, ForgePrStatus['state']> = {
   CLOSED: 'closed',
 };
 
-export function createGithubDriver(repoRoot: string, repoRef: GithubRepoRef | null): ForgeDriver {
+export function createGithubDriver(
+  repoRoot: string,
+  repoRef: GithubRepoRef | null,
+  opts?: ForgeDriverCacheRoots,
+): ForgeDriver {
+  // See `ForgeDriverCacheRoots`: only the ref-status cache has readers outside this driver, so it
+  // is the only one whose root a caller may pin. Every other cache in this file (`listCache`,
+  // `checksCache`, `repoHandleCache`, `prDiffCache`, `commentsCache`, `mergeStateCache`) stays on
+  // `repoRoot` — nothing outside reads them, so they cannot disagree with anyone (#50).
+  const refStatusRoot = opts?.refStatusRoot ?? repoRoot;
   return {
     kind: 'github',
 
@@ -2561,7 +2577,7 @@ export function createGithubDriver(repoRoot: string, repoRef: GithubRepoRef | nu
     // `ForgeRefStatusResult` both mirror `githubRefStatusDataSchema`. This is the whole GitHub
     // half of #12 — the route now resolves a driver, and for a GitHub repo (or a repo with no
     // forge, via `resolveForgeOrGithub`) it lands right back in the function it always called.
-    refStatus: (input) => fetchGithubRefStatus(repoRoot, input),
+    refStatus: (input) => fetchGithubRefStatus(repoRoot, input, refStatusRoot),
 
     createPR: (input) => createDraftPr(input),
 

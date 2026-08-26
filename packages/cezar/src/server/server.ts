@@ -4925,7 +4925,15 @@ export function createApp(deps: ServerDeps) {
         // CEZ_DRY_RUN) reproduces this route's pre-seam behaviour exactly, with no second branch to
         // express it. Same reasoning, and the same preamble, as its `/github/checks` sibling.
         const [repoInfo, forgeSettings] = await loadForgeInputs(repoRoot);
-        const forge = resolveForgeOrGithub(repoRoot, repoInfo, forgeSettings);
+        // `refStatusRoot: repoRoot` — the ONLY route that pins a driver cache, and the only one that
+        // has to (#50). `resolveForge` builds both drivers on `repoInfo.root` (the git top-level),
+        // but this cache is read from two places that never touch a driver — `readCachedRefStatuses`
+        // below in the runs index, and `forgetRefStatus` in the two routes that change a pull
+        // request — and all three hold `project.root`. Those are the same string only while a
+        // project is registered AT its repository's top level; below it, the writer and the readers
+        // stop meeting, so the chips never hydrate warm and a merge invalidates nothing. Every other
+        // cache these drivers hold is read only from inside them and stays on `repoInfo.root`.
+        const forge = resolveForgeOrGithub(repoRoot, repoInfo, forgeSettings, { refStatusRoot: repoRoot });
         // `recheckAfterMs: null` — a forge whose driver cannot answer this at all will not start
         // answering in five minutes, so there is nothing for the cockpit to schedule. Every other
         // degrade on this route carries a retry cadence because it is the FORGE that was
