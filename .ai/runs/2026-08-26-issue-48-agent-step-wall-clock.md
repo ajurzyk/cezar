@@ -79,8 +79,8 @@ here because the stated reason was wrong even though the conclusion was not.
 
 ### Phase 2: Wiring the value to the runner
 
-- [ ] 2.1 Red: `run.test.ts` — the value reaches the runner, and the last agent step still gets `timeoutMs: 0`
-- [ ] 2.2 Green: `stepTimeoutMs(step, interactive)` in `run.ts`, used at the `startSession` call
+- [x] 2.1 Red: `run.test.ts` — the value reaches the runner, and the last agent step still gets `timeoutMs: 0` — 60006d7d
+- [x] 2.2 Green: `stepTimeoutMs(step, interactive)` in `run.ts`, used at the `startSession` call — 60006d7d
 
 ### Phase 3: Runner diagnostics on the timeout path
 
