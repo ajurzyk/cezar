@@ -186,3 +186,59 @@ every network answer" and the four dry-run fixtures this driver already carries.
 
 Both new guards were mutation-checked by restoring the exact original defect: the dry-run degrade
 fails 3 of the new cases, and dropping the `.slice` fails the cap case.
+
+### Phase 7: Cache-key split found by the independent review — issue #50
+
+The independent review of head `1aeee99c` found one major that no test on this branch can see, and
+it is a **behavioural regression against `main`, for GitHub-hosted projects too**. Filed with its
+three candidate fixes, their measured costs, and its named test cases as **issue #50** — read that
+issue body before writing anything; it is the specification for this phase.
+
+In one line: this PR moved the ref-status cache's write key. `server.ts:4927-4928` resolves the
+driver through `resolveForgeOrGithub(repoRoot, repoInfo, …)`, which **ignores its first argument**
+whenever `resolveForge` succeeds (`forge/index.ts:173` and `:180` both build on `repoInfo.root`, the
+git top-level). The read (`server.ts:5478`) and both invalidations (`server.ts:4227`, `:4975`) still
+key by `project.root`. The two are the same string only while a project is registered *at* its
+repository's top level — and `shouldRegisterProject` (`workspace/projects.ts:115-120`) rejects only
+`$HOME` and task worktrees, so registering a subdirectory is allowed and silently splits the key.
+
+Consequences: the runs index never hydrates a reference chip warm, and a cockpit merge invalidates
+nothing, so the pre-merge answer stands for up to `REF_STATUS_MERGED_TTL` (24 h).
+
+Constraints that are not negotiable in this phase (full text in #50):
+
+- Issue #50 lists **three** candidates and requires the implementer to **state which one was taken
+  and why** in PR #45's body, including what it did or did not do to `/github/checks`. Pick
+  deliberately; do not take the first thing that compiles.
+- `github-ref-status-api.test.ts` and `ref-status-invalidation.test.ts` must keep passing **with
+  zero edits to their assertions**. If a candidate needs them edited, that candidate is wrong.
+- `refStatusCache.set` must still appear exactly twice (`rememberRefStatus` and the test-only
+  seeder). Do not add a third writer to route around the key problem.
+- Both readers must land on the writer's key. Aligning only `readCachedRefStatuses` or only
+  `forgetRefStatus` leaves the other silently broken and is not a fix.
+- `runs-index-api.test.ts:347` and `:369` seed the cache through `__seedRefStatusCacheForTests`
+  with `realpathSync(repoRoot)` — any candidate that changes the key has to check those two.
+- Ad-hoc `npx vitest run …` invocations need a `TMPDIR=/tmp` prefix (the gate script pins it; a
+  bare invocation lets `mkdtempSync` land inside a git repo and reddens files this phase must not
+  touch).
+
+Do **not** revert `dryRunForgejoRefStatus` while in here: issue #12's scope decision 1 was retired
+on 2026-08-26 with the measurement that disproved its premise, and the dry-run path is ratified.
+
+- [ ] 7.1 Align the ref-status cache key across the writer and both readers — choose one of #50's
+      three candidates and record the choice and its reasoning in PR #45's body
+- [ ] 7.2 RED-first guard: "ref-status writes and reads one key when the project root is below the
+      repository top level" in `forge-seam-api.test.ts` — `git init` at `<tmp>`, pass
+      `<tmp>/packages/app` as `createApp`'s `repoRoot`, no `registerProject()`
+- [ ] 7.3 RED-first guard: "a merge invalidates the entry the route wrote when the project root is
+      below the top level" — the `forgetRefStatus` half, same file
+- [ ] 7.4 No-regression case: "a project root that is the repository top level keeps its existing
+      key" — same file
+- [ ] 7.5 If the candidate touched `forge/index.ts`: "resolveForgeOrGithub builds both drivers on
+      the documented root" in `forge/index.test.ts` (a new case — no test asserts on
+      `resolveForgeOrGithub` today)
+- [ ] 7.6 Mutation-check every guard by restoring the original defect (`repoInfo.root` back where
+      the fix took it out) and paste each red `npx vitest run <file> -t "<name>"` output into a
+      `## Mutation checks` section of PR #45's body
+- [ ] 7.7 Re-run the full gate; quote the file/test counts against the 336 / 6646 reference at
+      `1aeee99c` and state the difference
