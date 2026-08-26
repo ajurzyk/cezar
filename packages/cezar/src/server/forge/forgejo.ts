@@ -52,7 +52,13 @@ import { buildPrBody, mergePreflightAllowed } from './github.ts';
 //
 // `deriveIssueReferenceStatus` is reused rather than re-derived — the issue ladder is pure, and a
 // second copy would be a second vocabulary to keep in step.
-import { deriveIssueReferenceStatus, peekRefStatus, refStatusBatchRecheckAfter, rememberRefStatus } from './github.ts';
+import {
+  deriveIssueReferenceStatus,
+  GH_REF_STATUS_MAX,
+  peekRefStatus,
+  refStatusBatchRecheckAfter,
+  rememberRefStatus,
+} from './github.ts';
 import type { ReferenceStatus, ResolvedReference } from './github.ts';
 import type {
   DraftPrInput,
@@ -2170,6 +2176,64 @@ function refStatusFromRow(row: ForgejoRefStatusRow): ResolvedReference | undefin
   return { kind: 'issue', status: deriveIssueReferenceStatus({ state: row.state, stateReason: null }) };
 }
 
+/** One kind's request list, deduped and bounded by the same ceiling the route enforces — the
+ *  Forgejo half of `sanitizeRefNumbers` (`github.ts`). */
+function capRefNumbers(numbers: number[] | undefined): number[] {
+  return [...new Set(numbers ?? [])].filter((n) => Number.isInteger(n) && n > 0).slice(0, GH_REF_STATUS_MAX);
+}
+
+/**
+ * `CEZ_DRY_RUN=1` — statuses from the fixture catalog, so the offline demo paints real chips (#12).
+ *
+ * This used to degrade to `{ available: false, … }` instead, on the stated grounds that doing so
+ * "reproduces what a Forgejo project's chips did before this method existed". It does not, and the
+ * two payloads are different UI states rather than the same one. Before the seam the route called
+ * `fetchGithubRefStatus` for EVERY repo, Forgejo-configured included, whose own dry-run branch
+ * answers from `mockGithubRefStatus`; measured, that is:
+ *
+ *   {"available":true,"prs":{},"issues":{},"recheckAfterMs":60000}
+ *
+ * which `queries.ts` maps to `state: 'unknown'` — the neutral chip, rechecked every minute. An
+ * `available: false` payload maps to `state: 'unavailable'`, which `reference-chip.tsx` renders
+ * with the headline "Status unavailable", and a `null` cadence becomes `Infinity`, so the chip
+ * never refreshes for the life of the session. Degrading turned every reference chip in a Forgejo
+ * demo into an error state — against AGENTS.md's "`CEZ_DRY_RUN=1` fakes every network answer", and
+ * against the four dry-run fixtures this file already carries.
+ *
+ * The answers walk the SAME ladder `refStatusFromRow` walks live, because `DryRunForgejoRow` already
+ * carries `isDraft` — the one field that ladder needs. So an open, non-draft pull request is ABSENT
+ * here exactly as it is absent live: a demo must not show a status the live path would refuse to
+ * assert. Nothing is written to the shared cache — `readCachedRefStatuses` serves real projects too,
+ * and a fixture leaking into it would outlive the demo describing a repository nobody read.
+ */
+function dryRunForgejoRefStatus(input: { prs?: number[]; issues?: number[] }): ForgeRefStatusResult {
+  const byNumber = new Map(DRY_RUN_FORGEJO_ROWS.map((row) => [row.number, row] as const));
+  const prs: Record<number, ReferenceStatus> = {};
+  const issues: Record<number, ReferenceStatus> = {};
+  const entries: (ResolvedReference | null)[] = [];
+  for (const n of new Set([...capRefNumbers(input.prs), ...capRefNumbers(input.issues)])) {
+    const row = byNumber.get(n);
+    // A number the catalog does not carry stays absent, the same as one the live instance 404s on.
+    if (!row) {
+      entries.push(null);
+      continue;
+    }
+    // Every catalog row is OPEN — there is no closed or merged fixture — so the ladder reduces to
+    // the two rungs those rows can reach, through the same helper the live path uses for issues.
+    const entry: ResolvedReference | null =
+      row.kind === 'pr'
+        ? row.isDraft
+          ? { kind: 'pr', status: 'draft' }
+          : null // open, not a draft — absent, exactly as `refStatusFromRow` leaves it
+        : { kind: 'issue', status: deriveIssueReferenceStatus({ state: 'open', stateReason: null }) };
+    entries.push(entry);
+    if (entry) (entry.kind === 'pr' ? prs : issues)[n] = entry.status;
+  }
+  // `refStatusBatchRecheckAfter` over the same entries the live path would hand it, so the demo's
+  // cadence is computed by the one table rather than pinned to a literal here.
+  return { available: true, prs, issues, recheckAfterMs: refStatusBatchRecheckAfter(entries) };
+}
+
 /**
  * Batched reference status for a Forgejo repo — the driver half of #12.
  *
@@ -2191,18 +2255,23 @@ function refStatusFromRow(row: ForgejoRefStatusRow): ResolvedReference | undefin
  * shared with the synchronous `readCachedRefStatuses` the runs index reads. A warm entry is never
  * re-queried, and everything this function resolves is written back so that reader sees it.
  *
- * Fan-out is bounded by the same `FJ_CHECKS_CONCURRENCY` chunking `forgejoListChecks` uses — never
- * an unbounded `Promise.all` over a hundred numbers at a self-hosted instance. The per-kind request
- * cap is already enforced route-side (`parseRefNumbers` + `GH_REF_STATUS_MAX` in `server.ts`), so
- * this does not re-enforce it.
+ * **That cache is keyed by `repoRoot` ALONE**, unlike all six caches above it in this file
+ * (`listCacheKey`, `prStatusCacheKey`, `mergeStateCacheKey`, `prDiffCacheKey`, `commentsCacheKey`,
+ * `checksCacheKey`), which each carry `apiBase` so a repository pointed at a different instance
+ * cannot be served the old one's answers. The discriminator is absent here because it CANNOT be
+ * added: sharing this cache is the point — `readCachedRefStatuses(project.root, …)` is how the runs
+ * index gets Forgejo statuses at all, and that reader knows only the root, so an `apiBase` in the
+ * key would make every entry this driver writes permanently invisible to it. The cost is real and
+ * unmitigated: change a project's `config.forge.apiUrl` to another instance and stale answers are
+ * served until they expire — up to `REF_STATUS_MERGED_TTL` (24 h) for a merged pull request.
+ * Invalidating the repo's entries when `config.forge` changes is the fix if that ever bites.
  *
- * `CEZ_DRY_RUN=1` short-circuits to `{ available: false, … }` with no fixture, which is
- * deliberately unlike every sibling in this file (`dryRunForgejoChecks`, `mockGithubRefStatus`) —
- * but it still has to be a SHORT-CIRCUIT, not an absence of one. Dry-run means "fake every network
- * answer" (AGENTS.md), and without this the offline demo would issue up to 200 real GETs at the
- * configured `apiUrl`, with the Forgejo token attached, and wait out a timeout per chunk when
- * nothing answers. Degrading here reproduces what a Forgejo project's chips did before this method
- * existed; a dry-run reference chip for Forgejo is its own change.
+ * Fan-out is bounded by the same `FJ_CHECKS_CONCURRENCY` chunking `forgejoListChecks` uses — never
+ * an unbounded `Promise.all` over a hundred numbers at a self-hosted instance, and the request list
+ * itself is capped per kind by `capRefNumbers` rather than trusting the route to have done it.
+ *
+ * `CEZ_DRY_RUN=1` answers from the catalog (`dryRunForgejoRefStatus`), like every sibling in this
+ * file — see that function for why degrading here was wrong.
  */
 async function forgejoRefStatus(
   repoRoot: string,
@@ -2211,12 +2280,14 @@ async function forgejoRefStatus(
   repo: string,
   input: { prs?: number[]; issues?: number[] },
 ): Promise<ForgeRefStatusResult> {
-  if (process.env.CEZ_DRY_RUN === '1') {
-    return { available: false, reason: 'reference status is unavailable offline', recheckAfterMs: null };
-  }
-  const wanted = [...new Set([...(input.prs ?? []), ...(input.issues ?? [])])].filter(
-    (n) => Number.isInteger(n) && n > 0,
-  );
+  if (process.env.CEZ_DRY_RUN === '1') return dryRunForgejoRefStatus(input);
+  // Bounded HERE, not only route-side. `fetchGithubRefStatus` sanitizes its own lists
+  // (`sanitizeRefNumbers` ends in the same `.slice`), and `refStatus` is a public `ForgeDriver`
+  // method: relying on `parseRefNumbers`' cap would leave two implementations of one interface
+  // disagreeing about whether they defend themselves — a direct caller passing a thousand numbers
+  // would cost 100 reads on one driver and a thousand on this one. Per KIND before the merge, so
+  // the ceiling matches the route's and a caller cannot spend the pull-request budget on issues.
+  const wanted = [...new Set([...capRefNumbers(input.prs), ...capRefNumbers(input.issues)])];
 
   const prs: Record<number, ReferenceStatus> = {};
   const issues: Record<number, ReferenceStatus> = {};
@@ -2236,6 +2307,17 @@ async function forgejoRefStatus(
   // reporting "the repository is private" about a repo this driver is plainly reading — once a
   // minute, forever. Only a RESOLVED entry is proof; a cached `null` is an absence and would be
   // circular evidence for settling another one.
+  //
+  // KNOWN LIMIT, and it follows from that last sentence: an open non-draft PR is cached as a bare
+  // `null` too (see the write below — deliberately, since a proven absence and "resolved, nothing
+  // honest to say" mean the same thing to every READER of this cache), so a row that really was
+  // read is indistinguishable here from one that was not. A public repo, no token, whose warm
+  // entries are all open non-draft PRs — the dominant case, by that write's own comment — plus one
+  // number that does not exist will therefore still degrade with the "…or the repository is
+  // private" hint. Narrow: any issue, or any merged/closed/draft PR, in the same batch clears the
+  // gate, and it self-heals on the next fresh read. Closing it properly means widening the cached
+  // value beyond `ResolvedReference | null`, which is a change to the shared seam, not to this
+  // driver.
   let anyRowRead = false;
 
   const misses: number[] = [];

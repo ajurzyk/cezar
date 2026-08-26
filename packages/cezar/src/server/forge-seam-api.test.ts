@@ -656,4 +656,34 @@ describe('the forge seam — GET /github/ref-status (#12)', () => {
     expect((await apiRequest(app, '/api/v1/github/ref-status?prs=abc')).status).toBe(400);
     expect((await apiRequest(app, '/api/v1/github/ref-status')).status).toBe(400);
   });
+
+  /**
+   * The route is where the dry-run regression actually showed: before the seam it called
+   * `fetchGithubRefStatus` for EVERY repo, so a Forgejo project offline got
+   * `{available: true, …, recheckAfterMs: 60000}` and the neutral chip. Routing it through the
+   * driver briefly turned that into `available: false`, which the cockpit renders as
+   * "Status unavailable" and never rechecks. `available` is the assertion that matters — the
+   * driver-level suite pins which statuses come back.
+   */
+  it('answers a Forgejo repo from the fixtures under CEZ_DRY_RUN=1, never with a degrade', async () => {
+    process.env.CEZ_DRY_RUN = '1';
+    ({ repoRoot, store } = initForgejoRepo());
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const app = createApp({ repoRoot, store, manager: {} as RunManager, version: '0.0.0-test' });
+    const res = await apiRequest(app, '/api/v1/github/ref-status?prs=777,764&issues=24');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ForgeRefStatusResult;
+    expect(body.available).toBe(true);
+    if (body.available) {
+      expect(body.prs[764]).toBe('draft');
+      expect(body.issues[24]).toBe('open');
+      // Open and not a draft — absent offline exactly as it is absent live.
+      expect(body.prs[777]).toBeUndefined();
+      expect(body.recheckAfterMs).toBe(60_000);
+    }
+    // Dry-run means the demo never reaches the configured apiUrl.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });

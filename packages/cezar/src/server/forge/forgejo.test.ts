@@ -18,6 +18,7 @@ import {
 import {
   __clearRefStatusCacheForTests,
   __seedRefStatusCacheForTests,
+  GH_REF_STATUS_MAX,
   readCachedRefStatuses,
 } from './github.ts';
 
@@ -2912,22 +2913,114 @@ describe('refStatus (#12)', () => {
     __clearRefStatusCacheForTests();
   });
 
-  it('degrades under CEZ_DRY_RUN=1 WITHOUT touching the network', async () => {
-    // The assertion that matters is the second one. Dry-run means "fake every network answer", so
-    // an offline demo must not fire up to 200 real GETs at the configured apiUrl with the Forgejo
-    // token attached — and a rejecting mock alone would be green whether or not the driver
-    // short-circuits, which is exactly how that was missed once.
-    process.env.CEZ_DRY_RUN = '1';
-    const fetchMock = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
+  describe('CEZ_DRY_RUN=1 answers from the catalog', () => {
+    beforeEach(() => {
+      process.env.CEZ_DRY_RUN = '1';
+    });
+
+    it('never touches the network', async () => {
+      // Dry-run means "fake every network answer" (AGENTS.md), so an offline demo must not fire up
+      // to 200 real GETs at the configured apiUrl with the Forgejo token attached — and a rejecting
+      // mock alone would be green whether or not the driver short-circuits, which is exactly how
+      // that was missed once.
+      const fetchMock = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
+      const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+      await driver.refStatus?.({ prs: [777], issues: [24] });
+
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    /**
+     * The offline demo must paint the same chips it painted before this method existed, and
+     * "available: false" is NOT that. Measured on the pre-seam route (which called
+     * `fetchGithubRefStatus` for every repo, Forgejo-configured included):
+     *
+     *   PRE-SEAM  : {"available":true,"prs":{},"issues":{},"recheckAfterMs":60000}
+     *
+     * That is `state: 'unknown'` in the cockpit (`queries.ts`) — the NEUTRAL chip, rechecked every
+     * minute. An `available: false` payload is `state: 'unavailable'` instead, which
+     * `reference-chip.tsx` renders with the headline "Status unavailable", and its `null` cadence
+     * becomes `Infinity`, so the chip never refreshes again. Degrading here turned every reference
+     * chip in a Forgejo demo into an error state.
+     */
+    it('answers available:true from the catalog rather than degrading', async () => {
+      const driver = createForgejoDriver(makeCtx(repoRoot), {
+        fetch: vi.fn().mockRejectedValue(new TypeError('fetch failed')) as never,
+        token: null,
+      });
+
+      const out = await driver.refStatus?.({ prs: [777, 764], issues: [24, 18] });
+
+      expect(out?.available).toBe(true);
+    });
+
+    /**
+     * The fixture answers on the SAME ladder `refStatusFromRow` walks live — `DryRunForgejoRow`
+     * already carries `isDraft`, which is the one field that ladder needs. So an open, non-draft
+     * pull request (777) is ABSENT here exactly as it is absent live: the demo must not show a
+     * status the live path would refuse to assert.
+     */
+    it('walks the live ladder over the fixture rows, absent rung included', async () => {
+      const driver = createForgejoDriver(makeCtx(repoRoot), {
+        fetch: vi.fn().mockRejectedValue(new TypeError('fetch failed')) as never,
+        token: null,
+      });
+
+      const out = await driver.refStatus?.({ prs: [777, 764], issues: [24, 18] });
+
+      expect(out).toEqual({
+        available: true,
+        // 764 is `isDraft: true` in the catalog; 777 is open and not a draft, so it is absent.
+        prs: { 764: 'draft' },
+        issues: { 24: 'open', 18: 'open' },
+        // The same minute `mockGithubRefStatus` hands back — not `null`, which would tell the
+        // cockpit to stop scheduling forever.
+        recheckAfterMs: 60_000,
+      });
+    });
+
+    it('leaves a number the catalog does not carry absent, not guessed at', async () => {
+      const driver = createForgejoDriver(makeCtx(repoRoot), {
+        fetch: vi.fn().mockRejectedValue(new TypeError('fetch failed')) as never,
+        token: null,
+      });
+
+      const out = await driver.refStatus?.({ prs: [4242], issues: [9999] });
+
+      expect(out).toEqual({ available: true, prs: {}, issues: {}, recheckAfterMs: 60_000 });
+    });
+
+    it('writes nothing into the shared cache — a fixture is not something the runs index should serve', async () => {
+      const driver = createForgejoDriver(makeCtx(repoRoot), {
+        fetch: vi.fn().mockRejectedValue(new TypeError('fetch failed')) as never,
+        token: null,
+      });
+
+      await driver.refStatus?.({ issues: [24] });
+
+      // `readCachedRefStatuses` is read by the runs index for REAL projects too. A dry-run answer
+      // leaking into it would outlive the demo by a minute and describe a repository nobody read.
+      expect(readCachedRefStatuses(repoRoot, [24])).toEqual({ prs: {}, issues: {} });
+      __clearRefStatusCacheForTests();
+    });
+  });
+
+  /**
+   * `fetchGithubRefStatus` bounds its own request list (`sanitizeRefNumbers` ends in
+   * `.slice(0, GH_REF_STATUS_MAX)`). This driver relied on the route's cap instead — true of the
+   * only caller today, but `refStatus` is a public `ForgeDriver` method, and two implementations of
+   * one interface should not differ in whether they defend themselves against their caller.
+   */
+  it('bounds its own request list at GH_REF_STATUS_MAX per kind, as the GitHub driver does', async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse(refRow({ state: 'open' }))));
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
 
-    const out = await driver.refStatus?.({ prs: [7] });
+    const tooMany = Array.from({ length: GH_REF_STATUS_MAX + 50 }, (_, i) => i + 1);
+    await driver.refStatus?.({ prs: tooMany });
 
-    expect(out?.available).toBe(false);
-    expect(fetchMock).not.toHaveBeenCalled();
-    // No fixture, deliberately — unlike `dryRunForgejoChecks` and `mockGithubRefStatus`. The
-    // cadence is `null`: nothing offline is going to start answering in five minutes.
-    expect(out).toEqual({ available: false, reason: expect.any(String), recheckAfterMs: null });
+    expect(fetchMock).toHaveBeenCalledTimes(GH_REF_STATUS_MAX);
+    __clearRefStatusCacheForTests();
   });
 
   /**
