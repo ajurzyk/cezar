@@ -73,9 +73,9 @@ here because the stated reason was wrong even though the conclusion was not.
 
 ### Phase 1: Schema, guards and the contract mirror
 
-- [ ] 1.1 Red: new vitest file `src/workflows/types.test.ts` with the four schema cases
-- [ ] 1.2 Green: `timeoutMinutes` on `workflowStepSchema`, the new refine clause, the `skillStackOf` guard
-- [ ] 1.3 Green: the identical field and refine in the contract mirror `packages/contract/src/workflows.ts`
+- [x] 1.1 Red: new vitest file `src/workflows/types.test.ts` with the four schema cases — 6b81bdba
+- [x] 1.2 Green: `timeoutMinutes` on `workflowStepSchema`, the new refine clause, the `skillStackOf` guard — 6b81bdba
+- [x] 1.3 Green: the identical field and refine in the contract mirror `packages/contract/src/workflows.ts` — 6b81bdba
 
 ### Phase 2: Wiring the value to the runner
 
