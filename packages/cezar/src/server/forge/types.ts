@@ -1,3 +1,4 @@
+import type { ReferenceStatus } from '@open-mercato/cezar-contract';
 import { z } from 'zod';
 import type { RunRecord } from '../../runs/store.ts';
 
@@ -217,6 +218,27 @@ export type ForgeChecksResult =
   | { available: true; checks: Record<number, 'passing' | 'failing' | 'pending' | null> }
   | { available: false; reason: string };
 
+/** Result of `refStatus` — a discriminated union mirroring `GithubRefStatusData` (`forge/github.ts`,
+ *  itself mirroring `githubRefStatusDataSchema`), same precedent as `ForgeChecksResult` above.
+ *
+ *  `recheckAfterMs` is REQUIRED in BOTH branches, unlike every other result type here: the
+ *  cockpit's whole refresh policy for these chips is "ask again when the server says to" and it
+ *  keeps no table of its own (BACKWARD_COMPATIBILITY.md §2), so a driver implementing this method
+ *  owes a cadence and not just statuses. `null` is a legal value and means "nothing in this answer
+ *  can change; do not schedule anything" — it is not the same as omitting the field.
+ *
+ *  A number the forge does not know is **absent** from its map rather than present with a fallback:
+ *  absent means "nothing is known", which the cockpit paints as the neutral chip. Collapsing that
+ *  into a status would let "we could not ask" render as "nothing is wrong". */
+export type ForgeRefStatusResult =
+  | {
+      available: true;
+      prs: Record<number, ReferenceStatus>;
+      issues: Record<number, ReferenceStatus>;
+      recheckAfterMs: number | null;
+    }
+  | { available: false; reason: string; recheckAfterMs: number | null };
+
 export type ForgeMergeMethod = 'merge' | 'squash' | 'rebase';
 
 export interface ForgePrCheck {
@@ -333,6 +355,11 @@ export interface ForgeDriver {
   listComments?(kind: 'issue' | 'pr', number: number, opts?: { refresh?: boolean }): Promise<ForgeCommentsData>;
   /** Batched CI-status glyphs for the given PR numbers (lazy hydration for on-screen rows, #664). */
   listChecks?(numbers: number[]): Promise<ForgeChecksResult>;
+  /** Batched reference status for the `#N` chips a task table paints. The two lists are the
+   *  caller's GUESS at each number's kind; what comes back is filed by what the forge says each
+   *  number actually IS, which is why a chip whose kind the cockpit guessed wrong still gets the
+   *  right status. Never throws — an unreachable forge degrades in the payload. */
+  refStatus?(input: { prs?: number[]; issues?: number[] }): Promise<ForgeRefStatusResult>;
   /** Web URL for a ref on the forge, or null when the remote isn't parseable. */
   viewUrl(kind: ForgeRefKind, ref: string | number): string | null;
 }

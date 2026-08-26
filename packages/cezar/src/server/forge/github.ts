@@ -1492,6 +1492,68 @@ export function __seedRefStatusCacheForTests(
 }
 
 /**
+ * Write one reference into the shared cache, evicting down to the bound afterwards (#12).
+ *
+ * The seam a SECOND driver fills. Not a plain setter, and the difference is the point: the write
+ * used to be inline in `fetchGithubRefStatus` together with the `storedAt` stamping and the LRU
+ * eviction that bounds the map, so an exported `set` would have handed the other driver an
+ * unbounded map to grow. `at` is stamped HERE, when the answer arrived, and not by the caller —
+ * dating an entry from before its own round trip ages a slow query's results by its own duration,
+ * shortening the TTL of exactly the answers that cost the most to get.
+ *
+ * `resolved: null` is a PROVEN "this repository has no such number", not "we could not ask". A
+ * number a read failed on must never reach this function — see `RefStatusBatch`'s own doc comment
+ * for the defect that rule exists to prevent.
+ *
+ * The cache stays here rather than moving to `forge/shared/`: it is keyed by `repoRoot` and its TTL
+ * table is pure and forge-agnostic — per-repo infrastructure this file happens to house, not GitHub
+ * behaviour looking for a neutral home. Cross-driver reuse is by import while there are two drivers
+ * (spec `2026-08-14-forge-seam-closure.md`, Invariants §4); a third makes this a move, not a
+ * rewrite.
+ */
+export function rememberRefStatus(repoRoot: string, number: number, resolved: ResolvedReference | null): void {
+  refStatusCache.set(refStatusKey(repoRoot, number), { at: Date.now(), resolved });
+  evictOldestRefStatuses();
+}
+
+/** Drop the oldest entries until the map is back inside its bound. Insertion-ordered `Map` keys,
+ *  same shape as every other cache here. */
+function evictOldestRefStatuses(): void {
+  while (refStatusCache.size > REF_STATUS_CACHE_MAX) {
+    const oldest = refStatusCache.keys().next().value;
+    if (oldest === undefined) break;
+    refStatusCache.delete(oldest);
+  }
+}
+
+/**
+ * What the cache holds about ONE number — `undefined` for a miss, `{ resolved: null }` for a proven
+ * absence (#12).
+ *
+ * `readCachedRefStatuses` cannot serve this and that is why this exists: it folds a cached `null`
+ * into "absent" (`if (!hit || !hit.resolved || …) continue`), which is right for its own caller —
+ * the runs index only ever wants statuses it can paint — and wrong for a driver deciding what to go
+ * and ASK for. Through that reader, a number the forge has already denied looks identical to one
+ * nobody has looked up, so it would be re-queried on every repaint, forever.
+ *
+ * Freshness is `refStatusTtl`'s table, the same one `readCachedRefStatuses` serves by. A driver
+ * keeping its own would silently disagree about the freshness of the same rows.
+ */
+export function peekRefStatus(repoRoot: string, number: number): { resolved: ResolvedReference | null } | undefined {
+  const hit = refStatusCache.get(refStatusKey(repoRoot, number));
+  if (!hit || Date.now() - hit.at >= refStatusTtl(hit.resolved)) return undefined;
+  return { resolved: hit.resolved };
+}
+
+/** How long a WHOLE batch of references holds, for a driver assembling a `ForgeRefStatusResult`
+ *  (#12). The third and last symbol of the cache seam: `batchRecheckAfter` and the two TTL tables
+ *  under it are private, and a driver that invented its own cadence would hand the cockpit a
+ *  refresh schedule that disagrees with the cache actually serving the rows. */
+export function refStatusBatchRecheckAfter(entries: (ResolvedReference | null)[]): number | null {
+  return batchRecheckAfter(entries);
+}
+
+/**
  * Forget what we knew about one reference, so the next read asks GitHub again.
  *
  * Called where cezar itself CHANGES a pull request — it merges one, it opens one — because those
@@ -1694,10 +1756,9 @@ export async function fetchGithubRefStatus(
     if (entry) resolved[entry.kind === 'pr' ? 'prs' : 'issues'][number] = entry.status;
   };
   const misses: number[] = [];
-  const now = Date.now();
   for (const n of wanted) {
-    const hit = refStatusCache.get(refStatusKey(repoRoot, n));
-    if (!hit || now - hit.at >= refStatusTtl(hit.resolved)) misses.push(n);
+    const hit = peekRefStatus(repoRoot, n);
+    if (!hit) misses.push(n);
     else file(n, hit.resolved);
   }
   if (misses.length === 0) {
@@ -1710,22 +1771,17 @@ export async function fetchGithubRefStatus(
     }
     const batch = await fetchRefStatuses(refStatusGraphql(repoRoot), ownerName.owner, ownerName.name, misses);
     const failed = new Set(batch.failed);
-    // Stamped when the answer ARRIVED, not when the request was assembled: `now` above predates
-    // the round trip, and dating an entry by it would age a slow query's results by its own
-    // duration — shortening the TTL of exactly the answers that cost the most to get.
-    const storedAt = Date.now();
     for (const n of misses) {
       // A number we could not ask about is NOT cached: caching it would pin "this repository has
       // no such number" for a minute on the strength of a network blip.
       if (failed.has(n)) continue;
       const entry = batch.resolved[n] ?? null;
       file(n, entry);
-      refStatusCache.set(refStatusKey(repoRoot, n), { at: storedAt, resolved: entry });
-    }
-    while (refStatusCache.size > REF_STATUS_CACHE_MAX) {
-      const oldest = refStatusCache.keys().next().value;
-      if (oldest === undefined) break;
-      refStatusCache.delete(oldest);
+      // `rememberRefStatus` stamps the entry HERE, after the round trip — never from a `Date.now()`
+      // read before the request was assembled, which would age a slow query's results by its own
+      // duration and shorten the TTL of exactly the answers that cost the most to get. It also
+      // evicts, which is why the bound is not re-applied separately below.
+      rememberRefStatus(repoRoot, n, entry);
     }
     // Anything unasked makes the whole answer `unavailable`, deliberately. The alternative is a
     // payload where a number we could not reach is indistinguishable from one that does not exist,
@@ -2501,6 +2557,11 @@ export function createGithubDriver(repoRoot: string, repoRef: GithubRepoRef | nu
     // `GithubChecksData` (this file, above) is structurally identical to `ForgeChecksResult`
     // (`types.ts`) — both mirror `githubChecksDataSchema`'s own discriminated union.
     listChecks: (numbers) => fetchGithubChecks(repoRoot, numbers),
+    // Same structural identity, for the same reason: `GithubRefStatusData` and
+    // `ForgeRefStatusResult` both mirror `githubRefStatusDataSchema`. This is the whole GitHub
+    // half of #12 — the route now resolves a driver, and for a GitHub repo (or a repo with no
+    // forge, via `resolveForgeOrGithub`) it lands right back in the function it always called.
+    refStatus: (input) => fetchGithubRefStatus(repoRoot, input),
 
     createPR: (input) => createDraftPr(input),
 
