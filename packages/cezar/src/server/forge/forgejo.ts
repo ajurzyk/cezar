@@ -2196,9 +2196,13 @@ function refStatusFromRow(row: ForgejoRefStatusRow): ResolvedReference | undefin
  * cap is already enforced route-side (`parseRefNumbers` + `GH_REF_STATUS_MAX` in `server.ts`), so
  * this does not re-enforce it.
  *
- * `CEZ_DRY_RUN=1` deliberately has NO fixture here, unlike every sibling in this file: under
- * dry-run there is no fetch to answer, so this degrades to `{ available: false, … }` exactly as the
- * driver does today and nothing regresses. A dry-run reference chip for Forgejo is its own change.
+ * `CEZ_DRY_RUN=1` short-circuits to `{ available: false, … }` with no fixture, which is
+ * deliberately unlike every sibling in this file (`dryRunForgejoChecks`, `mockGithubRefStatus`) —
+ * but it still has to be a SHORT-CIRCUIT, not an absence of one. Dry-run means "fake every network
+ * answer" (AGENTS.md), and without this the offline demo would issue up to 200 real GETs at the
+ * configured `apiUrl`, with the Forgejo token attached, and wait out a timeout per chunk when
+ * nothing answers. Degrading here reproduces what a Forgejo project's chips did before this method
+ * existed; a dry-run reference chip for Forgejo is its own change.
  */
 async function forgejoRefStatus(
   repoRoot: string,
@@ -2207,6 +2211,9 @@ async function forgejoRefStatus(
   repo: string,
   input: { prs?: number[]; issues?: number[] },
 ): Promise<ForgeRefStatusResult> {
+  if (process.env.CEZ_DRY_RUN === '1') {
+    return { available: false, reason: 'reference status is unavailable offline', recheckAfterMs: null };
+  }
   const wanted = [...new Set([...(input.prs ?? []), ...(input.issues ?? [])])].filter(
     (n) => Number.isInteger(n) && n > 0,
   );
@@ -2231,23 +2238,48 @@ async function forgejoRefStatus(
   }
 
   const repoPrefix = repoPath(owner, repo);
+  // A 404 this driver could not PROVE, because no token was sent — see the deferral below. Held
+  // rather than cached until the batch shows the repository was readable at all.
+  const unproven: Array<{ n: number; reason: string }> = [];
+  // Did the forge answer ANY of these numbers with a row? That is the only evidence that the
+  // repository is readable, which is what turns an anonymous 404 from ambiguous into proof.
+  let anyRowRead = false;
+
   for (let i = 0; i < misses.length; i += FJ_CHECKS_CONCURRENCY) {
     const chunk = misses.slice(i, i + FJ_CHECKS_CONCURRENCY);
     const results = await Promise.all(
-      chunk.map(async (n): Promise<{ n: number; entry: ResolvedReference | null } | { n: number; reason: string }> => {
-        try {
-          const row = forgejoRefStatusSchema.parse(await http.getJson(`${repoPrefix}/issues/${n}`));
-          // `undefined` is "resolved, but nothing honest to say" (an open non-draft PR). It is
-          // cached as a `null` — the same short TTL and the same neutral chip a proven absence
-          // gets, which is the whole of what either one means to every reader of this cache. Not
-          // caching it would re-query every open pull request in a table on every single repaint,
-          // which is the dominant case.
-          return { n, entry: refStatusFromRow(row) ?? null };
-        } catch (err) {
-          if (err instanceof ForgejoHttpError && err.status === 404) return { n, entry: null };
-          return { n, reason: describeError(err) };
-        }
-      }),
+      chunk.map(
+        async (
+          n,
+        ): Promise<
+          | { n: number; entry: ResolvedReference | null }
+          | { n: number; reason: string; unproven?: true }
+        > => {
+          try {
+            const row = forgejoRefStatusSchema.parse(await http.getJson(`${repoPrefix}/issues/${n}`));
+            // `undefined` is "resolved, but nothing honest to say" (an open non-draft PR). It is
+            // cached as a `null` — the same short TTL and the same neutral chip a proven absence
+            // gets, which is the whole of what either one means to every reader of this cache. Not
+            // caching it would re-query every open pull request in a table on every single repaint,
+            // which is the dominant case.
+            return { n, entry: refStatusFromRow(row) ?? null };
+          } catch (err) {
+            if (err instanceof ForgejoHttpError && err.status === 404) {
+              // A 404 is the instance's proven "no such number" — but ONLY once a token is in play.
+              // `forgejo-http.ts` documents this, measured live: a PRIVATE repository answers an
+              // ANONYMOUS request with a 404 whose body is byte-identical to a repository that does
+              // not exist. Every sibling 404-as-proven site in this file is reached through a
+              // repo-level read that would already have degraded (`forgejoListChecks` walks
+              // `pulls?state=open` first); `refStatus` is the only one whose very first request is
+              // per-number, so without this an entire private repo would cache as "none of these
+              // references exist" and the token hint the http layer built would never be seen.
+              if (http.hasToken()) return { n, entry: null };
+              return { n, reason: describeError(err), unproven: true };
+            }
+            return { n, reason: describeError(err) };
+          }
+        },
+      ),
     );
 
     // Cache every number this chunk DID resolve before acting on any failure in it — those reads
@@ -2256,9 +2288,14 @@ async function forgejoRefStatus(
     let failure: string | undefined;
     for (const result of results) {
       if ('reason' in result) {
+        if (result.unproven) {
+          unproven.push({ n: result.n, reason: result.reason });
+          continue;
+        }
         failure ??= result.reason;
         continue;
       }
+      anyRowRead = true;
       file(result.n, result.entry);
       rememberRefStatus(repoRoot, result.n, result.entry);
     }
@@ -2270,6 +2307,26 @@ async function forgejoRefStatus(
     // already unavailable.
     if (failure !== undefined) {
       return { available: false, reason: failure, recheckAfterMs: FJ_REF_STATUS_RETRY_MS };
+    }
+  }
+
+  // The deferred anonymous 404s, settled by what the rest of the batch proved. Same "did anything
+  // resolve at all" gate `forgejoListChecks` applies to its own reads, and for the same reason: a
+  // whole batch failing together is a different signal from one item failing among many.
+  //
+  //  - Something was read → the repository IS readable anonymously, so those numbers really are
+  //    absent. Cache them, exactly as a token-backed 404 would have been cached.
+  //  - Nothing was read → every number 404'd with no token, which is what a private repository
+  //    looks like from here. Degrade, and carry up the http layer's own message, which already ends
+  //    in "or the repository is private: set CEZ_FORGEJO_TOKEN to authenticate".
+  const firstUnproven = unproven[0];
+  if (firstUnproven) {
+    if (!anyRowRead) {
+      return { available: false, reason: firstUnproven.reason, recheckAfterMs: FJ_REF_STATUS_RETRY_MS };
+    }
+    for (const { n } of unproven) {
+      file(n, null);
+      rememberRefStatus(repoRoot, n, null);
     }
   }
 

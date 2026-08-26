@@ -2789,13 +2789,15 @@ describe('refStatus (#12)', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('caches a 404 as a PROVEN absence — a number the instance does not have is not re-queried', async () => {
+  it('caches a proven absence — a number the instance does not have is not re-queried', async () => {
     let calls = 0;
     const fetchMock = vi.fn().mockImplementation(() => {
       calls += 1;
       return Promise.resolve(jsonResponse({ message: 'not found' }, { status: 404 }));
     });
-    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+    // A token, so the 404 is unambiguous — see "an anonymous 404 is not proof" below for why that
+    // distinction is load-bearing rather than incidental setup.
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: 'fj-token' });
 
     const first = await driver.refStatus?.({ prs: [404] });
     expect(first).toEqual({ available: true, prs: {}, issues: {}, recheckAfterMs: 60_000 });
@@ -2910,11 +2912,11 @@ describe('refStatus (#12)', () => {
     __clearRefStatusCacheForTests();
   });
 
-  it('degrades under CEZ_DRY_RUN=1 rather than inventing a fixture — deliberately unlike its siblings', async () => {
-    // Named so nobody reads the absence as an oversight: every sibling in this file short-circuits
-    // at the top of its function under dry-run, and this one does not. There is no fetch to answer
-    // offline, so the driver degrades exactly as it does today and nothing regresses. A dry-run
-    // reference chip for Forgejo is its own change.
+  it('degrades under CEZ_DRY_RUN=1 WITHOUT touching the network', async () => {
+    // The assertion that matters is the second one. Dry-run means "fake every network answer", so
+    // an offline demo must not fire up to 200 real GETs at the configured apiUrl with the Forgejo
+    // token attached — and a rejecting mock alone would be green whether or not the driver
+    // short-circuits, which is exactly how that was missed once.
     process.env.CEZ_DRY_RUN = '1';
     const fetchMock = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
     const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
@@ -2922,5 +2924,66 @@ describe('refStatus (#12)', () => {
     const out = await driver.refStatus?.({ prs: [7] });
 
     expect(out?.available).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+    // No fixture, deliberately — unlike `dryRunForgejoChecks` and `mockGithubRefStatus`. The
+    // cadence is `null`: nothing offline is going to start answering in five minutes.
+    expect(out).toEqual({ available: false, reason: expect.any(String), recheckAfterMs: null });
+  });
+
+  /**
+   * A 404 is the instance's proven "no such number" only once a token is in play. `forgejo-http.ts`
+   * documents, measured live, that a PRIVATE repository answers an ANONYMOUS request with a 404
+   * byte-identical to a repository that does not exist — so anonymously the two are the same
+   * answer, and caching it as an absence would pin "none of these references exist" on a repo the
+   * user merely has not authenticated to.
+   */
+  describe('an anonymous 404 is not proof', () => {
+    it('degrades with the token hint when NOTHING in the batch could be read', async () => {
+      const fetchMock = vi.fn().mockImplementation(() =>
+        Promise.resolve(jsonResponse({ message: "The target couldn't be found." }, { status: 404 })),
+      );
+      const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+      const out = await driver.refStatus?.({ prs: [5, 6] });
+
+      expect(out?.available).toBe(false);
+      if (out?.available !== false) throw new Error('expected unavailable');
+      // The http layer already builds this hint; the driver's job is not to swallow it.
+      expect(out.reason).toContain('CEZ_FORGEJO_TOKEN');
+      // Nothing cached — the next request asks again instead of serving a guess.
+      expect(readCachedRefStatuses(repoRoot, [5, 6])).toEqual({ prs: {}, issues: {} });
+    });
+
+    it('caches the 404s as genuine absences once ANY number in the batch was read', async () => {
+      // Something answered, so the repository is readable anonymously and those numbers really are
+      // absent — the same "did anything resolve at all" gate `forgejoListChecks` uses.
+      const fetchMock = issuesFetch({
+        5: () => jsonResponse(refRow({ state: 'closed', pull_request: { merged: true } })),
+        6: () => jsonResponse({ message: "The target couldn't be found." }, { status: 404 }),
+      });
+      const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+      const out = await driver.refStatus?.({ prs: [5, 6] });
+
+      expect(out).toEqual({ available: true, prs: { 5: 'merged' }, issues: {}, recheckAfterMs: 60_000 });
+      const callsBefore = fetchMock.mock.calls.length;
+      await driver.refStatus?.({ prs: [5, 6] });
+      expect(fetchMock.mock.calls.length).toBe(callsBefore); // both served warm, #6 as a proven absence
+    });
+
+    it('trusts a 404 immediately when a token WAS sent — there the answer is unambiguous', async () => {
+      let calls = 0;
+      const fetchMock = vi.fn().mockImplementation(() => {
+        calls += 1;
+        return Promise.resolve(jsonResponse({ message: 'not found' }, { status: 404 }));
+      });
+      const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: 'fj-token' });
+
+      const out = await driver.refStatus?.({ prs: [5] });
+
+      expect(out).toEqual({ available: true, prs: {}, issues: {}, recheckAfterMs: 60_000 });
+      await driver.refStatus?.({ prs: [5] });
+      expect(calls).toBe(1); // cached as a proven absence
+    });
   });
 });
