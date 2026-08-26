@@ -184,10 +184,21 @@ PR: #52
 ### Phase 5: The documents the same contract is written down in
 
 - [x] 5.1 `BACKWARD_COMPATIBILITY.md` §2 — the new route in the inventory (the drift guard is a test) — 33e26ba5
-- [ ] 5.2 `README.md` — the Forgejo section gains the provisioning path and its **Manual steps**
+- [x] 5.2 `README.md` — the Forgejo section gains the provisioning path and its **Manual steps** — 4e8b0e6b
 
 ### Phase 6: Validation, live verification, and the GitHub path's unchanged answer
 
-- [ ] 6.1 Full `validation.commands` gate plus the canonical baseline
-- [ ] 6.2 Live tier on `ajr/cezar-qa`: provision from empty → 27 read back through a paged listing; run again → zero writes
-- [ ] 6.3 `bash .ai/scripts/labels-sync.sh --check` still prints `label taxonomy complete in ajurzyk/cezar (27 labels)` and exits 0
+- [x] 6.1 Full `validation.commands` gate plus the canonical baseline — `verify.sh`: typecheck clean, **340 files /
+      6634 tests passed**, exit 0. Against `main`'s 336 / 6602 that is +4 files / +32 tests, **none lost**.
+      `npm run test:unit` 36/36, `npm run build` ok (`check:pack ok — 494 files`), `npm run test:package` 15/15 —
+      all five `validation.commands` green
+- [x] 6.2 Live tier on `ajr/cezar-qa` — provisioned from a repo holding only `selftest` → 27 created; read back through
+      an INDEPENDENT paged walk: 28 labels, **0 duplicates**, `selftest` untouched. Repo then padded to 58 labels
+      (past the 50-row cap): second pass sent **2 GETs, 0 non-GET requests, methods `['GET']`**. `in-progress` +
+      `review` deleted and `blocked` hand-recoloured: check-only reported `complete:false`, `missing:['review',
+      'in-progress']`, `drifted:[blocked 00ff00 vs b60205]` with 0 writes; provisioning then sent exactly 2 POSTs and
+      left `blocked` alone. Fillers removed and `blocked` restored — repo left at 27 + `selftest`. The four
+      behaviours were re-measured first-hand (duplicate POST → 201 with ids 21/22; `Dup-Probe` alongside `dup-probe`
+      → 201; `#0366d6` echoed as `0366d6`); the paging one **contradicted the issue** and was corrected in code
+- [x] 6.3 `bash .ai/scripts/labels-sync.sh --check` → `label taxonomy complete in ajurzyk/cezar (27 labels)`, exit 0.
+      `git diff origin/main...HEAD -- .ai/scripts/ .ai/agentic.config.json` is empty: neither file was touched
