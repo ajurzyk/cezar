@@ -743,6 +743,41 @@ field, so `createForgejoPr` fakes draft state with a `WIP:` title prefix — an
 instance that has customized `WORK_IN_PROGRESS_PREFIXES` away from the default
 list gets a NON-draft pull request instead.
 
+Label provisioning is wired too, and it is a precondition rather than a
+convenience. The `om-*` claim/lock protocol and the review signalling run on
+**labels**, not comments: a label that does not exist makes every mutation of it
+a logged skip, so the protocol silently stops working while every individual
+step still reports success — and a run cannot bootstrap the labels it is already
+trying to use. The Forgejo tab's **Sync labels** button
+(`POST /api/v1/forge/labels` → `ForgeDriver.ensureLabels` →
+`forge/forgejo-labels.ts`) puts the 27-label pipeline taxonomy in place: the 26
+declared in `.ai/agentic.config.json` plus `do-not-close`, with the colours and
+descriptions `label_meta()` (`.ai/scripts/labels-sync.sh`) declares. GitHub keeps
+that script — the button is not rendered for a GitHub project at all.
+
+Three properties are worth knowing before pointing it at a repository:
+
+- **Create-only.** Nothing is ever deleted, renamed or recoloured. A repository's
+  own backlog taxonomy (`epic/*`, `type/*`, …) survives untouched, and a label
+  that exists under a taxonomy name with a different colour or description is
+  **left alone and reported**, never repaired.
+- **The target is explicit and checked.** The request names `owner/repo` and the
+  server refuses when it does not match what the project's `origin` resolves to.
+  That is the Forgejo-side equivalent of the guard PR #16 added to
+  `labels-sync.sh`, where an inferred target could aim cezar's taxonomy at
+  somebody else's repository.
+- **Names are case-sensitive on Forgejo.** `Bug` and `bug` coexist as separate
+  labels, so a repository carrying `Bug` keeps it and gets `bug` alongside. On
+  GitHub the same state is unrepairable drift that `labels-sync.sh` fails loudly
+  over, because label uniqueness there is case-*in*sensitive.
+
+**Manual steps: none** — the Forgejo label API carries name, colour and
+description in the create call, so a provisioned label needs no follow-up in the
+web UI. Measured against Forgejo 15.0.3 on 2026-08-26. The two things the button
+does *not* do are deliberate and are not steps it left for you: it does not
+repair a drifted colour (see above), and it does not provision GitHub (use
+`bash .ai/scripts/labels-sync.sh`).
+
 One gap remains: the comment/review thread has no timeline-events axis for a
 Forgejo repo. GitHub's timeline API (joins, label changes, renames, and the
 rest of the non-comment events `mergeThread` folds in) has no Forgejo
