@@ -30,6 +30,16 @@ export const workflowStepSchema = z
     runner: z.enum(RUNNER_IDS).optional(),
     allowedTools: z.array(z.string()).optional(),
     bashAllowlist: z.array(z.string()).optional(),
+    /** Wall-clock cap for THIS agent step, in minutes. Absent falls back to the
+     *  runner's `DEFAULT_RUN_TIMEOUT_MS` (#48) — this is an opt-UP for a step
+     *  that legitimately runs long, not the removal of the safety net. A step
+     *  killed by the default cap is recorded as a step FAILURE, which stops the
+     *  rest of the chain (`verify`, `review`, `qa`, `acceptance`) from ever
+     *  running while the work it already pushed looks finished from the outside.
+     *
+     *  Bounded at four hours on purpose: `positive()` alone accepts `999999`,
+     *  which is the safety net deleted by arithmetic rather than by decision. */
+    timeoutMinutes: z.number().int().positive().max(240).optional(),
     // check step
     command: z.string().optional(),
     onFail: z
@@ -41,6 +51,16 @@ export const workflowStepSchema = z
   })
   .refine((s) => Boolean(s.command) !== Boolean(s.prompt ?? s.skill), {
     message: 'a step is either an agent step (prompt/skill) or a check step (command), not both',
+  })
+  /** A check step is a shell command, so an agent wall clock has nothing to cap
+   *  there. Kept as its OWN refine rather than folded into the XOR above: the
+   *  XOR's message is the one authors see for the common mistake, and merging
+   *  the two would answer "you set a timeout on a check" with "prompt/skill vs
+   *  command, not both". A narrowing of a schema the run store parses back
+   *  (`runs/store.ts`), but a safe one — `timeoutMinutes` does not exist before
+   *  this commit, so no queued run can carry the rejected shape. */
+  .refine((s) => !(s.command && s.timeoutMinutes !== undefined), {
+    message: 'timeoutMinutes applies to agent steps only; a check step (command) may not carry it',
   });
 
 /**
@@ -115,7 +135,12 @@ export function skillStackOf(steps: WorkflowStepDef[]): string[] | null {
     if (stepKind(s) !== 'agent' || !s.skill) return null;
     if (s.prompt !== undefined && s.prompt !== '{{task}}') return null;
     if (s.name !== undefined && s.name !== s.skill) return null;
+    // `timeoutMinutes` belongs here for a reason the others don't advertise:
+    // `POST /workflows` saves the compact `skills:` form whenever this returns a
+    // list, and that form has nowhere to write a timeout — so omitting the field
+    // from this guard drops it on save, with no error (#48).
     if (s.model || s.runner || s.allowedTools || s.bashAllowlist || s.onFail) return null;
+    if (s.timeoutMinutes !== undefined) return null;
     skills.push(s.skill);
   }
   return skills.length ? skills : null;
