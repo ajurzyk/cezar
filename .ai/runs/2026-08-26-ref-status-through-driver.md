@@ -122,9 +122,9 @@ for scope creep.
 
 ### Phase 1: The seam and the GitHub side
 
-- [ ] 1.1 ForgeRefStatusResult and the optional refStatus method
-- [ ] 1.2 Extract the ref-status cache seam and wire the GitHub driver
-- [ ] 1.3 Route /github/ref-status through the driver
+- [x] 1.1 ForgeRefStatusResult and the optional refStatus method — eb5e3fdc
+- [x] 1.2 Extract the ref-status cache seam and wire the GitHub driver — eb5e3fdc
+- [x] 1.3 Route /github/ref-status through the driver — 2b7e66d5
 
 ### Phase 2: The Forgejo driver
 
