@@ -15,6 +15,11 @@ import {
   FJ_PR_PATCH_CAP,
   type ForgejoDriverCtx,
 } from './forgejo.ts';
+import {
+  __clearRefStatusCacheForTests,
+  __seedRefStatusCacheForTests,
+  readCachedRefStatuses,
+} from './github.ts';
 
 // `vi.hoisted` so `execFileMock` exists before the (hoisted) vi.mock factory runs — same pattern
 // as `github.test.ts`. Default behavior delegates every call to the REAL `execFile`: `createPR`'s
@@ -2678,5 +2683,244 @@ describe('prDiff', () => {
     await driver.prDiff?.(9, { refresh: true });
     expect(callCount('/files')).toBeGreaterThan(filesAfterFirst);
     expect(callCount('.diff')).toBeGreaterThan(diffAfterFirst);
+  });
+});
+
+/**
+ * `refStatus` (#12) — the driver half of the ref-status seam. One `GET issues/{n}` per number, and
+ * the whole design rests on that endpoint answering for pull requests too: the payload's
+ * `pull_request` member is what settles the KIND, so the caller's `prs`/`issues` split is only a
+ * guess and never the answer.
+ *
+ * The cache these cases exercise is `github.ts`'s `refStatusCache`, deliberately shared with the
+ * synchronous `readCachedRefStatuses` the runs index reads — so it is cleared here through
+ * `__clearRefStatusCacheForTests`, not through `__clearForgejoCachesForTests` (which knows nothing
+ * about it).
+ */
+describe('refStatus (#12)', () => {
+  const repoRoot = '/repo/ref-status';
+
+  beforeEach(() => {
+    __clearRefStatusCacheForTests();
+  });
+  afterEach(() => {
+    __clearRefStatusCacheForTests();
+    delete process.env.CEZ_DRY_RUN;
+  });
+
+  /** The shape `GET issues/{n}` answers with — a genuine issue when `pull_request` is absent. */
+  function refRow(over: Record<string, unknown> = {}): Record<string, unknown> {
+    return { state: 'open', ...over };
+  }
+
+  /** Answers `issues/{n}` from a table, and throws on any OTHER url — so a case that accidentally
+   *  reached `pulls/{n}` or `commits/{sha}/status` fails loudly instead of quietly costing reads
+   *  this ladder is specified not to spend. */
+  function issuesFetch(byNumber: Record<number, () => Response>): ReturnType<typeof vi.fn> {
+    return vi.fn().mockImplementation((url: URL | string) => {
+      const s = String(url);
+      const m = /\/repos\/acme\/demo\/issues\/(\d+)$/.exec(s);
+      const answer = m ? byNumber[Number(m[1])] : undefined;
+      if (!answer) throw new Error(`unexpected url ${s}`);
+      return Promise.resolve(answer());
+    });
+  }
+
+  it('files each number by what the FORGE says it is, not by which list the caller put it in', async () => {
+    // The whole point of reading `issues/{n}`: #1 was asked about as an issue and #2 as a PR, and
+    // both guesses are wrong. A driver that trusted the request would file both under the wrong
+    // kind, which is the bug `issueOrPullRequest` fixes on the GitHub side.
+    const fetchMock = issuesFetch({
+      1: () => jsonResponse(refRow({ state: 'closed', pull_request: { merged: true } })),
+      2: () => jsonResponse(refRow({ state: 'open', pull_request: null })),
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const out = await driver.refStatus?.({ issues: [1], prs: [2] });
+
+    expect(out).toEqual({ available: true, prs: { 1: 'merged' }, issues: { 2: 'open' }, recheckAfterMs: 60_000 });
+  });
+
+  it('reads the ladder row by row from one payload', async () => {
+    const fetchMock = issuesFetch({
+      1: () => jsonResponse(refRow({ state: 'open' })),
+      2: () => jsonResponse(refRow({ state: 'closed' })),
+      3: () => jsonResponse(refRow({ state: 'closed', pull_request: { merged: true } })),
+      4: () => jsonResponse(refRow({ state: 'closed', pull_request: { merged: false } })),
+      5: () => jsonResponse(refRow({ state: 'open', pull_request: { merged: false, draft: true } })),
+      6: () => jsonResponse(refRow({ state: 'open', pull_request: { merged: false, draft: false } })),
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const out = await driver.refStatus?.({ prs: [1, 2, 3, 4, 5, 6] });
+
+    expect(out?.available).toBe(true);
+    if (!out?.available) throw new Error('expected available');
+    expect(out.issues).toEqual({ 1: 'open', 2: 'completed' });
+    // #6 — an OPEN, NON-DRAFT pull request — is absent, and that is the design, not a gap. Checks
+    // and reviews are unread here, so `ready` would assert the opposite of the truth for a PR with
+    // red CI or a requested change. Absent means "nothing is known" and paints a neutral chip.
+    expect(out.prs).toEqual({ 3: 'merged', 4: 'closed', 5: 'draft' });
+    expect(out.prs[6]).toBeUndefined();
+  });
+
+  it('reads a closed issue as `completed` — Forgejo has no state-reason, so `not-planned` is unreachable', async () => {
+    // Stated rather than silently inherited: `completed` and `not-planned` are opposite outcomes
+    // ("we did it" vs "we won't") and the vocabulary keeps them apart on purpose. On this forge the
+    // distinction is simply not in the data.
+    const fetchMock = issuesFetch({ 9: () => jsonResponse(refRow({ state: 'closed' })) });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const out = await driver.refStatus?.({ issues: [9] });
+
+    expect(out?.available && out.issues[9]).toBe('completed');
+  });
+
+  it('spends exactly ONE read per number — never the pulls/{n} + status + reviews fan-out', async () => {
+    const fetchMock = issuesFetch({
+      1: () => jsonResponse(refRow({ state: 'open', pull_request: { merged: false, draft: false } })),
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    await driver.refStatus?.({ prs: [1] });
+
+    // `issuesFetch` throws on any other url, so this is belt and braces — but the count is the
+    // budget claim itself: the upper rungs are a follow-up precisely because they cost three more.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('caches a 404 as a PROVEN absence — a number the instance does not have is not re-queried', async () => {
+    let calls = 0;
+    const fetchMock = vi.fn().mockImplementation(() => {
+      calls += 1;
+      return Promise.resolve(jsonResponse({ message: 'not found' }, { status: 404 }));
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const first = await driver.refStatus?.({ prs: [404] });
+    expect(first).toEqual({ available: true, prs: {}, issues: {}, recheckAfterMs: 60_000 });
+    expect(calls).toBe(1);
+
+    // Absent from the map both times — but the second answer costs nothing, which is the whole
+    // difference between a proven absence and a cache miss.
+    const second = await driver.refStatus?.({ prs: [404] });
+    expect(second).toEqual({ available: true, prs: {}, issues: {}, recheckAfterMs: 60_000 });
+    expect(calls).toBe(1);
+  });
+
+  it('degrades on a transport failure instead of throwing — and caches NOTHING for it', async () => {
+    // "Failed is not absent". Caching a failure would pin "this repository has no such number" on
+    // the strength of a network blip, and the chip would then confidently show the wrong thing.
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const out = await driver.refStatus?.({ prs: [7] });
+
+    expect(out?.available).toBe(false);
+    if (out?.available !== false) throw new Error('expected unavailable');
+    expect(out.reason).toBeTruthy();
+    expect(out.recheckAfterMs).toBe(5 * 60_000);
+    expect(readCachedRefStatuses(repoRoot, [7])).toEqual({ prs: {}, issues: {} });
+  });
+
+  it('degrades the WHOLE payload when any one number fails, and keeps the successes cached', async () => {
+    // Per-number blanking is what this must not do: in a `number -> status` map, "we could not ask"
+    // and "no such number" are indistinguishable, and the cockpit would paint "not on this
+    // repository" over a perfectly good PR.
+    const fetchMock = issuesFetch({
+      1: () => jsonResponse(refRow({ state: 'closed', pull_request: { merged: true } })),
+      2: () => jsonResponse({ message: 'boom' }, { status: 500 }),
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const out = await driver.refStatus?.({ prs: [1, 2] });
+    expect(out?.available).toBe(false);
+
+    // #1 resolved and its read already happened, so the next request costs only what failed.
+    expect(readCachedRefStatuses(repoRoot, [1, 2])).toEqual({ prs: { 1: 'merged' }, issues: {} });
+  });
+
+  it('serves a warm entry without asking the forge again', async () => {
+    __seedRefStatusCacheForTests(repoRoot, [[7, { kind: 'pr', status: 'merged' }]]);
+    const fetchMock = vi.fn().mockImplementation(() => {
+      throw new Error('should not have been called');
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const out = await driver.refStatus?.({ prs: [7] });
+
+    // `merged` is immutable, so the cadence goes null and the cockpit stops scheduling this batch.
+    expect(out).toEqual({ available: true, prs: { 7: 'merged' }, issues: {}, recheckAfterMs: null });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('writes what it resolved into the cache the runs index reads synchronously', async () => {
+    // The other half of "one cache": `readCachedRefStatuses` (`server.ts`'s runs index) is
+    // synchronous and cannot resolve a driver, so a status a Forgejo project's chips carry gets
+    // there only if this driver fills that exact map.
+    const fetchMock = issuesFetch({
+      3: () => jsonResponse(refRow({ state: 'closed', pull_request: { merged: true } })),
+      4: () => jsonResponse(refRow({ state: 'closed' })),
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    await driver.refStatus?.({ prs: [3], issues: [4] });
+
+    expect(readCachedRefStatuses(repoRoot, [3, 4])).toEqual({ prs: { 3: 'merged' }, issues: { 4: 'completed' } });
+  });
+
+  it('bounds the fan-out to FJ_CHECKS_CONCURRENCY simultaneous reads', async () => {
+    // Never an unbounded `Promise.all` over a hundred numbers at a self-hosted instance — the same
+    // bound, and the same chunking loop, `forgejoListChecks` already uses.
+    let inFlight = 0;
+    let peak = 0;
+    const fetchMock = vi.fn().mockImplementation(() => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      return new Promise<Response>((resolve) => {
+        setTimeout(() => {
+          inFlight -= 1;
+          resolve(jsonResponse(refRow({ state: 'open' })));
+        }, 0);
+      });
+    });
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    await driver.refStatus?.({ issues: Array.from({ length: 25 }, (_, i) => i + 1) });
+
+    expect(fetchMock).toHaveBeenCalledTimes(25);
+    expect(peak).toBeLessThanOrEqual(8);
+  });
+
+  it('answers an empty request without touching the forge', async () => {
+    const fetchMock = vi.fn();
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    expect(await driver.refStatus?.({})).toEqual({ available: true, prs: {}, issues: {}, recheckAfterMs: null });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('keys the shared cache by repoRoot, so two projects each having a #42 never collide', async () => {
+    const fetchMock = issuesFetch({ 42: () => jsonResponse(refRow({ state: 'closed', pull_request: { merged: true } })) });
+    const driver = createForgejoDriver(makeCtx('/repo/ref-status-a'), { fetch: fetchMock, token: null });
+    await driver.refStatus?.({ prs: [42] });
+
+    expect(readCachedRefStatuses('/repo/ref-status-a', [42])).toEqual({ prs: { 42: 'merged' }, issues: {} });
+    expect(readCachedRefStatuses('/repo/ref-status-b', [42])).toEqual({ prs: {}, issues: {} });
+    __clearRefStatusCacheForTests();
+  });
+
+  it('degrades under CEZ_DRY_RUN=1 rather than inventing a fixture — deliberately unlike its siblings', async () => {
+    // Named so nobody reads the absence as an oversight: every sibling in this file short-circuits
+    // at the top of its function under dry-run, and this one does not. There is no fetch to answer
+    // offline, so the driver degrades exactly as it does today and nothing regresses. A dry-run
+    // reference chip for Forgejo is its own change.
+    process.env.CEZ_DRY_RUN = '1';
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
+    const driver = createForgejoDriver(makeCtx(repoRoot), { fetch: fetchMock, token: null });
+
+    const out = await driver.refStatus?.({ prs: [7] });
+
+    expect(out?.available).toBe(false);
   });
 });
